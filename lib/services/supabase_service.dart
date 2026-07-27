@@ -495,10 +495,13 @@ class SupabaseService {
   static Future<List<Map<String, dynamic>>> fetchCorrections() async {
     if (!isReady) return [];
     try {
+      // Timeout guard: if the table is missing or the network stalls, never
+      // let this hang — the admin panel awaits this call before showing data.
       final rows = await _db
           .from('ai_corrections')
           .select()
-          .order('created_at', ascending: false);
+          .order('created_at', ascending: false)
+          .timeout(const Duration(seconds: 8));
       return (rows as List)
           .map((r) => _corrFromRow(Map<String, dynamic>.from(r as Map)))
           .toList();

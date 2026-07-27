@@ -127,6 +127,7 @@ class _AdminScreenState extends State<AdminScreen>
   // ── AI Corrections state (feedback loop review queue) ─────────────
   List<Map<String, dynamic>> _corrections = [];
   bool _correctionsLoading = false;
+  bool _correctionsLoadedOnce = false; // prevents infinite lazy-reload when empty
   String _corrFilter = 'pending'; // 'pending' | 'ai_mistake' | 'user_preference' | 'all'
 
   // ── Knowledge Base state ─────────────────────────────────────────
@@ -6143,13 +6144,18 @@ class _AdminScreenState extends State<AdminScreen>
       if (mounted) setState(() => _corrections = list);
     } catch (_) {
     } finally {
-      if (mounted) setState(() => _correctionsLoading = false);
+      if (mounted) setState(() {
+        _correctionsLoading = false;
+        _correctionsLoadedOnce = true;
+      });
     }
   }
 
   Widget _moduleAiCorrections(SL sl) {
-    // Lazy-load on first open.
-    if (_corrections.isEmpty && !_correctionsLoading) {
+    // Lazy-load on first open only. Guarding on _correctionsLoadedOnce prevents
+    // an infinite reload loop when the correction list is legitimately empty
+    // (isEmpty would otherwise re-trigger the load on every rebuild).
+    if (!_correctionsLoadedOnce && !_correctionsLoading) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadCorrections());
     }
 

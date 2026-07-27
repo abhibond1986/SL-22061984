@@ -201,10 +201,18 @@ class AiCorrectionService {
   /// All corrections, newest first. Merges the Supabase view (cross-device)
   /// with the local queue so nothing is missed whether online or offline.
   static Future<List<Map<String, dynamic>>> getAllCorrections() async {
-    final remote = await SupabaseService.fetchCorrections(); // [] if disabled
-    if (remote.isNotEmpty) {
-      // Keep the local store in sync so offline admin still sees them.
-      await LocalDB.mergeAiCorrections(remote);
+    // Best-effort remote sync — never let a slow/failed Supabase call block the
+    // admin panel. On any error (missing table, no network, timeout) we simply
+    // fall back to whatever is in the local store.
+    try {
+      final remote = await SupabaseService.fetchCorrections()
+          .timeout(const Duration(seconds: 10), onTimeout: () => const []);
+      if (remote.isNotEmpty) {
+        // Keep the local store in sync so offline admin still sees them.
+        await LocalDB.mergeAiCorrections(remote);
+      }
+    } catch (_) {
+      // Ignore — local data is the source of truth for display.
     }
     final all = await LocalDB.getAiCorrections();
     all.sort((a, b) => (b['createdAt']?.toString() ?? '')
