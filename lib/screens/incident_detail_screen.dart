@@ -270,11 +270,17 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           files.add(XFile(imgFile.path, mimeType: 'image/jpeg'));
         }
 
-        await Share.shareXFiles(files, text: text,
-          subject: 'Near Miss Report — ${_inc['plant'] ?? ''}');
+        // IMPORTANT: Do NOT pass `text:` here. WhatsApp (and some other apps)
+        // silently DROP file attachments when the share intent also carries
+        // EXTRA_TEXT — the user ends up with only the text and no PDF. The PDF
+        // already contains all incident details, so we share files only. The
+        // descriptive caption is still available via "Share via Email" and the
+        // text-only WhatsApp path.
+        await Share.shareXFiles(files,
+          subject: 'Safety Report — ${_inc['plant'] ?? ''}');
       } else {
         // Native share — no wa.me URLs (they open new browser tabs)
-        await Share.share(text, subject: 'Near Miss Report — ${_inc['plant'] ?? ''}');
+        await Share.share(text, subject: 'Safety Report — ${_inc['plant'] ?? ''}');
       }
     } catch (e) {
       _snack('Share failed: $e', AppColors.red);
