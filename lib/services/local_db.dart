@@ -24,6 +24,10 @@ class LocalDB {
   static const _kKbDocs        = 'kb_documents';
   static const _kFeedback      = 'feedback_corrections';
   static const _kCustomHazards = 'custom_hazards';
+  // AI correction records (user edits to AI output) queued locally. Kept even
+  // when Supabase is the source of truth, so edits made offline are never lost
+  // and so the admin panel still works if the backend is unreachable.
+  static const _kAiCorrections = 'ai_corrections';
   // Tombstones: ids/usernames deleted locally that must stay hidden even if a
   // backend re-fetch still returns them (until the backend confirms removal).
   static const _kDeletedIncidentIds = 'deleted_incident_ids';
@@ -935,5 +939,56 @@ class LocalDB {
       }
     } catch (_) {}
     return {'incidents': incidents, 'kb': kb, 'users': users};
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  AI CORRECTIONS — local mirror of user edits to AI output
+  //  Records are keyed by id. This local store is (a) an offline queue
+  //  that AiCorrectionService flushes to Supabase when online, and
+  //  (b) a fallback the admin panel reads when the backend is down.
+  // ═══════════════════════════════════════════════════════════════
+  static Future<List<Map<String, dynamic>>> getAiCorrections() async {
+    final raw = _prefs.getString(_kAiCorrections);
+    if (raw == null) return [];
+    try {
+      return (jsonDecode(raw) as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Insert or update a correction (keyed by id).
+  static Future<void> saveAiCorrection(Map<String, dynamic> correction) async {
+    final id = correction['id']?.toString() ?? '';
+    if (id.isEmpty) return;
+    final all = await getAiCorrections();
+    final idx = all.indexWhere((c) => c['id']?.toString() == id);
+    if (idx >= 0) {
+      all[idx] = {...all[idx], ...correction};
+    } else {
+      all.add(correction);
+    }
+    await _prefs.setString(_kAiCorrections, jsonEncode(all));
+  }
+
+  /// Merge a batch of correction rows (e.g. pulled from Supabase) into the
+  /// local store, keeping the newest version of each by id.
+  static Future<void> mergeAiCorrections(
+      List<Map<String, dynamic>> incoming) async {
+    if (incoming.isEmpty) return;
+    final all = await getAiCorrections();
+    final byId = {for (final c in all) c['id']?.toString() ?? '': c};
+    for (final c in incoming) {
+      final id = c['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      byId[id] = {...?byId[id], ...c};
+    }
+    await _prefs.setString(_kAiCorrections, jsonEncode(byId.values.toList()));
+  }
+
+  static Future<void> clearAiCorrections() async {
+    await _prefs.remove(_kAiCorrections);
   }
 }

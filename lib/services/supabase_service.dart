@@ -438,4 +438,85 @@ class SupabaseService {
       return false;
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  AI CORRECTIONS (ai_corrections — user edits to AI output, admin review)
+  // ══════════════════════════════════════════════════════════════════════════
+  static const Map<String, String> _corrAppToDb = {
+    'id': 'id',
+    'incidentId': 'incident_id',
+    'incidentType': 'incident_type',
+    'imageHash': 'image_hash',
+    'plant': 'plant',
+    'fieldChanged': 'field_changed',
+    'hazardName': 'hazard_name',
+    'originalValue': 'original_value',
+    'editedValue': 'edited_value',
+    'editedBy': 'edited_by',
+    'aiSource': 'ai_source',
+    'verdict': 'verdict',
+    'reviewedBy': 'reviewed_by',
+    'reviewedAt': 'reviewed_at',
+    'addedToTraining': 'added_to_training',
+    'createdAt': 'created_at',
+  };
+  static final Map<String, String> _corrDbToApp = {
+    for (final e in _corrAppToDb.entries) e.value: e.key,
+  };
+
+  static Map<String, dynamic> _corrToRow(Map<String, dynamic> c) {
+    final row = <String, dynamic>{};
+    _corrAppToDb.forEach((appKey, dbCol) {
+      if (!c.containsKey(appKey)) return;
+      var v = c[appKey];
+      if (appKey == 'addedToTraining') {
+        v = v is bool ? v : v?.toString().toLowerCase() == 'true';
+      }
+      // Empty strings for timestamptz columns must become null.
+      if (dbCol == 'reviewed_at' && (v == null || v.toString().isEmpty)) {
+        v = null;
+      }
+      row[dbCol] = v;
+    });
+    return row;
+  }
+
+  static Map<String, dynamic> _corrFromRow(Map<String, dynamic> row) {
+    final c = <String, dynamic>{};
+    row.forEach((dbCol, v) {
+      final appKey = _corrDbToApp[dbCol];
+      if (appKey != null) c[appKey] = v;
+    });
+    return c;
+  }
+
+  /// Fetch all AI corrections (newest first). Returns [] on any error / when
+  /// Supabase is disabled.
+  static Future<List<Map<String, dynamic>>> fetchCorrections() async {
+    if (!isReady) return [];
+    try {
+      final rows = await _db
+          .from('ai_corrections')
+          .select()
+          .order('created_at', ascending: false);
+      return (rows as List)
+          .map((r) => _corrFromRow(Map<String, dynamic>.from(r as Map)))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Insert or update one AI correction (keyed by id). Returns true on success.
+  static Future<bool> upsertCorrection(Map<String, dynamic> correction) async {
+    if (!isReady) return false;
+    try {
+      final row = _corrToRow(correction);
+      if ((row['id']?.toString() ?? '').isEmpty) return false;
+      await _db.from('ai_corrections').upsert(row, onConflict: 'id');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 }

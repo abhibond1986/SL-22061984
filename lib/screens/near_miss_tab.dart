@@ -32,6 +32,7 @@ import '../services/knowledge_service.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
+import '../services/ai_correction_service.dart';
 
 class NearMissTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -83,6 +84,12 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   bool _aiRefining = false;
   Map<String, dynamic>? _aiSuggestion; // {refined, isNearMiss, reason, confidence}
   String? _aiSummary; // ★ Summary of Near Miss shown above description
+  // ★ AI correction feedback loop: pristine snapshot of what the AI suggested
+  // (description/summary, corrective action, severity) so we can diff it
+  // against the user's final values on save and feed real AI mistakes back
+  // into training. Null until an AI analysis populates the form.
+  Map<String, String>? _aiOriginalSuggestion;
+  String? _aiOriginalSource;
   // ★ v29: Proper Timer-based debounce (replaces pile-up Future.delayed)
   Timer? _descDebounce;
   Timer? _locationDebounce;
@@ -663,6 +670,13 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           _immediateAction.selection = TextSelection.fromPosition(
               TextPosition(offset: correctiveAction.length));
         }
+        // ★ Snapshot AI's refinement so later user edits can be detected.
+        _aiOriginalSuggestion = {
+          'summary':          refined,
+          'correctiveAction': correctiveAction,
+          'severity':         _severity,
+        };
+        _aiOriginalSource = _aiSuggestion?['_source']?.toString() ?? 'refinement';
         _aiSuggestion = null;
       });
     }
@@ -1019,6 +1033,13 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         _severity             = sev;
         _obsType              = refinedData['obsType']?.toString() ?? _obsType;
         _analyzing            = false;
+        // ★ Snapshot the AI's suggested values so we can detect user edits.
+        _aiOriginalSuggestion = {
+          'summary':          refinedData['desc']?.toString() ?? '',
+          'correctiveAction': refinedData['action']?.toString() ?? '',
+          'severity':         sev,
+        };
+        _aiOriginalSource = (result?['_source'] ?? (isOnline ? 'online' : 'offline')).toString();
       });
     } catch (e) {
       setState(() {
@@ -1265,6 +1286,40 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
       }
 
       await LocalDB.saveIncident(incident);
+
+      // ★ AI correction feedback loop: if the AI populated the form and the user
+      // then changed the summary, corrective action, or severity, record each
+      // edit so an admin can decide whether the AI was wrong (→ training data)
+      // or the user just preferred different wording. Fire-and-forget.
+      if (_aiOriginalSuggestion != null) {
+        final incId = incident['id']?.toString() ?? '';
+        final editedBy = (user?['name'] ?? user?['username'] ?? '').toString();
+        AiCorrectionService.recordSingleEdit(
+          incidentId: incId, incidentType: 'NEAR_MISS',
+          field: AiCorrectionService.fieldSummary,
+          original: _aiOriginalSuggestion!['summary'] ?? '',
+          edited: _description.text.trim(),
+          plant: _plant, editedBy: editedBy,
+          aiSource: _aiOriginalSource ?? '',
+        ).catchError((_) {});
+        AiCorrectionService.recordSingleEdit(
+          incidentId: incId, incidentType: 'NEAR_MISS',
+          field: AiCorrectionService.fieldCorrectiveAction,
+          original: _aiOriginalSuggestion!['correctiveAction'] ?? '',
+          edited: _immediateAction.text.trim(),
+          plant: _plant, editedBy: editedBy,
+          aiSource: _aiOriginalSource ?? '',
+        ).catchError((_) {});
+        AiCorrectionService.recordSingleEdit(
+          incidentId: incId, incidentType: 'NEAR_MISS',
+          field: AiCorrectionService.fieldOverallRisk,
+          original: _aiOriginalSuggestion!['severity'] ?? '',
+          edited: _severity,
+          plant: _plant, editedBy: editedBy,
+          aiSource: _aiOriginalSource ?? '',
+        ).catchError((_) {});
+      }
+
       // Start network sync but don't block — show success after max 5s
       final syncFuture = SyncService.pushIncident(incident).catchError((_) => false);
       // Only generate/upload PDF in background if user chose Save+PDF

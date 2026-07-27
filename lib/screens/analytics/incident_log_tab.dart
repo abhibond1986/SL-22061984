@@ -454,6 +454,9 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final hasInlineImage = imageBase64.isNotEmpty && imageBase64 != 'null' && imageBase64 != '[image]' && imageBase64.length > 100;
     final hasImageRef = (inc['imageRef']?.toString() ?? '').isNotEmpty &&
         inc['imageRef'].toString() != 'null';
+    // Cloud-synced records may carry only a Supabase Storage URL (no file ref,
+    // no inline base64) — those must also load asynchronously via ImageStorage.
+    final hasImageUrl = (inc['imageUrl']?.toString() ?? '').startsWith('http');
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -499,7 +502,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                           width: 52, height: 52,
                           errorBuilder: (_, __, ___) => _typeIconWidget(typeIcon, typeColor),
                         )
-                      : hasImageRef
+                      : (hasImageRef || hasImageUrl)
                           ? _asyncThumbnail(inc, typeIcon, typeColor)
                           : _typeIconWidget(typeIcon, typeColor),
             ),

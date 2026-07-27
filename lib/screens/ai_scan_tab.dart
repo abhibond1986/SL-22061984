@@ -27,6 +27,7 @@ import '../widgets/universal_app_bar.dart';
 import '../widgets/voice_text_field.dart';
 import '../services/i18n.dart';
 import '../services/ai_audit_service.dart';
+import '../services/ai_correction_service.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -51,6 +52,10 @@ class _AIScanTabState extends State<AIScanTab> {
   Uint8List? _imageBytes;
   bool       _analyzing = false;
   Map<String, dynamic>? _result;
+  // Pristine snapshot of the AI output the moment analysis finished, so we can
+  // diff it against the user's edits on save and feed real mistakes back into
+  // training. Deep-copied so later edits to _result don't mutate it.
+  Map<String, dynamic>? _originalAiResult;
   String     _step = '';
   String?    _savedImageHash;
   int _currentStep = 0;
@@ -280,6 +285,11 @@ class _AIScanTabState extends State<AIScanTab> {
         _buildHazardKeys(hazards.length);
         setState(() {
           _result      = result;
+          // Deep copy via JSON round-trip so edits to _result never mutate the
+          // pristine snapshot we diff against on save.
+          _originalAiResult = result == null
+              ? null
+              : jsonDecode(jsonEncode(result)) as Map<String, dynamic>;
           _analyzing   = false;
           _currentStep = 3;
         });
@@ -943,6 +953,23 @@ class _AIScanTabState extends State<AIScanTab> {
         imageBytes: _imageBytes!,
         primarySource: primarySource,
       );  // Fire-and-forget — no await
+    }
+
+    // ★ AI correction feedback loop: if the user edited the AI's output, record
+    // each changed field so an admin can later decide whether the AI was wrong
+    // (→ training data) or the user just preferred different wording.
+    if (_originalAiResult != null && _result != null) {
+      final incId = dbInc['id']?.toString() ?? '';
+      AiCorrectionService.recordResultEdits(
+        incidentId: incId,
+        incidentType: 'AI_SCAN',
+        original: _originalAiResult!,
+        edited: _result!,
+        imageHash: _savedImageHash ?? '',
+        plant: (user['plant'] ?? '').toString(),
+        editedBy: (user['name'] ?? user['username'] ?? '').toString(),
+        aiSource: _result!['_source']?.toString() ?? '',
+      ).catchError((_) => 0); // Fire-and-forget — never block the save.
     }
 
     setState(() {

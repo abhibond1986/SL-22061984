@@ -40,6 +40,8 @@ import '../services/groq_service.dart';
 import '../services/gemini_vision.dart';
 import '../services/gemini_direct_vision.dart';
 import '../services/pdf_kb_extractor.dart';
+import '../services/ai_correction_service.dart';
+import '../services/image_storage.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
     if (dart.library.html) '../services/pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
@@ -98,6 +100,8 @@ class _AdminScreenState extends State<AdminScreen>
         Icons.auto_stories_rounded,    Color(0xFF1565C0), true),
     _AdminModule(14,'ai_audit',  'AI Audit',           'Model comparison',
         Icons.compare_arrows_rounded,  Color(0xFFD32F2F), true),
+    _AdminModule(15,'ai_corrections','AI Corrections',  'User edits & training',
+        Icons.model_training_rounded,  Color(0xFF00838F), true),
   ];
 
   // ── Login state ─────────────────────────────────────────────────
@@ -119,6 +123,11 @@ class _AdminScreenState extends State<AdminScreen>
   List<Map<String, dynamic>> _incidents = [];
   List<Map<String, dynamic>> _kbDocs    = [];
   List<Map<String, dynamic>> _auditLog  = [];
+
+  // ── AI Corrections state (feedback loop review queue) ─────────────
+  List<Map<String, dynamic>> _corrections = [];
+  bool _correctionsLoading = false;
+  String _corrFilter = 'pending'; // 'pending' | 'ai_mistake' | 'user_preference' | 'all'
 
   // ── Knowledge Base state ─────────────────────────────────────────
   bool _kbUploading = false;
@@ -691,6 +700,7 @@ class _AdminScreenState extends State<AdminScreen>
       case 12: return _moduleCompliance(sl);
       case 13: return _moduleKnowledgeBase(sl);
       case 14: return _moduleAiAudit(sl);
+      case 15: return _moduleAiCorrections(sl);
       default: return _modulePlaceholder(m, sl);
     }
   }
@@ -6117,6 +6127,391 @@ class _AdminScreenState extends State<AdminScreen>
         ]),
       ]),
     );
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  MODULE 15 — AI CORRECTIONS (trust-building feedback loop)
+  //  Shows every user edit to AI output. Admin classifies each as an
+  //  "AI mistake" (→ fed into fine-tuning data so accuracy improves) or a
+  //  "User preference" (no training impact). Pulls from Supabase + local.
+  // ══════════════════════════════════════════════════════════════════
+  Future<void> _loadCorrections() async {
+    if (_correctionsLoading) return;
+    setState(() => _correctionsLoading = true);
+    try {
+      final list = await AiCorrectionService.getAllCorrections();
+      if (mounted) setState(() => _corrections = list);
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _correctionsLoading = false);
+    }
+  }
+
+  Widget _moduleAiCorrections(SL sl) {
+    // Lazy-load on first open.
+    if (_corrections.isEmpty && !_correctionsLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadCorrections());
+    }
+
+    final stats = AiCorrectionService.computeStats(_corrections);
+    final filtered = _corrFilter == 'all'
+        ? _corrections
+        : _corrections
+            .where((c) => (c['verdict']?.toString() ?? 'pending') == _corrFilter)
+            .toList();
+
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      // ── Header + stats ──
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: sl.glassColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: sl.glassBorder),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.model_training_rounded, color: Color(0xFF00838F), size: 20),
+            const SizedBox(width: 8),
+            Expanded(child: Text('AI Corrections & Training', style: TextStyle(
+                color: sl.text1, fontSize: 15, fontWeight: FontWeight.w800))),
+            IconButton(
+              onPressed: _correctionsLoading ? null : _loadCorrections,
+              icon: _correctionsLoading
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : Icon(Icons.refresh_rounded, color: sl.text2, size: 20),
+              tooltip: 'Refresh',
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text('When a user edits the AI\'s summary, severity or corrective action, '
+              'it lands here. Mark real errors as "AI mistake" to feed them into the '
+              'training set — the model keeps getting more accurate.',
+              style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4)),
+          const SizedBox(height: 16),
+          Row(children: [
+            _auditStatCard(sl, 'Total Edits', '${stats['total']}',
+                Icons.edit_note_rounded, const Color(0xFF1E88E5)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Pending', '${stats['pending']}',
+                Icons.pending_actions_rounded, AppColors.amber),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'AI Mistakes', '${stats['aiMistake']}',
+                Icons.error_outline_rounded, const Color(0xFFD32F2F)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'In Training', '${stats['addedToTraining']}',
+                Icons.school_outlined, const Color(0xFF43A047)),
+          ]),
+          const SizedBox(height: 12),
+          // AI mistake rate + most-wrong field.
+          Row(children: [
+            Expanded(child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFD32F2F).withOpacity(0.06),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(children: [
+                const Icon(Icons.percent_rounded, color: Color(0xFFD32F2F), size: 14),
+                const SizedBox(width: 6),
+                Expanded(child: Text('AI mistake rate (of reviewed): '
+                    '${(stats['aiMistakeRate'] as double).toStringAsFixed(0)}%',
+                    style: TextStyle(color: sl.text2, fontSize: 10, fontWeight: FontWeight.w600))),
+              ]),
+            )),
+            const SizedBox(width: 8),
+            Expanded(child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF7E57C2).withOpacity(0.06),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(children: [
+                const Icon(Icons.leaderboard_rounded, color: Color(0xFF7E57C2), size: 14),
+                const SizedBox(width: 6),
+                Expanded(child: Text('Most-wrong field: ${_fieldLabel(stats['topMistakeField']?.toString() ?? '—')}',
+                    style: TextStyle(color: sl.text2, fontSize: 10, fontWeight: FontWeight.w600),
+                    maxLines: 1, overflow: TextOverflow.ellipsis)),
+              ]),
+            )),
+          ]),
+        ]),
+      ),
+      const SizedBox(height: 12),
+
+      // ── Filter chips ──
+      Row(children: [
+        _corrFilterChip(sl, 'pending', 'Pending', stats['pending'] as int),
+        const SizedBox(width: 8),
+        _corrFilterChip(sl, 'ai_mistake', 'AI Mistakes', stats['aiMistake'] as int),
+        const SizedBox(width: 8),
+        _corrFilterChip(sl, 'user_preference', 'Preferences', stats['userPreference'] as int),
+        const SizedBox(width: 8),
+        _corrFilterChip(sl, 'all', 'All', stats['total'] as int),
+      ]),
+      const SizedBox(height: 12),
+
+      // ── Correction cards ──
+      if (_correctionsLoading && _corrections.isEmpty)
+        const Center(child: Padding(
+          padding: EdgeInsets.all(40), child: CircularProgressIndicator()))
+      else if (filtered.isEmpty)
+        Center(child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(children: [
+            Icon(Icons.check_circle_outline_rounded, color: sl.text4, size: 44),
+            const SizedBox(height: 10),
+            Text(_corrFilter == 'pending' ? 'No edits waiting for review' : 'Nothing here',
+                style: TextStyle(color: sl.text3, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text('Edits users make to AI output will appear here',
+                style: TextStyle(color: sl.text4, fontSize: 10), textAlign: TextAlign.center),
+          ]),
+        ))
+      else
+        ...filtered.map((c) => _correctionCard(sl, c)),
+    ]);
+  }
+
+  Widget _corrFilterChip(SL sl, String value, String label, int count) {
+    final selected = _corrFilter == value;
+    const accent = Color(0xFF00838F);
+    return Expanded(child: GestureDetector(
+      onTap: () => setState(() => _corrFilter = value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? accent.withOpacity(0.15) : sl.card,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: selected ? accent : sl.glassBorder,
+              width: selected ? 1.5 : 1),
+        ),
+        child: Column(children: [
+          Text('$count', style: TextStyle(
+              color: selected ? accent : sl.text2,
+              fontSize: 14, fontWeight: FontWeight.w900)),
+          Text(label, style: TextStyle(
+              color: selected ? accent : sl.text3,
+              fontSize: 8, fontWeight: FontWeight.w700),
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+        ]),
+      ),
+    ));
+  }
+
+  String _fieldLabel(String field) {
+    switch (field) {
+      case 'summary':          return 'Summary';
+      case 'overallRisk':      return 'Overall severity';
+      case 'severity':         return 'Severity';
+      case 'hazardSeverity':   return 'Hazard severity';
+      case 'correctiveAction': return 'Corrective action';
+      default:                 return field.isEmpty ? '—' : field;
+    }
+  }
+
+  Widget _correctionCard(SL sl, Map<String, dynamic> c) {
+    final verdict = c['verdict']?.toString() ?? 'pending';
+    final field = c['fieldChanged']?.toString() ?? '';
+    final hazardName = c['hazardName']?.toString() ?? '';
+    final original = c['originalValue']?.toString() ?? '';
+    final edited = c['editedValue']?.toString() ?? '';
+    final editedBy = c['editedBy']?.toString() ?? '';
+    final aiSource = c['aiSource']?.toString() ?? '';
+    final type = c['incidentType']?.toString() ?? '';
+    final addedToTraining = c['addedToTraining'] == true;
+    final createdAt = c['createdAt']?.toString() ?? '';
+    final dateStr = createdAt.length >= 16
+        ? createdAt.substring(0, 16).replaceAll('T', ' ') : createdAt;
+
+    final Color vColor = verdict == 'ai_mistake'
+        ? const Color(0xFFD32F2F)
+        : verdict == 'user_preference'
+            ? const Color(0xFF43A047)
+            : AppColors.amber;
+    final String vLabel = verdict == 'ai_mistake'
+        ? 'AI Mistake'
+        : verdict == 'user_preference' ? 'User Preference' : 'Pending';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: verdict == 'pending'
+            ? AppColors.amber.withOpacity(0.3) : sl.glassBorder),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Header: field + verdict badge
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0xFF00838F).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(6)),
+            child: Text(_fieldLabel(field), style: const TextStyle(
+                color: Color(0xFF00838F), fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+          if (type.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Text(type == 'NEAR_MISS' ? 'Near miss' : 'Hazard scan',
+                style: TextStyle(color: sl.text4, fontSize: 9)),
+          ],
+          const Spacer(),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: vColor.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: vColor.withOpacity(0.4))),
+            child: Text(vLabel, style: TextStyle(
+                color: vColor, fontSize: 9, fontWeight: FontWeight.w800)),
+          ),
+        ]),
+        if (hazardName.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text('Hazard: $hazardName', style: TextStyle(
+              color: sl.text2, fontSize: 10, fontWeight: FontWeight.w600)),
+        ],
+        const SizedBox(height: 8),
+
+        // Original (AI) vs Edited (user)
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: _corrValueBox(sl, 'AI produced', original,
+              const Color(0xFFD32F2F))),
+          const SizedBox(width: 8),
+          Expanded(child: _corrValueBox(sl, 'User changed to', edited,
+              const Color(0xFF43A047))),
+        ]),
+        const SizedBox(height: 8),
+
+        // Meta row
+        Row(children: [
+          Icon(Icons.person_outline_rounded, color: sl.text4, size: 11),
+          const SizedBox(width: 3),
+          Expanded(child: Text(
+              editedBy.isEmpty ? 'Unknown user' : editedBy,
+              style: TextStyle(color: sl.text4, fontSize: 9),
+              maxLines: 1, overflow: TextOverflow.ellipsis)),
+          if (aiSource.isNotEmpty) ...[
+            Icon(Icons.smart_toy_outlined, color: sl.text4, size: 11),
+            const SizedBox(width: 3),
+            Text(aiSource, style: TextStyle(color: sl.text4, fontSize: 9)),
+            const SizedBox(width: 8),
+          ],
+          Text(dateStr, style: TextStyle(color: sl.text4, fontSize: 9)),
+        ]),
+
+        // Actions / verdict result
+        if (verdict == 'pending') ...[
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: ElevatedButton.icon(
+              onPressed: () => _classifyCorrection(c, aiMistake: true),
+              icon: const Icon(Icons.error_outline_rounded, size: 14, color: Colors.white),
+              label: const Text('AI mistake', style: TextStyle(
+                  color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFD32F2F),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            )),
+            const SizedBox(width: 8),
+            Expanded(child: OutlinedButton.icon(
+              onPressed: () => _classifyCorrection(c, aiMistake: false),
+              icon: const Icon(Icons.thumb_up_alt_outlined, size: 13, color: Color(0xFF43A047)),
+              label: const Text('User preference', style: TextStyle(
+                  color: Color(0xFF43A047), fontSize: 11, fontWeight: FontWeight.w700)),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: Color(0xFF43A047), width: 1.5),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            )),
+          ]),
+        ] else if (verdict == 'ai_mistake') ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: (addedToTraining ? const Color(0xFF43A047) : sl.text4).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(6)),
+            child: Row(children: [
+              Icon(addedToTraining ? Icons.school_rounded : Icons.info_outline_rounded,
+                  color: addedToTraining ? const Color(0xFF43A047) : sl.text3, size: 12),
+              const SizedBox(width: 6),
+              Expanded(child: Text(
+                  addedToTraining
+                      ? 'Added to fine-tuning dataset — will improve the next model export.'
+                      : 'Marked as AI mistake. (No evidence image was available to add to training.)',
+                  style: TextStyle(color: sl.text3, fontSize: 9, height: 1.3))),
+            ]),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Widget _corrValueBox(SL sl, String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.15)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label, style: TextStyle(
+            color: color, fontSize: 9, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text(value.isEmpty ? '(empty)' : value, style: TextStyle(
+            color: value.isEmpty ? sl.text4 : sl.text2, fontSize: 10, height: 1.35),
+            maxLines: 8, overflow: TextOverflow.ellipsis),
+      ]),
+    );
+  }
+
+  Future<void> _classifyCorrection(
+      Map<String, dynamic> c, {required bool aiMistake}) async {
+    if (!aiMistake) {
+      await AiCorrectionService.markUserPreference(c, reviewedBy: _currentActor);
+      await AdminAudit.log(
+        action: 'ai_correction_user_pref', actor: _currentActor,
+        target: c['id']?.toString() ?? '');
+      _toast('Marked as user preference', const Color(0xFF43A047));
+      await _loadCorrections();
+      return;
+    }
+
+    // AI mistake → try to attach the evidence image so it becomes a useful
+    // vision training example, then push into the fine-tuning collector.
+    String imageBase64 = '';
+    final incidentId = c['incidentId']?.toString() ?? '';
+    if (incidentId.isNotEmpty) {
+      final inc = _incidents.firstWhere(
+        (i) => i['id']?.toString() == incidentId,
+        orElse: () => <String, dynamic>{});
+      if (inc.isNotEmpty) {
+        try {
+          final bytes = await ImageStorage.getImageForIncident(inc);
+          if (bytes != null && bytes.isNotEmpty) {
+            imageBase64 = base64Encode(bytes);
+          }
+        } catch (_) {}
+      }
+    }
+
+    await AiCorrectionService.markAiMistake(c,
+        reviewedBy: _currentActor, imageBase64: imageBase64);
+    await AdminAudit.log(
+      action: 'ai_correction_ai_mistake', actor: _currentActor,
+      target: c['id']?.toString() ?? '');
+    _toast(
+      imageBase64.isEmpty
+          ? 'Marked as AI mistake (no image to train on)'
+          : 'AI mistake → added to training data ✓',
+      const Color(0xFFD32F2F));
+    await _loadCorrections();
   }
 }
 

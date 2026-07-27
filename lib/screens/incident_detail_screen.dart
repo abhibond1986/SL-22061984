@@ -34,6 +34,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   final _closedByCtrl = TextEditingController();
   final _remarksCtrl  = TextEditingController();
   bool _saving = false;
+  // Evidence image resolved once (file ref → inline base64 → Supabase URL) and
+  // cached, so the detail view shows the same photo the analysis was made on.
+  Future<Uint8List?>? _evidenceImageFuture;
 
   static const List<String> _statusOrder = [
     'OPEN', 'INVESTIGATING', 'ACTION TAKEN', 'CLOSED'
@@ -46,6 +49,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     _actionCtrl.text   = _inc['correctiveAction']?.toString() ?? '';
     _closedByCtrl.text = _inc['closedBy']?.toString()         ?? '';
     _remarksCtrl.text  = _inc['closingRemarks']?.toString()   ?? '';
+    // Kick off image resolution once (handles mobile file storage where the
+    // inline base64 is stripped, plus Supabase-URL images synced from cloud).
+    _evidenceImageFuture = _resolveImageBytes();
   }
 
   @override
@@ -544,35 +550,119 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       }).toList()));
 
   // ─── EVIDENCE PHOTO ──────────────────────────────────────────
+  // Shows the image the analysis was performed on. Uses the resolved-bytes
+  // future (file ref → inline base64 → Supabase URL) rather than reading only
+  // the inline base64 fields, because on mobile the full base64 is stripped
+  // from the record after the image is saved to a file (imageRef).
   Widget _buildEvidencePhoto(SL sl, Color bg) {
-    final imgB64 = _inc['imageBase64']?.toString() ?? '';
-    final shareB64 = _inc['shareImageBase64']?.toString() ?? '';
-    final thumbB64 = _inc['thumbnailBase64']?.toString() ?? '';
-    final b64 = imgB64.isNotEmpty ? imgB64 : shareB64.isNotEmpty ? shareB64 : thumbB64;
-    if (b64.isEmpty) return const SizedBox.shrink();
+    // Quick check: if there's no image reference of ANY kind on the record,
+    // don't reserve space or show a loader.
+    final hasAnyImageRef = ((_inc['imageRef']?.toString() ?? '').isNotEmpty) ||
+        ((_inc['imageBase64']?.toString() ?? '').isNotEmpty) ||
+        ((_inc['shareImageBase64']?.toString() ?? '').isNotEmpty) ||
+        ((_inc['thumbnailBase64']?.toString() ?? '').isNotEmpty) ||
+        ((_inc['imageUrl']?.toString() ?? '').startsWith('http'));
+    if (!hasAnyImageRef) return const SizedBox.shrink();
 
-    return Column(children: [
-      ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          width: double.infinity,
-          constraints: const BoxConstraints(maxHeight: 220),
-          decoration: BoxDecoration(
-            color: sl.isDark ? const Color(0xFF252840) : Colors.white,
-            border: Border.all(color: sl.isDark
-                ? Colors.white10 : Colors.black12),
-            borderRadius: BorderRadius.circular(10),
+    return FutureBuilder<Uint8List?>(
+      future: _evidenceImageFuture,
+      builder: (context, snap) {
+        // While loading, show a compact placeholder so the layout doesn't jump.
+        if (snap.connectionState == ConnectionState.waiting) {
+          return Column(children: [
+            Container(
+              width: double.infinity,
+              height: 140,
+              decoration: BoxDecoration(
+                color: sl.isDark ? const Color(0xFF252840) : Colors.white,
+                border: Border.all(color: sl.isDark ? Colors.white10 : Colors.black12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Center(child: SizedBox(
+                width: 22, height: 22,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: sl.text4))),
+            ),
+            const SizedBox(height: 12),
+          ]);
+        }
+        final bytes = snap.data;
+        if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
+
+        return Column(children: [
+          Stack(children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 220),
+                decoration: BoxDecoration(
+                  color: sl.isDark ? const Color(0xFF252840) : Colors.white,
+                  border: Border.all(color: sl.isDark
+                      ? Colors.white10 : Colors.black12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+            // Tap anywhere on the image to view it full-screen.
+            Positioned.fill(child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => _openFullImage(bytes),
+              ),
+            )),
+            Positioned(
+              top: 8, right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.55),
+                  borderRadius: BorderRadius.circular(20)),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.zoom_in_rounded, color: Colors.white, size: 13),
+                  SizedBox(width: 3),
+                  Text('Analysed image', style: TextStyle(
+                      color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 12),
+        ]);
+      },
+    );
+  }
+
+  // Full-screen, pinch-to-zoom viewer for the evidence image.
+  void _openFullImage(Uint8List bytes) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.9),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(12),
+        child: Stack(children: [
+          InteractiveViewer(
+            minScale: 0.8, maxScale: 5,
+            child: Center(child: Image.memory(bytes, fit: BoxFit.contain)),
           ),
-          child: Image.memory(
-            base64Decode(b64),
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.high,
-            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          Positioned(
+            top: 4, right: 4,
+            child: IconButton(
+              icon: const Icon(Icons.close_rounded, color: Colors.white, size: 28),
+              onPressed: () => Navigator.pop(ctx),
+            ),
           ),
-        ),
+        ]),
       ),
-      const SizedBox(height: 12),
-    ]);
+    );
   }
 
   // ─── COMPACT INFO (replaces giant GridView) ──────────────────
