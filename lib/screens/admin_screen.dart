@@ -6312,6 +6312,8 @@ class _AdminScreenState extends State<AdminScreen>
       case 'severity':         return 'Severity';
       case 'hazardSeverity':   return 'Hazard severity';
       case 'correctiveAction': return 'Corrective action';
+      case 'hazardDeleted':    return 'Hazard removed (false positive)';
+      case 'hazardAdded':      return 'Hazard added (AI missed)';
       default:                 return field.isEmpty ? '—' : field;
     }
   }
@@ -6382,14 +6384,32 @@ class _AdminScreenState extends State<AdminScreen>
         ],
         const SizedBox(height: 8),
 
-        // Original (AI) vs Edited (user)
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(child: _corrValueBox(sl, 'AI produced', original,
-              const Color(0xFFD32F2F))),
-          const SizedBox(width: 8),
-          Expanded(child: _corrValueBox(sl, 'User changed to', edited,
-              const Color(0xFF43A047))),
-        ]),
+        // Original (AI) vs Edited (user). Hazard add/remove read differently
+        // from a field edit, so give them plain-language boxes.
+        if (field == 'hazardDeleted')
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: _corrValueBox(sl, 'AI flagged', original,
+                const Color(0xFFD32F2F))),
+            const SizedBox(width: 8),
+            Expanded(child: _corrValueBox(sl, 'User verdict',
+                'Not present in image — removed', const Color(0xFF43A047))),
+          ])
+        else if (field == 'hazardAdded')
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: _corrValueBox(sl, 'AI missed',
+                'Not detected', const Color(0xFFD32F2F))),
+            const SizedBox(width: 8),
+            Expanded(child: _corrValueBox(sl, 'User added', edited,
+                const Color(0xFF43A047))),
+          ])
+        else
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: _corrValueBox(sl, 'AI produced', original,
+                const Color(0xFFD32F2F))),
+            const SizedBox(width: 8),
+            Expanded(child: _corrValueBox(sl, 'User changed to', edited,
+                const Color(0xFF43A047))),
+          ]),
         const SizedBox(height: 8),
 
         // Meta row

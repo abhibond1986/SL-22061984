@@ -41,6 +41,17 @@ class AiCorrectionService {
   static const String fieldSeverity          = 'severity';
   static const String fieldCorrectiveAction  = 'correctiveAction';
   static const String fieldHazardSeverity    = 'hazardSeverity';
+  // ★ A hazard the AI detected but the user removed = a false positive. This is
+  //   an unambiguous AI mistake (the hazard wasn't in the picture), so it is
+  //   auto-classified and fed to training without waiting for admin review.
+  static const String fieldHazardDeleted     = 'hazardDeleted';
+  // ★ A hazard the user added that the AI missed = a false negative. Recorded
+  //   for admin review (could be a real miss worth training on).
+  static const String fieldHazardAdded       = 'hazardAdded';
+
+  /// Sentinel stored in editedValue for a deleted hazard — tells the training
+  /// exporter "the model should NOT have flagged this hazard for this image".
+  static const String valueHazardNotPresent  = 'HAZARD_NOT_PRESENT';
 
   // ══════════════════════════════════════════════════════════════════════════
   //  RECORDING EDITS
@@ -62,6 +73,7 @@ class AiCorrectionService {
     String plant = '',
     String editedBy = '',
     String aiSource = '',
+    String imageBase64 = '', // enables auto-training for deleted hazards
   }) async {
     var recorded = 0;
 
@@ -91,14 +103,69 @@ class AiCorrectionService {
       recorded++;
     }
 
-    // ── Per-hazard severity + corrective action ──────────────────────────
+    // ── Per-hazard diff ──────────────────────────────────────────────────
+    // CRITICAL: match hazards by NAME, not by list position. If we matched by
+    // index, deleting a hazard from the middle would shift every later hazard
+    // up one slot and be misread as a flurry of "severity"/"corrective action"
+    // edits on the wrong hazards — while the actual deletion went unrecorded.
     final origHaz = _hazardList(original['hazards']);
     final editHaz = _hazardList(edited['hazards']);
-    // Match hazards by index (the edit sheet edits in place, preserving order).
-    for (var i = 0; i < editHaz.length && i < origHaz.length; i++) {
-      final o = origHaz[i];
-      final e = editHaz[i];
-      final hazardName = (e['name'] ?? o['name'] ?? 'Hazard ${i + 1}').toString();
+
+    String nameKey(Map<String, dynamic> h) =>
+        (h['name'] ?? '').toString().trim().toLowerCase();
+
+    final editByName = <String, Map<String, dynamic>>{};
+    for (final e in editHaz) {
+      final k = nameKey(e);
+      if (k.isNotEmpty) editByName[k] = e;
+    }
+    final origByName = <String, Map<String, dynamic>>{};
+    for (final o in origHaz) {
+      final k = nameKey(o);
+      if (k.isNotEmpty) origByName[k] = o;
+    }
+
+    // 1) Hazards the AI produced but the user removed → false positive.
+    //    Auto-classified as an AI mistake and (if we have the image) fed to
+    //    training immediately, so a deletion is itself the feedback signal.
+    for (final o in origHaz) {
+      final k = nameKey(o);
+      if (k.isEmpty || editByName.containsKey(k)) continue;
+      final hazardName = (o['name'] ?? 'Hazard').toString();
+      await _record(
+        incidentId: incidentId, incidentType: incidentType,
+        field: fieldHazardDeleted,
+        original: hazardName,          // what the AI wrongly flagged
+        edited: valueHazardNotPresent, // the correct label: not present
+        hazardName: hazardName,
+        imageHash: imageHash, plant: plant, editedBy: editedBy, aiSource: aiSource,
+        autoVerdict: verdictAiMistake, // deletion = unambiguous AI mistake
+        imageBase64: imageBase64,
+      );
+      recorded++;
+    }
+
+    // 2) Hazards the user added that the AI missed → false negative (review).
+    for (final e in editHaz) {
+      final k = nameKey(e);
+      if (k.isEmpty || origByName.containsKey(k)) continue;
+      final hazardName = (e['name'] ?? 'Hazard').toString();
+      await _record(
+        incidentId: incidentId, incidentType: incidentType,
+        field: fieldHazardAdded,
+        original: '', edited: hazardName,
+        hazardName: hazardName,
+        imageHash: imageHash, plant: plant, editedBy: editedBy, aiSource: aiSource,
+      );
+      recorded++;
+    }
+
+    // 3) Hazards present in BOTH → compare severity + corrective action only.
+    for (final e in editHaz) {
+      final k = nameKey(e);
+      final o = origByName[k];
+      if (o == null) continue; // added hazard, already handled above
+      final hazardName = (e['name'] ?? o['name'] ?? 'Hazard').toString();
 
       final oSev = (o['severity'] ?? '').toString().trim().toUpperCase();
       final eSev = (e['severity'] ?? '').toString().trim().toUpperCase();
@@ -165,8 +232,12 @@ class AiCorrectionService {
     String plant = '',
     String editedBy = '',
     String aiSource = '',
+    String autoVerdict = verdictPending, // pre-classify (e.g. deletions)
+    String imageBase64 = '',             // enables immediate auto-training
   }) async {
     final id = '${DateTime.now().microsecondsSinceEpoch}_${field}_$incidentId';
+    final now = DateTime.now().toIso8601String();
+    final isAuto = autoVerdict != verdictPending;
     final record = <String, dynamic>{
       'id': id,
       'incidentId': incidentId,
@@ -179,12 +250,37 @@ class AiCorrectionService {
       'editedValue': edited,
       'editedBy': editedBy,
       'aiSource': aiSource,
-      'verdict': verdictPending,
-      'reviewedBy': '',
-      'reviewedAt': null,
+      'verdict': autoVerdict,
+      // Auto-classified corrections are system-reviewed, not admin-reviewed.
+      'reviewedBy': isAuto ? 'auto (hazard removed)' : '',
+      'reviewedAt': isAuto ? now : null,
       'addedToTraining': false,
-      'createdAt': DateTime.now().toIso8601String(),
+      'createdAt': now,
     };
+
+    // Auto-feed training for a removed hazard (false positive). We have the
+    // image, so the model can learn "don't flag <hazard> for this image."
+    if (autoVerdict == verdictAiMistake && imageBase64.isNotEmpty) {
+      try {
+        final ok = await FineTuningCollector.saveTrainingExample(
+          imageBase64: imageBase64,
+          approvedResult: {
+            'correctionField': field,
+            'hazardName': hazardName,
+            'correctedValue': edited,   // HAZARD_NOT_PRESENT
+            'originalValue': original,  // the wrongly-flagged hazard name
+            'detectedSection': plant,
+          },
+          metadata: {
+            'source': 'ai_correction_auto',
+            'incidentId': incidentId,
+            'field': field,
+            'reviewedBy': 'auto',
+          },
+        );
+        record['addedToTraining'] = ok;
+      } catch (_) {}
+    }
 
     // 1) Local first (never lose an edit).
     await LocalDB.saveAiCorrection(record);

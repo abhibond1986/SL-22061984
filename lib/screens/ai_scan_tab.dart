@@ -969,6 +969,9 @@ class _AIScanTabState extends State<AIScanTab> {
         plant: (user['plant'] ?? '').toString(),
         editedBy: (user['name'] ?? user['username'] ?? '').toString(),
         aiSource: _result!['_source']?.toString() ?? '',
+        // Pass the image so a removed hazard (false positive) can be fed to
+        // training immediately without waiting for admin review.
+        imageBase64: _imageBytes != null ? base64Encode(_imageBytes!) : '',
       ).catchError((_) => 0); // Fire-and-forget — never block the save.
     }
 
