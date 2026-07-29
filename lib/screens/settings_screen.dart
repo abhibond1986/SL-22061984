@@ -9,7 +9,7 @@ import '../services/local_db.dart';
 //  Admin Panel URL — update after deploying to GitHub Pages
 // ─────────────────────────────────────────────────────────────
 const String _kAdminPanelUrl =
-    'https://abhibond1986.github.io/Safety-Lens-V2/admin/';
+    'https://abhibond1986.github.io/SL-22061984/admin/';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});

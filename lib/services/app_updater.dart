@@ -21,7 +21,7 @@ import 'package:flutter/material.dart';
 class AppUpdater {
   // ── Config ─────────────────────────────────────────────────────────────────
   static const String _owner = 'abhibond1986';
-  static const String _repo = 'Safety-Lens-V2';
+  static const String _repo = 'SL-22061984';
 
   /// Fallback version if native query fails — should match pubspec.yaml
   static const String _fallbackVersion = '1.0.97';

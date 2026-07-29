@@ -184,7 +184,7 @@ function handle(e) {
             var oStart = new Date().getTime();
             var oResp = UrlFetchApp.fetch('https://openrouter.ai/api/v1/chat/completions', {
               method: 'post', contentType: 'application/json',
-              headers: { 'Authorization': 'Bearer ' + oKey, 'HTTP-Referer': 'https://abhibond1986.github.io/Safety-Lens-V2/', 'X-Title': 'SAIL Safety Lens' },
+              headers: { 'Authorization': 'Bearer ' + oKey, 'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/', 'X-Title': 'SAIL Safety Lens' },
               payload: JSON.stringify({ model: OPENROUTER_MODEL, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 10 }),
               muteHttpExceptions: true
             });
@@ -393,7 +393,7 @@ function getProviderHealth() {
     try {
       var oResp = UrlFetchApp.fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'post', contentType: 'application/json',
-        headers: { 'Authorization': 'Bearer ' + oKey, 'HTTP-Referer': 'https://abhibond1986.github.io/Safety-Lens-V2/', 'X-Title': 'SAIL Safety Lens' },
+        headers: { 'Authorization': 'Bearer ' + oKey, 'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/', 'X-Title': 'SAIL Safety Lens' },
         payload: JSON.stringify({ model: OPENROUTER_MODEL, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 10 }),
         muteHttpExceptions: true
       });
@@ -1507,7 +1507,7 @@ function callOpenRouterWithRetry(payload) {
     method: 'post', contentType: 'application/json',
     headers: {
       'Authorization': 'Bearer ' + key,
-      'HTTP-Referer': 'https://abhibond1986.github.io/Safety-Lens-V2/',
+      'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
       'X-Title': 'SAIL Safety Lens'
     },
     payload: JSON.stringify(payload),
@@ -1768,7 +1768,7 @@ function runTrueParallel(prompt, base64, mimeType, cloudUrl) {
       contentType: 'application/json',
       headers: {
         'Authorization': 'Bearer ' + openRouterKey,
-        'HTTP-Referer': 'https://abhibond1986.github.io/Safety-Lens-V2/',
+        'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
         'X-Title': 'SAIL Safety Lens'
       },
       payload: JSON.stringify(orPayload),

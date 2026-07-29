@@ -14,6 +14,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # ★ Needed so configure-pages can auto-enable Pages via `enablement: true`
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,7 +40,7 @@ jobs:
         run: flutter pub get
 
       - name: Build web (release)
-        run: flutter build web --release --base-href "/Safety-Lens-V2/" --no-tree-shake-icons
+        run: flutter build web --release --base-href "/SL-22061984/" --no-tree-shake-icons
 
       - name: List web output
         run: ls -la build/web/
@@ -49,7 +54,10 @@ jobs:
         run: cp build/web/index.html build/web/404.html
 
       - name: Setup Pages
-        uses: actions/configure-pages@v4
+        uses: actions/configure-pages@v5
+        with:
+          # ★ Creates the Pages site if it doesn't exist yet (fixes HttpError: Not Found)
+          enablement: true
 
       - name: Upload to GitHub Pages
         uses: actions/upload-pages-artifact@v3

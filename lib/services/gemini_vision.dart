@@ -338,7 +338,7 @@ class GeminiVision {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $apiKey',
-          'HTTP-Referer': 'https://abhibond1986.github.io/Safety-Lens-V2/',
+          'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
           'X-Title': 'SAIL Safety Lens',
         },
         body: jsonEncode(requestBody),
