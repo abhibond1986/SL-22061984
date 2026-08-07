@@ -40,7 +40,7 @@ jobs:
         run: flutter pub get
 
       - name: Build web (release)
-        run: flutter build web --release --base-href "/SL-22061984/" --no-tree-shake-icons
+        run: flutter build web --release --base-href "/" --no-tree-shake-icons
 
       - name: List web output
         run: ls -la build/web/
