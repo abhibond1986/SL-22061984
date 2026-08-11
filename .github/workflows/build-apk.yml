@@ -123,11 +123,17 @@ jobs:
             ${{ github.event.head_commit.message }}
 
             ### Install
-            1. Download `SafetyLens-v${{ steps.version.outputs.version }}.apk` below
+            1. Download the APK below
             2. Open on your Android phone
             3. Allow "Install from unknown sources" if prompted
             4. Done! The app will auto-check for future updates every 2 days.
+
+            ### Direct Download Link (always latest)
+            ```
+            https://github.com/${{ github.repository }}/releases/latest/download/app-release.apk
+            ```
           files: |
+            build/app/outputs/flutter-apk/app-release.apk
             build/app/outputs/flutter-apk/SafetyLens-v${{ steps.version.outputs.version }}.apk
           draft: false
           prerelease: false
