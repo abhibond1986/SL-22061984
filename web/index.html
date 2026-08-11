@@ -210,69 +210,6 @@
       animation: blink 1.5s ease-in-out infinite;
     }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-    /* App Download Section */
-    .app-download {
-      margin-top: 32px;
-      padding-top: 32px;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .download-btn {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 14px 28px;
-      background: linear-gradient(135deg, #22C55E 0%, #16A34A 100%);
-      color: white;
-      text-decoration: none;
-      border-radius: 12px;
-      font-weight: 600;
-      font-size: 14px;
-      letter-spacing: 0.3px;
-      transition: all 0.3s ease;
-      box-shadow:
-        0 4px 12px rgba(34, 197, 94, 0.3),
-        0 2px 4px rgba(0, 0, 0, 0.2);
-    }
-
-    .download-btn:hover {
-      transform: translateY(-2px);
-      box-shadow:
-        0 6px 20px rgba(34, 197, 94, 0.4),
-        0 3px 6px rgba(0, 0, 0, 0.3);
-    }
-
-    .download-btn:active {
-      transform: translateY(0);
-    }
-
-    .download-btn svg {
-      width: 20px;
-      height: 20px;
-    }
-
-    .android-note {
-      font-size: 10px;
-      color: rgba(100, 116, 139, 0.8);
-      letter-spacing: 0.5px;
-      margin: 0;
-    }
-
-    @media (max-width: 480px) {
-      .app-download {
-        margin-top: 24px;
-        padding-top: 24px;
-      }
-      .download-btn {
-        padding: 12px 24px;
-        font-size: 13px;
-      }
-    }
   </style>
 </head>
 <body>
@@ -290,21 +227,6 @@
         <div class="progress-fill"></div>
       </div>
       <div class="status">Initializing...</div>
-
-      <!-- Android App Download -->
-      <div class="app-download">
-        <a href="https://github.com/abhibond1986/SL-22061984/releases/latest/download/app-release.apk"
-           class="download-btn"
-           id="downloadBtn">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-          Download Android App
-        </a>
-        <p class="android-note">Android only · Always updated</p>
-      </div>
     </div>
   </div>
 

@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
@@ -437,7 +438,79 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
 
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 20),
+
+                  // Android App Download Button
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF22C55E), Color(0xFF16A34A)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E).withOpacity(0.3),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: _launchAppDownload,
+                            borderRadius: BorderRadius.circular(16),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 16),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.download_rounded,
+                                    color: Colors.white,
+                                    size: 22,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Text(
+                                        'Download Android App',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: 0.3,
+                                        ),
+                                      ),
+                                      Text(
+                                        'Android only · Always updated',
+                                        style: TextStyle(
+                                          color: Colors.white.withOpacity(0.85),
+                                          fontSize: 10,
+                                          letterSpacing: 0.5,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 20),
 
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -463,6 +536,42 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _launchAppDownload() async {
+    const url = 'https://github.com/abhibond1986/SL-22061984/releases/latest/download/app-release.apk';
+    try {
+      final uri = Uri.parse(url);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Could not open download link. Please visit GitHub releases manually.',
+              style: TextStyle(fontSize: 12),
+            ),
+            backgroundColor: AppColors.crit,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Error: $e',
+            style: const TextStyle(fontSize: 12),
+          ),
+          backgroundColor: AppColors.crit,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+    }
   }
 
   List<Widget> _loginFields(SL sl) => [
