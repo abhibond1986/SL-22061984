@@ -509,74 +509,83 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
             // ★ RIGHT COLUMN: Details
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               // Title + Status
-              Row(children: [
-                Expanded(child: Text(
-                  inc['title']?.toString() ?? 'Untitled',
-                  style: TextStyle(color: sl.text1, fontSize: 14.5,
-                      fontWeight: FontWeight.w700),
-                  maxLines: 2, overflow: TextOverflow.ellipsis,
-                )),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: statusColor.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: statusColor.withOpacity(0.3)),
-                  ),
-                  child: Text(status, style: TextStyle(
-                      color: statusColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
-                ),
-              ]),
-              const SizedBox(height: 5),
-              // Info row: plant, date, severity
-              Row(children: [
-                Icon(Icons.factory_outlined, color: sl.text4, size: 11),
-                const SizedBox(width: 3),
-                Flexible(child: Text(
-                  inc['plant']?.toString() ?? '—',
-                  style: TextStyle(color: sl.text3, fontSize: 11.5),
-                  overflow: TextOverflow.ellipsis,
-                )),
-                const SizedBox(width: 8),
-                Icon(Icons.calendar_today_outlined, color: sl.text4, size: 11),
-                const SizedBox(width: 3),
-                Text(dateStr, style: TextStyle(color: sl.text3, fontSize: 11.5)),
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: sevColor.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(4)),
-                  child: Text(sev, style: TextStyle(
-                      color: sevColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
-                ),
-              ]),
-              const SizedBox(height: 5),
-              // Bottom row: category + type badge + reported by
-              Row(children: [
-                if ((inc['wsaCategory']?.toString() ?? '').isNotEmpty) ...[
-                  Icon(Icons.label_outline, color: sl.text4, size: 10),
-                  const SizedBox(width: 3),
-                  Flexible(child: Text(inc['wsaCategory'].toString(),
-                      style: TextStyle(color: sl.text4, fontSize: 9),
-                      overflow: TextOverflow.ellipsis)),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: Text(
+                    inc['title']?.toString() ?? 'Untitled',
+                    style: TextStyle(color: sl.text1, fontSize: 14.5,
+                        fontWeight: FontWeight.w700, height: 1.3),
+                    maxLines: 2, overflow: TextOverflow.ellipsis,
+                  )),
                   const SizedBox(width: 8),
-                ],
-                // ★ Type badge (more prominent)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: typeColor.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: typeColor.withOpacity(0.3)),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: statusColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: statusColor.withOpacity(0.3)),
+                    ),
+                    child: Text(status, style: TextStyle(
+                        color: statusColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
                   ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(typeIcon, color: typeColor, size: 9),
-                    const SizedBox(width: 3),
-                    Text(typeLabel, style: TextStyle(
-                        color: typeColor, fontSize: 9.5, fontWeight: FontWeight.w700)),
-                  ]),
-                ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              // Info row: plant, date, severity
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Icon(Icons.factory_outlined, color: sl.text4, size: 12),
+                  const SizedBox(width: 4),
+                  Flexible(child: Text(
+                    inc['plant']?.toString() ?? '—',
+                    style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.2),
+                    overflow: TextOverflow.ellipsis,
+                  )),
+                  const SizedBox(width: 10),
+                  Icon(Icons.calendar_today_outlined, color: sl.text4, size: 12),
+                  const SizedBox(width: 4),
+                  Text(dateStr, style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.2)),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: sevColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(4)),
+                    child: Text(sev, style: TextStyle(
+                        color: sevColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              // Bottom row: category + type badge + reported by
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  if ((inc['wsaCategory']?.toString() ?? '').isNotEmpty) ...[
+                    Icon(Icons.label_outline, color: sl.text4, size: 11),
+                    const SizedBox(width: 4),
+                    Flexible(child: Text(inc['wsaCategory'].toString(),
+                        style: TextStyle(color: sl.text4, fontSize: 9.5, height: 1.2),
+                        overflow: TextOverflow.ellipsis)),
+                    const SizedBox(width: 10),
+                  ],
+                  // ★ Type badge (more prominent)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: typeColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: typeColor.withOpacity(0.3)),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(typeIcon, color: typeColor, size: 10),
+                      const SizedBox(width: 4),
+                      Text(typeLabel, style: TextStyle(
+                          color: typeColor, fontSize: 9.5, fontWeight: FontWeight.w700)),
+                    ]),
+                  ),
                 // ★ v35: Audit status badge
                 if (inc['auditStatus']?.toString() == 'NEEDS_REVIEW') ...[
                   const SizedBox(width: 6),

@@ -158,14 +158,14 @@ class _HomeScreenState extends State<HomeScreen>
         child: Container(
           decoration: BoxDecoration(
             color: sl.isDark
-                ? const Color(0xFF1E1B3A).withOpacity(0.95) // solid dark card for visibility
+                ? const Color(0xFF0D1117).withOpacity(0.98) // darker, more neutral dark background
                 : sl.glassColor,
             border: Border(
               top: BorderSide(
                 color: sl.isDark
-                    ? Colors.white.withOpacity(0.15)
+                    ? Colors.white.withOpacity(0.1)
                     : sl.glassBorder,
-                width: 0.5),
+                width: 1),
             ),
           ),
           child: SafeArea(
