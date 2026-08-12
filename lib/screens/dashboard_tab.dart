@@ -249,6 +249,8 @@ class _DashboardTabState extends State<DashboardTab> {
                       delegate: SliverChildListDelegate([
                         _buildUserSwitcher(sl),
                         const SizedBox(height: 16),
+                        _buildPlantSummary(sl),
+                        const SizedBox(height: 16),
                         _buildActivitySection(sl),
                         const SizedBox(height: 20),
                         _buildSeveritySection(sl),
@@ -521,6 +523,198 @@ class _DashboardTabState extends State<DashboardTab> {
       ]),
     ],
   );
+
+  /// ★ NEW: Plant-specific summary for the user's plant
+  Widget _buildPlantSummary(SL sl) {
+    final userPlant = widget.user?['plant']?.toString() ?? 'Unknown';
+
+    // Filter incidents for user's plant only
+    final plantIncidents = _incidents.where((inc) {
+      final incPlant = inc['plant']?.toString() ?? '';
+      return incPlant == userPlant || incPlant.toUpperCase().contains(userPlant.toUpperCase());
+    }).toList();
+
+    if (plantIncidents.isEmpty) {
+      // Don't show widget if no data for this plant
+      return const SizedBox.shrink();
+    }
+
+    // Calculate metrics
+    final total = plantIncidents.length;
+    final critical = plantIncidents.where((i) =>
+      (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL').length;
+    final open = plantIncidents.where((i) {
+      final status = i['status']?.toString().toUpperCase() ?? '';
+      return status == 'OPEN' || status == 'INVESTIGATING' || status == 'ACTION TAKEN';
+    }).length;
+
+    // Last 30 days trend
+    final last30Days = DateTime.now().subtract(const Duration(days: 30));
+    final recentCount = plantIncidents.where((inc) {
+      try {
+        final dateStr = inc['date']?.toString() ?? '';
+        if (dateStr.isEmpty) return false;
+        final date = DateTime.parse(dateStr);
+        return date.isAfter(last30Days);
+      } catch (_) {
+        return false;
+      }
+    }).length;
+
+    // Top department in this plant
+    final deptCounts = <String, int>{};
+    for (var inc in plantIncidents) {
+      final dept = inc['dept']?.toString() ?? 'Unknown';
+      if (dept.isNotEmpty && dept != 'Unknown') {
+        deptCounts[dept] = (deptCounts[dept] ?? 0) + 1;
+      }
+    }
+    final sortedDepts = deptCounts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final topDept = sortedDepts.isNotEmpty ? sortedDepts.first : null;
+
+    final trendUp = total > 0 && recentCount > (total * 0.4);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionHeader('🏭  $userPlant Safety Summary', sl),
+        const SizedBox(height: 4),
+        Text('Your plant\'s incident overview',
+          style: TextStyle(color: sl.text4, fontSize: 10)),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: sl.card,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: sl.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Metrics Grid
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _plantMetricTile('Total', total, Icons.warning_amber_rounded,
+                    AppColors.amber, sl),
+                  _plantMetricTile('Critical', critical, Icons.error_outline_rounded,
+                    AppColors.crit, sl),
+                  _plantMetricTile('Open', open, Icons.pending_outlined,
+                    AppColors.cyan, sl),
+                ],
+              ),
+
+              const SizedBox(height: 14),
+
+              // Trend Indicator
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: trendUp
+                    ? AppColors.red.withOpacity(0.08)
+                    : AppColors.green.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: trendUp
+                      ? AppColors.red.withOpacity(0.2)
+                      : AppColors.green.withOpacity(0.2),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      trendUp ? Icons.trending_up_rounded : Icons.trending_down_rounded,
+                      color: trendUp ? AppColors.red : AppColors.green,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '$recentCount incidents in last 30 days',
+                        style: TextStyle(
+                          color: sl.text2,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Top Department (if available)
+              if (topDept != null) ...[
+                const SizedBox(height: 12),
+                Text('Department Needing Most Attention:',
+                  style: TextStyle(color: sl.text4, fontSize: 10,
+                    fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppColors.accent.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.accent.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.engineering_outlined, size: 13, color: AppColors.accent),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${topDept.key} (${topDept.value} ${topDept.value == 1 ? "incident" : "incidents"})',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.accent,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Helper: Plant metric tile
+  Widget _plantMetricTile(String label, int value, IconData icon, Color color, SL sl) {
+    return Column(
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: color, size: 24),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          value.toString(),
+          style: TextStyle(
+            color: sl.text1,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        Text(
+          label,
+          style: TextStyle(
+            color: sl.text4,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _buildPlantSection(SL sl) {
     final stats  = _plantStats();

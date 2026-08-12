@@ -418,6 +418,24 @@ body.theme-dark .auth-card { background: var(--surface); }
       </div>
 
       <div class="tcard" style="margin-bottom:16px">
+        <div class="thead-row">
+          <div class="tc-title">🏭 Master Data — Plants</div>
+          <button class="bsm b-ac" onclick="addPlant()">➕ Add Plant</button>
+        </div>
+        <div style="padding:18px 20px">
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Manage the master list of plants. Changes sync to all apps automatically.
+          </p>
+          <div id="plants-list" style="display:grid;gap:8px">
+            <div style="font-size:12px;color:var(--muted);padding:12px;text-align:center">
+              Loading plants...
+            </div>
+          </div>
+          <div class="alert" id="plants-msg" style="margin-top:12px;display:none"></div>
+        </div>
+      </div>
+
+      <div class="tcard" style="margin-bottom:16px">
         <div class="thead-row"><div class="tc-title">📋 Required Sheet structure — <em>Users</em> tab</div></div>
         <div style="padding:14px 18px;font-size:12px;color:var(--muted);overflow-x:auto">
           <p style="margin-bottom:10px">Create a sheet tab named <strong style="color:var(--text)">users</strong> with this header row in row 1:</p>
@@ -527,6 +545,55 @@ uid | name | designation | plant | department | pno | mobile | email | isAdmin |
     <div style="display:flex;gap:8px">
       <button class="bsm b-gh" style="flex:1;justify-content:center;padding:9px" onclick="closeM('m-confirm')">Cancel</button>
       <button class="bsm b-dn" style="flex:1;justify-content:center;padding:9px" id="conf-ok">Proceed</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ADD / EDIT PLANT -->
+<div class="mbg" id="m-plant">
+<div class="mbox" style="max-width:500px">
+  <div class="mhead">
+    <div class="mtitle" id="m-plant-title">Add Plant</div>
+    <button class="mclose" onclick="closeM('m-plant')">✕</button>
+  </div>
+  <div class="mbody">
+    <div class="alert ae" id="mp-err" style="display:none"><span id="mp-err-msg"></span></div>
+    <input type="hidden" id="mp-edit-idx">
+
+    <div class="fg">
+      <label class="fl">Plant Code <span style="color:var(--accent)">*</span></label>
+      <input class="fi" id="mp-code" type="text" placeholder="BSP" maxlength="10">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Short code (e.g., BSP, DSP, RSP)</div>
+    </div>
+
+    <div class="fg">
+      <label class="fl">Plant Name <span style="color:var(--accent)">*</span></label>
+      <input class="fi" id="mp-name" type="text" placeholder="Bhilai Steel Plant">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Full name of the plant</div>
+    </div>
+
+    <div class="fr">
+      <div class="fg">
+        <label class="fl">State</label>
+        <input class="fi" id="mp-state" type="text" placeholder="Chhattisgarh">
+      </div>
+      <div class="fg">
+        <label class="fl">Type</label>
+        <select class="fsel" id="mp-kind">
+          <option value="Plant">Plant</option>
+          <option value="Marketing">Marketing</option>
+          <option value="Mines">Mines</option>
+          <option value="Refractory">Refractory</option>
+          <option value="HQ">HQ / Corporate</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="bsm b-gh" style="flex:1;justify-content:center;padding:10px" onclick="closeM('m-plant')">Cancel</button>
+      <button class="bsm b-ac" style="flex:2;justify-content:center;padding:10px;font-size:13px" onclick="savePlant()">💾 Save Plant</button>
     </div>
   </div>
 </div>
@@ -656,6 +723,7 @@ function enterAdmin(){
   document.getElementById('sheet-id').value=CFG.SHEET_ID;
   loadUsers();
   loadGasCode();
+  loadPlants();
 }
 
 function doLogout(){ SESSION=null; ls('sl_session',null); showPg('pg-login'); toast('Signed out'); }
@@ -1024,6 +1092,171 @@ function loadGasCode(){
 function copyCode(){
   const txt=document.getElementById('code-block').textContent;
   navigator.clipboard.writeText(txt).then(()=>toast('✅ Apps Script code copied to clipboard!'));
+}
+
+// ─────────────────────────────────────────
+//  MASTER DATA — PLANTS MANAGEMENT
+// ─────────────────────────────────────────
+let PLANTS = [];
+
+async function loadPlants(){
+  try {
+    const r = await api({action:'getMasterData'});
+    if(r.ok && r.data && r.data.plants){
+      PLANTS = r.data.plants;
+    } else {
+      // Use default if no saved data
+      PLANTS = [
+        {code:'BSP', name:'Bhilai Steel Plant', state:'Chhattisgarh', kind:'Plant'},
+        {code:'DSP', name:'Durgapur Steel Plant', state:'West Bengal', kind:'Plant'},
+        {code:'RSP', name:'Rourkela Steel Plant', state:'Odisha', kind:'Plant'},
+        {code:'BSL', name:'Bokaro Steel Plant', state:'Jharkhand', kind:'Plant'},
+        {code:'ISP', name:'IISCO Steel Plant Burnpur', state:'West Bengal', kind:'Plant'},
+        {code:'ASP', name:'Alloy Steels Plant', state:'West Bengal', kind:'Plant'},
+        {code:'SSP', name:'Salem Steel Plant', state:'Tamil Nadu', kind:'Plant'},
+        {code:'CFP', name:'Chandrapur Ferro Alloys', state:'Maharashtra', kind:'Plant'},
+        {code:'CMO', name:'Central Marketing Org', state:'Delhi', kind:'Marketing'},
+        {code:'JGOM', name:'Jharkhand Group of Mines', state:'Jharkhand', kind:'Mines'},
+        {code:'OGOM', name:'Odisha Group of Mines', state:'Odisha', kind:'Mines'},
+        {code:'BSP_MINES', name:'BSP Mines', state:'Chhattisgarh', kind:'Mines'},
+        {code:'COLLIERIES', name:'Collieries Division', state:'Jharkhand/WB', kind:'Mines'},
+        {code:'SRU', name:'SRU Kulti', state:'West Bengal', kind:'Refractory'},
+        {code:'CORP', name:'Corporate — Ranchi', state:'Jharkhand', kind:'HQ'},
+        {code:'OTHER', name:'Others', state:'—', kind:'Other'}
+      ];
+    }
+    renderPlantsList();
+    await populatePlantDropdowns();
+  } catch(e){
+    console.error('Load plants error:',e);
+  }
+}
+
+function renderPlantsList(){
+  const el = document.getElementById('plants-list');
+  if(!el || PLANTS.length===0){
+    el.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:12px;text-align:center">No plants defined yet</div>';
+    return;
+  }
+  el.innerHTML = PLANTS.map((p,i)=>`
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--s2);border-radius:8px;border:1px solid var(--border)">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;color:var(--text)">${p.code} — ${p.name}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${p.state || '—'} • ${p.kind || 'Plant'}</div>
+      </div>
+      <button class="bsm b-gh" style="padding:6px 10px;font-size:11px" onclick="editPlant(${i})">✏️ Edit</button>
+      <button class="bsm b-dn" style="padding:6px 10px;font-size:11px" onclick="deletePlant(${i})">🗑️</button>
+    </div>
+  `).join('');
+}
+
+function addPlant(){
+  document.getElementById('m-plant-title').textContent = 'Add Plant';
+  document.getElementById('mp-edit-idx').value = '';
+  document.getElementById('mp-code').value = '';
+  document.getElementById('mp-name').value = '';
+  document.getElementById('mp-state').value = '';
+  document.getElementById('mp-kind').value = 'Plant';
+  document.getElementById('mp-err').style.display = 'none';
+  openM('m-plant');
+}
+
+function editPlant(idx){
+  const p = PLANTS[idx];
+  if(!p) return;
+  document.getElementById('m-plant-title').textContent = 'Edit Plant';
+  document.getElementById('mp-edit-idx').value = idx;
+  document.getElementById('mp-code').value = p.code || '';
+  document.getElementById('mp-name').value = p.name || '';
+  document.getElementById('mp-state').value = p.state || '';
+  document.getElementById('mp-kind').value = p.kind || 'Plant';
+  document.getElementById('mp-err').style.display = 'none';
+  openM('m-plant');
+}
+
+async function savePlant(){
+  const idxStr = document.getElementById('mp-edit-idx').value;
+  const code = document.getElementById('mp-code').value.trim();
+  const name = document.getElementById('mp-name').value.trim();
+  const state = document.getElementById('mp-state').value.trim();
+  const kind = document.getElementById('mp-kind').value;
+
+  // Validation
+  if(!code || !name){
+    document.getElementById('mp-err-msg').textContent = 'Code and Name are required';
+    document.getElementById('mp-err').style.display = 'block';
+    return;
+  }
+
+  const plant = {code, name, state: state || '—', kind: kind || 'Plant'};
+
+  if(idxStr === ''){
+    // Add new
+    PLANTS.push(plant);
+  } else {
+    // Edit existing
+    PLANTS[parseInt(idxStr)] = plant;
+  }
+
+  // Save to backend
+  try {
+    const r = await api({action:'saveMasterData', plants:PLANTS});
+    if(r.ok){
+      toast('✅ Plant saved successfully');
+      closeM('m-plant');
+      renderPlantsList();
+      await populatePlantDropdowns();
+    } else {
+      throw new Error(r.error || 'Save failed');
+    }
+  } catch(e){
+    document.getElementById('mp-err-msg').textContent = 'Error: ' + e.message;
+    document.getElementById('mp-err').style.display = 'block';
+  }
+}
+
+function deletePlant(idx){
+  const p = PLANTS[idx];
+  if(!p) return;
+  confirm_(`Delete plant "${p.code} — ${p.name}"?`, async ()=>{
+    PLANTS.splice(idx, 1);
+    try {
+      const r = await api({action:'saveMasterData', plants:PLANTS});
+      if(r.ok){
+        toast('✅ Plant deleted');
+        renderPlantsList();
+        await populatePlantDropdowns();
+      }
+    } catch(e){
+      toast('❌ Delete failed: ' + e.message);
+    }
+  });
+}
+
+async function populatePlantDropdowns(){
+  // Update plant dropdowns in user registration and edit forms
+  const rPlant = document.getElementById('r-plant');
+  const mPlant = document.getElementById('m-plant');
+
+  if(rPlant){
+    const currentVal = rPlant.value;
+    rPlant.innerHTML = '<option value="">Select plant…</option>' +
+      PLANTS.map(p => {
+        const display = p.name.includes('—') ? p.name : `${p.code} — ${p.name}`;
+        return `<option value="${display}">${display}</option>`;
+      }).join('');
+    if(currentVal) rPlant.value = currentVal;
+  }
+
+  if(mPlant){
+    const currentVal = mPlant.value;
+    mPlant.innerHTML = '<option value="">Select plant…</option>' +
+      PLANTS.map(p => {
+        const display = p.name.includes('—') ? p.name : `${p.code} — ${p.name}`;
+        return `<option value="${display}">${display}</option>`;
+      }).join('');
+    if(currentVal) mPlant.value = currentVal;
+  }
 }
 
 // ─────────────────────────────────────────

@@ -22,17 +22,9 @@ class _WsaBarChartState extends State<WsaBarChart> {
   bool _loading = true;
   // Admin-editable canonical plant list for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
-
-  static const List<Map<String, String>> _plants = [
+  // Plant dropdown list — dynamically loaded from AdminMasterData
+  List<Map<String, String>> _plants = [
     {'code': 'all',  'name': 'Entire SAIL'},
-    {'code': 'BSP',  'name': 'BSP — Bhilai'},
-    {'code': 'DSP',  'name': 'DSP — Durgapur'},
-    {'code': 'RSP',  'name': 'RSP — Rourkela'},
-    {'code': 'BSL',  'name': 'BSL — Bokaro'},
-    {'code': 'ISP',  'name': 'ISP — Burnpur'},
-    {'code': 'ASP',  'name': 'ASP — Durgapur'},
-    {'code': 'SSP',  'name': 'SSP — Salem'},
-    {'code': 'CFP',  'name': 'CFP — Chandrapur'},
   ];
 
   @override
@@ -50,6 +42,17 @@ class _WsaBarChartState extends State<WsaBarChart> {
       _incidents = inc;
       _wsaCategories = wsa;
       _plantDefs = plants;
+      // Build plant dropdown from loaded master data
+      _plants = [
+        {'code': 'all',  'name': 'Entire SAIL'},
+        ...plants.map((p) {
+          final code = p['code'] ?? '';
+          final name = p['name'] ?? '';
+          // Format: CODE — Name (or just name if it already contains a dash)
+          final displayName = name.contains('—') ? name : '$code — $name';
+          return {'code': code, 'name': displayName};
+        }).toList(),
+      ];
       _loading = false;
     });
   }
