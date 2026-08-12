@@ -28,6 +28,9 @@ import '../widgets/voice_text_field.dart';
 import '../services/i18n.dart';
 import '../services/ai_audit_service.dart';
 import '../services/ai_correction_service.dart';
+import '../services/error_log_service.dart';
+import '../models/error_log_entry.dart';
+import 'package:uuid/uuid.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -257,7 +260,7 @@ class _AIScanTabState extends State<AIScanTab> {
         result = kIsWeb
             ? await GeminiVision.analyseImageBytes(_imageBytes!)
             : await GeminiVision.analyseImage(File(_pickedFile!.path));
-      } catch (e) {
+      } catch (e, stackTrace) {
         // ✅ FIX: Check if it's a network/connectivity error
         final errorStr = e.toString().toLowerCase();
         if (errorStr.contains('socket') ||
@@ -267,6 +270,9 @@ class _AIScanTabState extends State<AIScanTab> {
             errorStr.contains('failed host lookup')) {
           failedDueToInternet = true;
         }
+
+        // ✅ LOG ERROR to admin panel
+        _logAnalysisError(e, stackTrace, failedDueToInternet);
 
         // Show error and stop - don't fall back to demo
         if (mounted) {
@@ -294,11 +300,40 @@ class _AIScanTabState extends State<AIScanTab> {
           _currentStep = 3;
         });
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      // ✅ LOG ERROR to admin panel
+      _logAnalysisError(e, stackTrace, false);
+
       if (mounted) {
         setState(() { _analyzing = false; _currentStep = 1; });
         _snack('Analysis failed: $e', AppColors.red);
       }
+    }
+  }
+
+  /// Log AI analysis errors to admin panel for tracking
+  Future<void> _logAnalysisError(
+      dynamic error, StackTrace stackTrace, bool isNetworkError) async {
+    try {
+      await ErrorLogService.logError(ErrorLogEntry(
+        id: const Uuid().v4(),
+        timestamp: DateTime.now(),
+        errorType: isNetworkError
+            ? ErrorType.NETWORK_ERROR
+            : ErrorType.AI_ANALYSIS_FAILED,
+        errorMessage: error.toString(),
+        stackTrace: stackTrace.toString(),
+        userId: _user['pno']?.toString() ?? _user['username']?.toString() ?? 'unknown',
+        userName: _user['name']?.toString() ?? 'Unknown User',
+        plant: _user['plant']?.toString() ?? 'Unknown',
+        department: _user['department']?.toString(),
+        apiEndpoint: 'GeminiVision', // Could be dynamic based on provider
+        appVersion: '1.0.98', // Should come from app config
+        platform: kIsWeb ? 'Web' : (Platform.isAndroid ? 'Android' : 'iOS'),
+      ));
+    } catch (e) {
+      // Error logging failed - don't break the app
+      print('Failed to log error: $e');
     }
   }
 

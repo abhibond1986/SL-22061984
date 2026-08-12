@@ -40,6 +40,9 @@ dependencies:
   share_plus: ^9.0.0
   http: ^1.2.0
 
+  # Utilities
+  uuid: ^4.2.1
+
   # AI — Direct Gemini call (failsafe when Apps Script is down)
   google_generative_ai: ^0.4.6
 

@@ -19,6 +19,10 @@ import '../services/local_ai.dart';
 import '../services/local_db.dart';
 import '../services/knowledge_service.dart';
 import '../widgets/universal_app_bar.dart';
+import '../services/error_log_service.dart';
+import '../models/error_log_entry.dart';
+import 'package:uuid/uuid.dart';
+import 'dart:io' show Platform;
 
 class ChatTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -388,8 +392,35 @@ class _ChatTabState extends State<ChatTab> {
         if (result.isNotEmpty && result.length > 20) return result;
       }
       return null;
-    } catch (_) {
+    } catch (e, stackTrace) {
+      // ✅ LOG ERROR to admin panel
+      _logChatError(e, stackTrace, question);
       return null;
+    }
+  }
+
+  /// Log chat API errors to admin panel for tracking
+  Future<void> _logChatError(
+      dynamic error, StackTrace stackTrace, String question) async {
+    try {
+      await ErrorLogService.logError(ErrorLogEntry(
+        id: const Uuid().v4(),
+        timestamp: DateTime.now(),
+        errorType: ErrorType.CHAT_API_FAILED,
+        errorMessage: error.toString(),
+        stackTrace: stackTrace.toString(),
+        userId: _user?['pno']?.toString() ?? _user?['username']?.toString() ?? 'unknown',
+        userName: _user?['name']?.toString() ?? 'Unknown User',
+        plant: _user?['plant']?.toString() ?? 'Unknown',
+        department: _user?['department']?.toString(),
+        apiEndpoint: 'AppsScript-Gemini',
+        requestData: 'Question: ${question.substring(0, question.length > 100 ? 100 : question.length)}...',
+        appVersion: '1.0.98',
+        platform: kIsWeb ? 'Web' : (Platform.isAndroid ? 'Android' : 'iOS'),
+      ));
+    } catch (e) {
+      // Error logging failed - don't break the app
+      print('Failed to log chat error: $e');
     }
   }
 

@@ -1038,6 +1038,41 @@ class SyncService {
     }
   }
 
+  /// Push error log to backend for admin visibility
+  static Future<bool> pushErrorLog(Map<String, dynamic> errorLog) async {
+    // ★ Supabase path (if implemented)
+    // if (SupabaseConfig.enabled) {
+    //   return SupabaseService.insertErrorLog(errorLog);
+    // }
+
+    if (!await isConfigured) return false;
+
+    try {
+      final url = await getBackendUrl();
+      final body = Map<String, dynamic>.from(errorLog);
+      body['action'] = 'pushErrorLog';
+
+      // Clean nulls
+      body.removeWhere((key, value) => value == null);
+
+      final resp = await _postWithRedirect(url, body,
+          timeout: const Duration(seconds: 15));
+
+      if (resp != null && resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        if (data is Map && (data['success'] == true || data['ok'] == true)) {
+          print('SyncService: pushErrorLog SUCCESS for ${errorLog['errorType']}');
+          return true;
+        }
+        print('SyncService: pushErrorLog response: ${resp.body}');
+      }
+    } catch (e) {
+      print('SyncService: pushErrorLog error: $e');
+    }
+
+    return false;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  DEBUG — returns full response for diagnosing Sheets issues
   // ═══════════════════════════════════════════════════════════════

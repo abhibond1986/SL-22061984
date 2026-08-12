@@ -24,6 +24,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
 
   // Filters
   String _plantFilter = 'All';
+  String _departmentFilter = 'All'; // ★ NEW: Department filter
   final Set<String> _sevFilter = {};
   final Set<String> _statusFilter = {};
   String _typeFilter = 'All';
@@ -34,6 +35,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   bool _currentUserIsAdmin = false;
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
+  List<String> _departments = []; // ★ NEW: Department list
 
   /// True if the current user may delete [inc]: admins can delete anything;
   /// a reporter can delete only their own AI scan / near-miss report.
@@ -98,6 +100,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final inc = await LocalDB.getIncidents();
     final user = await LocalDB.getCurrentUser();
     final plants = await AdminMasterData.getPlants();
+    final depts = await AdminMasterData.getDepartments(); // ★ NEW: Load departments
     final adminVal = user?['isAdmin'];
     final isAdmin = adminVal is bool
         ? adminVal
@@ -105,6 +108,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     if (mounted) setState(() {
       _all = inc;
       _plantDefs = plants;
+      _departments = ['All', ...depts]; // ★ NEW: Set departments
       _currentUserName = user?['name']?.toString() ?? '';
       _currentUserPno = user?['pno']?.toString() ?? '';
       _currentUserIsAdmin = isAdmin;
@@ -125,6 +129,12 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     // variants of the same plant are matched together.
     if (_plantFilter != 'All') {
       list = list.where((i) => _canonPlant(i) == _plantFilter).toList();
+    }
+
+    // ★ NEW: Department filter
+    if (_departmentFilter != 'All') {
+      list = list.where((i) =>
+          (i['dept']?.toString() ?? 'Unknown') == _departmentFilter).toList();
     }
 
     // Severity filter
@@ -198,12 +208,14 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                   fontWeight: FontWeight.w600)),
           const Spacer(),
           if (_sevFilter.isNotEmpty || _statusFilter.isNotEmpty ||
-              _plantFilter != 'All' || _typeFilter != 'All' || _myReportsOnly)
+              _plantFilter != 'All' || _departmentFilter != 'All' ||
+              _typeFilter != 'All' || _myReportsOnly)
             GestureDetector(
               onTap: () => setState(() {
                 _sevFilter.clear();
                 _statusFilter.clear();
                 _plantFilter = 'All';
+                _departmentFilter = 'All'; // ★ NEW: Clear department filter
                 _typeFilter = 'All';
                 _dateRange = '90 days';
                 _myReportsOnly = false;
@@ -243,10 +255,13 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Row 1: Plant dropdown + Date range
+        // Row 1: Plant dropdown + Department dropdown + Date range
         Row(children: [
           Expanded(child: _dropdownChip(sl, _plantFilter, _plants, (v) =>
               setState(() => _plantFilter = v))),
+          const SizedBox(width: 8),
+          Expanded(child: _dropdownChip(sl, _departmentFilter, _departments, (v) =>
+              setState(() => _departmentFilter = v))),
           const SizedBox(width: 8),
           _dropdownChip(sl, _dateRange,
               ['7 days', '30 days', '90 days', 'All'], (v) =>
