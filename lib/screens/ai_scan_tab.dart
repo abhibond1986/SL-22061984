@@ -6,7 +6,7 @@
 // ✅ NEW: "Review & Edit AI Findings" hint banner at top of review sheet
 // ✅ Inline edit per hazard preserved
 
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
@@ -323,10 +323,11 @@ class _AIScanTabState extends State<AIScanTab> {
             : ErrorType.AI_ANALYSIS_FAILED,
         errorMessage: error.toString(),
         stackTrace: stackTrace.toString(),
-        userId: _user['pno']?.toString() ?? _user['username']?.toString() ?? 'unknown',
-        userName: _user['name']?.toString() ?? 'Unknown User',
-        plant: _user['plant']?.toString() ?? 'Unknown',
-        department: _user['department']?.toString(),
+        userId: widget.user?['pno']?.toString()
+            ?? widget.user?['username']?.toString() ?? 'unknown',
+        userName: widget.user?['name']?.toString() ?? 'Unknown User',
+        plant: widget.user?['plant']?.toString() ?? 'Unknown',
+        department: widget.user?['department']?.toString(),
         apiEndpoint: 'GeminiVision', // Could be dynamic based on provider
         appVersion: '1.0.98', // Should come from app config
         platform: kIsWeb ? 'Web' : (Platform.isAndroid ? 'Android' : 'iOS'),
