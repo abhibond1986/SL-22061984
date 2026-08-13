@@ -290,6 +290,56 @@ class AppUpdater {
     }
   }
 
+  /// Latest released version string (e.g. "1.0.166") for DISPLAY only, plus the
+  /// APK size in bytes when the release publishes one.
+  ///
+  /// _checkForUpdate() cannot be reused for this: it returns null when the
+  /// installed build is already current, so a label built on it would read
+  /// "unknown" exactly when everything is fine. This asks only "what is the
+  /// latest tag", with no version comparison and no install side-effects.
+  ///
+  /// Safe on web (the login screen's download button is shown there too), where
+  /// the MethodChannel used by getCurrentVersion() is unavailable — this touches
+  /// only the HTTP API.
+  ///
+  /// Cached for the process lifetime so rebuilding the login screen does not
+  /// re-hit the API; GitHub rate-limits unauthenticated calls to 60/hour/IP.
+  static ({String version, int sizeBytes})? _latestReleaseCache;
+
+  static Future<({String version, int sizeBytes})?> getLatestRelease() async {
+    if (_latestReleaseCache != null) return _latestReleaseCache;
+    try {
+      final resp = await http.get(
+        Uri.parse('https://api.github.com/repos/$_owner/$_repo/releases/latest'),
+        headers: {'Accept': 'application/vnd.github.v3+json'},
+      ).timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200) return null;
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final version =
+          (data['tag_name'] ?? '').toString().replaceAll(RegExp(r'^v'), '');
+      if (version.isEmpty) return null;
+
+      // Prefer the fixed-name asset, because that is what the login button's
+      // /releases/latest/download/app-release.apk URL actually serves. The CI
+      // workflow also attaches a versioned copy of the same bytes.
+      int size = 0;
+      for (final a in (data['assets'] as List?) ?? const []) {
+        final name = (a['name'] ?? '').toString().toLowerCase();
+        if (!name.endsWith('.apk')) continue;
+        size = (a['size'] as int?) ?? 0;
+        if (name == 'app-release.apk') break;
+      }
+
+      _latestReleaseCache = (version: version, sizeBytes: size);
+      return _latestReleaseCache;
+    } catch (_) {
+      // Offline, rate-limited, or malformed — caller falls back to a generic
+      // label rather than showing an error on the login screen.
+      return null;
+    }
+  }
+
   /// Call this when app resumes from background to check immediately
   static Future<void> onAppResumed() async {
     if (kIsWeb || !Platform.isAndroid) return;

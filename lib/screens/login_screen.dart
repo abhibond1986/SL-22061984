@@ -5,6 +5,7 @@ import '../main.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
+import '../services/app_updater.dart';
 import '../services/auth_token_service.dart';
 import '../services/crypto_utils.dart';
 import '../services/validators.dart';
@@ -38,6 +39,14 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _selectedPlant;
   bool _isOtherPlant = false;
 
+  /// Latest released version shown on the download button. Fetched from the
+  /// GitHub Releases API rather than hardcoded, because the CI workflow bumps
+  /// the version on every push to main — a literal here would be wrong within
+  /// a day, and pubspec.yaml is already stale (1.0.98 while releases are at
+  /// 1.0.166) precisely because it has to be updated by hand.
+  String _latestVersion = '';
+  int _latestSizeBytes = 0;
+
   // SINGLE SOURCE OF TRUTH: AdminMasterData. Seeded from the shared const via
   // the shared label formatter so the first frame matches what _loadPlants()
   // will install — no re-typed copy that can drift from the master list.
@@ -56,6 +65,30 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     _loadPlants();
     AdminMasterData.revision.addListener(_loadPlants);
+    _loadLatestVersion();
+  }
+
+  /// Non-blocking: the button renders immediately with a generic subtitle and
+  /// gains the version when (or if) the call returns. Login must never wait on
+  /// GitHub being reachable.
+  Future<void> _loadLatestVersion() async {
+    final rel = await AppUpdater.getLatestRelease();
+    if (rel == null || !mounted) return;
+    setState(() {
+      _latestVersion = rel.version;
+      _latestSizeBytes = rel.sizeBytes;
+    });
+  }
+
+  /// Subtitle for the download button. Falls back to the original wording when
+  /// the version isn't known, so an offline or rate-limited device sees no
+  /// error text and no empty gap.
+  String get _downloadSubtitle {
+    if (_latestVersion.isEmpty) return 'Android only · Always updated';
+    final mb = _latestSizeBytes > 0
+        ? ' · ${(_latestSizeBytes / (1024 * 1024)).toStringAsFixed(0)} MB'
+        : '';
+    return 'Android · v$_latestVersion$mb · Latest';
   }
 
   Future<void> _loadPlants() async {
@@ -486,7 +519,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                         ),
                                       ),
                                       Text(
-                                        'Android only · Always updated',
+                                        _downloadSubtitle,
                                         style: TextStyle(
                                           color: Colors.white.withOpacity(0.85),
                                           fontSize: 10,
@@ -495,6 +528,30 @@ class _LoginScreenState extends State<LoginScreen> {
                                       ),
                                     ],
                                   ),
+                                  // Version pill. Only shown once the real
+                                  // version is known — a placeholder like
+                                  // "v—" would look like a failure.
+                                  if (_latestVersion.isNotEmpty) ...[
+                                    const SizedBox(width: 10),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withOpacity(0.22),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        'v$_latestVersion',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: 0.2,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
