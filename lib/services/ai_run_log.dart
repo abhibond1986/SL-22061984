@@ -43,6 +43,7 @@
 //   • No image bytes and no free text are stored — only a hash, counts,
 //     timings, and the reporter identity the app already stores on incidents.
 
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart'
     show kIsWeb, debugPrint, defaultTargetPlatform, TargetPlatform;
@@ -80,6 +81,48 @@ class AiRunLog {
   /// an unbounded list would grow the app's startup read forever.
   static const int _maxLocal = 1000;
   static const String _kRuns = 'ai_runs_log';
+
+  /// Local-only bookkeeping key on each stored record: has this run reached
+  /// Supabase yet? It is deliberately NOT in SupabaseService._runAppToDb, so it
+  /// is stripped before upload and can never break the insert.
+  ///
+  /// WHY THIS EXISTS — this is the bug that made the dashboard read zero.
+  /// record() mirrored to Supabase exactly once, inside `try { } catch (_) {}`.
+  /// If that single attempt failed — offline, or, far more likely, because
+  /// supabase_ai_runs_setup.sql had not been run yet so the `ai_runs` table did
+  /// not exist — the run stayed in this device's SharedPreferences and was never
+  /// retried. The dashboard then showed those runs on the device that produced
+  /// them and NOTHING anywhere else, because the whole point of the panel
+  /// ("every AI analysis run across all devices") depends on the mirror. Open
+  /// the same panel from another device, another browser profile, or a web build
+  /// with a fresh localStorage, and you get a clean set of zeros for runs that
+  /// definitely happened. Marking sync state and retrying fixes that
+  /// permanently, and retroactively: the backlog uploads as soon as the table
+  /// exists, so nothing recorded during the outage is lost.
+  static const String _kSynced = 'synced';
+
+  /// Serialises every read-modify-write of the runs list.
+  ///
+  /// _saveLocal reads the whole JSON blob, appends, and writes it back. record()
+  /// is fire-and-forget from several call sites, so two runs finishing close
+  /// together could both read the same snapshot and the second write would
+  /// silently discard the first run. The lock makes appends atomic.
+  static Future<void> _writeChain = Future<void>.value();
+
+  /// Queues [action] behind any write already in flight. Every mutation below
+  /// goes through this, so the read-modify-write is never interleaved.
+  static Future<void> _locked(Future<void> Function() action) {
+    final out = Completer<void>();
+    _writeChain = _writeChain.then((_) async {
+      try {
+        await action();
+        if (!out.isCompleted) out.complete();
+      } catch (e, st) {
+        if (!out.isCompleted) out.completeError(e, st);
+      }
+    });
+    return out.future;
+  }
 
   /// Human-readable labels for the fail-reason codes, for the admin UI.
   static String reasonLabel(String code) {
@@ -157,14 +200,19 @@ class AiRunLog {
         // timestamp lands 5h30m in the past — which would silently move runs
         // into the previous day and corrupt the "today" counts.
         'createdAt': now.toUtc().toIso8601String(),
+        // Pessimistic until proven otherwise, so a crash between the local
+        // write and the upload leaves the run queued rather than assumed sent.
+        _kSynced: false,
       };
 
       await _saveLocal(record);
 
-      // Best-effort mirror. No-op when Supabase is disabled or the table is
-      // missing, so the dashboard degrades to local-only rather than breaking.
+      // Best-effort mirror. Unlike before, a failure is REMEMBERED: the record
+      // keeps synced=false and flushUnsynced() will retry it on the next app
+      // start, background sync, or dashboard open.
       try {
-        await SupabaseService.upsertAiRun(record);
+        final ok = await SupabaseService.upsertAiRun(record);
+        if (ok) await _markSynced({record['id'].toString()});
       } catch (_) {}
     } catch (e) {
       // Deliberately terminal: telemetry never escalates.
@@ -177,12 +225,101 @@ class AiRunLog {
   //  READING  (admin panel only)
   // ══════════════════════════════════════════════════════════════════════════
 
+  /// Number of runs recorded on this device that have not reached Supabase yet.
+  /// Shown in the dashboard so a broken mirror is visible instead of looking
+  /// like an empty week.
+  static Future<int> pendingUploadCount() async {
+    final all = await _getLocal();
+    return all.where(_isUnsynced).length;
+  }
+
+  static bool _isUnsynced(Map<String, dynamic> r) => r[_kSynced] != true;
+
+  /// Rows the server returned on the last getAllRuns(). Reported verbatim by the
+  /// dashboard, because "how many runs does the cloud actually hold" is the one
+  /// number that tells an admin the mirror is working — and it cannot be derived
+  /// from the local list, which is capped at [_maxLocal] while the server keeps
+  /// far more.
+  static int lastRemoteCount = 0;
+
+  /// Trim to [_maxLocal], but never evict a run that has not been uploaded yet.
+  ///
+  /// A blind "keep the newest 1000" would quietly delete the very backlog this
+  /// class exists to protect: _mergeLocal folds in up to 5000 server rows, so on
+  /// a device where reads succeed but writes fail (read-only RLS, for instance)
+  /// the unsynced records would be trimmed away and pendingUploadCount() would
+  /// fall to 0 — a green "all synced" banner over permanently missing runs.
+  static List<Map<String, dynamic>> _trim(List<Map<String, dynamic>> all) {
+    if (all.length <= _maxLocal) return all;
+    final unsynced = all.where(_isUnsynced).toList();
+    if (unsynced.length >= _maxLocal) return unsynced;
+    // Fill the remaining budget with the newest synced rows, then restore
+    // chronological order so later appends stay append-ordered.
+    final synced = all.where((r) => !_isUnsynced(r)).toList();
+    final keep = synced.sublist(synced.length - (_maxLocal - unsynced.length));
+    final out = [...unsynced, ...keep]
+      ..sort((a, b) => (a['createdAt']?.toString() ?? '')
+          .compareTo(b['createdAt']?.toString() ?? ''));
+    return out;
+  }
+
+  /// Upload every run that has not reached Supabase yet, oldest first.
+  ///
+  /// Safe and cheap to call often: it returns immediately when there is nothing
+  /// pending or Supabase is not ready, and the upsert is keyed on `id`, so a
+  /// retry that partly succeeded before cannot create duplicates.
+  ///
+  /// Returns the number of runs successfully uploaded.
+  static Future<int> flushUnsynced({int batchSize = 200}) async {
+    try {
+      if (!SupabaseService.isReady) return 0;
+      final all = await _getLocal();
+      final pending = all.where(_isUnsynced).toList()
+        ..sort((a, b) => (a['createdAt']?.toString() ?? '')
+            .compareTo(b['createdAt']?.toString() ?? ''));
+      if (pending.isEmpty) return 0;
+
+      var sent = 0;
+      for (var i = 0; i < pending.length; i += batchSize) {
+        final end =
+            (i + batchSize) < pending.length ? i + batchSize : pending.length;
+        final chunk = pending.sublist(i, end);
+        final confirmed = await SupabaseService.upsertAiRuns(chunk);
+        if (confirmed.isNotEmpty) {
+          // Only ids the server echoed back are marked — see upsertAiRuns.
+          await _markSynced(confirmed);
+          sent += confirmed.length;
+          continue;
+        }
+        // Nothing confirmed. Stop only if the CLOUD is the problem, so the
+        // backlog is preserved for the next attempt. An empty error means the
+        // chunk itself was unsendable (no usable ids), which must not block the
+        // remaining chunks forever.
+        if (SupabaseService.aiRunsLastError.isNotEmpty ||
+            SupabaseService.aiRunsCloudDisabled) break;
+      }
+      if (sent > 0) debugPrint('[AiRunLog] flushed $sent pending run(s)');
+      return sent;
+    } catch (e) {
+      debugPrint('[AiRunLog] flushUnsynced failed (ignored): $e');
+      return 0;
+    }
+  }
+
   /// All runs, newest first. Merges Supabase (all devices — the whole point of
   /// the dashboard) with the local queue so an offline admin still sees data.
+  ///
+  /// Kicks the local backlog on the way past, so opening the dashboard is also
+  /// what repairs a previously failed mirror. Deliberately NOT awaited: when the
+  /// table is missing, the upload burns its full timeout before failing, and
+  /// awaiting it would leave the admin staring at a spinner for ~25s in exactly
+  /// the broken state this panel exists to diagnose. The Retry button awaits.
   static Future<List<Map<String, dynamic>>> getAllRuns() async {
+    flushUnsynced().catchError((_) => 0);
     try {
       final remote = await SupabaseService.fetchAiRuns()
           .timeout(const Duration(seconds: 10), onTimeout: () => const []);
+      lastRemoteCount = remote.length;
       if (remote.isNotEmpty) await _mergeLocal(remote);
     } catch (_) {
       // Ignore — local is the display source of truth.
@@ -334,37 +471,49 @@ class AiRunLog {
     }
   }
 
-  static Future<void> _saveLocal(Map<String, dynamic> run) async {
-    final prefs = await SharedPreferences.getInstance();
-    final all = await _getLocal();
-    all.add(run);
-    // Trim oldest first. The list is append-ordered, so a plain sublist is
-    // enough and avoids sorting 1000 entries on every scan.
-    final trimmed =
-        all.length > _maxLocal ? all.sublist(all.length - _maxLocal) : all;
-    await prefs.setString(_kRuns, jsonEncode(trimmed));
-  }
+  static Future<void> _saveLocal(Map<String, dynamic> run) => _locked(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final all = await _getLocal();
+        all.add(run);
+        await prefs.setString(_kRuns, jsonEncode(_trim(all)));
+      });
 
-  static Future<void> _mergeLocal(List<Map<String, dynamic>> incoming) async {
-    if (incoming.isEmpty) return;
-    final prefs = await SharedPreferences.getInstance();
-    final all = await _getLocal();
-    final byId = <String, Map<String, dynamic>>{
-      for (final r in all) (r['id']?.toString() ?? ''): r,
-    };
-    for (final r in incoming) {
-      final id = r['id']?.toString() ?? '';
-      if (id.isEmpty) continue;
-      byId[id] = {...?byId[id], ...r};
-    }
-    final merged = byId.values.toList()
-      ..sort((a, b) => (a['createdAt']?.toString() ?? '')
-          .compareTo(b['createdAt']?.toString() ?? ''));
-    final trimmed = merged.length > _maxLocal
-        ? merged.sublist(merged.length - _maxLocal)
-        : merged;
-    await prefs.setString(_kRuns, jsonEncode(trimmed));
-  }
+  /// Flip the local sync flag for the given run ids after a successful upload.
+  static Future<void> _markSynced(Set<String> ids) => _locked(() async {
+        if (ids.isEmpty) return;
+        final prefs = await SharedPreferences.getInstance();
+        final all = await _getLocal();
+        var changed = false;
+        for (final r in all) {
+          if (ids.contains(r['id']?.toString() ?? '') && r[_kSynced] != true) {
+            r[_kSynced] = true;
+            changed = true;
+          }
+        }
+        if (changed) await prefs.setString(_kRuns, jsonEncode(all));
+      });
+
+  static Future<void> _mergeLocal(List<Map<String, dynamic>> incoming) =>
+      _locked(() async {
+        if (incoming.isEmpty) return;
+        final prefs = await SharedPreferences.getInstance();
+        final all = await _getLocal();
+        final byId = <String, Map<String, dynamic>>{
+          for (final r in all) (r['id']?.toString() ?? ''): r,
+        };
+        for (final r in incoming) {
+          final id = r['id']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          // A row that came back FROM the server is by definition synced — set
+          // the flag last so it wins over a stale local false and the row is not
+          // re-uploaded forever.
+          byId[id] = {...?byId[id], ...r, _kSynced: true};
+        }
+        final merged = byId.values.toList()
+          ..sort((a, b) => (a['createdAt']?.toString() ?? '')
+              .compareTo(b['createdAt']?.toString() ?? ''));
+        await prefs.setString(_kRuns, jsonEncode(_trim(merged)));
+      });
 
   // ══════════════════════════════════════════════════════════════════════════
   //  ENVIRONMENT

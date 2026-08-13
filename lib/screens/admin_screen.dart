@@ -42,6 +42,7 @@ import '../services/gemini_direct_vision.dart';
 import '../services/pdf_kb_extractor.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
+import '../services/supabase_service.dart';
 import '../services/image_storage.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -140,6 +141,20 @@ class _AdminScreenState extends State<AdminScreen>
   bool _runsLoading = false;
   bool _runsLoadedOnce = false;   // same reason as _correctionsLoadedOnce
   String _runWindow = 'today';    // 'today' | '7d' | 'all'
+  // Cloud-mirror health for the AI Performance module. Without these, a missing
+  // `ai_runs` table looked exactly like "nobody ran a scan today": the panel
+  // reported a tidy row of zeros while every run sat stranded in one device's
+  // local storage. See AiRunLog._kSynced.
+  int _runsPendingUpload = 0;
+  int _runsFromCloud = 0;
+  String _runsCloudError = '';
+  // Snapshotted alongside the error, not read live: aiRunsSchemaMissing is a
+  // process-global that the 5-minute BackgroundSync flush also writes, so
+  // reading it during build could describe a different failure than the
+  // headline next to it.
+  bool _runsSchemaMissing = false;
+  bool _runsCloudDisabled = false;
+  bool _runsRetrying = false;
 
   // ── Knowledge Base state ─────────────────────────────────────────
   bool _kbUploading = false;
@@ -6653,10 +6668,25 @@ class _AdminScreenState extends State<AdminScreen>
   // ══════════════════════════════════════════════════════════════════
   Future<void> _loadAiRuns() async {
     if (_runsLoading) return;
+    // Guarded: _loadAiRuns is awaited after a network call in _retryAiRunUpload,
+    // so the admin can have navigated away by the time it runs.
+    if (!mounted) return;
     setState(() => _runsLoading = true);
     try {
+      // getAllRuns() also kicks this device's backlog, so simply opening the
+      // panel repairs a mirror that failed earlier.
       final list = await AiRunLog.getAllRuns();
-      if (mounted) setState(() => _aiRuns = list);
+      final pending = await AiRunLog.pendingUploadCount();
+      if (mounted) setState(() {
+        _aiRuns = list;
+        _runsPendingUpload = pending;
+        // The server's own count, not a local derivation: local storage is
+        // capped well below what the table holds.
+        _runsFromCloud = AiRunLog.lastRemoteCount;
+        _runsCloudError = SupabaseService.aiRunsLastError;
+        _runsSchemaMissing = SupabaseService.aiRunsSchemaMissing;
+        _runsCloudDisabled = SupabaseService.aiRunsCloudDisabled;
+      });
     } catch (_) {
       // Telemetry is diagnostic, never fatal — show whatever we have.
     } finally {
@@ -6762,7 +6792,13 @@ class _AdminScreenState extends State<AdminScreen>
               'real provider analysed the image and returned hazards — the '
               'offline checklist counts as failed, so an outage shows up here '
               'instead of hiding behind a valid-looking result.',
-              style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4)),
+              style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
+
+          // ── Cloud mirror health ──
+          // The single most confusing failure this panel can have is showing
+          // zeros for runs that definitely happened. That is what a broken
+          // mirror looks like, so it is stated here rather than left implicit.
+          _aiCloudStatus(sl),
           const SizedBox(height: 14),
 
           // ── Window selector ──
@@ -6914,6 +6950,147 @@ class _AdminScreenState extends State<AdminScreen>
         // export above covers the full window for deeper analysis.
         ...visible.take(60).map((r) => _aiRunCard(sl, r)),
     ]);
+  }
+
+  /// Cloud-mirror health strip for the AI Performance module.
+  ///
+  /// WHY THIS IS HERE. This panel claims to show "every AI analysis run across
+  /// all devices", and that claim rests entirely on each run being mirrored to
+  /// the Supabase `ai_runs` table. Both sides of that mirror used to fail
+  /// silently: SupabaseService returned `[]`/`false` on any error, and
+  /// AiRunLog.record() wrapped its one upload attempt in `catch (_) {}` with no
+  /// retry. So if the table did not exist yet — supabase_ai_runs_setup.sql is a
+  /// manual step — scans were recorded locally, looked fine on the device that
+  /// made them, and then read as ZERO from anywhere else, with no hint as to
+  /// why. This strip makes the state legible and offers the repair.
+  Widget _aiCloudStatus(SL sl) {
+    final pending = _runsPendingUpload;
+    final broken = _runsCloudError.isNotEmpty;
+
+    // Four distinct states, because collapsing them is what made the original
+    // failure unreadable. "Disabled" in particular must NOT look like an alarm:
+    // a build with no Supabase configured is local-only by design and a Retry
+    // button there could never succeed.
+    final Color tone = broken
+        ? const Color(0xFFD32F2F)
+        : _runsCloudDisabled
+            ? sl.text3
+            : pending > 0
+                ? AppColors.amber
+                : const Color(0xFF43A047);
+
+    final IconData icon = broken
+        ? Icons.cloud_off_outlined
+        : _runsCloudDisabled
+            ? Icons.phonelink_off_rounded
+            : pending > 0
+                ? Icons.cloud_upload_outlined
+                : Icons.cloud_done_outlined;
+
+    late final String headline;
+    late final String detail;
+    if (broken) {
+      headline = _runsSchemaMissing
+          ? 'Cloud table missing — showing this device only'
+          : 'Cloud unreachable — showing this device only';
+      detail = _runsSchemaMissing
+          ? 'Run supabase_ai_runs_setup.sql once in the Supabase SQL editor. '
+            'Nothing is lost — the $pending run${pending == 1 ? '' : 's'} already '
+            'on this device upload automatically once the table exists.'
+          : 'Runs are saved on each device and upload by themselves when the '
+            'connection returns. $pending waiting here.';
+    } else if (_runsCloudDisabled) {
+      headline = 'Cloud sync off in this build';
+      detail = 'Supabase is not configured, so these numbers cover THIS DEVICE '
+          'only. Other devices keep their own separate counts.';
+    } else if (pending > 0) {
+      headline = '$pending run${pending == 1 ? '' : 's'} waiting to upload';
+      detail = 'Recorded while the server was unavailable. They upload on the '
+          'next sync, or press Retry.';
+    } else {
+      headline = 'Synced — $_runsFromCloud run'
+          '${_runsFromCloud == 1 ? '' : 's'} on the server';
+      detail = _runsFromCloud == 0
+          ? 'The cloud table is reachable and empty, so no scans have been '
+            'recorded on any device yet.'
+          : 'Counts below cover all devices, not just this one.';
+    }
+
+    final canRetry = !_runsCloudDisabled && (broken || pending > 0);
+    final busy = _runsRetrying || _runsLoading;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: tone.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: tone.withOpacity(0.30)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(icon, color: tone, size: 18),
+          const SizedBox(width: 8),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(headline, style: TextStyle(
+                color: tone, fontSize: 12, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 3),
+            Text(detail, style: TextStyle(
+                color: sl.text3, fontSize: 11, height: 1.35)),
+          ])),
+          if (canRetry) ...[
+            const SizedBox(width: 6),
+            TextButton(
+              onPressed: busy ? null : _retryAiRunUpload,
+              style: TextButton.styleFrom(
+                  foregroundColor: tone,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  minimumSize: const Size(0, 36)),
+              child: busy
+                  ? SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: tone))
+                  : const Text('Retry', style: TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w800)),
+            ),
+          ],
+        ]),
+        // Raw PostgREST text, clipped: useful when it names the missing column,
+        // but a long message must not push the whole panel down.
+        if (broken) ...[
+          const SizedBox(height: 6),
+          Text(_runsCloudError,
+              maxLines: 3, overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: sl.text4, fontSize: 10, height: 1.3,
+                  fontFamily: 'monospace')),
+        ],
+      ]),
+    );
+  }
+
+  Future<void> _retryAiRunUpload() async {
+    if (_runsRetrying) return;
+    setState(() => _runsRetrying = true);
+    int sent = 0;
+    try {
+      sent = await AiRunLog.flushUnsynced();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _runsRetrying = false);
+    }
+    if (!mounted) return;
+    await _loadAiRuns();
+    if (!mounted) return;
+    _toast(
+      sent > 0
+          ? 'Uploaded $sent pending run${sent == 1 ? '' : 's'} ✓'
+          : (SupabaseService.aiRunsSchemaMissing
+              ? 'Still no ai_runs table — run supabase_ai_runs_setup.sql'
+              : 'Nothing uploaded — server still unreachable'),
+      sent > 0 ? const Color(0xFF43A047) : const Color(0xFFD32F2F),
+    );
   }
 
   Widget _runWindowChip(SL sl, String value, String label) {

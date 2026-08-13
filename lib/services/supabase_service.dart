@@ -576,13 +576,51 @@ class SupabaseService {
     for (final e in _runAppToDb.entries) e.value: e.key,
   };
 
+  /// Last failure from an ai_runs read/write, or '' when the last call worked.
+  ///
+  /// WHY THIS EXISTS: both methods below used to swallow their errors and return
+  /// `[]` / `false`. That made a MISSING `ai_runs` TABLE indistinguishable from
+  /// "nobody has run a scan yet" — the dashboard showed a clean set of zeros
+  /// while every single row was silently stranded on one device. The AI
+  /// Performance module now reads this and says so out loud.
+  static String aiRunsLastError = '';
+
+  /// Supabase is switched off or unconfigured in this build. Distinct from an
+  /// error: there is no cloud to reach, so the dashboard should say "local only
+  /// by design" rather than raise an alarm and offer a Retry that cannot work.
+  static bool aiRunsCloudDisabled = false;
+
+  /// True when the failure looks like "the table/columns do not exist yet",
+  /// i.e. supabase_ai_runs_setup.sql was never run. PostgREST reports this as
+  /// 42P01 (undefined_table) or PGRST205 (table not found in schema cache).
+  static bool get aiRunsSchemaMissing {
+    final e = aiRunsLastError.toLowerCase();
+    return e.contains('42p01') ||
+        e.contains('pgrst205') ||
+        e.contains('does not exist') ||
+        e.contains('could not find the table');
+  }
+
+  static String _describeError(Object e) {
+    if (e is PostgrestException) {
+      final code = (e.code ?? '').isEmpty ? '' : '${e.code}: ';
+      return '$code${e.message}';
+    }
+    return e.toString();
+  }
+
   /// Fetch AI runs, newest first.
   ///
   /// Capped at 5000 rows: this is append-only telemetry that grows with every
   /// scan across every device, and an unbounded select would eventually stall
   /// the admin panel. The dashboard only ever reports on recent windows.
   static Future<List<Map<String, dynamic>>> fetchAiRuns({int limit = 5000}) async {
-    if (!isReady) return [];
+    if (!isReady) {
+      aiRunsCloudDisabled = true;
+      aiRunsLastError = '';
+      return [];
+    }
+    aiRunsCloudDisabled = false;
     try {
       final rows = await _db
           .from('ai_runs')
@@ -590,30 +628,76 @@ class SupabaseService {
           .order('created_at', ascending: false)
           .limit(limit)
           .timeout(const Duration(seconds: 8));
+      aiRunsLastError = '';
       return (rows as List)
           .map((r) => _runFromRow(Map<String, dynamic>.from(r as Map)))
           .toList();
-    } catch (_) {
-      // Missing table / offline / timeout — the dashboard falls back to the
-      // local ring buffer rather than showing an error.
+    } catch (e) {
+      // Missing table / offline / timeout — the dashboard still falls back to
+      // the local ring buffer, but it now knows WHY it had to.
+      aiRunsLastError = _describeError(e);
       return [];
     }
   }
 
   /// Insert or update one AI run record (keyed by id).
   static Future<bool> upsertAiRun(Map<String, dynamic> run) async {
-    if (!isReady) return false;
+    final id = run['id']?.toString() ?? '';
+    if (id.isEmpty) return false;
+    final confirmed = await upsertAiRuns([run]);
+    return confirmed.contains(id);
+  }
+
+  /// Insert or update many AI run records in one round trip.
+  ///
+  /// Used by AiRunLog.flushUnsynced() to drain the backlog that builds up while
+  /// the table is missing or the device is offline.
+  ///
+  /// Returns the ids the SERVER echoed back, not the ids we sent. That
+  /// distinction is the whole reliability story here: the caller flips a local
+  /// "synced" flag based on this result, and inferring success purely from "no
+  /// exception was thrown" would let it mark rows as safely stored when they
+  /// were not, which is exactly the class of silent loss this fix exists to end.
+  /// On failure the set is empty and the reason is in [aiRunsLastError].
+  static Future<Set<String>> upsertAiRuns(List<Map<String, dynamic>> runs) async {
+    if (runs.isEmpty) return <String>{};
+    if (!isReady) {
+      aiRunsCloudDisabled = true;
+      aiRunsLastError = '';
+      return <String>{};
+    }
+    aiRunsCloudDisabled = false;
     try {
-      final row = <String, dynamic>{};
-      _runAppToDb.forEach((appKey, dbCol) {
-        if (!run.containsKey(appKey)) return;
-        row[dbCol] = run[appKey];
-      });
-      if ((row['id']?.toString() ?? '').isEmpty) return false;
-      await _db.from('ai_runs').upsert(row, onConflict: 'id');
-      return true;
-    } catch (_) {
-      return false;
+      final rows = <Map<String, dynamic>>[];
+      for (final run in runs) {
+        final row = <String, dynamic>{};
+        _runAppToDb.forEach((appKey, dbCol) {
+          if (!run.containsKey(appKey)) return;
+          row[dbCol] = run[appKey];
+        });
+        // Local-only bookkeeping keys (e.g. AiRunLog's 'synced') are dropped by
+        // the map above, which matters: PostgREST rejects the WHOLE batch for
+        // one unknown column.
+        if ((row['id']?.toString() ?? '').isEmpty) continue;
+        rows.add(row);
+      }
+      // Nothing sendable is not a server failure — leave aiRunsLastError alone
+      // so the caller can tell "bad input, skip it" from "cloud is down, stop".
+      if (rows.isEmpty) return <String>{};
+
+      final echoed = await _db
+          .from('ai_runs')
+          .upsert(rows, onConflict: 'id')
+          .select('id')
+          .timeout(const Duration(seconds: 12));
+      aiRunsLastError = '';
+      return (echoed as List)
+          .map((r) => (Map<String, dynamic>.from(r as Map)['id'] ?? '').toString())
+          .where((id) => id.isNotEmpty)
+          .toSet();
+    } catch (e) {
+      aiRunsLastError = _describeError(e);
+      return <String>{};
     }
   }
 

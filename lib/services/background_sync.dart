@@ -6,6 +6,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'sync_service.dart';
 import 'app_logger.dart';
+import 'ai_run_log.dart';
 
 class BackgroundSync {
   static Timer? _timer;
@@ -37,9 +38,14 @@ class BackgroundSync {
     _running = true;
 
     try {
+      // AI telemetry backlog first, and BEFORE the early return below: it has
+      // its own queue, so a cycle where the incident queue is empty must still
+      // retry stranded runs. Cheap no-op when nothing is pending.
+      await AiRunLog.flushUnsynced().catchError((_) => 0);
+
       final pending = await SyncService.getPendingCount();
       if (pending == 0) {
-        return; // Nothing to sync
+        return; // Nothing else to sync
       }
 
       debugPrint('[BackgroundSync] Retrying $pending pending items...');

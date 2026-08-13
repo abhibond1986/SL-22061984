@@ -12,6 +12,7 @@ import 'services/image_storage.dart';
 import 'services/background_sync.dart';
 import 'services/realtime_sync.dart';
 import 'services/gemini_vision.dart';
+import 'services/ai_run_log.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
@@ -30,6 +31,12 @@ void main() async {
   // ✅ FIX: Purge bloated imageBase64 from local storage to fix QuotaExceededError
   LocalDB.purgeStoredImages().catchError((_) => 0);
   SyncService.drainPendingQueue().catchError((_) => 0);
+  // AI telemetry backlog. Runs recorded while the device was offline — or while
+  // the `ai_runs` table did not exist yet — stay flagged unsynced locally, so
+  // the admin dashboard (which reports on ALL devices via Supabase) would show
+  // zero for scans that really happened. Draining here means the backlog
+  // repairs itself on the next launch instead of being stranded forever.
+  AiRunLog.flushUnsynced().catchError((_) => 0);
   // ★ Pull ALL shared incidents from the backend into local storage so every
   //   device shows the SAME data for a given user (desktop == mobile).
   //   Non-blocking: screens refresh when it completes / on pull-to-refresh.
