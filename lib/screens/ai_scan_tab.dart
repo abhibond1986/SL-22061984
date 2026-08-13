@@ -696,8 +696,9 @@ class _AIScanTabState extends State<AIScanTab> {
                                     child: Text(
                                       h['severity']?.toString() ?? '—',
                                       style: TextStyle(
-                                          color: sc, fontSize: 8,
-                                          fontWeight: FontWeight.w800))),
+                                          color: sc, fontSize: 10,           // Improved: was 8px
+                                          fontWeight: FontWeight.w900,        // Extra bold compensates for small size
+                                          letterSpacing: 0.3))),
                               const SizedBox(width: 8),
                               GestureDetector(
                                 onTap: () => setLocal(() {

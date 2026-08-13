@@ -2018,7 +2018,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 border: Border.all(color: AppColors.amber.withOpacity(0.6)),
                 borderRadius: BorderRadius.circular(8)),
               child: Text('${_aiBrief!['severity']} · ${_aiBrief!['confidence']}%',
-                style: const TextStyle(color: AppColors.amber, fontSize: 9, fontWeight: FontWeight.w800))),
+                style: const TextStyle(color: AppColors.amber, fontSize: 11, fontWeight: FontWeight.w800))),  // Improved: was 9px
           ]),
           if (!_isOnlineMode) ...[
             const SizedBox(height: 8),
@@ -2476,7 +2476,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4)),
                     const SizedBox(height: 4),
                     Text('You can edit this after accepting',
-                      style: TextStyle(color: sl.text4, fontSize: 9, fontStyle: FontStyle.italic)),
+                      style: TextStyle(color: sl.text3, fontSize: 11, fontStyle: FontStyle.italic)),  // Improved: was text4/9px
                   ],
                 ),
               ),

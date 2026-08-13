@@ -459,8 +459,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   Text(
                     'No login required — AI Scan & Near Miss only',
                     style: TextStyle(
-                      color: sl.text4,
-                      fontSize: 10,
+                      color: sl.text3,        // Improved contrast
+                      fontSize: 11,           // Increased from 10
                       fontStyle: FontStyle.italic,
                     ),
                   ),
@@ -521,8 +521,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                       Text(
                                         _downloadSubtitle,
                                         style: TextStyle(
-                                          color: Colors.white.withOpacity(0.85),
-                                          fontSize: 10,
+                                          color: Colors.white.withOpacity(0.90),  // Better contrast
+                                          fontSize: 11,                            // Increased from 10
                                           letterSpacing: 0.5,
                                         ),
                                       ),
@@ -727,7 +727,7 @@ class _LoginScreenState extends State<LoginScreen> {
       children: [
         Text('PLANT / UNIT',
           style: TextStyle(
-            color: sl.text4, fontSize: 9,
+            color: sl.text3, fontSize: 11,    // Improved: was text4/9px
             fontWeight: FontWeight.w700, letterSpacing: 0.8)),
         const SizedBox(height: 6),
         Container(
@@ -797,7 +797,7 @@ class _LoginScreenState extends State<LoginScreen> {
       children: [
         Text(label.toUpperCase(),
           style: TextStyle(
-            color: sl.text4, fontSize: 9,
+            color: sl.text3, fontSize: 11,    // Improved: was text4/9px
             fontWeight: FontWeight.w700, letterSpacing: 0.8)),
         const SizedBox(height: 6),
         TextField(

@@ -402,7 +402,7 @@ class _DashboardTabState extends State<DashboardTab> {
         Text('SAIL Safety Lens',
           style: TextStyle(color: sl.text1, fontSize: 14, fontWeight: FontWeight.w700)),
         Text('AI Safety Platform',
-          style: TextStyle(color: sl.text4, fontSize: 9)),
+          style: TextStyle(color: sl.text3, fontSize: 12)),  // Improved: was text4/9px
       ])),
       if (_refreshing)
         Padding(
@@ -461,7 +461,7 @@ class _DashboardTabState extends State<DashboardTab> {
       border: Border.all(color: sl.border)),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('VIEWING ACTIVITY OF',
-        style: TextStyle(color: sl.text4, fontSize: 9,
+        style: TextStyle(color: sl.text3, fontSize: 11,    // Improved: was text4/9px
             fontWeight: FontWeight.w700, letterSpacing: 0.7)),
       const SizedBox(height: 8),
       Row(children: [
@@ -1081,8 +1081,8 @@ class _DashboardTabState extends State<DashboardTab> {
           const SizedBox(height: 5),
           Flexible(
             child: Text(label, textAlign: TextAlign.center,
-              style: TextStyle(color: color, fontSize: 9,
-                  fontWeight: FontWeight.w600, height: 1.3),
+              style: TextStyle(color: color, fontSize: 11,    // Improved: was 9px
+                  fontWeight: FontWeight.w700, height: 1.3),  // Increased weight for emphasis
               maxLines: 2,
               overflow: TextOverflow.ellipsis),
           ),
