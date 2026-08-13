@@ -77,11 +77,13 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         _closedStatus = closed.toUpperCase();
         _deptOrder    = depts;
         _loading      = false;
-        if (scope.isLocked) {
-          // Locked to the user's own plant — never the first plant in the data.
-          _selectedPlant = scope.plant;
-        } else if (_selectedPlant == null && _plants.isNotEmpty) {
-          _selectedPlant = _plants.first;
+        // Default to user's own plant if available, otherwise first plant in data
+        if (_selectedPlant == null && _plants.isNotEmpty) {
+          if (scope.plant.isNotEmpty && _plants.contains(scope.plant)) {
+            _selectedPlant = scope.plant;
+          } else {
+            _selectedPlant = _plants.first;
+          }
         }
         // A department that just vanished from the admin list (or from this
         // plant's data) must not stay silently applied as a filter.
@@ -250,9 +252,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     if (_all.isEmpty) {
       return Center(
         child: Text(
-            _scope.isLocked
-                ? 'No data recorded yet for ${_scope.plant}'
-                : 'No data recorded yet',
+            'No data recorded yet',
             textAlign: TextAlign.center,
             style: TextStyle(color: sl.text3, fontSize: 14)),
       );
@@ -261,8 +261,8 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Locked users get a plant header; admins get the switcher chips.
-        if (_scope.isLocked) _lockedPlantHeader(sl) else _plantSelector(sl),
+        // All users can select any plant to view its reports
+        _plantSelector(sl),
         const SizedBox(height: 10),
         // Department drill-down within the plant.
         _deptSelector(sl),
