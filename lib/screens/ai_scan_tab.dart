@@ -29,6 +29,7 @@ import '../widgets/voice_text_field.dart';
 import '../services/i18n.dart';
 import '../services/ai_audit_service.dart';
 import '../services/ai_correction_service.dart';
+import '../services/ai_run_log.dart';
 import '../services/error_log_service.dart';
 import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
@@ -280,10 +281,19 @@ class _AIScanTabState extends State<AIScanTab> {
       Map<String, dynamic>? result;
       bool failedDueToInternet = false;
 
+      // Telemetry (admin AI performance dashboard) is recorded INSIDE
+      // GeminiVision, at every exit point, so failures that quietly return the
+      // offline checklist are still counted. All we do here is tell it which
+      // kind of run this is and who ran it.
+      final tPlant = widget.user?['plant']?.toString() ?? '';
+      final tDept = widget.user?['department']?.toString() ?? '';
+
       try {
         result = kIsWeb
-            ? await GeminiVision.analyseImageBytes(_imageBytes!)
-            : await GeminiVision.analyseImage(File(_pickedFile!.path));
+            ? await GeminiVision.analyseImageBytes(_imageBytes!,
+                runType: AiRunLog.typeHazardScan, plant: tPlant, dept: tDept)
+            : await GeminiVision.analyseImage(File(_pickedFile!.path),
+                runType: AiRunLog.typeHazardScan, plant: tPlant, dept: tDept);
       } catch (e, stackTrace) {
         // ✅ FIX: Check if it's a network/connectivity error
         final errorStr = e.toString().toLowerCase();

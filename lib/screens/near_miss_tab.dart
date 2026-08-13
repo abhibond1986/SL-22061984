@@ -33,6 +33,7 @@ import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
 import '../services/ai_correction_service.dart';
+import '../services/ai_run_log.dart';
 
 class NearMissTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -463,6 +464,12 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
 
     _detectLanguageFromText(rawText);
 
+    // Same pattern as _refineWithAI: capture outcome, record once in `finally`.
+    final sw = Stopwatch()..start();
+    var fieldOk = false;
+    var fieldProvider = '';
+    var fieldReason = AiRunLog.reasonExhausted;
+
     try {
       // ★ PRIMARY: Try Groq first (fast, free, reliable)
       final groqResult = await GroqService.correctText(
@@ -472,6 +479,8 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
       ).timeout(const Duration(seconds: 12), onTimeout: () => null);
 
       if (groqResult != null && groqResult.isNotEmpty && groqResult != rawText) {
+        fieldOk = true;
+        fieldProvider = 'groq';
         if (mounted) {
           setState(() {
             field.text = groqResult;
@@ -480,6 +489,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         }
         return;
       }
+      if (sw.elapsedMilliseconds >= 12000) fieldReason = AiRunLog.reasonTimeout;
 
       if (!mounted) return;
 
@@ -505,7 +515,11 @@ Respond with ONLY the corrected text — no quotes, no explanation, no JSON. Jus
 If the text is already fine, return it unchanged.''';
 
       Map<String, dynamic>? body = await SyncService.callAiText(prompt);
-      if (body == null) body = await _callAiTextFallback(prompt);
+      var viaDirectFallback = false;
+      if (body == null) {
+        body = await _callAiTextFallback(prompt);
+        viaDirectFallback = true;
+      }
       if (!mounted || body == null) return;
 
       String? aiText;
@@ -513,6 +527,9 @@ If the text is already fine, return it unchanged.''';
       else if (body['result'] != null) aiText = body['result'].toString();
 
       if (aiText != null && aiText.trim().isNotEmpty) {
+        fieldOk = true;
+        fieldProvider =
+            viaDirectFallback ? 'apps_script_direct' : 'apps_script';
         String cleaned = aiText.trim();
         if (cleaned.startsWith('```')) cleaned = cleaned.replaceAll(RegExp(r'^```\w*\n?'), '').replaceAll('```', '');
         if (cleaned.startsWith('"') && cleaned.endsWith('"')) cleaned = cleaned.substring(1, cleaned.length - 1);
@@ -524,10 +541,25 @@ If the text is already fine, return it unchanged.''';
             field.selection = TextSelection.fromPosition(TextPosition(offset: cleaned.length));
           });
         }
+      } else {
+        // Replied, but with nothing usable.
+        fieldOk = false;
+        fieldReason = AiRunLog.reasonEmptyResult;
       }
-    } catch (_) {}
+    } catch (_) {
+      fieldReason = AiRunLog.reasonException;
+    }
     finally {
       _fieldRefining = false; // ★ v29: always release mutex
+      AiRunLog.record(
+        runType: AiRunLog.typeFieldRefine,
+        outcome: fieldOk ? AiRunLog.outcomeSuccess : AiRunLog.outcomeFailed,
+        failReason: fieldOk ? '' : fieldReason,
+        provider: fieldProvider,
+        durationMs: sw.elapsedMilliseconds,
+        plant: _plant,
+        dept: _effectiveDept,
+      );
     }
   }
 

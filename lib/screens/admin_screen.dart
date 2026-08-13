@@ -41,6 +41,7 @@ import '../services/gemini_vision.dart';
 import '../services/gemini_direct_vision.dart';
 import '../services/pdf_kb_extractor.dart';
 import '../services/ai_correction_service.dart';
+import '../services/ai_run_log.dart';
 import '../services/image_storage.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -102,6 +103,10 @@ class _AdminScreenState extends State<AdminScreen>
         Icons.compare_arrows_rounded,  Color(0xFFD32F2F), true),
     _AdminModule(15,'ai_corrections','AI Corrections',  'User edits & training',
         Icons.model_training_rounded,  Color(0xFF00838F), true),
+    // Admin-only view of how the AI itself is performing: runs per day,
+    // real success rate, and response times. Not exposed anywhere else.
+    _AdminModule(16,'ai_telemetry','AI Performance',    'Runs, success, speed',
+        Icons.speed_rounded,           Color(0xFF455A64), true),
   ];
 
   // ── Login state ─────────────────────────────────────────────────
@@ -129,6 +134,12 @@ class _AdminScreenState extends State<AdminScreen>
   bool _correctionsLoading = false;
   bool _correctionsLoadedOnce = false; // prevents infinite lazy-reload when empty
   String _corrFilter = 'pending'; // 'pending' | 'ai_mistake' | 'user_preference' | 'all'
+
+  // ── AI Performance (module 16) ──────────────────────────────────
+  List<Map<String, dynamic>> _aiRuns = [];
+  bool _runsLoading = false;
+  bool _runsLoadedOnce = false;   // same reason as _correctionsLoadedOnce
+  String _runWindow = 'today';    // 'today' | '7d' | 'all'
 
   // ── Knowledge Base state ─────────────────────────────────────────
   bool _kbUploading = false;
@@ -749,6 +760,7 @@ class _AdminScreenState extends State<AdminScreen>
       case 13: return _moduleKnowledgeBase(sl);
       case 14: return _moduleAiAudit(sl);
       case 15: return _moduleAiCorrections(sl);
+      case 16: return _moduleAiTelemetry(sl);
       default: return _modulePlaceholder(m, sl);
     }
   }
@@ -6624,6 +6636,453 @@ class _AdminScreenState extends State<AdminScreen>
           : 'AI mistake → added to training data ✓',
       const Color(0xFFD32F2F));
     await _loadCorrections();
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  MODULE 16 — AI PERFORMANCE (admin-only telemetry)
+  //  Every hazard scan, near-miss image analysis and text refinement
+  //  records one row (AiRunLog). This module answers three questions:
+  //  how many runs today, how many actually succeeded, how fast.
+  //
+  //  WHY "actually" MATTERS: GeminiVision never throws. When every
+  //  provider fails it returns an offline checklist that looks like a
+  //  valid result. So a naive dashboard built on the app's own return
+  //  values would show ~100% success during a total outage. Success
+  //  here means a real provider returned hazards for the image; the
+  //  fallback counts as FAILED, with the reason shown separately.
+  // ══════════════════════════════════════════════════════════════════
+  Future<void> _loadAiRuns() async {
+    if (_runsLoading) return;
+    setState(() => _runsLoading = true);
+    try {
+      final list = await AiRunLog.getAllRuns();
+      if (mounted) setState(() => _aiRuns = list);
+    } catch (_) {
+      // Telemetry is diagnostic, never fatal — show whatever we have.
+    } finally {
+      if (mounted) setState(() {
+        _runsLoading = false;
+        _runsLoadedOnce = true;
+      });
+    }
+  }
+
+  /// Start of the window currently selected, in LOCAL time.
+  /// 'today' is local midnight, so the count matches what the admin would
+  /// count by hand — AiRunLog stores UTC and converts back before comparing.
+  DateTime? get _runWindowStart {
+    final now = DateTime.now();
+    switch (_runWindow) {
+      case 'today':
+        return DateTime(now.year, now.month, now.day);
+      case '7d':
+        return DateTime(now.year, now.month, now.day)
+            .subtract(const Duration(days: 6));
+      default:
+        return null; // all time
+    }
+  }
+
+  String get _runWindowLabel {
+    switch (_runWindow) {
+      case 'today': return 'Today';
+      case '7d':    return 'Last 7 days';
+      default:      return 'All time';
+    }
+  }
+
+  Widget _moduleAiTelemetry(SL sl) {
+    // Lazy-load once. Guarding on the flag (not on isEmpty) matters: with no
+    // runs recorded yet, an isEmpty guard would reload on every rebuild.
+    if (!_runsLoadedOnce && !_runsLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadAiRuns());
+    }
+
+    const accent = Color(0xFF455A64);
+    final since = _runWindowStart;
+    final stats = AiRunLog.computeStats(_aiRuns, since: since);
+
+    final visible = since == null
+        ? _aiRuns
+        : _aiRuns.where((r) {
+            final t = DateTime.tryParse(r['createdAt']?.toString() ?? '');
+            return t != null && !t.toLocal().isBefore(since);
+          }).toList();
+
+    final rate      = stats['successRate'] as double;
+    final avgMs     = stats['avgMs'] as int;
+    final p95Ms     = stats['p95Ms'] as int;
+    final attempted = stats['attempted'] as int;
+    final byReason   = (stats['byReason']   as Map<String, int>);
+    final byProvider = (stats['byProvider'] as Map<String, int>);
+    final byType     = (stats['byType']     as Map<String, int>);
+
+    // Colour the headline by health, so a bad day is obvious at a glance.
+    final rateColor = attempted == 0
+        ? sl.text3
+        : rate >= 90 ? const Color(0xFF43A047)
+        : rate >= 70 ? AppColors.amber
+        : const Color(0xFFD32F2F);
+
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      // ── Header ──
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: sl.glassColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: sl.glassBorder),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.speed_rounded, color: accent, size: 20),
+            const SizedBox(width: 8),
+            Expanded(child: Text('AI Performance', style: TextStyle(
+                color: sl.text1, fontSize: 15, fontWeight: FontWeight.w800))),
+            IconButton(
+              onPressed: _runsLoading ? null : _loadAiRuns,
+              icon: _runsLoading
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : Icon(Icons.refresh_rounded, color: sl.text2, size: 20),
+              tooltip: 'Refresh',
+            ),
+            IconButton(
+              onPressed: visible.isEmpty ? null : () {
+                _downloadString(AiRunLog.exportToCsv(visible),
+                    'ai_runs_${_runWindow}_${DateTime.now().millisecondsSinceEpoch}.csv');
+              },
+              icon: Icon(Icons.download_rounded,
+                  color: visible.isEmpty ? sl.text4 : sl.text2, size: 20),
+              tooltip: 'Export CSV',
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text('Every AI analysis run across all devices. "Successful" means a '
+              'real provider analysed the image and returned hazards — the '
+              'offline checklist counts as failed, so an outage shows up here '
+              'instead of hiding behind a valid-looking result.',
+              style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4)),
+          const SizedBox(height: 14),
+
+          // ── Window selector ──
+          Row(children: [
+            _runWindowChip(sl, 'today', 'Today'),
+            const SizedBox(width: 8),
+            _runWindowChip(sl, '7d', '7 days'),
+            const SizedBox(width: 8),
+            _runWindowChip(sl, 'all', 'All time'),
+          ]),
+          const SizedBox(height: 14),
+
+          // ── Headline counters ──
+          Row(children: [
+            _auditStatCard(sl, '$_runWindowLabel Runs', '${stats['total']}',
+                Icons.play_circle_outline_rounded, const Color(0xFF1E88E5)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Successful', '${stats['success']}',
+                Icons.check_circle_outline_rounded, const Color(0xFF43A047)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Failed', '${stats['failed']}',
+                Icons.error_outline_rounded, const Color(0xFFD32F2F)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'From Cache', '${stats['cached']}',
+                Icons.bolt_rounded, const Color(0xFF7E57C2)),
+          ]),
+          const SizedBox(height: 12),
+
+          // ── Success rate ──
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: rateColor.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: rateColor.withOpacity(0.25)),
+            ),
+            child: Row(children: [
+              Icon(Icons.verified_outlined, color: rateColor, size: 22),
+              const SizedBox(width: 10),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(attempted == 0
+                        ? 'No AI runs attempted yet'
+                        : 'Success rate ${rate.toStringAsFixed(1)}%',
+                    style: TextStyle(color: rateColor,
+                        fontSize: 15, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 2),
+                Text(attempted == 0
+                        ? 'Counters start filling as soon as someone runs a scan'
+                        : '${stats['success']} of $attempted attempts '
+                          '(cache hits excluded, so a warm cache cannot mask a '
+                          'broken provider)',
+                    style: TextStyle(color: sl.text3, fontSize: 9, height: 1.35)),
+              ])),
+            ]),
+          ),
+          const SizedBox(height: 12),
+
+          // ── Timing ──
+          Row(children: [
+            _auditStatCard(sl, 'Avg response',
+                avgMs == 0 ? '—' : '${(avgMs / 1000).toStringAsFixed(1)}s',
+                Icons.timer_outlined, const Color(0xFF00897B)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Slowest 5% (p95)',
+                p95Ms == 0 ? '—' : '${(p95Ms / 1000).toStringAsFixed(1)}s',
+                Icons.trending_up_rounded, AppColors.amber),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Avg hazards',
+                (stats['avgHazards'] as double) == 0
+                    ? '—' : (stats['avgHazards'] as double).toStringAsFixed(1),
+                Icons.warning_amber_rounded, const Color(0xFFF57C00)),
+            const SizedBox(width: 10),
+            _auditStatCard(sl, 'Avg confidence',
+                (stats['avgConfidence'] as double) == 0
+                    ? '—' : '${(stats['avgConfidence'] as double).toStringAsFixed(0)}%',
+                Icons.psychology_outlined, const Color(0xFF8E24AA)),
+          ]),
+          if (avgMs > 0) ...[
+            const SizedBox(height: 8),
+            Text('Timing covers successful runs only. A failure returns almost '
+                'instantly, so counting failures would make a bad day look fast. '
+                'Range: ${((stats['fastestMs'] as int) / 1000).toStringAsFixed(1)}s – '
+                '${((stats['slowestMs'] as int) / 1000).toStringAsFixed(1)}s.',
+                style: TextStyle(color: sl.text4, fontSize: 9, height: 1.4)),
+          ],
+        ]),
+      ),
+      const SizedBox(height: 12),
+
+      // ── Why runs failed ──
+      if (byReason.isNotEmpty) ...[
+        _sectionHeader('Why runs failed', sl),
+        const SizedBox(height: 8),
+        ...(byReason.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value)))
+            .map((e) => _runBreakdownRow(
+                sl, AiRunLog.reasonLabel(e.key), e.value,
+                stats['failed'] as int, const Color(0xFFD32F2F))),
+        const SizedBox(height: 12),
+      ],
+
+      // ── Which provider served the successes ──
+      if (byProvider.isNotEmpty) ...[
+        _sectionHeader('Provider serving successful runs', sl),
+        const SizedBox(height: 8),
+        ...(byProvider.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value)))
+            .map((e) => _runBreakdownRow(
+                sl, e.key, e.value, stats['success'] as int,
+                const Color(0xFF43A047))),
+        const SizedBox(height: 12),
+      ],
+
+      // ── Runs by feature ──
+      if (byType.isNotEmpty) ...[
+        _sectionHeader('Runs by feature', sl),
+        const SizedBox(height: 8),
+        ...(byType.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value)))
+            .map((e) => _runBreakdownRow(
+                sl, _runTypeLabel(e.key), e.value,
+                stats['total'] as int, const Color(0xFF1E88E5))),
+        const SizedBox(height: 12),
+      ],
+
+      // ── Recent runs ──
+      _sectionHeader('Recent runs', sl),
+      const SizedBox(height: 8),
+      if (_runsLoading && _aiRuns.isEmpty)
+        const Center(child: Padding(
+            padding: EdgeInsets.all(40), child: CircularProgressIndicator()))
+      else if (visible.isEmpty)
+        Center(child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(children: [
+            Icon(Icons.speed_rounded, color: sl.text4, size: 44),
+            const SizedBox(height: 10),
+            Text('No AI runs in this window',
+                style: TextStyle(color: sl.text3, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text('Hazard scans and near-miss analyses will appear here as '
+                'users run them', textAlign: TextAlign.center,
+                style: TextStyle(color: sl.text4, fontSize: 10)),
+          ]),
+        ))
+      else
+        // Capped: the newest 60 keep the list scrollable on a phone. The CSV
+        // export above covers the full window for deeper analysis.
+        ...visible.take(60).map((r) => _aiRunCard(sl, r)),
+    ]);
+  }
+
+  Widget _runWindowChip(SL sl, String value, String label) {
+    final selected = _runWindow == value;
+    const accent = Color(0xFF455A64);
+    return Expanded(child: GestureDetector(
+      onTap: () => setState(() => _runWindow = value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? accent.withOpacity(0.15) : sl.card,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: selected ? accent : sl.glassBorder,
+              width: selected ? 1.5 : 1),
+        ),
+        child: Text(label, style: TextStyle(
+            color: selected ? accent : sl.text3,
+            fontSize: 10, fontWeight: FontWeight.w700)),
+      ),
+    ));
+  }
+
+  /// One labelled bar: count, share of [total], and a proportional fill.
+  Widget _runBreakdownRow(
+      SL sl, String label, int count, int total, Color color) {
+    final pct = total <= 0 ? 0.0 : count * 100.0 / total;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: sl.glassBorder),
+        ),
+        child: Column(children: [
+          Row(children: [
+            Expanded(child: Text(label, style: TextStyle(
+                color: sl.text2, fontSize: 10, fontWeight: FontWeight.w600),
+                maxLines: 1, overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 8),
+            Text('$count', style: TextStyle(
+                color: color, fontSize: 11, fontWeight: FontWeight.w900)),
+            const SizedBox(width: 6),
+            Text('(${pct.toStringAsFixed(0)}%)',
+                style: TextStyle(color: sl.text4, fontSize: 9)),
+          ]),
+          const SizedBox(height: 5),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: (pct / 100).clamp(0.0, 1.0),
+              minHeight: 4,
+              backgroundColor: sl.glassBorder,
+              valueColor: AlwaysStoppedAnimation(color),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  String _runTypeLabel(String t) {
+    switch (t) {
+      case AiRunLog.typeHazardScan:    return 'Hazard scan (photo)';
+      case AiRunLog.typeNearMissImage: return 'Near miss (photo)';
+      case AiRunLog.typeNearMissText:  return 'Near miss (text refine)';
+      case AiRunLog.typeFieldRefine:   return 'Field polish';
+      default:                         return t.isEmpty ? 'Unknown' : t;
+    }
+  }
+
+  Widget _aiRunCard(SL sl, Map<String, dynamic> r) {
+    final outcome = (r['outcome'] ?? '').toString();
+    Color c;
+    IconData ic;
+    String badge;
+    if (outcome == AiRunLog.outcomeSuccess) {
+      c = const Color(0xFF43A047);
+      ic = Icons.check_circle_rounded;
+      badge = 'SUCCESS';
+    } else if (outcome == AiRunLog.outcomeCached) {
+      c = const Color(0xFF7E57C2);
+      ic = Icons.bolt_rounded;
+      badge = 'CACHED';
+    } else {
+      c = const Color(0xFFD32F2F);
+      ic = Icons.error_rounded;
+      badge = 'FAILED';
+    }
+
+    final ms = (r['durationMs'] as num?)?.toInt() ?? 0;
+    final t = DateTime.tryParse(r['createdAt']?.toString() ?? '');
+    final when = t == null
+        ? '—'
+        : '${t.toLocal().hour.toString().padLeft(2, '0')}:'
+          '${t.toLocal().minute.toString().padLeft(2, '0')}';
+    final reason = (r['failReason'] ?? '').toString();
+    final provider = (r['provider'] ?? '').toString();
+    final model = (r['model'] ?? '').toString();
+    final who = (r['userName'] ?? '').toString();
+    final plant = (r['plant'] ?? '').toString();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: c.withOpacity(0.22)),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(ic, color: c, size: 14),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: c.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(badge, style: TextStyle(
+                  color: c, fontSize: 8, fontWeight: FontWeight.w900)),
+            ),
+            const SizedBox(width: 6),
+            Expanded(child: Text(_runTypeLabel((r['runType'] ?? '').toString()),
+                style: TextStyle(color: sl.text2, fontSize: 10,
+                    fontWeight: FontWeight.w700),
+                maxLines: 1, overflow: TextOverflow.ellipsis)),
+            // Cache hits show their time too, but it is excluded from averages.
+            Text(ms > 0 ? '${(ms / 1000).toStringAsFixed(1)}s' : '—',
+                style: TextStyle(color: sl.text3, fontSize: 10,
+                    fontWeight: FontWeight.w700)),
+          ]),
+          const SizedBox(height: 5),
+          Row(children: [
+            Icon(Icons.access_time_rounded, color: sl.text4, size: 9),
+            const SizedBox(width: 3),
+            Text(when, style: TextStyle(color: sl.text4, fontSize: 9)),
+            if (outcome == AiRunLog.outcomeSuccess) ...[
+              const SizedBox(width: 8),
+              Icon(Icons.warning_amber_rounded, color: sl.text4, size: 9),
+              const SizedBox(width: 2),
+              Text('${(r['hazardCount'] as num?)?.toInt() ?? 0} hazards',
+                  style: TextStyle(color: sl.text4, fontSize: 9)),
+            ],
+            if (reason.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              Expanded(child: Text(AiRunLog.reasonLabel(reason),
+                  style: const TextStyle(color: Color(0xFFD32F2F), fontSize: 9),
+                  maxLines: 1, overflow: TextOverflow.ellipsis)),
+            ] else
+              const Spacer(),
+          ]),
+          if (provider.isNotEmpty || model.isNotEmpty || who.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text([
+              if (model.isNotEmpty) model else if (provider.isNotEmpty) provider,
+              if (who.isNotEmpty) who,
+              if (plant.isNotEmpty) plant,
+            ].join(' · '),
+                style: TextStyle(color: sl.text4, fontSize: 9),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+          ],
+        ]),
+      ),
+    );
   }
 }
 

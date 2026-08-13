@@ -147,7 +147,7 @@ class GeminiVision {
     final stopwatch = Stopwatch()..start();
 
     // Records one run and passes the result straight through, so each exit
-    // stays a single `return _logged(...)` and none can be forgotten.
+    // stays a single `return logged(...)` and none can be forgotten.
     // Fire-and-forget: telemetry must never delay or break a scan.
     Map<String, dynamic>? logged(
       Map<String, dynamic>? result, {
