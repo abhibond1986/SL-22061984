@@ -302,7 +302,7 @@ class GeminiVision {
     final dataUrl = 'data:image/jpeg;base64,$base64Image';
 
     // Build prompt with KB context if available
-    String prompt = _getHazardPrompt();
+    String prompt = await resolvedHazardPrompt();
     if (kbContext != null && kbContext.isNotEmpty) {
       prompt += '\n\n═══════════════════════════════════════════════════════\n'
           'ADDITIONAL REFERENCE MATERIAL FROM KNOWLEDGE BANK\n'
@@ -397,6 +397,38 @@ class GeminiVision {
   // ══════════════════════════════════════════════════════════════════════════
   //  SHARED PROMPT — used by Groq & OpenRouter (client-side)
   // ══════════════════════════════════════════════════════════════════════════
+  /// [_getHazardPrompt] with `{{SEVERITIES}}` / `{{OBS_TYPES}}` replaced by the
+  /// admin's current vocabularies. Every caller must use this rather than the
+  /// raw template, otherwise the model keeps emitting severity labels and
+  /// observation types that no longer exist in the app's dropdowns.
+  static Future<String> resolvedHazardPrompt() async {
+    List<String> sevs;
+    List<String> types;
+    try {
+      sevs = await AdminMasterData.getSeverities();
+    } catch (_) {
+      sevs = List<String>.from(AdminMasterData.defaultSeverities);
+    }
+    try {
+      types = await AdminMasterData.getObsTypes();
+    } catch (_) {
+      types = List<String>.from(AdminMasterData.defaultObservationTypes);
+    }
+    // Most-severe-first reads more naturally in a prompt enum.
+    final sevEnum = sevs.isEmpty
+        ? 'LOW'
+        : sevs.reversed.map((s) => s.toUpperCase()).join('|');
+    // 'Line of Fire' drives the lofZone field below, so keep it available
+    // even if the admin's list doesn't mention it.
+    final typeList = <String>[
+      ...types,
+      if (!types.any((t) => t.toLowerCase() == 'line of fire')) 'Line of Fire',
+    ];
+    return _getHazardPrompt()
+        .replaceAll('{{SEVERITIES}}', sevEnum)
+        .replaceAll('{{OBS_TYPES}}', typeList.join('|'));
+  }
+
   static String _getHazardPrompt() {
     return '''You are a senior industrial safety inspector for SAIL (Steel Authority of India Limited), with 30+ years field experience in IS 14489:2018 and Factories Act 1948.
 
@@ -504,7 +536,7 @@ Types:
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 ═══════════════════════════════════════════════════════
 {
-  "overallRisk": "CRITICAL|HIGH|MEDIUM|LOW",
+  "overallRisk": "{{SEVERITIES}}",
   "riskScore": 0-100,
   "confidence": 0-100,
   "people": <count of ACTUALLY visible persons, 0 if none>,
@@ -513,10 +545,10 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
     {
       "name": "<max 5 words, specific to what you SEE>",
       "description": "<MUST start with visual evidence: 'Visible: [what you see].' Then: why dangerous, consequence>",
-      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "severity": "{{SEVERITIES}}",
       "regulation": "<EXACT reference from table above>",
       "correctiveAction": "<starts with action verb, specific measurable steps>",
-      "type": "Unsafe Act|Unsafe Condition|Line of Fire",
+      "type": "{{OBS_TYPES}}",
       "visualEvidence": "<brief: what specific object/condition in the image proves this hazard>",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7}

@@ -36,6 +36,33 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
   List<String> _departments = []; // ★ NEW: Department list
+  // Admin-configured severity and status vocabularies. The filter chips used
+  // to be four hardcoded literals each, so a renamed or added level was
+  // simply unfilterable.
+  List<String> _severities = List<String>.from(AdminMasterData.defaultSeverities);
+  List<String> _statuses   = List<String>.from(AdminMasterData.defaultStatuses);
+
+  /// Established colours; anything the admin invents falls back to neutral.
+  Color _sevColorFor(String sev) {
+    switch (sev.trim().toUpperCase()) {
+      case 'CRITICAL': return AppColors.crit;
+      case 'HIGH':     return AppColors.red;
+      case 'MEDIUM':   return AppColors.amber;
+      case 'LOW':      return AppColors.green;
+      default:         return Colors.blueGrey;
+    }
+  }
+
+  Color _statusColorFor(String status) {
+    switch (status.trim().toUpperCase()) {
+      case 'OPEN':          return AppColors.amber;
+      case 'INVESTIGATING': return AppColors.cyan;
+      case 'ACTION TAKEN':  return AppColors.purple;
+      case 'VERIFIED':      return AppColors.accent;
+      case 'CLOSED':        return AppColors.green;
+      default:              return Colors.blueGrey;
+    }
+  }
 
   /// True if the current user may delete [inc]: admins can delete anything;
   /// a reporter can delete only their own AI scan / near-miss report.
@@ -63,11 +90,14 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     _load();
     // Live refresh when any device adds/edits/deletes an incident.
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
+    // Live refresh when the admin edits plants/departments/severities/statuses.
+    AdminMasterData.revision.addListener(_onRealtime);
   }
 
   @override
   void dispose() {
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
+    AdminMasterData.revision.removeListener(_onRealtime);
     super.dispose();
   }
 
@@ -101,6 +131,8 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final user = await LocalDB.getCurrentUser();
     final plants = await AdminMasterData.getPlants();
     final depts = await AdminMasterData.getDepartments(); // ★ NEW: Load departments
+    final sevs = await AdminMasterData.getSeverities();
+    final statuses = await AdminMasterData.getStatuses();
     final adminVal = user?['isAdmin'];
     final isAdmin = adminVal is bool
         ? adminVal
@@ -109,6 +141,13 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       _all = inc;
       _plantDefs = plants;
       _departments = ['All', ...depts]; // ★ NEW: Set departments
+      _severities = sevs;
+      _statuses = statuses;
+      // Drop any active filter selection the admin has since deleted.
+      _sevFilter.removeWhere(
+          (s) => !sevs.map((e) => e.toUpperCase()).contains(s.toUpperCase()));
+      _statusFilter.removeWhere((s) =>
+          !statuses.map((e) => e.toUpperCase()).contains(s.toUpperCase()));
       _currentUserName = user?['name']?.toString() ?? '';
       _currentUserPno = user?['pno']?.toString() ?? '';
       _currentUserIsAdmin = isAdmin;
@@ -272,10 +311,8 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
-            _filterChip(sl, 'CRITICAL', _sevFilter, AppColors.crit),
-            _filterChip(sl, 'HIGH', _sevFilter, AppColors.red),
-            _filterChip(sl, 'MEDIUM', _sevFilter, AppColors.amber),
-            _filterChip(sl, 'LOW', _sevFilter, AppColors.green),
+            for (final s in _severities)
+              _filterChip(sl, s.toUpperCase(), _sevFilter, _sevColorFor(s)),
             const SizedBox(width: 12),
             _typeChip(sl, 'All'),
             _typeChip(sl, 'AI_SCAN'),
@@ -290,10 +327,8 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
-            _statusChip(sl, 'OPEN', AppColors.amber),
-            _statusChip(sl, 'INVESTIGATING', AppColors.cyan),
-            _statusChip(sl, 'ACTION TAKEN', const Color(0xFF8B5CF6)),
-            _statusChip(sl, 'CLOSED', AppColors.green),
+            for (final s in _statuses)
+              _statusChip(sl, s.toUpperCase(), _statusColorFor(s)),
           ]),
         ),
       ]),
@@ -437,21 +472,9 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final status = inc['status']?.toString().toUpperCase() ?? 'OPEN';
     final type = inc['type']?.toString().toUpperCase() ?? '';
 
-    Color sevColor;
-    switch (sev) {
-      case 'CRITICAL': sevColor = AppColors.crit; break;
-      case 'HIGH': sevColor = AppColors.red; break;
-      case 'MEDIUM': sevColor = AppColors.amber; break;
-      default: sevColor = AppColors.green;
-    }
-
-    Color statusColor;
-    switch (status) {
-      case 'CLOSED': statusColor = AppColors.green; break;
-      case 'INVESTIGATING': statusColor = AppColors.cyan; break;
-      case 'ACTION TAKEN': statusColor = const Color(0xFF8B5CF6); break;
-      default: statusColor = AppColors.amber;
-    }
+    // Shared with the filter chips so a card and its chip always agree.
+    final sevColor = _sevColorFor(sev);
+    final statusColor = _statusColorFor(status);
 
     final date = inc['date']?.toString() ?? '';
     final dateStr = date.length >= 10 ? date.substring(0, 10) : date;

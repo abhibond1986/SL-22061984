@@ -184,13 +184,24 @@ class _AdminScreenState extends State<AdminScreen>
   @override
   void initState() {
     super.initState();
+    // Surface a failed master-data push. Without this the admin sees the edit
+    // apply locally and assumes it reached every device, when in fact only
+    // this device changed — the exact silent divergence we're eliminating.
+    AdminMasterData.lastPushError.addListener(_onPushError);
   }
 
   @override
   void dispose() {
+    AdminMasterData.lastPushError.removeListener(_onPushError);
     _unameCtrl.dispose(); _pwCtrl.dispose();
     _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose();
     super.dispose();
+  }
+
+  void _onPushError() {
+    final err = AdminMasterData.lastPushError.value;
+    if (err == null || !mounted) return;
+    _toast('$err — saved on this device only.', AppColors.amber);
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -2587,11 +2598,14 @@ class _AdminScreenState extends State<AdminScreen>
         padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
         color: sl.bg2,
         child: Row(children: [
-          for (final s in const [
-            ['ALL','All'], ['OPEN','Open'], ['INVESTIGATING','Investig.'],
-            ['ACTION TAKEN','Action'], ['VERIFIED','Verified'], ['CLOSED','Closed'],
-          ]) ...[
-            _wfChip(s[0], s[1], sl), const SizedBox(width: 5),
+          // Chips come from the admin's own status list, so a stage added
+          // on the Master Data tab is immediately filterable here.
+          _wfChip('ALL', 'All', sl), const SizedBox(width: 5),
+          for (final s in (_customLists['status']?.isNotEmpty == true
+              ? _customLists['status']!
+              : AdminMasterData.defaultStatuses)) ...[
+            _wfChip(s.toUpperCase(), _wfShortLabel(s), sl),
+            const SizedBox(width: 5),
           ],
         ])),
       Expanded(child: filtered.isEmpty
@@ -2603,6 +2617,20 @@ class _AdminScreenState extends State<AdminScreen>
             separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (_, i) => _wfCard(filtered[i], sl))),
     ]);
+  }
+
+  /// Chip labels are tight on a phone, so shorten the long standard stages;
+  /// custom statuses are title-cased and truncated rather than dropped.
+  String _wfShortLabel(String status) {
+    final s = status.trim();
+    switch (s.toUpperCase()) {
+      case 'INVESTIGATING': return 'Investig.';
+      case 'ACTION TAKEN':  return 'Action';
+    }
+    final t = s.isEmpty
+        ? s
+        : s[0].toUpperCase() + s.substring(1).toLowerCase();
+    return t.length <= 10 ? t : '${t.substring(0, 9)}.';
   }
 
   Widget _wfChip(String value, String label, SL sl) {
@@ -2705,7 +2733,12 @@ class _AdminScreenState extends State<AdminScreen>
                         letterSpacing: 0.5)),
                 const SizedBox(height: 6),
                 Wrap(spacing: 5, runSpacing: 5, children: [
-                  for (final st in const ['OPEN','INVESTIGATING','ACTION TAKEN','VERIFIED','CLOSED'])
+                  // Uses the admin's OWN configured status list (Custom Lists
+                  // ▸ status). This dropdown previously hardcoded five
+                  // statuses, so the admin panel ignored its own settings.
+                  for (final st in (_customLists['status']?.isNotEmpty == true
+                      ? _customLists['status']!
+                      : AdminMasterData.defaultStatuses))
                     _wfStatusBtn(st, status, () => _wfChangeStatus(inc, st)),
                 ]),
                 const SizedBox(height: 12),
@@ -4098,13 +4131,13 @@ class _AdminScreenState extends State<AdminScreen>
 
   // ── Scoring Editor UI ───────────────────────────────────────────
   Widget _buildScoringEditor(SL sl) {
-    final levels = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
-    final colors = {
-      'CRITICAL': AppColors.crit,
-      'HIGH': AppColors.red,
-      'MEDIUM': AppColors.amber,
-      'LOW': AppColors.green,
-    };
+    // Levels come from the admin's own severity list (most severe first), so
+    // a severity added on the Master Data tab immediately gets a score tile
+    // instead of being stuck on the hardcoded default of 10.
+    final configured = _customLists['severity']?.isNotEmpty == true
+        ? _customLists['severity']!
+        : AdminMasterData.defaultSeverities;
+    final levels = configured.map((s) => s.toUpperCase()).toList().reversed.toList();
 
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -4127,7 +4160,7 @@ class _AdminScreenState extends State<AdminScreen>
           ]),
         ),
         for (final level in levels) ...[
-          _scoreTile(level, colors[level]!, sl),
+          _scoreTile(level, _sevColor(level), sl),
           const SizedBox(height: 10),
         ],
         const SizedBox(height: 16),

@@ -19,6 +19,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   String? _selectedPlant;
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
+  List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
 
   /// Canonical plant label for an incident (dedupes name variants).
   String _canonPlant(Map<String, dynamic> i) =>
@@ -45,10 +46,12 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   Future<void> _load() async {
     final inc = await LocalDB.getIncidents();
     final plants = await AdminMasterData.getPlants();
+    final statuses = await AdminMasterData.getStatuses();
     if (mounted) {
       setState(() {
         _all = inc;
         _plantDefs = plants;
+        _statuses = statuses;
         _loading = false;
         if (_selectedPlant == null && _plants.isNotEmpty) {
           _selectedPlant = _plants.first;
@@ -108,9 +111,31 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return sorted.take(6).toList();
   }
 
-  // Status distribution for this plant
+  /// Established colours for the standard SAIL pipeline; admin-added
+  /// statuses get a neutral fallback rather than failing.
+  Color _statusColorFor(String status) {
+    switch (status.trim().toUpperCase()) {
+      case 'OPEN':          return AppColors.amber;
+      case 'INVESTIGATING': return AppColors.cyan;
+      case 'ACTION TAKEN':  return AppColors.purple;
+      case 'VERIFIED':      return AppColors.accent;
+      case 'CLOSED':        return AppColors.green;
+      default:              return Colors.blueGrey;
+    }
+  }
+
+  /// 'ACTION TAKEN' → 'Action Taken'
+  String _titleCaseWords(String s) => s
+      .split(' ')
+      .map((w) => w.isEmpty
+          ? w
+          : w[0].toUpperCase() + w.substring(1).toLowerCase())
+      .join(' ');
+
+  // Status distribution for this plant, seeded from the admin's status list.
+  // Previously hardcoded four statuses, which silently omitted VERIFIED.
   Map<String, int> get _statusDist {
-    final m = <String, int>{'OPEN': 0, 'INVESTIGATING': 0, 'ACTION TAKEN': 0, 'CLOSED': 0};
+    final m = <String, int>{for (final s in _statuses) s.toUpperCase(): 0};
     for (final i in _plantIncidents) {
       final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
       m[s] = (m[s] ?? 0) + 1;
@@ -258,12 +283,13 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   // ═══════════════════════════════════════════════════════════════
   Widget _statusSection(SL sl) {
     final dist = _statusDist;
+    // Built from the admin's status list. Previously four force-unwrapped
+    // keys, which omitted VERIFIED and would crash on a renamed status.
     final stages = [
-      ('Open', dist['OPEN']!, AppColors.amber),
-      ('Investigating', dist['INVESTIGATING']!, AppColors.cyan),
-      ('Action Taken', dist['ACTION TAKEN']!, const Color(0xFF8B5CF6)),
-      ('Closed', dist['CLOSED']!, AppColors.green),
+      for (final e in dist.entries)
+        (_titleCaseWords(e.key), e.value, _statusColorFor(e.key)),
     ];
+    if (stages.isEmpty) return const SizedBox();
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
@@ -282,8 +308,10 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
             const SizedBox(height: 10),
             Row(children: stages.map((s) {
               final (label, count, color) = s;
-              final statusKey = label == 'Open' ? 'OPEN' : label == 'Investigating' ? 'INVESTIGATING'
-                  : label == 'Action Taken' ? 'ACTION TAKEN' : 'CLOSED';
+              // Recover the raw key from the display label instead of a
+              // hardcoded four-way ladder that defaulted everything unknown
+              // to 'CLOSED'.
+              final statusKey = label.toUpperCase();
               return Expanded(child: GestureDetector(
                 onTap: () => _showIncidentsSheet('$label — $_selectedPlant',
                     _plantIncidents.where((i) => (i['status']?.toString().toUpperCase() ?? 'OPEN') == statusKey).toList()),

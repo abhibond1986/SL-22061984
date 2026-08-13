@@ -16,6 +16,8 @@ class DataAnalysisTab extends StatefulWidget {
 class _DataAnalysisTabState extends State<DataAnalysisTab> {
   List<Map<String, dynamic>> _incidents = [];
   List<String> _wsaCategories = [];
+  List<String> _severities =
+      List<String>.from(AdminMasterData.defaultSeverities);
   bool _loading = true;
 
   // ── Interactive filters ──────────────────────────────────────────────
@@ -54,11 +56,13 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     super.initState();
     _load();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
+    AdminMasterData.revision.addListener(_load);
   }
 
   @override
   void dispose() {
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
+    AdminMasterData.revision.removeListener(_load);
     super.dispose();
   }
 
@@ -69,12 +73,23 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   Future<void> _load() async {
     final inc = await LocalDB.getIncidents();
     final wsa = await AdminMasterData.getWsaCauses();
-    if (mounted) setState(() { _incidents = inc; _wsaCategories = wsa; _loading = false; });
+    final sevs = await AdminMasterData.getSeverities();
+    if (mounted) {
+      setState(() {
+        _incidents = inc;
+        _wsaCategories = wsa;
+        _severities = sevs;
+        _loading = false;
+      });
+    }
   }
 
   // Severity counts
   Map<String, int> get _severityCounts {
-    final map = <String, int>{'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0};
+    // Seeded from the admin's severity list rather than four fixed keys.
+    final map = <String, int>{
+      for (final s in _severities.reversed) s.toUpperCase(): 0
+    };
     for (final i in _view) {
       final sev = (i['severity']?.toString() ?? 'MEDIUM').toUpperCase();
       map[sev] = (map[sev] ?? 0) + 1;
@@ -365,11 +380,11 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     final total = counts.values.fold<int>(0, (s, v) => s + v);
     if (total == 0) return const SizedBox();
 
+    // Driven by the admin's severity list. Previously force-unwrapped four
+    // fixed keys, which would crash if a severity were renamed in admin.
     final sections = <PieChartSectionData>[
-      _pieSection(counts['CRITICAL']!, total, AppColors.crit, 'Critical'),
-      _pieSection(counts['HIGH']!, total, AppColors.red, 'High'),
-      _pieSection(counts['MEDIUM']!, total, AppColors.amber, 'Medium'),
-      _pieSection(counts['LOW']!, total, AppColors.green, 'Low'),
+      for (final e in counts.entries)
+        _pieSection(e.value, total, _sevColorFor(e.key), _titleCase(e.key)),
     ];
 
     return Container(
@@ -393,15 +408,29 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _legendRow('Critical', counts['CRITICAL']!, AppColors.crit, sl),
-              _legendRow('High', counts['HIGH']!, AppColors.red, sl),
-              _legendRow('Medium', counts['MEDIUM']!, AppColors.amber, sl),
-              _legendRow('Low', counts['LOW']!, AppColors.green, sl),
+              for (final e in counts.entries)
+                _legendRow(_titleCase(e.key), e.value, _sevColorFor(e.key), sl),
             ],
           ),
         ],
       ),
     );
+  }
+
+  /// Colour for a severity label; admin-added levels get a neutral fallback.
+  Color _sevColorFor(String severity) {
+    switch (severity.trim().toUpperCase()) {
+      case 'CRITICAL': return AppColors.crit;
+      case 'HIGH':     return AppColors.red;
+      case 'MEDIUM':   return AppColors.amber;
+      case 'LOW':      return AppColors.green;
+      default:         return Colors.blueGrey;
+    }
+  }
+
+  String _titleCase(String s) {
+    if (s.isEmpty) return s;
+    return s[0].toUpperCase() + s.substring(1).toLowerCase();
   }
 
   PieChartSectionData _pieSection(int count, int total, Color color, String title) {

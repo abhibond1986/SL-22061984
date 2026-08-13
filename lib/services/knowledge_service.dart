@@ -11,6 +11,7 @@
 //   final fullPrompt = '$systemPrompt\n\n$context\n\nUser query: ...';
 
 import 'local_db.dart';
+import 'admin_master_data.dart';
 
 class KnowledgeService {
   // ═══════════════════════════════════════════════════════════════
@@ -48,20 +49,7 @@ CRITICAL SAFETY RULES — NEVER GET WRONG:
 14. BF tapping: min 5m exclusion zone. Full PPE: aluminized suit, face shield, safety shoes.
 15. Coke oven: CO + H₂S hazard. Continuous gas monitoring mandatory. Emergency escape routes.
 
-HAZARD CATEGORIES (WSA-13 Root Causes):
-1. Failure to follow procedure
-2. Lack of hazard awareness
-3. Improper PPE use
-4. Unsafe body positioning
-5. Equipment failure
-6. Communication failure
-7. Human error
-8. Poor housekeeping
-9. Lack of supervision
-10. Fatigue / time pressure
-11. Unauthorized operation
-12. Inadequate isolation (LOTO/PTW)
-13. Environmental conditions
+{{WSA_CAUSES}}
 
 NEAR MISS DEFINITION:
 An unplanned event that DID NOT result in injury, illness, or damage but HAD THE POTENTIAL to do so. It involves an unexpected hazardous exposure, a close call, or a condition that could have led to an accident if not corrected.
@@ -107,9 +95,10 @@ COMMON STEEL PLANT HAZARDS:
   }) async {
     final buffer = StringBuffer();
 
-    // 1. Expert system prompt (compact, always available)
+    // 1. Expert system prompt (compact, always available), with the WSA cause
+    //    list injected live from the admin panel — see resolvedExpertPrompt().
     if (includeExpertPrompt) {
-      buffer.writeln(expertSystemPrompt);
+      buffer.writeln(await resolvedExpertPrompt());
     }
 
     // 2. Relevant KB documents from admin uploads
@@ -139,9 +128,30 @@ COMMON STEEL PLANT HAZARDS:
     return getContextForPrompt(query, maxKbDocs: maxDocs, includeExpertPrompt: false);
   }
 
+  /// The expert system prompt with the `{{WSA_CAUSES}}` placeholder replaced
+  /// by the CURRENT admin-configured cause list. This is why the raw
+  /// [expertSystemPrompt] must never be sent to a model directly — every AI
+  /// path has to go through here, otherwise renaming a cause in the admin
+  /// panel leaves the AI emitting labels that no longer exist in the dropdown.
+  static Future<String> resolvedExpertPrompt() async {
+    List<String> causes;
+    try {
+      causes = await AdminMasterData.getWsaCauses();
+    } catch (_) {
+      causes = List<String>.from(AdminMasterData.defaultWsaCauses);
+    }
+    final block = causes.isEmpty
+        ? 'HAZARD CATEGORIES: none configured — do not assign a category.'
+        : 'HAZARD CATEGORIES (assign ONE, and use the exact wording below):\n'
+            '${causes.join('\n')}';
+    return expertSystemPrompt.replaceAll('{{WSA_CAUSES}}', block);
+  }
+
   /// Returns just the expert system prompt (no KB search).
   /// Use when you need the static knowledge without query-based doc search.
-  static String getExpertPrompt() => expertSystemPrompt;
+  /// NOTE: prefer [resolvedExpertPrompt] — this synchronous version still
+  /// contains the unresolved `{{WSA_CAUSES}}` placeholder.
+  static Future<String> getExpertPrompt() => resolvedExpertPrompt();
 
   /// Get total knowledge base stats for display.
   static Future<Map<String, dynamic>> getKbStats() async {

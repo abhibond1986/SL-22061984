@@ -47,6 +47,10 @@ class _HomeTabState extends State<HomeTab> {
   bool _loading = true;
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
+  // Statuses counted as "still open", derived from the admin's status list so
+  // adding a workflow stage doesn't silently exclude those incidents.
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
 
   @override
   void initState() {
@@ -54,12 +58,14 @@ class _HomeTabState extends State<HomeTab> {
     I18n.instance.addListener(_rebuild);
     _load();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
+    AdminMasterData.revision.addListener(_onRealtime);
   }
 
   @override
   void dispose() {
     I18n.instance.removeListener(_rebuild);
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
+    AdminMasterData.revision.removeListener(_onRealtime);
     super.dispose();
   }
 
@@ -72,8 +78,14 @@ class _HomeTabState extends State<HomeTab> {
   Future<void> _loadLocalOnly() async {
     final inc = await LocalDB.getIncidents();
     final plants = await AdminMasterData.getPlants();
+    final openStatuses = await AdminMasterData.getOpenStatuses();
     if (!mounted) return;
-    setState(() { _incidents = inc; _plantDefs = plants; _loading = false; });
+    setState(() {
+      _incidents = inc;
+      _plantDefs = plants;
+      _openStatuses = openStatuses;
+      _loading = false;
+    });
   }
 
   void _rebuild() { if (mounted) setState(() {}); }
@@ -87,8 +99,14 @@ class _HomeTabState extends State<HomeTab> {
     } catch (_) {}
     final inc = await LocalDB.getIncidents();
     final plants = await AdminMasterData.getPlants();
+    final openStatuses = await AdminMasterData.getOpenStatuses();
     if (!mounted) return;
-    setState(() { _incidents = inc; _plantDefs = plants; _loading = false; });
+    setState(() {
+      _incidents = inc;
+      _plantDefs = plants;
+      _openStatuses = openStatuses;
+      _loading = false;
+    });
   }
 
   /// True for admin users. Accepts boolean, 'true', or 'TRUE' string forms.
@@ -107,7 +125,7 @@ class _HomeTabState extends State<HomeTab> {
   int get _total    => _incidents.length;
   int get _open     => _incidents.where((i) {
     final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
-    return s == 'OPEN' || s == 'INVESTIGATING' || s == 'ACTION TAKEN';
+    return _openStatuses.contains(s);
   }).length;
   int get _closed   => _incidents.where((i) =>
       i['status']?.toString().toUpperCase() == 'CLOSED').length;

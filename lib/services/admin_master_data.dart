@@ -5,10 +5,73 @@
 // Plus storage hooks for user-edited custom lists.
 
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'sync_service.dart';
 
 class AdminMasterData {
+  // ── LIVE CHANGE NOTIFICATION ─────────────────────────────────────
+  // Bumped whenever ANY master list changes — local admin edit, backend
+  // pull, or realtime push. Screens listen and reload their dropdowns so
+  // an admin edit never requires an app restart.
+  //
+  // Usage in a StatefulWidget:
+  //   AdminMasterData.revision.addListener(_reloadMasterData);   // initState
+  //   AdminMasterData.revision.removeListener(_reloadMasterData); // dispose
+  static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
+  static void _bump() {
+    _wsaSnapshot = null; // force a re-read on next synchronous access
+    revision.value++;
+  }
+
+  // ── SYNCHRONOUS WSA SNAPSHOT ─────────────────────────────────────
+  // A few code paths (notably LocalAI.processText, which the near-miss form
+  // calls inline) are synchronous and cannot await getWsaCauses(). Rather than
+  // let them fall back to a re-typed hardcoded copy — which is exactly how the
+  // admin panel and the frontend drifted apart — they read this cache.
+  // Kept warm by [primeSnapshots], called at startup and after every change.
+  static List<String>? _wsaSnapshot;
+
+  /// Best-effort synchronous view of the admin's WSA cause list. Falls back to
+  /// the shared defaults until [primeSnapshots] has run at least once — never
+  /// to a private duplicate of the list.
+  static List<String> get wsaCausesSync =>
+      _wsaSnapshot ?? List<String>.from(defaultWsaCauses);
+
+  /// Warm the synchronous caches. Call once during app startup, and again
+  /// whenever master data changes (the revision listener in main does this).
+  static Future<void> primeSnapshots() async {
+    try {
+      _wsaSnapshot = await getWsaCauses();
+    } catch (_) {}
+  }
+
+  /// The admin's cause whose leading number matches [number] (e.g. 12 →
+  /// '12. Inadequate isolation (LOTO/PTW)'). Returns null if the admin has no
+  /// such entry, so callers can degrade instead of asserting a stale label.
+  static String? wsaCauseByNumber(int number) {
+    for (final c in wsaCausesSync) {
+      final m = RegExp(r'^\s*(\d+)\s*\.').firstMatch(c);
+      if (m != null && int.tryParse(m.group(1)!) == number) return c;
+    }
+    return null;
+  }
+
+  /// Set when a push to the backend fails, so the admin UI can warn that
+  /// the edit is local-only instead of silently diverging from the server.
+  static final ValueNotifier<String?> lastPushError =
+      ValueNotifier<String?>(null);
+
+  static void _pushGuarded(Future<bool> Function() push, String what) {
+    push().then((ok) {
+      lastPushError.value = ok ? null : 'Failed to save $what to server';
+    }).catchError((e) {
+      lastPushError.value = 'Failed to save $what to server: $e';
+      return null;
+    });
+  }
+
   // ── SAIL PLANTS (14 units + Others) ──────────────────────────────
   static const List<Map<String, String>> sailPlants = [
     {'code': 'BSP',        'name': 'Bhilai Steel Plant',          'state': 'Chhattisgarh', 'kind': 'Plant'},
@@ -121,6 +184,30 @@ class AdminMasterData {
     return cleaned; // no confident match — keep the cleaned original
   }
 
+  /// The ONE canonical display label for a plant entry: "CODE — Name"
+  /// (or just the name when it already carries its own separator, e.g.
+  /// "Corporate — Ranchi", or when there is no useful code).
+  /// Every dropdown must use this so labels never diverge between screens.
+  static String plantLabel(Map<String, String> p) {
+    final code = (p['code'] ?? '').trim();
+    final name = (p['name'] ?? '').trim();
+    if (name.isEmpty) return code;
+    if (name.contains('—')) return name;
+    if (code.isEmpty || code == 'OTHER') return name;
+    return '$code — $name';
+  }
+
+  /// Display labels for the active plant list, de-duplicated and order-preserved.
+  static Future<List<String>> getPlantLabels() async {
+    final plants = await getPlants();
+    final out = <String>[];
+    for (final p in plants) {
+      final label = plantLabel(p);
+      if (label.isNotEmpty && !out.contains(label)) out.add(label);
+    }
+    return out;
+  }
+
   /// Convenience: canonicalize using the current active plant list.
   static Future<String> canonicalPlant(String raw) async {
     if (raw.trim().isEmpty) return '';
@@ -166,6 +253,22 @@ class AdminMasterData {
   static const List<String> defaultStatuses = [
     'OPEN', 'INVESTIGATING', 'ACTION TAKEN', 'VERIFIED', 'CLOSED',
   ];
+
+  /// Statuses that mean "the case is finished". Screens must not hardcode
+  /// `status == 'OPEN' || ... 'INVESTIGATING' || ... 'ACTION TAKEN'`, because
+  /// adding one stage in the admin panel would then make it invisible to
+  /// every "open cases" count. Use [openStatusesFrom] instead.
+  static const List<String> terminalStatuses = ['VERIFIED', 'CLOSED'];
+
+  /// Everything in [statuses] that isn't terminal, upper-cased for comparison.
+  static Set<String> openStatusesFrom(List<String> statuses) => statuses
+      .map((s) => s.trim().toUpperCase())
+      .where((s) => !terminalStatuses.contains(s))
+      .toSet();
+
+  /// Convenience async form for callers that don't already hold the list.
+  static Future<Set<String>> getOpenStatuses() async =>
+      openStatusesFrom(await getStatuses());
 
   // ── DEFAULT OBSERVATION TYPES ────────────────────────────────────
   static const List<String> defaultObservationTypes = [
@@ -220,23 +323,34 @@ class AdminMasterData {
   static Future<void> savePlants(List<Map<String, String>> v, {bool syncToBackend = true}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kPlants, jsonEncode(v));
+    _bump();
     if (syncToBackend) {
-      // Fire-and-forget push to backend
-      SyncService.pushMasterData(plants: v).catchError((_) => false);
+      _pushGuarded(() => SyncService.pushMasterData(plants: v), 'plants');
     }
   }
 
   static Future<void> _saveList(String key, List<String> v, {bool syncToBackend = true}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(key, jsonEncode(v));
+    _bump();
     if (syncToBackend) {
       // Push the specific list to backend
       switch (key) {
-        case _kDepts:      SyncService.pushMasterData(departments: v).catchError((_) => false); break;
-        case _kWsa:        SyncService.pushMasterData(wsaCauses: v).catchError((_) => false); break;
-        case _kSeverities: SyncService.pushMasterData(severities: v).catchError((_) => false); break;
-        case _kStatuses:   SyncService.pushMasterData(statuses: v).catchError((_) => false); break;
-        case _kObsTypes:   SyncService.pushMasterData(obsTypes: v).catchError((_) => false); break;
+        case _kDepts:
+          _pushGuarded(() => SyncService.pushMasterData(departments: v), 'departments');
+          break;
+        case _kWsa:
+          _pushGuarded(() => SyncService.pushMasterData(wsaCauses: v), 'near-miss causes');
+          break;
+        case _kSeverities:
+          _pushGuarded(() => SyncService.pushMasterData(severities: v), 'severities');
+          break;
+        case _kStatuses:
+          _pushGuarded(() => SyncService.pushMasterData(statuses: v), 'statuses');
+          break;
+        case _kObsTypes:
+          _pushGuarded(() => SyncService.pushMasterData(obsTypes: v), 'observation types');
+          break;
       }
     }
   }
@@ -262,7 +376,12 @@ class AdminMasterData {
 
       bool updated = false;
 
-      if (remote['plants'] is List && (remote['plants'] as List).isNotEmpty) {
+      // The admin panel is AUTHORITATIVE. A key that is PRESENT but holds an
+      // empty list means the admin deleted every entry — that must propagate,
+      // otherwise deletions silently never take effect and the frontend
+      // deviates from the admin panel. A key that is ABSENT means the server
+      // simply has no opinion, so the local list is left alone.
+      if (remote['plants'] is List) {
         final plants = (remote['plants'] as List)
             .map((e) => Map<String, String>.from(
                 (e as Map).map((k, v) => MapEntry(k.toString(), v.toString()))))
@@ -270,27 +389,27 @@ class AdminMasterData {
         await savePlants(plants, syncToBackend: false);
         updated = true;
       }
-      if (remote['departments'] is List && (remote['departments'] as List).isNotEmpty) {
+      if (remote['departments'] is List) {
         final depts = (remote['departments'] as List).map((e) => e.toString()).toList();
         await saveDepartments(depts, syncToBackend: false);
         updated = true;
       }
-      if (remote['wsaCauses'] is List && (remote['wsaCauses'] as List).isNotEmpty) {
+      if (remote['wsaCauses'] is List) {
         final wsa = (remote['wsaCauses'] as List).map((e) => e.toString()).toList();
         await saveWsaCauses(wsa, syncToBackend: false);
         updated = true;
       }
-      if (remote['severities'] is List && (remote['severities'] as List).isNotEmpty) {
+      if (remote['severities'] is List) {
         final sev = (remote['severities'] as List).map((e) => e.toString()).toList();
         await saveSeverities(sev, syncToBackend: false);
         updated = true;
       }
-      if (remote['statuses'] is List && (remote['statuses'] as List).isNotEmpty) {
+      if (remote['statuses'] is List) {
         final st = (remote['statuses'] as List).map((e) => e.toString()).toList();
         await saveStatuses(st, syncToBackend: false);
         updated = true;
       }
-      if (remote['obsTypes'] is List && (remote['obsTypes'] as List).isNotEmpty) {
+      if (remote['obsTypes'] is List) {
         final obs = (remote['obsTypes'] as List).map((e) => e.toString()).toList();
         await saveObsTypes(obs, syncToBackend: false);
         updated = true;
@@ -351,10 +470,21 @@ class AdminMasterData {
   static Future<void> saveSeverityScores(Map<String, int> scores) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSeverityScores, jsonEncode(scores));
+    _bump();
+  }
+
+  /// Risk score for a severity label, using the admin-configured scale.
+  /// Single source of truth — callers must not hardcode their own scale.
+  static Future<int> scoreForSeverity(String severity) async {
+    final scores = await getSeverityScores();
+    final key = severity.trim().toUpperCase();
+    return scores[key] ?? scores['MEDIUM'] ?? 10;
   }
 
   // ── RESET to defaults ────────────────────────────────────────────
-  static Future<void> resetAllToDefaults() async {
+  /// Clears local overrides AND pushes the defaults to the backend, so a
+  /// reset is not silently undone by the next startup pull.
+  static Future<void> resetAllToDefaults({bool syncToBackend = true}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kPlants);
     await prefs.remove(_kDepts);
@@ -363,5 +493,19 @@ class AdminMasterData {
     await prefs.remove(_kStatuses);
     await prefs.remove(_kObsTypes);
     await prefs.remove(_kSeverityScores);
+    _bump();
+    if (syncToBackend) {
+      _pushGuarded(
+        () => SyncService.pushMasterData(
+          plants: sailPlants.map((p) => Map<String, String>.from(p)).toList(),
+          departments: List<String>.from(defaultDepartments),
+          wsaCauses: List<String>.from(defaultWsaCauses),
+          severities: List<String>.from(defaultSeverities),
+          statuses: List<String>.from(defaultStatuses),
+          obsTypes: List<String>.from(defaultObservationTypes),
+        ),
+        'reset to defaults',
+      );
+    }
   }
 }

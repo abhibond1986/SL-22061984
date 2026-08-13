@@ -39,21 +39,16 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _loading    = true;
   bool _refreshing = false;
 
-  // Loaded dynamically from AdminMasterData (synced with admin Plant Master)
-  List<Map<String, String>> _plants = [
-    {'code': 'BSP',  'name': 'Bhilai Steel Plant'},
-    {'code': 'DSP',  'name': 'Durgapur Steel Plant'},
-    {'code': 'RSP',  'name': 'Rourkela Steel Plant'},
-    {'code': 'ISP',  'name': 'IISCO Steel Plant, Burnpur'},
-    {'code': 'BSL',  'name': 'Bokaro Steel Limited'},
-    {'code': 'SSP',  'name': 'Salem Steel Plant'},
-    {'code': 'VISL', 'name': 'Visvesvaraya Iron & Steel'},
-    {'code': 'ASP',  'name': 'Alloy Steels Plant, Durgapur'},
-    {'code': 'CFP',  'name': 'Chandrapur Ferro Alloy Plant'},
-    {'code': 'MEL',  'name': 'Maharashtra Elektrosmelt'},
-    {'code': 'SSO',  'name': 'SAIL Safety Organisation'},
-    {'code': 'Corp', 'name': 'Corporate Office, New Delhi'},
-  ];
+  // SINGLE SOURCE OF TRUTH: always AdminMasterData. Seeded from the shared
+  // const (never a re-typed copy) purely so the first frame has something to
+  // paint; _loadPlantsMaster() replaces it immediately.
+  List<Map<String, String>> _plants =
+      AdminMasterData.sailPlants.map((p) => Map<String, String>.from(p)).toList();
+  // Statuses that count as "still open". Derived from the admin's status list
+  // so adding a stage in the admin panel doesn't silently exclude those
+  // incidents from every open-case count on this screen.
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
 
   @override
   void initState() {
@@ -61,11 +56,13 @@ class _DashboardTabState extends State<DashboardTab> {
     _loadAll();
     _loadPlantsMaster();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
+    AdminMasterData.revision.addListener(_loadPlantsMaster);
   }
 
   @override
   void dispose() {
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
+    AdminMasterData.revision.removeListener(_loadPlantsMaster);
     super.dispose();
   }
 
@@ -76,8 +73,13 @@ class _DashboardTabState extends State<DashboardTab> {
   Future<void> _loadPlantsMaster() async {
     try {
       final masterPlants = await AdminMasterData.getPlants();
-      if (!mounted || masterPlants.isEmpty) return;
-      setState(() => _plants = masterPlants);
+      final openStatuses = await AdminMasterData.getOpenStatuses();
+      if (!mounted) return;
+      // No .isEmpty bail-out: if the admin deleted every plant, show none.
+      setState(() {
+        _plants = masterPlants;
+        _openStatuses = openStatuses;
+      });
     } catch (_) {}
   }
 
@@ -195,8 +197,12 @@ class _DashboardTabState extends State<DashboardTab> {
           }
         }
       }
-      code ??= 'SSO';
-      if (!result.containsKey(code)) continue;
+      // Unmatched incidents go to the master list's own catch-all ('OTHER'),
+      // never to a hardcoded code that may not exist in the admin's list.
+      // If the admin removed the catch-all too, the incident is counted under
+      // no plant rather than being silently attributed to the wrong one.
+      code ??= result.containsKey('OTHER') ? 'OTHER' : null;
+      if (code == null || !result.containsKey(code)) continue;
       result[code]!['total'] = (result[code]!['total'] ?? 0) + 1;
       final status   = inc['status']?.toString().toUpperCase()   ?? '';
       final severity = inc['severity']?.toString().toUpperCase() ?? '';
@@ -544,8 +550,8 @@ class _DashboardTabState extends State<DashboardTab> {
     final critical = plantIncidents.where((i) =>
       (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL').length;
     final open = plantIncidents.where((i) {
-      final status = i['status']?.toString().toUpperCase() ?? '';
-      return status == 'OPEN' || status == 'INVESTIGATING' || status == 'ACTION TAKEN';
+      final status = i['status']?.toString().toUpperCase() ?? 'OPEN';
+      return _openStatuses.contains(status);
     }).length;
 
     // Last 30 days trend
@@ -821,9 +827,8 @@ class _DashboardTabState extends State<DashboardTab> {
                 title: '$code — Open cases',
                 filter: (i) {
                   final p = i['plant']?.toString().toUpperCase() ?? '';
-                  final s = i['status']?.toString().toUpperCase() ?? '';
-                  return p.startsWith(code) &&
-                      (s == 'OPEN' || s == 'INVESTIGATING' || s == 'ACTION TAKEN');
+                  final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
+                  return p.startsWith(code) && _openStatuses.contains(s);
                 }, sl: sl)),
             const SizedBox(width: 4),
             _miniBadge('S:$scans', AppColors.accent,

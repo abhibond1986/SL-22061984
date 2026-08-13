@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL;
 import '../../services/local_db.dart';
+import '../../services/admin_master_data.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 
@@ -16,17 +17,27 @@ class OverviewTab extends StatefulWidget {
 class _OverviewTabState extends State<OverviewTab> {
   List<Map<String, dynamic>> _incidents = [];
   bool _loading = true;
+  // Admin-configured severities, so charts show exactly the levels the admin
+  // defined (a renamed level no longer leaves a phantom zero row).
+  List<String> _severities =
+      List<String>.from(AdminMasterData.defaultSeverities);
+  // Admin-configured workflow statuses, in the admin's own order — the
+  // pipeline used to hardcode four and silently dropped VERIFIED.
+  List<String> _statuses =
+      List<String>.from(AdminMasterData.defaultStatuses);
 
   @override
   void initState() {
     super.initState();
     _load();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
+    AdminMasterData.revision.addListener(_load);
   }
 
   @override
   void dispose() {
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
+    AdminMasterData.revision.removeListener(_load);
     super.dispose();
   }
 
@@ -36,7 +47,16 @@ class _OverviewTabState extends State<OverviewTab> {
 
   Future<void> _load() async {
     final inc = await LocalDB.getIncidents();
-    if (mounted) setState(() { _incidents = inc; _loading = false; });
+    final sevs = await AdminMasterData.getSeverities();
+    final statuses = await AdminMasterData.getStatuses();
+    if (mounted) {
+      setState(() {
+        _incidents = inc;
+        _severities = sevs;
+        _statuses = statuses;
+        _loading = false;
+      });
+    }
   }
 
   // ── COMPUTED KPIs ─────────────────────────────────────────────
@@ -85,7 +105,11 @@ class _OverviewTabState extends State<OverviewTab> {
 
   // Severity counts
   Map<String, int> get _severityCounts {
-    final m = <String, int>{'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0};
+    // Seeded from the admin's severity list (reverse-ordered so the most
+    // severe reads first, matching the previous CRITICAL→LOW presentation).
+    final m = <String, int>{
+      for (final s in _severities.reversed) s.toUpperCase(): 0
+    };
     for (final i in _incidents) {
       final s = (i['severity']?.toString().toUpperCase() ?? 'MEDIUM');
       m[s] = (m[s] ?? 0) + 1;
@@ -254,15 +278,27 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  STATUS PIPELINE — OPEN → INVESTIGATING → ACTION TAKEN → CLOSED
+  //  STATUS PIPELINE — stages come from the admin's status list, in order
   // ═══════════════════════════════════════════════════════════════
+  /// Established colours for the standard SAIL pipeline; a status the admin
+  /// invents gets a neutral colour rather than breaking the widget.
+  Color _statusColorFor(String status) {
+    switch (status.trim().toUpperCase()) {
+      case 'OPEN':          return AppColors.amber;
+      case 'INVESTIGATING': return AppColors.cyan;
+      case 'ACTION TAKEN':  return AppColors.purple;
+      case 'VERIFIED':      return AppColors.accent;
+      case 'CLOSED':        return AppColors.green;
+      default:              return Colors.blueGrey;
+    }
+  }
+
   Widget _statusPipeline(SL sl) {
     final stages = [
-      ('OPEN', _statusCount('OPEN'), AppColors.amber),
-      ('INVESTIGATING', _statusCount('INVESTIGATING'), AppColors.cyan),
-      ('ACTION TAKEN', _statusCount('ACTION TAKEN'), const Color(0xFF8B5CF6)),
-      ('CLOSED', _statusCount('CLOSED'), AppColors.green),
+      for (final s in _statuses)
+        (s.toUpperCase(), _statusCount(s.toUpperCase()), _statusColorFor(s)),
     ];
+    if (stages.isEmpty) return const SizedBox();
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
@@ -392,15 +428,17 @@ class _OverviewTabState extends State<OverviewTab> {
     final total = counts.values.fold<int>(0, (s, v) => s + v);
     if (total == 0) return const SizedBox();
 
+    // Driven by the admin's severity list, so adding or renaming a level
+    // shows up here instead of being dropped. Previously these four rows
+    // force-unwrapped fixed keys (counts['CRITICAL']!), which would crash
+    // outright if an admin renamed a severity.
     final sections = [
-      PieChartSectionData(value: (counts['CRITICAL'] ?? 0).toDouble(),
-          color: AppColors.crit, radius: 22, title: ''),
-      PieChartSectionData(value: (counts['HIGH'] ?? 0).toDouble(),
-          color: AppColors.red, radius: 22, title: ''),
-      PieChartSectionData(value: (counts['MEDIUM'] ?? 0).toDouble(),
-          color: AppColors.amber, radius: 22, title: ''),
-      PieChartSectionData(value: (counts['LOW'] ?? 0).toDouble(),
-          color: AppColors.green, radius: 22, title: ''),
+      for (final entry in counts.entries)
+        PieChartSectionData(
+            value: entry.value.toDouble(),
+            color: _sevColorFor(entry.key),
+            radius: 22,
+            title: ''),
     ];
 
     return ClipRRect(
@@ -429,16 +467,33 @@ class _OverviewTabState extends State<OverviewTab> {
                 Text('Severity Split', style: TextStyle(
                     color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 10),
-                _sevRow('Critical', counts['CRITICAL']!, AppColors.crit, sl),
-                _sevRow('High', counts['HIGH']!, AppColors.red, sl),
-                _sevRow('Medium', counts['MEDIUM']!, AppColors.amber, sl),
-                _sevRow('Low', counts['LOW']!, AppColors.green, sl),
+                for (final entry in counts.entries)
+                  _sevRow(_titleCase(entry.key), entry.value,
+                      _sevColorFor(entry.key), sl),
               ],
             )),
           ]),
         ),
       ),
     );
+  }
+
+  /// Colour for a severity label. Known SAIL levels keep their established
+  /// colours; an admin-added level falls back to a neutral grey rather than
+  /// failing.
+  Color _sevColorFor(String severity) {
+    switch (severity.trim().toUpperCase()) {
+      case 'CRITICAL': return AppColors.crit;
+      case 'HIGH':     return AppColors.red;
+      case 'MEDIUM':   return AppColors.amber;
+      case 'LOW':      return AppColors.green;
+      default:         return Colors.blueGrey;
+    }
+  }
+
+  String _titleCase(String s) {
+    if (s.isEmpty) return s;
+    return s[0].toUpperCase() + s.substring(1).toLowerCase();
   }
 
   Widget _sevRow(String label, int count, Color color, SL sl) {

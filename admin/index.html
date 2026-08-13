@@ -1105,7 +1105,12 @@ async function loadPlants(){
     if(r.ok && r.data && r.data.plants){
       PLANTS = r.data.plants;
     } else {
-      // Use default if no saved data
+      // Use default if no saved data.
+      // ⚠ MUST stay byte-identical to AdminMasterData.sailPlants in
+      // lib/services/admin_master_data.dart — this is a second copy of the
+      // master list that cannot be imported from Dart. If you add, rename or
+      // remove a plant there, mirror it here or the web admin and the app
+      // will disagree whenever the backend has no saved plant list.
       PLANTS = [
         {code:'BSP', name:'Bhilai Steel Plant', state:'Chhattisgarh', kind:'Plant'},
         {code:'DSP', name:'Durgapur Steel Plant', state:'West Bengal', kind:'Plant'},

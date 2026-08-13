@@ -136,19 +136,42 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     _micPulseCtrl.repeat(reverse: true);
     _initSpeech();
     _loadMasterData();
+    // Reload dropdowns the moment an admin edits a master list.
+    AdminMasterData.revision.addListener(_loadMasterData);
   }
 
   Future<void> _loadMasterData() async {
     try {
-      final plants = await AdminMasterData.getPlants();
+      final plantLabels = await AdminMasterData.getPlantLabels();
       final wsa    = await AdminMasterData.getWsaCauses();
       final depts  = await AdminMasterData.getDepartments();
+      final sevs   = await AdminMasterData.getSeverities();
+      final obs    = await AdminMasterData.getObsTypes();
+      final sevScores = await AdminMasterData.getSeverityScores();
       if (!mounted) return;
+      // No .isNotEmpty guards: the admin panel is authoritative, so a list
+      // the admin emptied must show as empty rather than silently keeping
+      // stale values.
       setState(() {
-        final plantNames = plants.map((p) => p['name'] ?? p['code'] ?? '').where((s) => s.isNotEmpty).toList();
-        if (plantNames.isNotEmpty) _plants = plantNames;
-        if (wsa.isNotEmpty) _wsaCauses = wsa;
-        if (depts.isNotEmpty) _departments = depts;
+        _plants     = plantLabels;
+        _wsaCauses  = wsa;
+        _departments = depts;
+        _severities = sevs;
+        _obsTypes   = obs;
+        _severityScores = sevScores;
+        // Clear selections the admin has since deleted, so the form can't
+        // submit a value that no longer exists in the master list.
+        if (!_plants.contains(_plant)) _plant = '';
+        if (!_wsaCauses.contains(_wsaCause)) _wsaCause = '';
+        if (_selectedDept.isNotEmpty && !_departments.contains(_selectedDept)) {
+          _selectedDept = '';
+        }
+        if (!_severities.contains(_severity)) {
+          _severity = _severities.isNotEmpty ? _severities.first : '';
+        }
+        if (!_obsTypes.contains(_obsType)) {
+          _obsType = _obsTypes.isNotEmpty ? _obsTypes.first : '';
+        }
       });
     } catch (_) {}
   }
@@ -698,16 +721,19 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
   }
 
   /// ★ Generate a tiny thumbnail (60px wide) for the incident log card
-  /// ★ v34: Compute risk score from severity for manual entries
-  /// Ensures PDF report never shows 0 when severity is selected
+  /// ★ v34: Compute risk score from severity for manual entries.
+  /// Uses the ADMIN-CONFIGURED severity scores (Admin ▸ Custom Lists ▸
+  /// severity scoring) so editing a score in the admin panel changes the
+  /// score recorded here. Previously this method hardcoded a second,
+  /// contradictory scale (90/70/50/25) that ignored the admin entirely.
+  /// `_severityScores` is loaded by _loadMasterData(); the fallback is the
+  /// shared default map, never a locally-invented scale.
   int _computeRiskScore(String severity) {
-    switch (severity.toUpperCase()) {
-      case 'CRITICAL': return 90;
-      case 'HIGH':     return 70;
-      case 'MEDIUM':   return 50;
-      case 'LOW':      return 25;
-      default:         return 50;
-    }
+    final key = severity.trim().toUpperCase();
+    final scores = _severityScores.isNotEmpty
+        ? _severityScores
+        : AdminMasterData.defaultSeverityScores;
+    return scores[key] ?? scores['MEDIUM'] ?? 0;
   }
 
   String? _generateThumbnail(Uint8List imageBytes) {
@@ -767,33 +793,28 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     _actionDebounce?.cancel();
     _micPulseCtrl.dispose();
     _speech.cancel();
+    AdminMasterData.revision.removeListener(_loadMasterData);
     _brief.dispose(); _deptOther.dispose(); _location.dispose();
     _description.dispose(); _immediateAction.dispose();
     for (final c in _additionalActions) { c.dispose(); }
     super.dispose();
   }
 
-  // Loaded dynamically from AdminMasterData (synced with admin panel)
-  List<String> _plants = ['BSP', 'DSP', 'RSP', 'BSL', 'ISP', 'ASP', 'SSP', 'CFP', 'CMO', 'JGOM', 'OGOM', 'BSP(M)', 'Collieries', 'SRU Kulti', 'SSO'];
-  // ★ Departments loaded from AdminMasterData — includes "Other" appended at end
+  // SINGLE SOURCE OF TRUTH: AdminMasterData for all three lists. Seeded from
+  // the shared consts (references, never re-typed copies) so the first frame
+  // has something to paint; _loadMasterData() replaces them immediately.
+  // Uses the same plantLabel() formatter as every other screen so the plant
+  // stored on an incident matches what the dashboards group by.
+  List<String> _plants = AdminMasterData.sailPlants
+      .map(AdminMasterData.plantLabel)
+      .where((s) => s.isNotEmpty)
+      .toList();
   List<String> _departments = List<String>.from(AdminMasterData.defaultDepartments);
-  // ✅ v23: Default matches AdminMasterData.defaultWsaCauses (WSA-13 root causes)
-  // Gets overwritten by _loadMasterData() with custom list from admin panel
-  List<String> _wsaCauses = const [
-    '1. Failure to follow procedure',
-    '2. Lack of hazard awareness',
-    '3. Improper PPE use',
-    '4. Unsafe body positioning',
-    '5. Equipment failure',
-    '6. Communication failure',
-    '7. Human error',
-    '8. Poor housekeeping',
-    '9. Lack of supervision',
-    '10. Fatigue / time pressure',
-    '11. Unauthorized operation',
-    '12. Inadequate isolation (LOTO/PTW)',
-    '13. Environmental conditions',
-  ];
+  List<String> _wsaCauses = List<String>.from(AdminMasterData.defaultWsaCauses);
+  List<String> _severities = List<String>.from(AdminMasterData.defaultSeverities);
+  List<String> _obsTypes = List<String>.from(AdminMasterData.defaultObservationTypes);
+  Map<String, int> _severityScores =
+      Map<String, int>.from(AdminMasterData.defaultSeverityScores);
 
   Future<void> _pickImage(ImageSource source) async {
     final picker = ImagePicker();
@@ -1966,8 +1987,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             _buildTextField('Enter Department Name', _deptOther, Icons.edit_outlined, sl),
           _buildLocationField(sl),
           _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses, (v) => setState(() => _wsaCause = v!), sl),
-          _buildDropdownField('Observation Type', _obsType, const ['Unsafe Act', 'Unsafe Condition'], (v) => setState(() => _obsType = v!), sl),
-          _buildDropdownField('Initial Risk Severity', _severity, const ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'], (v) => setState(() => _severity = v!), sl),
+          _buildDropdownField('Observation Type', _obsType, _obsTypes, (v) => setState(() => _obsType = v!), sl),
+          _buildDropdownField('Initial Risk Severity', _severity, _severities, (v) => setState(() => _severity = v!), sl),
           // ★ Reference image now shown in _imageSection at top (via _imageAttachedOnly)
           // ★ AI Summary of Near Miss (shown after AI processes voice/text input)
           if (_aiSummary != null)
@@ -2547,6 +2568,27 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   }
 
   Widget _buildDropdownField(String label, String value, List<String> items, ValueChanged<String?> onChanged, SL sl) {
+    // The admin may legitimately empty a master list. Render a disabled
+    // placeholder rather than crashing on items.first.
+    if (items.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: InputDecorator(
+          decoration: InputDecoration(
+            labelText: label,
+            labelStyle: TextStyle(color: sl.text3, fontSize: 11.5),
+            filled: true,
+            fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: sl.border.withOpacity(0.5))),
+          ),
+          child: Text('Not configured — contact admin',
+              style: TextStyle(color: sl.text3, fontSize: 12)),
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: DropdownButtonFormField<String>(

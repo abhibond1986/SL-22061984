@@ -22,6 +22,7 @@ import 'supabase_config.dart';
 import 'supabase_service.dart';
 import 'local_db.dart';
 import 'app_logger.dart';
+import 'admin_master_data.dart';
 
 class RealtimeSync {
   RealtimeSync._();
@@ -31,6 +32,7 @@ class RealtimeSync {
   static final ValueNotifier<int> incidentsRevision = ValueNotifier<int>(0);
 
   static RealtimeChannel? _channel;
+  static RealtimeChannel? _masterChannel;
   static bool _started = false;
 
   /// Begin listening for live incident changes. Safe to call more than once.
@@ -47,7 +49,22 @@ class RealtimeSync {
             callback: _onChange,
           )
           .subscribe();
-      AppLogger.info('RealtimeSync', 'Subscribed to live incident changes');
+
+      // Master data (plants, departments, severities, statuses, WSA causes,
+      // observation types) is edited in the admin panel, possibly on another
+      // device. Without this channel an admin edit only reached other devices
+      // on their next cold start, so the frontend deviated from the panel.
+      _masterChannel = SupabaseService.client
+          .channel('public:master_data')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'master_data',
+            callback: _onMasterDataChange,
+          )
+          .subscribe();
+      AppLogger.info('RealtimeSync',
+          'Subscribed to live incident + master data changes');
     } catch (e, s) {
       _started = false;
       AppLogger.error('RealtimeSync', 'Failed to subscribe',
@@ -62,11 +79,34 @@ class RealtimeSync {
         await SupabaseService.client.removeChannel(_channel!);
       }
     } catch (_) {}
+    try {
+      if (_masterChannel != null) {
+        await SupabaseService.client.removeChannel(_masterChannel!);
+      }
+    } catch (_) {}
     _channel = null;
+    _masterChannel = null;
     _started = false;
   }
 
   static bool get isActive => _started;
+
+  // ── master data change handler ────────────────────────────────────────────
+  /// Any row change in `master_data` triggers a full re-pull. The payload is
+  /// deliberately ignored: rows are key→jsonb, so re-pulling everything is both
+  /// simpler and safer than trying to apply one key in isolation, and it also
+  /// picks up the AI keys that live outside this table.
+  static Future<void> _onMasterDataChange(PostgresChangePayload payload) async {
+    try {
+      // syncFromBackend() writes to SharedPreferences and bumps
+      // AdminMasterData.revision, which is what every screen listens to.
+      await AdminMasterData.syncFromBackend();
+      AppLogger.info('RealtimeSync', 'Master data refreshed from live change');
+    } catch (e, s) {
+      AppLogger.error('RealtimeSync', 'Failed to refresh master data',
+          error: e, stack: s);
+    }
+  }
 
   // ── change handler ────────────────────────────────────────────────────────
   static Future<void> _onChange(PostgresChangePayload payload) async {

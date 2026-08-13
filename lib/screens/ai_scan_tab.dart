@@ -18,6 +18,7 @@ import '../main.dart';
 import '../services/gemini_vision.dart';
 import '../services/local_ai.dart';
 import '../services/local_db.dart';
+import '../services/admin_master_data.dart';
 import '../services/image_storage.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
@@ -78,8 +79,31 @@ class _AIScanTabState extends State<AIScanTab> {
   static const String _sheetUrl =
       'https://docs.google.com/spreadsheets/d/16BeCJ3KpXiYzl-cbcfRUFL1vZkPtzyXzUHZP5usNZhY/edit';
 
+  // ── ADMIN MASTER DATA ────────────────────────────────────────────
+  // This screen previously had NO master-data awareness at all — its
+  // severity dropdown and sort order were hardcoded, so admin edits never
+  // reached the AI scan review sheet.
+  List<String> _severities =
+      List<String>.from(AdminMasterData.defaultSeverities);
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMasterData();
+    AdminMasterData.revision.addListener(_loadMasterData);
+  }
+
+  Future<void> _loadMasterData() async {
+    try {
+      final sevs = await AdminMasterData.getSeverities();
+      if (!mounted) return;
+      setState(() => _severities = sevs);
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
+    AdminMasterData.revision.removeListener(_loadMasterData);
     _scrollController.dispose();
     _locationController.dispose();
     for (final c in _mitigationControllers.values) { c.dispose(); }
@@ -862,7 +886,16 @@ class _AIScanTabState extends State<AIScanTab> {
 
   Widget _severityDropdown(
       String current, SL sl, ValueChanged<String> onChanged) {
-    const sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+    // Admin-configured severities (Admin ▸ Custom Lists). Was hardcoded, so
+    // a severity added or renamed in the admin panel never appeared here.
+    final sevs = _severities;
+    if (sevs.isEmpty) {
+      return Text(current,
+          style: TextStyle(
+              color: _sevColor(current),
+              fontSize: 9,
+              fontWeight: FontWeight.w800));
+    }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6),
       decoration: BoxDecoration(
@@ -871,7 +904,7 @@ class _AIScanTabState extends State<AIScanTab> {
         border: Border.all(color: _sevColor(current))),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: sevs.contains(current) ? current : 'MEDIUM',
+          value: sevs.contains(current) ? current : sevs.first,
           isDense: true,
           dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
           style: TextStyle(
@@ -2103,9 +2136,15 @@ class _AIScanTabState extends State<AIScanTab> {
           fontWeight: FontWeight.w600)),
       ]))));
 
-  static const Map<String, int> _sevOrder = {
-    'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3,
-  };
+  /// Sort rank for hazard severity — 0 = most severe. Derived from the admin's
+  /// severity list (which is stored least-severe-first), so a renamed or added
+  /// level still sorts in the right place instead of all collapsing to last.
+  Map<String, int> get _sevOrder {
+    final ordered = _severities.reversed.toList();
+    return {
+      for (var i = 0; i < ordered.length; i++) ordered[i].toUpperCase(): i,
+    };
+  }
 
   /// Small pill showing whether the analysis came from the live online AI
   /// or the offline knowledge-base fallback. Reads the flags GeminiVision
@@ -2156,10 +2195,13 @@ class _AIScanTabState extends State<AIScanTab> {
     final confidence  = _result!['confidence']   ?? 75;
     final summary     = _result!['summary']?.toString() ?? '';
     final hazards     = List<dynamic>.from((_result!['hazards'] as List?) ?? []);
-    // Sort hazards by severity: CRITICAL > HIGH > MEDIUM > LOW
+    // Sort hazards most-severe-first, using the admin's severity order.
+    // Unknown levels sort last rather than being treated as MEDIUM.
+    final sevOrder = _sevOrder;
+    final unknownRank = sevOrder.length;
     hazards.sort((a, b) {
-      final sa = _sevOrder[(a as Map)['severity']?.toString().toUpperCase() ?? 'MEDIUM'] ?? 3;
-      final sb = _sevOrder[(b as Map)['severity']?.toString().toUpperCase() ?? 'MEDIUM'] ?? 3;
+      final sa = sevOrder[(a as Map)['severity']?.toString().toUpperCase() ?? ''] ?? unknownRank;
+      final sb = sevOrder[(b as Map)['severity']?.toString().toUpperCase() ?? ''] ?? unknownRank;
       return sa.compareTo(sb);
     });
     final riskColor   = _sevColor(overallRisk);

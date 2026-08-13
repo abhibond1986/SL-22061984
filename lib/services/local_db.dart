@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'kb_seed_data.dart';
 import 'crypto_utils.dart';
+import 'admin_master_data.dart';
 
 class LocalDB {
   static late SharedPreferences _prefs;
@@ -649,15 +650,32 @@ class LocalDB {
   //  PLANT STATS
   // ═══════════════════════════════════════════════════════════════
 
+  /// Per-plant rollup keyed by the canonical plant label.
+  /// Plants come from AdminMasterData (the single source of truth) and
+  /// incident plant strings are canonicalized before grouping, so the many
+  /// historical formats ("DSP", "DSP Durgapur", "Durgapur Steel Plant") all
+  /// roll up to one row. Previously this hardcoded five plants in a naming
+  /// format ("BSP Bhilai") that matched neither the codes nor the canonical
+  /// names, so every bucket read zero.
   static Future<Map<String, Map<String, int>>> getPlantStats() async {
     final inc = await getIncidents();
     final result = <String, Map<String, int>>{};
-    final plants = [
-      'BSP Bhilai', 'DSP Durgapur', 'RSP Rourkela',
-      'BSL Bokaro', 'ISP Burnpur',
-    ];
-    for (final p in plants) {
-      final pInc = inc.where((i) => i['plant'] == p).toList();
+    final master = await AdminMasterData.getPlants();
+    final labels = <String>[];
+    for (final p in master) {
+      final l = AdminMasterData.plantLabel(p);
+      if (l.isNotEmpty && !labels.contains(l)) labels.add(l);
+    }
+    // Pre-canonicalize each incident once.
+    final canon = inc
+        .map((i) => AdminMasterData.canonicalPlantFrom(
+            i['plant']?.toString() ?? '', master))
+        .toList();
+    for (final p in labels) {
+      final pInc = <Map<String, dynamic>>[];
+      for (var k = 0; k < inc.length; k++) {
+        if (canon[k] == p) pInc.add(inc[k]);
+      }
       result[p] = {
         'total':    pInc.length,
         'open':     pInc.where((i) => i['status']   == 'OPEN').length,

@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'admin_master_data.dart';
 
 class GeminiDirectVision {
   static const String _kApiKey = 'gemini_vision_api_key';
@@ -142,7 +143,7 @@ class GeminiDirectVision {
     final url = 'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey';
 
     // Build prompt with KB context if available
-    String prompt = _getComprehensivePrompt();
+    String prompt = await resolvedComprehensivePrompt();
     if (kbContext != null && kbContext.isNotEmpty) {
       prompt += '\n\n═══════════════════════════════════════════════════════\n'
           'ADDITIONAL REFERENCE MATERIAL FROM KNOWLEDGE BANK\n'
@@ -216,6 +217,47 @@ class GeminiDirectVision {
       print('GeminiDirectVision: [$model] Exception: $e');
       return null;
     }
+  }
+
+  /// [_getComprehensivePrompt] with the admin's live severity, observation-type
+  /// and WSA-cause vocabularies substituted in. Callers must use this, never the
+  /// raw template — otherwise renaming a severity or a cause in the admin panel
+  /// leaves this model emitting labels the app's dropdowns no longer accept.
+  static Future<String> resolvedComprehensivePrompt() async {
+    List<String> sevs;
+    List<String> types;
+    List<String> causes;
+    try {
+      sevs = await AdminMasterData.getSeverities();
+    } catch (_) {
+      sevs = List<String>.from(AdminMasterData.defaultSeverities);
+    }
+    try {
+      types = await AdminMasterData.getObsTypes();
+    } catch (_) {
+      types = List<String>.from(AdminMasterData.defaultObservationTypes);
+    }
+    try {
+      causes = await AdminMasterData.getWsaCauses();
+    } catch (_) {
+      causes = List<String>.from(AdminMasterData.defaultWsaCauses);
+    }
+    final sevEnum = sevs.isEmpty
+        ? 'LOW'
+        : sevs.reversed.map((s) => s.toUpperCase()).join('|');
+    // 'Line of Fire' drives the lofZone field, so keep it available regardless.
+    final typeList = <String>[
+      ...types,
+      if (!types.any((t) => t.toLowerCase() == 'line of fire')) 'Line of Fire',
+    ];
+    final causeBlock = causes.isEmpty
+        ? 'HAZARD CATEGORIES: none configured — omit "wsaCause" and "wsa".'
+        : 'HAZARD CATEGORIES (use the EXACT wording below for "wsaCause" and "wsa"):\n'
+            '${causes.join('\n')}';
+    return _getComprehensivePrompt()
+        .replaceAll('{{SEVERITIES}}', sevEnum)
+        .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
+        .replaceAll('{{WSA_CAUSES}}', causeBlock);
   }
 
   /// ★ v36: FINE-TUNED Comprehensive hazard analysis prompt
@@ -641,10 +683,13 @@ GAS NETWORK → Check: CO detector presence, gas leak indicators (dead birds/veg
 MAINTENANCE → Check: Grinding guards, welding screens, gas cylinder security, crane operation, chemical storage, housekeeping, fall protection for equipment repair, stored energy isolation
 
 ═══════════════════════════════════════════════════════
+{{WSA_CAUSES}}
+
+═══════════════════════════════════════════════════════
 OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
 ═══════════════════════════════════════════════════════
 {
-  "overallRisk": "CRITICAL|HIGH|MEDIUM|LOW",
+  "overallRisk": "{{SEVERITIES}}",
   "riskScore": 0-100,
   "confidence": 0-100 (reflects YOUR certainty based on image clarity + evidence strength),
   "people": <integer count of ACTUALLY VISIBLE persons, 0 if none>,
@@ -655,13 +700,13 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
   "hazards": [
     {
       "name": "max 5 words describing what is VISIBLE",
-      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "severity": "{{SEVERITIES}}",
       "description": "MUST START WITH 'Visible: [specific object/condition seen].' Then: why dangerous, potential consequence in THIS SECTION.",
       "visualEvidence": "What specific object/condition/person in the image PROVES this hazard exists (1 sentence)",
       "regulation": "MUST be from verified table above e.g. FA 1948 S37",
       "correctiveAction": "starts with action verb; specific measurable steps relevant to this section",
-      "type": "Unsafe Act|Unsafe Condition|Line of Fire",
-      "wsaCause": "number. description e.g. 5. Equipment failure",
+      "type": "{{OBS_TYPES}}",
+      "wsaCause": "EXACT wording from the hazard category list below",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7}
     }

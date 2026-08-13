@@ -13,6 +13,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'admin_master_data.dart';
 
 class GroqService {
   static const String _kGroqApiKey = 'groq_api_key';
@@ -170,6 +171,19 @@ Rules:
     required String language,
     String? kbContext,
   }) async {
+    // Observation types come from the admin panel. This used to be a
+    // hardcoded five-value enum that didn't match the app's own dropdown, so
+    // the AI could return a category the form then rejected.
+    List<String> obsTypes;
+    try {
+      obsTypes = await AdminMasterData.getObsTypes();
+    } catch (_) {
+      obsTypes = List<String>.from(AdminMasterData.defaultObservationTypes);
+    }
+    final categoryRule = obsTypes.isEmpty
+        ? '"category": ""'
+        : '"category": "one of (exact wording): ${obsTypes.join(', ')}"';
+
     final langInstruction = language == 'English'
         ? 'Respond with "reason", "refined", and "correctiveAction" fields in English.'
         : 'IMPORTANT: The worker spoke in $language. Write "reason", "refined", and "correctiveAction" in $language (native script). Do NOT translate to English.';
@@ -189,7 +203,7 @@ Respond in STRICT JSON format:
   "reason": "brief explanation (in worker's language)",
   "refined": "rewritten professional near-miss description with safety terminology (in worker's language)",
   "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in worker's language)",
-  "category": "one of: Unsafe Act, Unsafe Condition, Near Miss, Equipment Failure, Process Deviation",
+  $categoryRule,
   "detectedLanguage": "English/Hindi"
 }
 

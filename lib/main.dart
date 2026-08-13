@@ -38,6 +38,13 @@ void main() async {
   await AdminMasterData.syncFromBackend()
       .timeout(const Duration(seconds: 10), onTimeout: () => false)
       .catchError((_) => false);
+  // Warm the synchronous master-data snapshot used by code paths that can't
+  // await (LocalAI.processText, called inline by the near-miss form), and keep
+  // it warm on every later change.
+  await AdminMasterData.primeSnapshots();
+  AdminMasterData.revision.addListener(() {
+    AdminMasterData.primeSnapshots();
+  });
   // ★ v25: Pull latest Knowledge Base from backend (non-blocking)
   SyncService.syncKnowledgeBase().catchError((_) => false);
   // Silent auto-update: checks GitHub releases and installs APK in background

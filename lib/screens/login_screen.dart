@@ -38,24 +38,13 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _selectedPlant;
   bool _isOtherPlant = false;
 
-  // Loaded dynamically from AdminMasterData
-  List<String> _sailPlants = [
-    'BSP — Bhilai Steel Plant',
-    'DSP — Durgapur Steel Plant',
-    'RSP — Rourkela Steel Plant',
-    'BSL — Bokaro Steel Plant',
-    'ISP — IISCO Steel Plant, Burnpur',
-    'ASP — Alloy Steels Plant, Durgapur',
-    'SSP — Salem Steel Plant',
-    'CFP — Chandrapur Ferro Alloy Plant',
-    'CMO — Central Marketing Organisation',
-    'JGOM — Jharkhand Group of Mines',
-    'OGOM — Odisha Group of Mines',
-    'BSP(M) — BSP Mines',
-    'Collieries — SAIL Collieries',
-    'SRU Kulti — Steel Refractory Unit, Kulti',
-    'Others',
-  ];
+  // SINGLE SOURCE OF TRUTH: AdminMasterData. Seeded from the shared const via
+  // the shared label formatter so the first frame matches what _loadPlants()
+  // will install — no re-typed copy that can drift from the master list.
+  List<String> _sailPlants = AdminMasterData.sailPlants
+      .map(AdminMasterData.plantLabel)
+      .where((s) => s.isNotEmpty)
+      .toList();
 
   String get _effectivePlant {
     if (_isOtherPlant) return _regOtherPlantCtrl.text.trim();
@@ -66,24 +55,29 @@ class _LoginScreenState extends State<LoginScreen> {
   void initState() {
     super.initState();
     _loadPlants();
+    AdminMasterData.revision.addListener(_loadPlants);
   }
 
   Future<void> _loadPlants() async {
     try {
-      final plants = await AdminMasterData.getPlants();
-      if (!mounted || plants.isEmpty) return;
-      final list = plants.map((p) {
-        final code = p['code'] ?? '';
-        final name = p['name'] ?? '';
-        return code.isNotEmpty && name.isNotEmpty ? '$code — $name' : name;
-      }).where((s) => s.isNotEmpty).toList();
-      list.add('Others');
-      setState(() => _sailPlants = list);
+      // getPlantLabels() already de-duplicates and includes the master
+      // list's own catch-all entry, so nothing is appended here — the old
+      // code added a second 'Others' on top of the one in the master list.
+      final list = await AdminMasterData.getPlantLabels();
+      if (!mounted) return;
+      setState(() {
+        _sailPlants = list;
+        // Drop a stale selection that the admin has since deleted.
+        if (_selectedPlant != null && !list.contains(_selectedPlant)) {
+          _selectedPlant = null;
+        }
+      });
     } catch (_) {}
   }
 
   @override
   void dispose() {
+    AdminMasterData.revision.removeListener(_loadPlants);
     _userCtrl.dispose(); _passCtrl.dispose();
     _regNameCtrl.dispose(); _regUserCtrl.dispose(); _regPassCtrl.dispose();
     _regDesigCtrl.dispose(); _regPnoCtrl.dispose(); _regOtherPlantCtrl.dispose();

@@ -14,6 +14,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/local_db.dart';
+import '../services/admin_master_data.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
@@ -38,14 +39,19 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   // cached, so the detail view shows the same photo the analysis was made on.
   Future<Uint8List?>? _evidenceImageFuture;
 
-  static const List<String> _statusOrder = [
-    'OPEN', 'INVESTIGATING', 'ACTION TAKEN', 'CLOSED'
-  ];
+  // The workflow ladder shown here, straight from the admin's status list.
+  // This was hardcoded to four stages and omitted VERIFIED entirely, so the
+  // "advance to next stage" button skipped it and a verified incident showed
+  // as off-ladder.
+  List<String> _statusOrder =
+      List<String>.from(AdminMasterData.defaultStatuses);
 
   @override
   void initState() {
     super.initState();
     _inc = Map<String, dynamic>.from(widget.incident);
+    _loadStatuses();
+    AdminMasterData.revision.addListener(_loadStatuses);
     _actionCtrl.text   = _inc['correctiveAction']?.toString() ?? '';
     _closedByCtrl.text = _inc['closedBy']?.toString()         ?? '';
     _remarksCtrl.text  = _inc['closingRemarks']?.toString()   ?? '';
@@ -54,18 +60,32 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     _evidenceImageFuture = _resolveImageBytes();
   }
 
+  Future<void> _loadStatuses() async {
+    try {
+      final s = await AdminMasterData.getStatuses();
+      if (!mounted) return;
+      setState(() => _statusOrder = s.map((e) => e.toUpperCase()).toList());
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
+    AdminMasterData.revision.removeListener(_loadStatuses);
     _actionCtrl.dispose(); _closedByCtrl.dispose(); _remarksCtrl.dispose();
     super.dispose();
   }
 
   String get _status   => (_inc['status']?.toString() ?? 'OPEN').toUpperCase();
-  bool   get _isClosed => _status == 'CLOSED';
+  /// True once the incident has reached the FINAL workflow stage, whatever the
+  /// admin named it — comparing to the literal 'CLOSED' meant renaming the last
+  /// stage left every closed incident permanently editable.
+  bool   get _isClosed =>
+      _statusOrder.isNotEmpty && _status == _statusOrder.last;
 
   Color _statusColor(String s) {
     switch (s.toUpperCase()) {
       case 'CLOSED':        return const Color(0xFF16A34A);
+      case 'VERIFIED':      return const Color(0xFF1E88E5);
       case 'ACTION TAKEN':  return const Color(0xFF0891B2);
       case 'INVESTIGATING': return const Color(0xFFD97706);
       default:              return const Color(0xFFDC2626);
@@ -96,7 +116,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
 
   Future<void> _advanceStatus(String newStatus) async {
     if (_saving) return;
-    if (newStatus == 'CLOSED' && _actionCtrl.text.trim().isEmpty) {
+    // Require a corrective action before entering the FINAL stage, whatever
+    // the admin renamed it to — hardcoding 'CLOSED' meant a renamed final
+    // stage could be reached with the action field left blank.
+    final isFinal = _statusOrder.isNotEmpty && newStatus == _statusOrder.last;
+    if (isFinal && _actionCtrl.text.trim().isEmpty) {
       _snack('Enter corrective action first', AppColors.red); return;
     }
     setState(() => _saving = true);
@@ -105,7 +129,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     _inc['correctiveAction'] = _actionCtrl.text.trim();
     _inc['closedBy']         = _closedByCtrl.text.trim();
     _inc['closingRemarks']   = _remarksCtrl.text.trim();
-    if (newStatus == 'CLOSED')        _inc['closedAt']               = now;
+    // Stage timestamps. The final-stage stamp follows _statusOrder; the two
+    // named stamps only apply if the admin still has those stages.
+    if (isFinal)                      _inc['closedAt']               = now;
     if (newStatus == 'INVESTIGATING') _inc['investigationStartedAt'] = now;
     if (newStatus == 'ACTION TAKEN')  _inc['actionTakenAt']          = now;
     await LocalDB.saveIncident(_inc);
@@ -113,9 +139,8 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     setState(() => _saving = false);
     widget.onStatusChanged?.call();
     _snack(
-      newStatus == 'CLOSED' ? '✅ Case closed & synced to Sheets'
-          : '✅ Status → $newStatus',
-      newStatus == 'CLOSED' ? const Color(0xFF16A34A) : AppColors.accent,
+      isFinal ? '✅ Case closed & synced' : '✅ Status → $newStatus',
+      isFinal ? const Color(0xFF16A34A) : AppColors.accent,
     );
   }
 
@@ -965,7 +990,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final nextIdx = curIdx + 1;
     final hasNext = nextIdx < _statusOrder.length;
     final nextSt  = hasNext ? _statusOrder[nextIdx] : null;
-    final isClose = nextSt == 'CLOSED';
+    // "Closing" = advancing into the FINAL stage, whatever the admin named it.
+    // Checking `== 'CLOSED'` meant renaming the last stage silently dropped the
+    // closure-remarks requirement. (Deliberately the last stage only, not every
+    // terminal status — reaching VERIFIED shouldn't demand closure remarks.)
+    final isClose = hasNext && nextIdx == _statusOrder.length - 1;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 26),

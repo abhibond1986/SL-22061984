@@ -10,6 +10,7 @@
 // Used by: Ask AI (Suraksha Saathi) chatbot + offline fallback
 
 import 'dart:io';
+import 'admin_master_data.dart';
 
 class LocalAI {
 
@@ -408,6 +409,12 @@ class LocalAI {
       'Ref: SG/20, SMPV Rules 2016',
 
     // ── WSA 13 CAUSES ──────────────────────────────────────────────
+    // ⚠ This is the OFFLINE fallback knowledge base and must be a `const` map,
+    // so it cannot read the admin's cause list at runtime. The cause lines
+    // below are therefore the DEFAULT wording; every answer is passed through
+    // [_withLiveWsaCauses] on the way out, which swaps in the admin's list.
+    // Keep this block in sync with AdminMasterData.defaultWsaCauses so the
+    // substitution can find it.
     'wsa|13 causes|world steel|cause categories|root cause':
       'WSA 13 CAUSE CATEGORIES (World Steel Association):\n\n'
       'Assign ONE cause to every incident/near miss:\n\n'
@@ -422,7 +429,7 @@ class LocalAI {
       '9. Lack of supervision\n'
       '10. Fatigue / time pressure\n'
       '11. Unauthorized operation\n'
-      '12. Inadequate isolation\n'
+      '12. Inadequate isolation (LOTO/PTW)\n'
       '13. Environmental conditions\n\n'
       'WSA Top 5 causes in steel industry worldwide:\n'
       '1. Moving machinery\n'
@@ -735,17 +742,33 @@ class LocalAI {
       }
     }
 
-    if (bestScore > 0) return _kb[bestKey]!;
+    if (bestScore > 0) return _withLiveWsaCauses(_kb[bestKey]!);
 
     // Fuzzy fallback — check individual important words
     if (q.contains('sg/') || q.contains('sg 0') || q.contains('guideline')) {
       return _guidelineIndex();
     }
     if (q.contains('what') && q.contains('colour') || q.contains('color') && q.contains('helmet')) {
-      return _kb['ppe|personal protective|safety helmet|helmet|hard hat|safety shoes|ear protection|eye protection|gloves|harness']!;
+      return _withLiveWsaCauses(_kb[
+          'ppe|personal protective|safety helmet|helmet|hard hat|safety shoes|ear protection|eye protection|gloves|harness']!);
     }
 
     return _defaultHelp();
+  }
+
+  /// Replace the DEFAULT WSA cause list embedded in the const [_kb] with the
+  /// admin's current list, so an offline chatbot answer quotes the same
+  /// categories the near-miss dropdown offers. A no-op when the admin hasn't
+  /// customised them, or when the answer doesn't contain the cause block.
+  static String _withLiveWsaCauses(String answer) {
+    final live = AdminMasterData.wsaCausesSync;
+    const defaults = AdminMasterData.defaultWsaCauses;
+    final defaultBlock = '${defaults.join('\n')}\n';
+    if (!answer.contains(defaultBlock)) return answer;
+    final liveBlock = live.isEmpty
+        ? 'No cause categories are configured.\n'
+        : '${live.join('\n')}\n';
+    return answer.replaceAll(defaultBlock, liveBlock);
   }
 
   static String _defaultHelp() =>
@@ -813,70 +836,77 @@ class LocalAI {
   // ══════════════════════════════════════════════════════════════════
   //  NEAR MISS TEXT PROCESSING (used by near_miss_tab)
   // ══════════════════════════════════════════════════════════════════
+  /// Resolve a WSA cause by its number against the ADMIN's current list, so a
+  /// cause the admin renamed comes back with the admin's wording. [fallback] is
+  /// the shared default text, used only if the admin has no entry with that
+  /// number (e.g. they replaced the 13-cause taxonomy wholesale).
+  static String _wsa(int number, String fallback) =>
+      AdminMasterData.wsaCauseByNumber(number) ?? fallback;
+
   static Map<String, String> processText(String text) {
     final q = text.toLowerCase();
-    String wsa   = '7. Human error';
+    String wsa   = _wsa(7, '7. Human error');
     String root  = 'Momentary lapse in judgement; task pressure; inadequate hazard recognition training';
     String fix   = 'Conduct toolbox talk before resuming work; update Job Safety Analysis (JSA)';
     String title = 'Near Miss / Unsafe Condition Reported';
 
     if (q.contains('helmet') || q.contains('hard hat') || q.contains('ppe') || q.contains('gloves') || q.contains('harness') || q.contains('shoe')) {
-      wsa   = '3. Improper PPE use';
+      wsa   = _wsa(3, '3. Improper PPE use');
       root  = 'Insufficient PPE enforcement at bay entry; supervisor gap at shift start; PPE not issued';
       fix   = 'Issue correct PPE per IS 2925/3521/5852 immediately; stop-work until compliant; supervisor sign-off';
       title = 'PPE Violation — Missing Personal Protective Equipment';
     } else if (q.contains('slip') || q.contains('wet') || q.contains('spill') || q.contains('oil') || q.contains('housekeep') || q.contains('5s')) {
-      wsa   = '8. Poor housekeeping';
+      wsa   = _wsa(8, '8. Poor housekeeping');
       root  = 'Housekeeping schedule not followed; drainage blocked; area owner not assigned';
       fix   = 'Clean spillage immediately; wet floor signs; assign area owner; 5S audit';
       title = 'Slip/Trip Hazard — Floor Contamination';
     } else if (q.contains('crane') || q.contains('lifting') || q.contains('load') || q.contains('sling') || q.contains('swl')) {
-      wsa   = '4. Unsafe body positioning';
+      wsa   = _wsa(4, '4. Unsafe body positioning');
       root  = 'Exclusion zone not established; banksman not deployed; pre-lift check bypassed';
       fix   = 'Establish exclusion zone; ensure banksman signals (IS 4014); SWL verified; critical lift permit obtained';
       title = 'Crane/Lifting Operation — Unsafe Condition';
     } else if (q.contains('electric') || q.contains('loto') || q.contains('shock') || q.contains('live') || q.contains('panel')) {
-      wsa   = '12. Inadequate isolation';
+      wsa   = _wsa(12, '12. Inadequate isolation');
       root  = 'LOTOTO procedure not followed; energy isolation incomplete; danger notice not displayed';
       fix   = 'Apply LOTOTO immediately; test for dead; display DANGER notice per Indian Electricity Rules 1956, Rule 50; authorised personnel only';
       title = 'Electrical Safety Violation — Inadequate Isolation';
     } else if (q.contains('fall') || q.contains('height') || q.contains('scaffold') || q.contains('ladder') || q.contains('guardrail')) {
-      wsa   = '11. Unauthorized operation';
+      wsa   = _wsa(11, '11. Unauthorized operation');
       root  = 'WAH permit bypassed; no harness issued; anchor points not inspected; 100% tie-off rule violated';
       fix   = 'Stop work; obtain WAH PTW (SG/02); issue IS 3521 harness; inspect anchor (min 15kN)';
       title = 'Working at Height — Fall Risk (FA S32c)';
     } else if (q.contains('gas') || q.contains('fume') || q.contains('co ') || q.contains('carbon mono') || q.contains('bf gas') || q.contains('confined')) {
-      wsa   = '2. Lack of hazard awareness';
+      wsa   = _wsa(2, '2. Lack of hazard awareness');
       root  = 'Gas detector not used; atmosphere not tested before entry; confined space PTW not obtained';
       fix   = 'Evacuate area; atmosphere test by gas detector; purge + ventilate; re-entry only with PTW + gas clearance';
       title = 'Gas Hazard — Toxic/Flammable Exposure Risk';
     } else if (q.contains('fire') || q.contains('hot work') || q.contains('weld') || q.contains('grind') || q.contains('spark')) {
-      wsa   = '1. Failure to follow procedure';
+      wsa   = _wsa(1, '1. Failure to follow procedure');
       root  = 'Hot work permit not obtained; fire watch not deployed; combustibles not cleared within 10m';
       fix   = 'Stop hot work; obtain hot work PTW (SG/07/SG/08); deploy fire watch; 9kg DCP at site';
       title = 'Hot Work Hazard — Fire Risk';
     } else if (q.contains('liquid metal') || q.contains('hot metal') || q.contains('slag') || q.contains('molten') || q.contains('ladle')) {
-      wsa   = '2. Lack of hazard awareness';
+      wsa   = _wsa(2, '2. Lack of hazard awareness');
       root  = 'Ladle not preheated; moisture present; personnel in hazard zone during tap';
       fix   = 'Preheat ladle to min 800°C; clear all persons >15m; aluminised PPE mandatory (SG/23)';
       title = 'Hot Metal/Slag — Burn/Explosion Risk';
     } else if (q.contains('machin') || q.contains('guard') || q.contains('rotat') || q.contains('conveyor') || q.contains('belt')) {
-      wsa   = '5. Equipment failure';
+      wsa   = _wsa(5, '5. Equipment failure');
       root  = 'Machine guard removed or damaged; LOTOTO not applied; guard interlock bypassed';
       fix   = 'Stop machine via LOTOTO; reinstall/repair guard; test interlock before restart (SG/09)';
       title = 'Machinery Guarding — Rotating Part Exposed';
     } else if (q.contains('supervisor') || q.contains('unsupervised') || q.contains('alone')) {
-      wsa   = '9. Lack of supervision';
+      wsa   = _wsa(9, '9. Lack of supervision');
       root  = 'Supervisor absent during critical operation; contractor without site supervisor; span of control exceeded';
       fix   = 'Designate qualified supervisor immediately; 1 supervisor per 10 workers (SG/41)';
       title = 'Supervision Gap During Critical Operation';
     } else if (q.contains('cylinder') || q.contains('gas bottle') || q.contains('oxygen') || q.contains('acetylene')) {
-      wsa   = '8. Poor housekeeping';
+      wsa   = _wsa(8, '8. Poor housekeeping');
       root  = 'Cylinders not chained; O2 and flammable stored <6m apart; valve cap missing; SMPV Rules not followed';
       fix   = 'Chain cylinders upright; separate O2 and flammable >6m (SMPV Rule 14); fit valve caps; check ISI mark';
       title = 'Gas Cylinder — Storage Violation (SMPV Rules 2016)';
     } else if (q.contains('contactor') || q.contains('contactor') || q.contains('contractor')) {
-      wsa   = '1. Failure to follow procedure';
+      wsa   = _wsa(1, '1. Failure to follow procedure');
       root  = 'Contractor worker not inducted; working without PTW; no safety supervisor assigned';
       fix   = 'Stop work; complete safety induction; obtain PTW; assign supervisor (SG/41)';
       title = 'Contractor Safety Violation';

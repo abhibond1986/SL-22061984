@@ -10,6 +10,10 @@ import 'admin_alerts.dart';
 import 'supabase_service.dart';
 import 'supabase_config.dart';
 import 'image_storage.dart';
+// Cyclic with admin_master_data (which calls pushMasterData/pullMasterData).
+// Dart permits import cycles; there are no cross-file const/static
+// initialisers between the two, so load order can't bite us here.
+import 'admin_master_data.dart';
 
 /// SAIL Safety Lens — Google Sheets Sync Service
 ///
@@ -807,6 +811,12 @@ class SyncService {
       final users = await fetchUsers();
       if (users.isNotEmpty) await LocalDB.cacheUsers(users);
 
+      // Refresh master data (plants, departments, severities, statuses, WSA
+      // causes, observation types, AI keys). Without this, "Sync Now" left the
+      // device on stale lists and the frontend deviated from the admin panel
+      // until the next cold start.
+      final masterUpdated = await AdminMasterData.syncFromBackend();
+
       await _markSyncTime();
       return {
         'ok': true,
@@ -814,6 +824,7 @@ class SyncService {
         'pulled': serverRows.length,
         'removed': removed,
         'users': users.length,
+        'masterData': masterUpdated,
         'syncTime': DateTime.now().toIso8601String(),
       };
     }
@@ -893,13 +904,17 @@ class SyncService {
       await LocalDB.cacheUsers(users);
     }
 
+    // Refresh master data on the Apps Script path too, for the same reason.
+    final masterUpdated = await AdminMasterData.syncFromBackend();
+
     await _markSyncTime();
     return {
-      'ok':       true,
-      'pushed':   pushed,
-      'pulled':   pulled.length,
-      'users':    users.length,
-      'syncTime': DateTime.now().toIso8601String(),
+      'ok':         true,
+      'pushed':     pushed,
+      'pulled':     pulled.length,
+      'users':      users.length,
+      'masterData': masterUpdated,
+      'syncTime':   DateTime.now().toIso8601String(),
     };
   }
   // ═══════════════════════════════════════════════════════════════
