@@ -136,7 +136,7 @@ class ErrorLogService {
     try {
       final errors = await getErrors(startDate: startDate, endDate: endDate);
 
-      final stats = {
+      final stats = <String, dynamic>{
         'totalErrors': errors.length,
         'aiAnalysisFailed': errors.where((e) =>
           e.errorType == ErrorType.AI_ANALYSIS_FAILED).length,

@@ -1244,7 +1244,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
       }
 
       final user = await LocalDB.getCurrentUser();
-      final incident = {
+      final incident = <String, dynamic>{
         'id':              DateTime.now().millisecondsSinceEpoch.toString(),
         'title':           _aiBrief?['identified']?.toString().isNotEmpty == true
                                ? _aiBrief!['identified'].toString()

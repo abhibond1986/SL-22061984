@@ -1643,7 +1643,7 @@ class _AIScanTabState extends State<AIScanTab> {
     final detectedSection = _result!['detectedSection']?.toString() ?? 'GENERAL';
     final sectionCues = _result!['sectionCues']?.toString() ?? '';
 
-    final incident = {
+    final incident = <String, dynamic>{
       'id':              DateTime.now().millisecondsSinceEpoch.toString(),
       'title':           'AI Hazard Scan: ${firstHazard.toString()}',
       'plant':           user['plant']?.toString() ?? 'SAIL Safety Organisation',
