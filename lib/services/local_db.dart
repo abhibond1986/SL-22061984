@@ -8,7 +8,7 @@
 //                   replaceAllUsers, replaceAllKnowledgeDocs
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, ValueNotifier;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'kb_seed_data.dart';
 import 'crypto_utils.dart';
@@ -33,6 +33,21 @@ class LocalDB {
   // backend re-fetch still returns them (until the backend confirms removal).
   static const _kDeletedIncidentIds = 'deleted_incident_ids';
   static const _kDeletedUsernames   = 'deleted_usernames';
+
+  // ═══════════════════════════════════════════════════════════════
+  //  KNOWLEDGE BASE REVISION
+  // ═══════════════════════════════════════════════════════════════
+  /// Bumped whenever the knowledge base changes (doc added, edited, deleted,
+  /// seeded or bulk-replaced by a sync).
+  ///
+  /// Why this exists: consumers of the KB cache it (the AI hazard analyser
+  /// cached its KB context for the whole app session). Without a change signal
+  /// a document the admin uploaded was ignored until the app was restarted —
+  /// so "add knowledge, then scan" silently used the old knowledge. Listen to
+  /// this and drop any derived cache.
+  static final ValueNotifier<int> kbRevision = ValueNotifier<int>(0);
+
+  static void _bumpKb() => kbRevision.value++;
 
   // ═══════════════════════════════════════════════════════════════
   //  TOMBSTONES — keep deletes from being resurrected by sheet merges
@@ -644,6 +659,7 @@ class LocalDB {
   static Future<void> replaceAllKnowledgeDocs(
       List<Map<String, dynamic>> docs) async {
     await _prefs.setString(_kKbDocs, jsonEncode(docs));
+    _bumpKb();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -777,6 +793,7 @@ class LocalDB {
       'uploadedBy': (await getCurrentUser())?['name'] ?? 'admin',
     });
     await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
   }
 
   static Future<List<Map<String, dynamic>>> getKnowledgeDocs() async {
@@ -800,6 +817,7 @@ class LocalDB {
       all[idx]['content'] = content;
       if (source != null) all[idx]['source'] = source;
       await _prefs.setString(_kKbDocs, jsonEncode(all));
+      _bumpKb();
     }
   }
 
@@ -807,26 +825,48 @@ class LocalDB {
     final all = await getKnowledgeDocs();
     all.removeWhere((d) => d['id'] == id);
     await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
   }
 
+  /// Keyword search over the knowledge base, best match first.
+  ///
+  /// [limit] caps how many documents come back. It used to be hardcoded to 3
+  /// here, which silently overrode every caller's own limit — so a caller
+  /// asking for 8 documents of regulation context received 3, and most of a
+  /// large uploaded document set could never reach the model.
+  ///
+  /// [snippetChars] caps each snippet. The old fixed 400 characters truncated
+  /// mid-sentence on long clauses, which is how a citation could arrive at the
+  /// model cut in half.
   static Future<List<Map<String, dynamic>>> searchKnowledge(
-      String query) async {
+      String query, {
+      int limit = 3,
+      int snippetChars = 400,
+      }) async {
     final all = await getKnowledgeDocs();
     if (all.isEmpty) return [];
     final q = query
         .toLowerCase()
-        .split(RegExp(r'\s+'))
+        .split(RegExp(r'[^a-z0-9]+'))
         .where((w) => w.length > 2)
+        .toSet()   // a word repeated in the query shouldn't inflate the score
         .toList();
     if (q.isEmpty) return [];
 
     final results = <Map<String, dynamic>>[];
     for (final doc in all) {
       final content      = doc['content']?.toString() ?? '';
+      final title        = doc['title']?.toString() ?? '';
       final contentLower = content.toLowerCase();
+      final titleLower   = title.toLowerCase();
       int score = 0;
       for (final word in q) {
         score += word.allMatches(contentLower).length;
+        // A hit in the title is a strong relevance signal — a document called
+        // "Confined Space Entry Procedure" should surface for a confined-space
+        // query even if the body phrases it differently. Title matches were
+        // previously ignored entirely.
+        if (titleLower.contains(word)) score += 5;
       }
       if (score > 0) {
         final sentences = content.split(RegExp(r'(?<=[.!?])\s+'));
@@ -843,10 +883,15 @@ class LocalDB {
             bestSnippet      = s.trim();
           }
         }
+        // A title-only match scores above zero but matches no sentence, which
+        // used to yield an empty snippet — the document was "found" and then
+        // contributed nothing. Fall back to the opening text.
+        if (bestSnippet.isEmpty) bestSnippet = content.trim();
+        if (bestSnippet.isEmpty) continue;
         results.add({
           'title':   doc['title'],
-          'snippet': bestSnippet.length > 400
-              ? '${bestSnippet.substring(0, 400)}...'
+          'snippet': bestSnippet.length > snippetChars
+              ? '${bestSnippet.substring(0, snippetChars)}...'
               : bestSnippet,
           'score': score,
         });
@@ -854,7 +899,7 @@ class LocalDB {
     }
     results.sort(
         (a, b) => (b['score'] as int).compareTo(a['score'] as int));
-    return results.take(3).toList();
+    return results.take(limit < 1 ? 1 : limit).toList();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -895,6 +940,7 @@ class LocalDB {
     }
 
     await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
     return added;
   }
 
@@ -922,7 +968,10 @@ class LocalDB {
     await _prefs.remove('chat_history');
 
     // 4. Optional clears
-    if (!keepKb)    await _prefs.remove(_kKbDocs);
+    if (!keepKb) {
+      await _prefs.remove(_kKbDocs);
+      _bumpKb();
+    }
     if (!keepUsers) {
       await _prefs.remove(_kUsers);
       await _prefs.remove(_kCachedUsers);

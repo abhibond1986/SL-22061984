@@ -188,8 +188,18 @@ Rules:
         ? 'Respond with "reason", "refined", and "correctiveAction" fields in English.'
         : 'IMPORTANT: The worker spoke in $language. Write "reason", "refined", and "correctiveAction" in $language (native script). Do NOT translate to English.';
 
-    final prompt = '''${kbContext ?? ''}
+    // The knowledge bank block is explicitly framed as authoritative. It used
+    // to be dumped in unlabelled, so the model had no reason to prefer the
+    // plant's own uploaded standards over its general training.
+    final kb = (kbContext ?? '').trim();
+    final kbBlock = kb.isEmpty
+        ? ''
+        : 'PLANT SAFETY KNOWLEDGE (uploaded by this plant\'s safety admin — '
+            'AUTHORITATIVE. Where it conflicts with your general knowledge, '
+            'follow it, and cite clause/section numbers exactly as written):\n'
+            '$kb\n\n';
 
+    final prompt = '''$kbBlock
 You are analyzing a potential near miss incident reported by a worker at SAIL (Steel Authority of India Limited).
 
 WORKER'S INPUT: "$text"

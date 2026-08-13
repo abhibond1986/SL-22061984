@@ -230,7 +230,23 @@ class _ChatTabState extends State<ChatTab> {
     'permit to work systems, gas-free certification, LOTO energy isolation, '
     'crane lifting plans, conveyor safety, refractory safety, '
     'pickling line acid handling, annealing furnace H2 safety, '
-    'arc flash protection, steam safety, coal dust explosion prevention';
+    'arc flash protection, steam safety, coal dust explosion prevention\n\n'
+
+    // ─────────────────────────────────────────────────────────────
+    // KNOWLEDGE BANK PRECEDENCE
+    // Without this, the model treats its own built-in list above as complete
+    // and an admin-uploaded document as optional background — so a plant that
+    // uploaded its own standard saw no change in the answers.
+    // ─────────────────────────────────────────────────────────────
+    'PLANT KNOWLEDGE BANK — HIGHEST PRIORITY:\n'
+    '• If the prompt includes "RELEVANT KNOWLEDGE BASE DOCUMENTS" or '
+    '"ADDITIONAL KB MATCHES", those are documents the plant safety admin '
+    'uploaded. They are THIS PLANT\'S OWN authoritative standards.\n'
+    '• Answer from them FIRST. Where they conflict with the general knowledge '
+    'listed above, THE UPLOADED DOCUMENT WINS — say so briefly.\n'
+    '• Cite the document title and any clause/section number exactly as written.\n'
+    '• Never contradict an uploaded document. If it is silent on the question, '
+    'then use your general knowledge.';
 
   @override
   void initState() {
@@ -279,8 +295,10 @@ class _ChatTabState extends State<ChatTab> {
     });
     _scrollToBottom();
 
-    // 1. Search uploaded KB docs
-    final kbResults = await LocalDB.searchKnowledge(q.trim());
+    // 1. Search uploaded KB docs. These are shown to the user as sources and
+    //    also fed to the model; 3 was the old hardcoded internal cap.
+    final kbResults =
+        await LocalDB.searchKnowledge(q.trim(), limit: 5, snippetChars: 700);
 
     // 2. Try online AI (Apps Script → Gemini with full safety prompt)
     String? onlineAnswer;
@@ -350,8 +368,12 @@ class _ChatTabState extends State<ChatTab> {
   // ── ONLINE AI CALL (Apps Script → Gemini with safety prompt + KB) ─────
   Future<String?> _askOnlineAI(String question, List kbResults) async {
     try {
-      // ★ v25: Get comprehensive KB context from KnowledgeService
-      final kbContext = await KnowledgeService.getKbDocsContext(question, maxDocs: 3);
+      // ★ v25: Get comprehensive KB context from KnowledgeService.
+      // maxDocs raised from 3 and snippets from 400 chars: the answer quality
+      // ceiling here was retrieval, not the model. searchKnowledge used to cap
+      // at 3 internally regardless of what was requested — see LocalDB.
+      final kbContext = await KnowledgeService.getKbDocsContext(question,
+          maxDocs: 5, snippetChars: 700);
 
       // Also include any directly-searched results (legacy path)
       String legacyKb = '';
@@ -359,11 +381,12 @@ class _ChatTabState extends State<ChatTab> {
         final cleanKb = kbResults.where((r) {
           final s = r['snippet']?.toString() ?? '';
           return _isReadableText(s) && s.length > 30;
-        }).take(2).toList();
+        }).take(3).toList();
         if (cleanKb.isNotEmpty) {
           legacyKb = '\n\nADDITIONAL KB MATCHES:\n' +
               cleanKb.map((r) =>
-                  '- ${r['title']}: ${_sanitizeSnippet(r['snippet']?.toString() ?? '')}')
+                  '- ${r['title']}: '
+                  '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
                   .join('\n');
         }
       }
@@ -458,13 +481,19 @@ class _ChatTabState extends State<ChatTab> {
     return true;
   }
 
-  String _sanitizeSnippet(String raw) {
+  /// Strips control characters and collapses whitespace, then trims to
+  /// [maxChars] at a sentence boundary where possible.
+  ///
+  /// [maxChars] is a parameter because this was hardcoded to 400, which
+  /// silently re-truncated snippets that the KB search had deliberately
+  /// returned longer — clipping regulation clauses mid-sentence.
+  String _sanitizeSnippet(String raw, {int maxChars = 400}) {
     final cleaned = raw.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (cleaned.length <= 400) return cleaned;
-    final cut = cleaned.lastIndexOf('.', 400);
+    if (cleaned.length <= maxChars) return cleaned;
+    final cut = cleaned.lastIndexOf('.', maxChars);
     if (cut > 100) return '${cleaned.substring(0, cut + 1)}...';
-    return '${cleaned.substring(0, 400)}...';
+    return '${cleaned.substring(0, maxChars)}...';
   }
 
   // ── PDF TEXT EXTRACTION ─────────────────────────────────────────

@@ -92,6 +92,7 @@ COMMON STEEL PLANT HAZARDS:
     String query, {
     int maxKbDocs = 3,
     bool includeExpertPrompt = true,
+    int snippetChars = 400,
   }) async {
     final buffer = StringBuffer();
 
@@ -101,15 +102,24 @@ COMMON STEEL PLANT HAZARDS:
       buffer.writeln(await resolvedExpertPrompt());
     }
 
-    // 2. Relevant KB documents from admin uploads
+    // 2. Relevant KB documents from admin uploads.
+    //    maxKbDocs is passed INTO the search: it used to search with the
+    //    default (which capped at 3 internally) and then .take(maxKbDocs) the
+    //    result, so asking for more than 3 documents was silently impossible.
     if (query.trim().length >= 3) {
       try {
-        final kbResults = await LocalDB.searchKnowledge(query);
+        final kbResults = await LocalDB.searchKnowledge(
+          query,
+          limit: maxKbDocs,
+          snippetChars: snippetChars,
+        );
         if (kbResults.isNotEmpty) {
-          buffer.writeln('\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS (uploaded by admin):');
-          final docsToInclude = kbResults.take(maxKbDocs).toList();
-          for (int i = 0; i < docsToInclude.length; i++) {
-            final doc = docsToInclude[i];
+          buffer.writeln(
+              '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS (uploaded by the safety '
+              'admin — these are authoritative for this plant and OVERRIDE '
+              'any general knowledge that conflicts with them):');
+          for (int i = 0; i < kbResults.length; i++) {
+            final doc = kbResults[i];
             buffer.writeln('--- KB Doc ${i + 1}: ${doc['title'] ?? 'Untitled'} ---');
             buffer.writeln(doc['snippet'] ?? '');
           }
@@ -122,10 +132,60 @@ COMMON STEEL PLANT HAZARDS:
     return buffer.toString();
   }
 
+  /// Builds a retrieval query for a case where there is no user question —
+  /// principally AI image analysis.
+  ///
+  /// Why this exists: the hazard analyser searched the KB with one FIXED
+  /// string ('safety regulation statutory reference factories act IS
+  /// standard'). That query matches whatever happens to use those generic
+  /// words, so an uploaded document about, say, ladle handling was
+  /// unreachable no matter how relevant it was. Seeding the query from the
+  /// admin's OWN cause categories and observation types means retrieval
+  /// widens automatically as the admin adds vocabulary, and every configured
+  /// hazard domain gets a chance to match.
+  static Future<String> buildImageAnalysisQuery({String extraContext = ''}) async {
+    final terms = <String>{};
+    try {
+      for (final c in await AdminMasterData.getWsaCauses()) {
+        // Cause entries look like "3. Working at height" — drop the number.
+        terms.addAll(c
+            .replaceFirst(RegExp(r'^\s*\d+\s*[.)]\s*'), '')
+            .toLowerCase()
+            .split(RegExp(r'[^a-z0-9]+'))
+            .where((w) => w.length > 3));
+      }
+    } catch (_) {}
+    try {
+      for (final t in await AdminMasterData.getObsTypes()) {
+        terms.addAll(t
+            .toLowerCase()
+            .split(RegExp(r'[^a-z0-9]+'))
+            .where((w) => w.length > 3));
+      }
+    } catch (_) {}
+    if (extraContext.trim().isNotEmpty) {
+      terms.addAll(extraContext
+          .toLowerCase()
+          .split(RegExp(r'[^a-z0-9]+'))
+          .where((w) => w.length > 3));
+    }
+    // Drop words so common in safety documents that they match everything and
+    // therefore rank nothing.
+    terms.removeAll(const {'safety', 'unsafe', 'other', 'others', 'general'});
+    if (terms.isEmpty) {
+      return 'safety hazard regulation statutory reference';
+    }
+    return terms.join(' ');
+  }
+
   /// Lightweight version — only searches KB docs, no expert prompt.
   /// Use when the expert prompt is already included in the caller's system prompt.
-  static Future<String> getKbDocsContext(String query, {int maxDocs = 3}) async {
-    return getContextForPrompt(query, maxKbDocs: maxDocs, includeExpertPrompt: false);
+  static Future<String> getKbDocsContext(String query,
+      {int maxDocs = 3, int snippetChars = 400}) async {
+    return getContextForPrompt(query,
+        maxKbDocs: maxDocs,
+        includeExpertPrompt: false,
+        snippetChars: snippetChars);
   }
 
   /// The expert system prompt with the `{{WSA_CAUSES}}` placeholder replaced

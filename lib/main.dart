@@ -11,6 +11,7 @@ import 'services/app_updater.dart';
 import 'services/image_storage.dart';
 import 'services/background_sync.dart';
 import 'services/realtime_sync.dart';
+import 'services/gemini_vision.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
@@ -47,6 +48,12 @@ void main() async {
   });
   // ★ v25: Pull latest Knowledge Base from backend (non-blocking)
   SyncService.syncKnowledgeBase().catchError((_) => false);
+  // Any knowledge-base change must reach the AI hazard analyser immediately.
+  // It caches the KB context it injects into the vision prompt, and that cache
+  // used to live for the whole app session — so a document the admin uploaded
+  // was ignored until the next cold start. Dropping the cache here means the
+  // very next scan re-reads the knowledge base.
+  LocalDB.kbRevision.addListener(GeminiVision.invalidateKbContext);
   // Silent auto-update: checks GitHub releases and installs APK in background
   AppUpdater.init();
   // ★ v25: Periodic background sync — retries pending items every 5 minutes

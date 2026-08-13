@@ -142,16 +142,10 @@ class GeminiDirectVision {
   static Future<Map<String, dynamic>?> _callModel(String model, String apiKey, String base64Image, {String? kbContext}) async {
     final url = 'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey';
 
-    // Build prompt with KB context if available
-    String prompt = await resolvedComprehensivePrompt();
-    if (kbContext != null && kbContext.isNotEmpty) {
-      prompt += '\n\n═══════════════════════════════════════════════════════\n'
-          'ADDITIONAL REFERENCE MATERIAL FROM KNOWLEDGE BANK\n'
-          '═══════════════════════════════════════════════════════\n'
-          'Use the following uploaded reference documents for ACCURATE regulation citations.\n'
-          'If a specific clause/section is mentioned below, cite it EXACTLY as written:\n\n'
-          '$kbContext';
-    }
+    // KB context goes INTO the prompt builder so it lands inside the citable
+    // reference table, not after the instruction forbidding outside citations.
+    final String prompt =
+        await resolvedComprehensivePrompt(kbContext: kbContext ?? '');
 
     final requestBody = {
       'contents': [
@@ -223,7 +217,7 @@ class GeminiDirectVision {
   /// and WSA-cause vocabularies substituted in. Callers must use this, never the
   /// raw template — otherwise renaming a severity or a cause in the admin panel
   /// leaves this model emitting labels the app's dropdowns no longer accept.
-  static Future<String> resolvedComprehensivePrompt() async {
+  static Future<String> resolvedComprehensivePrompt({String kbContext = ''}) async {
     List<String> sevs;
     List<String> types;
     List<String> causes;
@@ -254,10 +248,25 @@ class GeminiDirectVision {
         ? 'HAZARD CATEGORIES: none configured — omit "wsaCause" and "wsa".'
         : 'HAZARD CATEGORIES (use the EXACT wording below for "wsaCause" and "wsa"):\n'
             '${causes.join('\n')}';
+    // Admin-uploaded knowledge is spliced INTO the verified reference table.
+    // Appending it after the table (as the caller used to) placed it after
+    // "You MUST ONLY cite regulations from this table" and "NEVER invent
+    // section numbers", which told the model to disregard it — so uploaded
+    // documents had no real effect on hazard analysis.
+    final kbBlock = kbContext.trim().isEmpty
+        ? ''
+        : '\n── PLANT KNOWLEDGE BANK (uploaded by the safety admin) ──\n'
+            'These entries are PART OF THIS TABLE and ARE citable. Where they\n'
+            'conflict with the generic entries above, THESE TAKE PRECEDENCE —\n'
+            'they are this plant\'s own standards. Cite clause/section numbers\n'
+            'exactly as written below.\n'
+            '$kbContext\n';
+
     return _getComprehensivePrompt()
         .replaceAll('{{SEVERITIES}}', sevEnum)
         .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
-        .replaceAll('{{WSA_CAUSES}}', causeBlock);
+        .replaceAll('{{WSA_CAUSES}}', causeBlock)
+        .replaceAll('{{KB_CONTEXT}}', kbBlock);
   }
 
   /// ★ v36: FINE-TUNED Comprehensive hazard analysis prompt
@@ -535,7 +544,7 @@ VERIFIED REGULATION REFERENCE TABLE
   Mines Act 1952, S18 = Mining safety supervision
   Mines Rules 1955 = Mining safety requirements
   DGMS Circular = Technical directives
-
+{{KB_CONTEXT}}
 ═══════════════════════════════════════════════════════
 HAZARD CHECKLIST — Check EVERY applicable category
 ═══════════════════════════════════════════════════════

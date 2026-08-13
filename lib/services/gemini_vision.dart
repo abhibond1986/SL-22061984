@@ -19,6 +19,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'network_checker.dart';
 import 'admin_master_data.dart';
 import 'knowledge_service.dart';
+// For LocalDB.kbRevision — the KB context cache below is keyed to it so an
+// admin knowledge upload reaches the analyser without an app restart.
+import 'local_db.dart';
 
 class GeminiVision {
   // OpenRouter vision models (free tier), tried in order.
@@ -91,8 +94,21 @@ class GeminiVision {
   // Prevent concurrent AI calls
   static bool _isAnalyzing = false;
 
-  // KB regulation context cached for the session (avoids re-fetching per scan).
+  // KB regulation context, cached to avoid re-fetching before every scan.
+  //
+  // The cache is keyed on LocalDB.kbRevision: it used to be cached for the
+  // whole app session, so a document the admin uploaded mid-session was never
+  // picked up — "add knowledge, then scan" used the pre-upload knowledge until
+  // the app was restarted, and if the KB had been empty at first scan the empty
+  // result was cached too. Now any KB write invalidates it on the next scan.
   static String? _kbContextCache;
+  static int _kbContextCacheRev = -1;
+
+  /// Drops the cached KB context so the next scan re-reads the knowledge base.
+  static void invalidateKbContext() {
+    _kbContextCache = null;
+    _kbContextCacheRev = -1;
+  }
 
   // ── analyseImage (mobile / File path) ─────────────────────────────────────
   static Future<Map<String, dynamic>?> analyseImage(File imageFile) async {
@@ -171,25 +187,37 @@ class GeminiVision {
       // ══════════════════════════════════════════════════════════════════════
       // FETCH KB CONTEXT — inject regulation knowledge from uploaded docs
       // ══════════════════════════════════════════════════════════════════════
-      String kbContext = _kbContextCache ?? '';
-      if (_kbContextCache == null) {
-        // Fetch KB context once per session and cache it — it rarely changes
-        // and re-fetching it added a few seconds before every scan.
+      final kbRev = LocalDB.kbRevision.value;
+      String kbContext = '';
+      if (_kbContextCache != null && _kbContextCacheRev == kbRev) {
+        kbContext = _kbContextCache!;
+        print('GeminiVision: ✓ KB context (cached, rev $kbRev)');
+      } else {
+        // Cache is keyed to the KB revision, so an admin upload is picked up on
+        // the very next scan while repeat scans still skip the re-fetch.
         try {
+          // The retrieval query is derived from the admin's own cause
+          // categories and observation types rather than a fixed string, so
+          // documents about whatever domains the admin actually configured are
+          // reachable. Timeout raised from 3s: on a large KB the search was
+          // timing out and returning '' — silently analysing with no knowledge.
+          final query = await KnowledgeService.buildImageAnalysisQuery();
           kbContext = await KnowledgeService.getContextForPrompt(
-            'safety regulation statutory reference factories act IS standard',
-            maxKbDocs: 5,
+            query,
+            maxKbDocs: 6,
             includeExpertPrompt: false,
-          ).timeout(const Duration(seconds: 3), onTimeout: () => '');
-          _kbContextCache = kbContext; // cache (even empty) for the session
+            snippetChars: 700,
+          ).timeout(const Duration(seconds: 8), onTimeout: () => '');
+          _kbContextCache = kbContext;
+          _kbContextCacheRev = kbRev;
           if (kbContext.isNotEmpty) {
             print('GeminiVision: ✓ KB context loaded (${kbContext.length} chars)');
+          } else {
+            print('GeminiVision: ⚠ KB context empty — no matching documents');
           }
         } catch (_) {
           print('GeminiVision: KB context fetch failed — continuing without');
         }
-      } else {
-        print('GeminiVision: ✓ KB context (cached)');
       }
 
       // ══════════════════════════════════════════════════════════════════════
@@ -301,16 +329,12 @@ class GeminiVision {
     final base64Image = base64Encode(bytes);
     final dataUrl = 'data:image/jpeg;base64,$base64Image';
 
-    // Build prompt with KB context if available
-    String prompt = await resolvedHazardPrompt();
-    if (kbContext != null && kbContext.isNotEmpty) {
-      prompt += '\n\n═══════════════════════════════════════════════════════\n'
-          'ADDITIONAL REFERENCE MATERIAL FROM KNOWLEDGE BANK\n'
-          '═══════════════════════════════════════════════════════\n'
-          'Use the following uploaded reference documents for ACCURATE regulation citations.\n'
-          'If a specific clause/section is mentioned below, cite it EXACTLY as written:\n\n'
-          '$kbContext';
-    }
+    // KB context is passed INTO the prompt builder, which splices it into the
+    // citable regulation table. Appending it to the end of the finished prompt
+    // (as this did before) put it after "NEVER invent regulation numbers not in
+    // this table", which told the model to disregard it.
+    final String prompt =
+        await resolvedHazardPrompt(kbContext: kbContext ?? '');
 
     final requestBody = {
       'model': model,
@@ -401,7 +425,7 @@ class GeminiVision {
   /// admin's current vocabularies. Every caller must use this rather than the
   /// raw template, otherwise the model keeps emitting severity labels and
   /// observation types that no longer exist in the app's dropdowns.
-  static Future<String> resolvedHazardPrompt() async {
+  static Future<String> resolvedHazardPrompt({String kbContext = ''}) async {
     List<String> sevs;
     List<String> types;
     try {
@@ -424,9 +448,25 @@ class GeminiVision {
       ...types,
       if (!types.any((t) => t.toLowerCase() == 'line of fire')) 'Line of Fire',
     ];
+    // Admin-uploaded knowledge is spliced INTO the citable reference table,
+    // not appended after it. The table is headed "CITE ONLY FROM HERE" and the
+    // hard rules end with "NEVER invent regulation numbers not in this table" —
+    // so knowledge appended below that point was, as far as the model was
+    // concerned, explicitly not citable. Uploaded documents were therefore
+    // ignored in practice, which is exactly the deviation being fixed.
+    final kbBlock = kbContext.trim().isEmpty
+        ? ''
+        : '\n── Plant Knowledge Bank (uploaded by the safety admin) ──\n'
+            'These are part of this table and ARE citable. Where they conflict\n'
+            'with the generic entries above, THESE TAKE PRECEDENCE — they are\n'
+            'this plant\'s own standards. Cite clause/section numbers exactly as\n'
+            'written below.\n'
+            '$kbContext\n';
+
     return _getHazardPrompt()
         .replaceAll('{{SEVERITIES}}', sevEnum)
-        .replaceAll('{{OBS_TYPES}}', typeList.join('|'));
+        .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
+        .replaceAll('{{KB_CONTEXT}}', kbBlock);
   }
 
   static String _getHazardPrompt() {
@@ -507,13 +547,14 @@ REGULATION REFERENCE TABLE — CITE ONLY FROM HERE
 
 ── Chemical ──
   MSIHC Rules 1989 = Hazardous chemical storage/labelling
-
+{{KB_CONTEXT}}
 HARD RULES:
 • S21 = machinery fencing ONLY. NEVER for gas cylinders.
 • S36 = confined space ONLY. NEVER for height work.
 • S32 = height/access/floors. NEVER confuse with S36.
 • IS 14489:2018 is an audit standard — do NOT cite for individual hazards.
-• NEVER invent regulation numbers not in this table.
+• NEVER invent regulation numbers not in this table. The Plant Knowledge Bank
+  section above, when present, is part of this table and may be cited freely.
 
 ═══════════════════════════════════════════════════════
 LINE OF FIRE (LOF) — ONLY if persons visible near energy sources
@@ -566,146 +607,200 @@ FIELD RULES:
   }
 
   // ── Offline fallback ─────────────────────────────────────────────────────
+  //
+  // When every vision model is unreachable we cannot analyse the IMAGE, so this
+  // returns a review checklist instead. Two things were wrong with it before:
+  //
+  //  1. It fetched KB context and then ignored it, returning a fixed list of 12
+  //     hazards while labelling the result '_source': 'knowledge_bank_fallback'
+  //     and '_kbBased': true. So a plant that had uploaded its own standards got
+  //     back generic content that claimed to come from those standards.
+  //  2. Its hazards carried a 'recommendation' key, but every screen reads
+  //     'correctiveAction' — so the recommendations never actually displayed.
+  //
+  // Now the admin's uploaded documents produce the leading checkpoints, the
+  // generic checklist follows as clearly-labelled fallback material, and the
+  // severity/type labels are mapped onto the admin's configured vocabularies.
   static Future<Map<String, dynamic>> _offlineFallback(Uint8List bytes,
       {String reason = ''}) async {
-    // ═══════════════════════════════════════════════════════════════
-    // KB-BASED CRITICAL ANALYSIS — Comprehensive steel plant inspection
-    // When all AI models fail, provide FULL critical analysis using
-    // Knowledge Bank (expert knowledge + admin-uploaded documents).
-    // Covers ALL major hazard categories with accurate statutory refs.
-    // ═══════════════════════════════════════════════════════════════
     try {
-      // Fetch KB context from multiple safety domains for maximum coverage
-      final kbContext = await KnowledgeService.getContextForPrompt(
-        'safety hazard inspection steel plant PPE electrical height fire gas cylinder confined space crane machinery',
-        maxKbDocs: 8,
-        includeExpertPrompt: true,
-      ).timeout(const Duration(seconds: 5), onTimeout: () => '');
+      // Retrieval query derives from the admin's own vocabularies rather than a
+      // fixed string, so uploaded documents on any configured hazard domain are
+      // reachable — see KnowledgeService.buildImageAnalysisQuery.
+      final query = await KnowledgeService.buildImageAnalysisQuery();
+      final kbDocs = await LocalDB
+          .searchKnowledge(query, limit: 8, snippetChars: 600)
+          .timeout(const Duration(seconds: 5),
+              onTimeout: () => const <Map<String, dynamic>>[]);
 
-      if (kbContext.isNotEmpty) {
-        // Comprehensive critical hazard analysis from KB
-        final hazards = <Map<String, dynamic>>[
-          // ─── PPE COMPLIANCE ─────────────────────────────────────
-          {
-            'name': 'Head Protection — Helmet',
-            'type': 'Unsafe Act',
-            'severity': 'HIGH',
-            'regulation': 'FA 1948 S35(1) — PPE; IS 2925:1984 — Industrial safety helmets',
-            'recommendation': 'Helmet mandatory in ALL plant areas. Colour code: White=Officer, Yellow=Supervisor, Blue=Worker, Green=Visitor, Red=Fire crew. Check: No cracks, chin strap secured, within 3-year life.',
-          },
-          {
-            'name': 'Body & Eye Protection',
-            'type': 'Unsafe Act',
-            'severity': 'MEDIUM',
-            'regulation': 'FA 1948 S35; IS 4912 (Goggles), IS 5983 (Gloves), IS 5852 (Safety shoes), IS 6994 (Ear muffs)',
-            'recommendation': 'Verify: Safety shoes with steel toe, eye protection for grinding/cutting/welding, hand protection matched to hazard, ear protection if noise >85dB.',
-          },
-          // ─── WORKING AT HEIGHT ──────────────────────────────────
-          {
-            'name': 'Fall from Height (>1.8m)',
-            'type': 'Unsafe Condition',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S32 — Floors, stairs, means of access; IS 3521:1999 — Full body harness',
-            'recommendation': 'Full body harness with double lanyard MANDATORY above 1.8m. Anchor point min 15kN. Guardrails min 1m height. Toe boards. Safety net if >3m. Scaffold must be tagged GREEN.',
-          },
-          // ─── ELECTRICAL SAFETY ──────────────────────────────────
-          {
-            'name': 'Electrical Isolation / LOTOTO',
-            'type': 'Unsafe Condition',
-            'severity': 'CRITICAL',
-            'regulation': 'CEA Regulations 2010 Reg 36, 44, 45; Indian Electricity Rules 1956 Rule 29, 50, 61',
-            'recommendation': '5-step LOTOTO: Identify → Isolate → Lock → Tag → TryOut. Each worker applies OWN lock. Verify zero energy before work. No exposed wiring. Earthing ≤1Ω. Panel doors closed & locked.',
-          },
-          // ─── FIRE / HOT WORK ────────────────────────────────────
-          {
-            'name': 'Hot Work Permit & Fire Prevention',
-            'type': 'Line of Fire',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S38 — Fire precaution; IS 14489:2018 Cl.11.2 — Hot work permit system',
-            'recommendation': 'Valid hot work permit MANDATORY. Fire watcher posted. Extinguisher within 6m (correct class). Combustibles removed 11m radius. Spark direction controlled. Post-work fire watch 30 min.',
-          },
-          // ─── GAS CYLINDER SAFETY ────────────────────────────────
-          {
-            'name': 'Gas Cylinder Storage & Separation',
-            'type': 'Unsafe Condition',
-            'severity': 'CRITICAL',
-            'regulation': 'SMPV Rules 2016 Rule 14 Table-3 — Min 6m separation; IS 3933 — Colour coding',
-            'recommendation': 'O₂ and flammable gas (C₂H₂/LPG): MINIMUM 6m apart OR firewall (1.5m high, 30-min rating). Stored upright & chained. Caps on when not in use. Colours: O₂=Black/White shoulder, C₂H₂=Maroon, LPG=Silver, N₂=Grey. NO oil/grease near O₂.',
-          },
-          // ─── CONFINED SPACE ─────────────────────────────────────
-          {
-            'name': 'Confined Space Entry',
-            'type': 'Unsafe Act',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S36 — Dangerous fumes & confined space; IS 14489:2018 Cl.8',
-            'recommendation': 'Entry permit MANDATORY. Atmospheric testing: O₂ 19.5–23.5%, LEL <10%, CO <50ppm, H₂S <10ppm. Continuous 4-gas monitor. Standby person at entry. SCBA available. Rescue plan & tripod.',
-          },
-          // ─── CRANE / LIFTING ────────────────────────────────────
-          {
-            'name': 'Crane & Overhead Load',
-            'type': 'Line of Fire',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S33 — Hoists & lifts; IS 3757:1985 — Crane signals; IS 14489:2018 Cl.9',
-            'recommendation': 'NEVER stand under suspended load. Barricade swing radius. Tagline for load control. SWL marked on slings. Annual load test current. Dedicated signal person. Horn before travel.',
-          },
-          // ─── MACHINERY / GUARDS ─────────────────────────────────
-          {
-            'name': 'Machine Guarding & Fencing',
-            'type': 'Unsafe Condition',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S21 — Fencing of machinery; S22 — Work near machinery in motion',
-            'recommendation': 'ALL rotating/moving parts MUST be guarded. Interlocked guards. No operation with guard removed. No loose clothing/jewelry near rotating parts. Emergency stop within reach. LOTOTO for maintenance.',
-          },
-          // ─── HOUSEKEEPING ───────────────────────────────────────
-          {
-            'name': 'Housekeeping & Access',
-            'type': 'Unsafe Condition',
-            'severity': 'MEDIUM',
-            'regulation': 'FA 1948 S32 — Floors, stairs & means of access; Ministry of Steel SG/03',
-            'recommendation': 'Walkways clear (min 1m width). No trailing cables. Yellow markings visible. Material stacking ≤3× base width. Oil spills cleaned immediately. Emergency exits unobstructed.',
-          },
-          // ─── HOT METAL AREA ─────────────────────────────────────
-          {
-            'name': 'Hot Metal / Molten Splash Zone',
-            'type': 'Line of Fire',
-            'severity': 'CRITICAL',
-            'regulation': 'IS 14489:2018 Cl.10 — Steel making safety; Ministry of Steel SG/12',
-            'recommendation': 'Min 5m exclusion zone during tapping. Aluminized proximity suit + face shield MANDATORY. No moisture in ladle path (steam explosion risk). Ladle preheat min 800°C. Runner condition verified.',
-          },
-          // ─── GAS HAZARD (BF/CO) ─────────────────────────────────
-          {
-            'name': 'Toxic Gas Exposure (CO/BF Gas)',
-            'type': 'Unsafe Condition',
-            'severity': 'CRITICAL',
-            'regulation': 'FA 1948 S36, S41A — Hazardous processes; IS 14489:2018 Cl.8.3',
-            'recommendation': 'BF gas: CO 25–28% (TLV=50ppm, explosive 35–74%). Continuous gas monitoring. Wind direction indicator. Emergency escape route marked & drilled. SCBA at all BF gas areas.',
-          },
-        ];
+      // Map generic labels onto whatever the admin actually configured, so an
+      // offline result can't show a severity or type the app's own dropdowns
+      // would reject on submit.
+      // If the admin has configured no severities/types at all, emit nothing
+      // rather than a label that does not exist — the admin panel is
+      // authoritative, and an empty list is a legitimate configuration.
+      final sevs = await _safeSeverities();
+      final types = await _safeObsTypes();
+      String sev(String wanted) => _nearestLabel(wanted, sevs, fallback: '');
+      String typ(String wanted) => _nearestLabel(wanted, types, fallback: '');
 
-        return {
-          'overallRisk': 'HIGH',
-          'riskScore': 70,
-          'confidence': 35,
-          'people': 0,
-          'hazards': hazards,
-          'summary':
-              '⚠️ AI Vision models unavailable ($reason)\n\n'
-              '📚 CRITICAL ANALYSIS FROM KNOWLEDGE BANK\n'
-              'Comprehensive safety inspection checklist generated from expert knowledge & uploaded regulation documents.\n\n'
-              '🔍 ${hazards.length} critical checkpoints covering: PPE, Height, Electrical, Fire, Gas Cylinders, Confined Space, Crane, Machinery, Housekeeping, Hot Metal, Toxic Gas.\n\n'
-              '⚡ Review each hazard for applicable statutory references. '
-              'Retry scan when internet is restored for AI-powered image-specific analysis with bounding boxes.',
-          '_source': 'knowledge_bank_fallback',
-          '_offline_reason': reason,
-          '_isOnline': false,
-          '_kbBased': true,
-        };
+      final hazards = <Map<String, dynamic>>[];
+
+      // 1. Checkpoints derived from the admin's OWN uploaded documents. These
+      //    lead, because they are this plant's authoritative standards.
+      for (final doc in kbDocs) {
+        final title = doc['title']?.toString().trim() ?? '';
+        final snippet = doc['snippet']?.toString().trim() ?? '';
+        if (snippet.isEmpty) continue;
+        hazards.add({
+          'name': title.isEmpty
+              ? 'Knowledge bank checkpoint'
+              : (title.length > 60 ? '${title.substring(0, 60)}…' : title),
+          'type': typ('Unsafe Condition'),
+          'severity': sev('HIGH'),
+          'regulation': title.isEmpty ? 'Plant knowledge bank' : title,
+          'correctiveAction': snippet,
+          'visualEvidence':
+              'Not image-verified — offline checklist item from the plant knowledge bank.',
+          '_fromKb': true,
+        });
       }
+
+      // 2. Generic steel-plant checklist. Clearly secondary, and only worth
+      //    returning at all if we have nothing better.
+      final generic = <Map<String, dynamic>>[
+      // ─── PPE COMPLIANCE ─────────────────────────────────────
+      {
+        'name': 'Head Protection — Helmet',
+        'type': 'Unsafe Act',
+        'severity': 'HIGH',
+        'regulation': 'FA 1948 S35(1) — PPE; IS 2925:1984 — Industrial safety helmets',
+        'correctiveAction': 'Helmet mandatory in ALL plant areas. Colour code: White=Officer, Yellow=Supervisor, Blue=Worker, Green=Visitor, Red=Fire crew. Check: No cracks, chin strap secured, within 3-year life.',
+      },
+      {
+        'name': 'Body & Eye Protection',
+        'type': 'Unsafe Act',
+        'severity': 'MEDIUM',
+        'regulation': 'FA 1948 S35; IS 4912 (Goggles), IS 5983 (Gloves), IS 5852 (Safety shoes), IS 6994 (Ear muffs)',
+        'correctiveAction': 'Verify: Safety shoes with steel toe, eye protection for grinding/cutting/welding, hand protection matched to hazard, ear protection if noise >85dB.',
+      },
+      // ─── WORKING AT HEIGHT ──────────────────────────────────
+      {
+        'name': 'Fall from Height (>1.8m)',
+        'type': 'Unsafe Condition',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S32 — Floors, stairs, means of access; IS 3521:1999 — Full body harness',
+        'correctiveAction': 'Full body harness with double lanyard MANDATORY above 1.8m. Anchor point min 15kN. Guardrails min 1m height. Toe boards. Safety net if >3m. Scaffold must be tagged GREEN.',
+      },
+      // ─── ELECTRICAL SAFETY ──────────────────────────────────
+      {
+        'name': 'Electrical Isolation / LOTOTO',
+        'type': 'Unsafe Condition',
+        'severity': 'CRITICAL',
+        'regulation': 'CEA Regulations 2010 Reg 36, 44, 45; Indian Electricity Rules 1956 Rule 29, 50, 61',
+        'correctiveAction': '5-step LOTOTO: Identify → Isolate → Lock → Tag → TryOut. Each worker applies OWN lock. Verify zero energy before work. No exposed wiring. Earthing ≤1Ω. Panel doors closed & locked.',
+      },
+      // ─── FIRE / HOT WORK ────────────────────────────────────
+      {
+        'name': 'Hot Work Permit & Fire Prevention',
+        'type': 'Line of Fire',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S38 — Fire precaution; IS 14489:2018 Cl.11.2 — Hot work permit system',
+        'correctiveAction': 'Valid hot work permit MANDATORY. Fire watcher posted. Extinguisher within 6m (correct class). Combustibles removed 11m radius. Spark direction controlled. Post-work fire watch 30 min.',
+      },
+      // ─── GAS CYLINDER SAFETY ────────────────────────────────
+      {
+        'name': 'Gas Cylinder Storage & Separation',
+        'type': 'Unsafe Condition',
+        'severity': 'CRITICAL',
+        'regulation': 'SMPV Rules 2016 Rule 14 Table-3 — Min 6m separation; IS 3933 — Colour coding',
+        'correctiveAction': 'O₂ and flammable gas (C₂H₂/LPG): MINIMUM 6m apart OR firewall (1.5m high, 30-min rating). Stored upright & chained. Caps on when not in use. Colours: O₂=Black/White shoulder, C₂H₂=Maroon, LPG=Silver, N₂=Grey. NO oil/grease near O₂.',
+      },
+      // ─── CONFINED SPACE ─────────────────────────────────────
+      {
+        'name': 'Confined Space Entry',
+        'type': 'Unsafe Act',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S36 — Dangerous fumes & confined space; IS 14489:2018 Cl.8',
+        'correctiveAction': 'Entry permit MANDATORY. Atmospheric testing: O₂ 19.5–23.5%, LEL <10%, CO <50ppm, H₂S <10ppm. Continuous 4-gas monitor. Standby person at entry. SCBA available. Rescue plan & tripod.',
+      },
+      // ─── CRANE / LIFTING ────────────────────────────────────
+      {
+        'name': 'Crane & Overhead Load',
+        'type': 'Line of Fire',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S33 — Hoists & lifts; IS 3757:1985 — Crane signals; IS 14489:2018 Cl.9',
+        'correctiveAction': 'NEVER stand under suspended load. Barricade swing radius. Tagline for load control. SWL marked on slings. Annual load test current. Dedicated signal person. Horn before travel.',
+      },
+      // ─── MACHINERY / GUARDS ─────────────────────────────────
+      {
+        'name': 'Machine Guarding & Fencing',
+        'type': 'Unsafe Condition',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S21 — Fencing of machinery; S22 — Work near machinery in motion',
+        'correctiveAction': 'ALL rotating/moving parts MUST be guarded. Interlocked guards. No operation with guard removed. No loose clothing/jewelry near rotating parts. Emergency stop within reach. LOTOTO for maintenance.',
+      },
+      // ─── HOUSEKEEPING ───────────────────────────────────────
+      {
+        'name': 'Housekeeping & Access',
+        'type': 'Unsafe Condition',
+        'severity': 'MEDIUM',
+        'regulation': 'FA 1948 S32 — Floors, stairs & means of access; Ministry of Steel SG/03',
+        'correctiveAction': 'Walkways clear (min 1m width). No trailing cables. Yellow markings visible. Material stacking ≤3× base width. Oil spills cleaned immediately. Emergency exits unobstructed.',
+      },
+      // ─── HOT METAL AREA ─────────────────────────────────────
+      {
+        'name': 'Hot Metal / Molten Splash Zone',
+        'type': 'Line of Fire',
+        'severity': 'CRITICAL',
+        'regulation': 'IS 14489:2018 Cl.10 — Steel making safety; Ministry of Steel SG/12',
+        'correctiveAction': 'Min 5m exclusion zone during tapping. Aluminized proximity suit + face shield MANDATORY. No moisture in ladle path (steam explosion risk). Ladle preheat min 800°C. Runner condition verified.',
+      },
+      // ─── GAS HAZARD (BF/CO) ─────────────────────────────────
+      {
+        'name': 'Toxic Gas Exposure (CO/BF Gas)',
+        'type': 'Unsafe Condition',
+        'severity': 'CRITICAL',
+        'regulation': 'FA 1948 S36, S41A — Hazardous processes; IS 14489:2018 Cl.8.3',
+        'correctiveAction': 'BF gas: CO 25–28% (TLV=50ppm, explosive 35–74%). Continuous gas monitoring. Wind direction indicator. Emergency escape route marked & drilled. SCBA at all BF gas areas.',
+      },
+    
+      ];
+      for (final g in generic) {
+        hazards.add({
+          ...g,
+          'type': typ(g['type']?.toString() ?? ''),
+          'severity': sev(g['severity']?.toString() ?? ''),
+          'visualEvidence':
+              'Not image-verified — generic offline checklist item.',
+          '_fromKb': false,
+        });
+      }
+
+      final kbCount = kbDocs.length;
+      return {
+        // No image was analysed, so this is explicitly not a risk finding.
+        'overallRisk': sev('MEDIUM'),
+        'riskScore': 0,
+        'confidence': 0,
+        'people': 0,
+        'hazards': hazards,
+        'summary': '⚠️ AI vision unavailable ($reason) — the image was NOT analysed.\n\n'
+            '${kbCount > 0 ? "📚 $kbCount checkpoint(s) below come from your uploaded knowledge bank documents.\n" : "📚 No knowledge bank documents matched — the checklist below is generic guidance only.\n"}'
+            'These are review prompts, not findings about this photo. '
+            'Risk score and confidence are 0 because nothing was verified visually.\n\n'
+            'Retry the scan once you are back online for image-specific analysis.',
+        '_source': kbCount > 0 ? 'knowledge_bank_fallback' : 'generic_offline_checklist',
+        '_offline_reason': reason,
+        '_isOnline': false,
+        '_kbBased': kbCount > 0,
+        '_imageAnalysed': false,
+      };
     } catch (_) {
-      // KB fetch also failed — fall through to basic message
+      // Fall through to the minimal response below.
     }
 
-    // Absolute fallback: no KB available either
+    // Absolute fallback: KB unreachable too.
     return {
       'overallRisk': 'UNKNOWN',
       'riskScore': 0,
@@ -719,7 +814,40 @@ FIELD RULES:
       '_source': 'offline_fallback',
       '_offline_reason': reason,
       '_isOnline': false,
+      '_imageAnalysed': false,
     };
+  }
+
+  // ── label helpers for the offline path ───────────────────────────────────
+  static Future<List<String>> _safeSeverities() async {
+    try {
+      return await AdminMasterData.getSeverities();
+    } catch (_) {
+      return List<String>.from(AdminMasterData.defaultSeverities);
+    }
+  }
+
+  static Future<List<String>> _safeObsTypes() async {
+    try {
+      return await AdminMasterData.getObsTypes();
+    } catch (_) {
+      return List<String>.from(AdminMasterData.defaultObservationTypes);
+    }
+  }
+
+  /// Best available match for [wanted] within [options].
+  ///
+  /// Exact (case-insensitive) match wins; otherwise the middle option, so a
+  /// 'HIGH' severity still lands somewhere sensible on a renamed scale rather
+  /// than emitting a label the app would reject. Returns [fallback] only when
+  /// the admin has configured no options at all.
+  static String _nearestLabel(String wanted, List<String> options,
+      {required String fallback}) {
+    if (options.isEmpty) return fallback;
+    for (final o in options) {
+      if (o.trim().toUpperCase() == wanted.trim().toUpperCase()) return o;
+    }
+    return options[options.length ~/ 2];
   }
 
   static bool get isConfigured => true;

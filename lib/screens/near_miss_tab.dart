@@ -539,11 +539,15 @@ If the text is already fine, return it unchanged.''';
       // ★ v29: Detect language from the raw text before sending to AI
       _detectLanguageFromText(rawText);
 
-      // ★ v29: Get KB context with timeout to prevent hanging
+      // ★ v29: Get KB context with timeout to prevent hanging.
+      // maxKbDocs raised from 2 and the timeout from 3s: this is a text
+      // classification, so uploaded documents are the main thing that makes
+      // the suggestion plant-specific rather than generic.
       String kbContext = '';
       try {
-        kbContext = await KnowledgeService.getContextForPrompt(rawText, maxKbDocs: 2)
-            .timeout(const Duration(seconds: 3), onTimeout: () => '');
+        kbContext = await KnowledgeService.getContextForPrompt(rawText,
+                maxKbDocs: 4, snippetChars: 600)
+            .timeout(const Duration(seconds: 6), onTimeout: () => '');
       } catch (_) {}
 
       if (!mounted) return;
@@ -570,8 +574,24 @@ If the text is already fine, return it unchanged.''';
           ? 'Respond with the "reason", "refined", and "correctiveAction" fields in English.'
           : 'IMPORTANT: The worker spoke in $_detectedLangName. You MUST write the "reason", "refined", and "correctiveAction" fields in $_detectedLangName language (using native script). Do NOT translate to English.';
 
-      final prompt = '''$kbContext
+      // Frame the knowledge bank as authoritative, and drive "category" from
+      // the admin's own observation types. This prompt previously dumped the KB
+      // in unlabelled and hardcoded five categories ("Unsafe Act, Unsafe
+      // Condition, Near Miss, Equipment Failure, Process Deviation") that do
+      // not match this form's own dropdown — so the AI could suggest a category
+      // the form then refused to accept.
+      final kbTrimmed = kbContext.trim();
+      final kbBlock = kbTrimmed.isEmpty
+          ? ''
+          : 'PLANT SAFETY KNOWLEDGE (uploaded by this plant\'s safety admin — '
+              'AUTHORITATIVE. Where it conflicts with your general knowledge, '
+              'follow it, and cite clause/section numbers exactly as written):\n'
+              '$kbTrimmed\n\n';
+      final categoryRule = _obsTypes.isEmpty
+          ? '"category": ""'
+          : '"category": "one of (exact wording): ${_obsTypes.join(', ')}"';
 
+      final prompt = '''$kbBlock
 You are analyzing a potential near miss incident reported by a worker at SAIL (Steel Authority of India Limited).
 
 WORKER'S INPUT: "$rawText"
@@ -585,7 +605,7 @@ Analyze this and respond in STRICT JSON format:
   "reason": "brief explanation why this is or is not a near miss (in the same language as worker's input)",
   "refined": "rewritten professional near-miss description with proper safety terminology, clear grammar, and structured format (in the same language as worker's input)",
   "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in the same language as worker's input)",
-  "category": "one of: Unsafe Act, Unsafe Condition, Near Miss, Equipment Failure, Process Deviation",
+  $categoryRule,
   "detectedLanguage": "the language the worker spoke in (English/Hindi)"
 }
 
