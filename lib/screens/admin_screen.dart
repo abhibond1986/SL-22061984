@@ -173,6 +173,40 @@ class _AdminScreenState extends State<AdminScreen>
   Map<String, int> _severityScores = {};
   bool _scoresLoaded = false;
 
+  /// Statuses that count as "still open", derived from the admin's own status
+  /// list. Held in state because [AdminAlerts.evaluate] is called from build()
+  /// and must stay synchronous.
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+
+  /// The full ladder. A record with a blank status is treated as sitting at the
+  /// FIRST configured stage, not at a literal 'OPEN'.
+  List<String> get _statusLadder =>
+      _customLists['status'] ?? AdminMasterData.defaultStatuses;
+
+  String _statusOf(Map<String, dynamic> i) {
+    final s = (i['status']?.toString().trim().toUpperCase() ?? '');
+    if (s.isNotEmpty) return s;
+    final ladder = _statusLadder;
+    return ladder.isEmpty ? '' : ladder.first.trim().toUpperCase();
+  }
+
+  /// Open per the admin's ladder — replaces `status == 'OPEN'`, which reported
+  /// zero the moment the first stage was renamed and never counted the
+  /// intermediate stages (INVESTIGATING, ACTION TAKEN) as open work.
+  bool _isOpenInc(Map<String, dynamic> i) {
+    final s = _statusOf(i);
+    return s.isNotEmpty && _openStatuses.contains(s);
+  }
+
+  /// Closed = the LAST configured stage. Replaces `status == 'CLOSED'`, which
+  /// stopped matching as soon as the admin renamed that stage.
+  bool _isClosedInc(Map<String, dynamic> i) {
+    final ladder = _statusLadder;
+    if (ladder.isEmpty) return false;
+    return _statusOf(i) == ladder.last.trim().toUpperCase();
+  }
+
   // ── Alerts state ────────────────────────────────────────────────
   List<Map<String, dynamic>> _alertRules = [];
   bool _alertsLoaded = false;
@@ -338,6 +372,7 @@ class _AdminScreenState extends State<AdminScreen>
       final stats   = await AdminMasterData.getStatuses();
       final obs     = await AdminMasterData.getObsTypes();
       final scores  = await AdminMasterData.getSeverityScores();
+      final openSts = await AdminMasterData.getOpenStatuses();
 
       if (!mounted) return;
       setState(() {
@@ -354,6 +389,7 @@ class _AdminScreenState extends State<AdminScreen>
           'status'  : stats,
           'obstype' : obs,
         };
+        _openStatuses   = openSts;
         _severityScores = scores;
         _scoresLoaded   = true;
         _mastersLoaded  = true;
@@ -763,10 +799,8 @@ class _AdminScreenState extends State<AdminScreen>
   Widget _moduleOverview(SL sl) {
     final critical = _incidents.where((i) =>
         (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL').length;
-    final open = _incidents.where((i) =>
-        (i['status']?.toString().toUpperCase() ?? '') == 'OPEN').length;
-    final closed = _incidents.where((i) =>
-        (i['status']?.toString().toUpperCase() ?? '') == 'CLOSED').length;
+    final open = _incidents.where(_isOpenInc).length;
+    final closed = _incidents.where(_isClosedInc).length;
     final activeUsers = _users.where((u) =>
         (u['status']?.toString().toLowerCase() ?? 'active') == 'active').length;
     final adminUsers = _users.where((u) =>
@@ -968,8 +1002,8 @@ class _AdminScreenState extends State<AdminScreen>
         byMonth[m] = (byMonth[m] ?? 0) + 1;
       }
 
-      // MTTR (only for closed)
-      if ((inc['status']?.toString().toUpperCase() ?? '') == 'CLOSED') {
+      // MTTR (only for closed — per the admin's final stage, not a literal)
+      if (_isClosedInc(inc)) {
         final closedAt = inc['closedAt']?.toString();
         if (dateStr.isNotEmpty && closedAt != null && closedAt.isNotEmpty) {
           try {
@@ -1325,11 +1359,14 @@ class _AdminScreenState extends State<AdminScreen>
   Widget _closureRateCard(SL sl) {
     final byPlant = <String, Map<String, int>>{};
     for (final inc in _incidents) {
-      final p = (inc['plant']?.toString() ?? '—').trim();
-      final s = (inc['status']?.toString().toUpperCase() ?? '');
+      // Canonicalise the key so "DSP" and "DSP Durgapur" don't produce two rows
+      // each with half the plant's closure data.
+      final canon = AdminMasterData.canonicalPlantFrom(
+          inc['plant']?.toString() ?? '', _plantsEditable);
+      final p = canon.isEmpty ? '—' : canon;
       byPlant.putIfAbsent(p, () => {'total': 0, 'closed': 0});
       byPlant[p]!['total'] = byPlant[p]!['total']! + 1;
-      if (s == 'CLOSED') {
+      if (_isClosedInc(inc)) {
         byPlant[p]!['closed'] = byPlant[p]!['closed']! + 1;
       }
     }
@@ -2344,11 +2381,12 @@ class _AdminScreenState extends State<AdminScreen>
 
       _exportCard(
         'Incidents — Open only',
-        '${_incidents.where((i) => (i['status']?.toString().toUpperCase() ?? '') == 'OPEN').length} rows',
+        '${_incidents.where(_isOpenInc).length} rows',
         Icons.lock_open_rounded, AppColors.amber, sl,
         () {
-          final list = _incidents.where((i) =>
-              (i['status']?.toString().toUpperCase() ?? '') == 'OPEN').toList();
+          // The export said "Open only" but shipped just the first stage, so
+          // INVESTIGATING and ACTION TAKEN cases were missing from the CSV.
+          final list = _incidents.where(_isOpenInc).toList();
           final csv = _incidentsToCsv(list);
           _downloadString(csv, 'SafetyLens_OpenIncidents_${_todayIso()}.csv');
           _logExport('incidents_open', list.length);
@@ -2658,7 +2696,10 @@ class _AdminScreenState extends State<AdminScreen>
     final id     = inc['id']?.toString() ?? '';
     final title  = inc['title']?.toString() ?? 'Untitled';
     final sev    = inc['severity']?.toString().toUpperCase() ?? '—';
-    final status = inc['status']?.toString().toUpperCase() ?? 'OPEN';
+    // Blank status resolves to the first configured stage, not a literal 'OPEN'
+    // that may no longer exist in the admin's ladder.
+    final status = _statusOf(inc);
+    final isClosed = _isClosedInc(inc);
     final plant  = inc['plant']?.toString() ?? '—';
     final dt     = inc['date']?.toString() ?? '';
     final assignee = inc['assignedTo']?.toString();
@@ -2669,14 +2710,14 @@ class _AdminScreenState extends State<AdminScreen>
     int days = 0;
     Color slaColor = AppColors.green;
     String slaText = '';
-    if (status != 'CLOSED' && dt.isNotEmpty) {
+    if (!isClosed && dt.isNotEmpty) {
       try {
         days = DateTime.now().difference(DateTime.parse(dt)).inDays;
         if (days >= 14) { slaColor = AppColors.red;   slaText = '$days d ⚠'; }
         else if (days >= 7)  { slaColor = AppColors.amber; slaText = '$days d'; }
         else                 { slaColor = AppColors.green; slaText = '$days d'; }
       } catch (_) {}
-    } else if (status == 'CLOSED') {
+    } else if (isClosed) {
       slaText = 'closed'; slaColor = AppColors.green;
     }
 
@@ -2870,7 +2911,13 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _wfChangeStatus(Map<String, dynamic> inc, String newStatus) async {
     final old = inc['status']?.toString();
     inc['status'] = newStatus;
-    if (newStatus == 'CLOSED') {
+    // Stamp closure when the case reaches the admin's FINAL stage, whatever it
+    // is called. Comparing to 'CLOSED' meant a renamed final stage left closedAt
+    // and closedBy empty, which in turn broke every MTTR and closure-rate figure.
+    final ladder = _statusLadder;
+    final isFinal = ladder.isNotEmpty &&
+        newStatus.trim().toUpperCase() == ladder.last.trim().toUpperCase();
+    if (isFinal) {
       inc['closedAt'] = DateTime.now().toIso8601String();
       inc['closedBy'] = _currentActor;
     }
@@ -4322,7 +4369,9 @@ class _AdminScreenState extends State<AdminScreen>
   //  MODULE 10 — ALERTS & NOTIFICATIONS
   // ══════════════════════════════════════════════════════════════════
   Widget _moduleAlerts(SL sl) {
-    final firing = AdminAlerts.evaluate(_alertRules, _incidents);
+    // Pass the live master data in — evaluate() is sync, so it can't fetch.
+    final firing = AdminAlerts.evaluate(_alertRules, _incidents,
+        openStatuses: _openStatuses, plants: _plantsEditable);
 
     return ListView(padding: const EdgeInsets.all(16), children: [
       Container(
@@ -5206,24 +5255,28 @@ class _AdminScreenState extends State<AdminScreen>
   Widget _moduleCompliance(SL sl) {
     final byPlant = <String, _PlantCompliance>{};
     for (final inc in _incidents) {
-      final p = (inc['plant']?.toString() ?? '—').trim();
+      // Canonical plant key: raw strings split one plant across several rows.
+      final canon = AdminMasterData.canonicalPlantFrom(
+          inc['plant']?.toString() ?? '', _plantsEditable);
+      final p = canon.isEmpty ? '—' : canon;
       byPlant.putIfAbsent(p, () => _PlantCompliance(p));
       final pc = byPlant[p]!;
       pc.total++;
       final sev = inc['severity']?.toString().toUpperCase() ?? '';
-      final st  = inc['status']?.toString().toUpperCase() ?? '';
+      // Closed/open per the admin's ladder, not literal 'CLOSED'.
+      final isClosed = _isClosedInc(inc);
       if (sev == 'CRITICAL') pc.critical++;
       if (sev == 'HIGH')     pc.high++;
-      if (st  == 'CLOSED')   pc.closed++;
-      else                   pc.open++;
-      if ((sev == 'CRITICAL' || sev == 'HIGH') && st != 'CLOSED') {
+      if (isClosed) pc.closed++;
+      else          pc.open++;
+      if ((sev == 'CRITICAL' || sev == 'HIGH') && !isClosed) {
         final d = DateTime.tryParse(inc['date']?.toString() ?? '');
         if (d != null &&
             DateTime.now().difference(d).inDays > 7) {
           pc.staleHighCritical++;
         }
       }
-      if (st == 'CLOSED') {
+      if (isClosed) {
         final d1 = DateTime.tryParse(inc['date']?.toString() ?? '');
         final d2 = DateTime.tryParse(inc['closedAt']?.toString() ?? '');
         if (d1 != null && d2 != null) {

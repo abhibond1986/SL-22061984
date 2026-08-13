@@ -11,6 +11,7 @@ import '../main.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
+import '../services/plant_scope.dart';
 import '../services/realtime_sync.dart';
 import 'admin_screen.dart';
 
@@ -36,6 +37,10 @@ class _DashboardTabState extends State<DashboardTab> {
   List<Map<String, dynamic>> _incidents = [];
   List<Map<String, dynamic>> _allUsers  = [];
   Map<String, dynamic>?      _selectedUser;
+  /// Resolved visibility scope. Starts null and every scoped getter treats null
+  /// as "nothing decided yet" rather than "everything", so the first frame can't
+  /// leak other plants' users while the resolve is in flight.
+  PlantScope? _scope;
   bool _loading    = true;
   bool _refreshing = false;
 
@@ -49,6 +54,45 @@ class _DashboardTabState extends State<DashboardTab> {
   // incidents from every open-case count on this screen.
   Set<String> _openStatuses =
       AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+  /// Full ladder, so a blank status can be read as the FIRST configured stage
+  /// instead of a literal 'OPEN'.
+  List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
+
+  /// Effective status of [i]: its own, or the first configured stage when blank.
+  String _statusOf(Map<String, dynamic> i) {
+    final s = (i['status']?.toString().trim().toUpperCase() ?? '');
+    if (s.isNotEmpty) return s;
+    return _statuses.isEmpty ? '' : _statuses.first.trim().toUpperCase();
+  }
+
+  bool _isOpenInc(Map<String, dynamic> i) {
+    final s = _statusOf(i);
+    return s.isNotEmpty && _openStatuses.contains(s);
+  }
+
+  /// True when incident [i] belongs to the plant with code [code].
+  ///
+  /// Canonicalises first. The old filters used `plant.startsWith(code)`, which
+  /// matched 'BSP' against 'BSP_MINES' — two different plants counted as one.
+  bool _matchesPlantCode(Map<String, dynamic> i, String code) {
+    final canon = AdminMasterData
+        .canonicalPlantFrom(i['plant']?.toString() ?? '', _plants)
+        .toUpperCase();
+    final c = code.trim().toUpperCase();
+    if (c.isEmpty || canon.isEmpty) return false;
+    // Canonical labels are "CODE — Name", so compare the code segment exactly.
+    final dash = canon.indexOf(' — ');
+    final canonCode = dash > 0 ? canon.substring(0, dash) : canon;
+    return canonCode == c;
+  }
+
+  /// "Finished" — anything not open. Previously written as
+  /// `s == 'CLOSED' || s == 'RESOLVED'`, where 'RESOLVED' isn't even in the
+  /// status list, so a VERIFIED case counted as neither open nor resolved.
+  bool _isDoneInc(Map<String, dynamic> i) {
+    final s = _statusOf(i);
+    return s.isNotEmpty && !_openStatuses.contains(s);
+  }
 
   @override
   void initState() {
@@ -74,11 +118,13 @@ class _DashboardTabState extends State<DashboardTab> {
     try {
       final masterPlants = await AdminMasterData.getPlants();
       final openStatuses = await AdminMasterData.getOpenStatuses();
+      final allStatuses  = await AdminMasterData.getStatuses();
       if (!mounted) return;
       // No .isEmpty bail-out: if the admin deleted every plant, show none.
       setState(() {
         _plants = masterPlants;
         _openStatuses = openStatuses;
+        _statuses = allStatuses;
       });
     } catch (_) {}
   }
@@ -89,26 +135,71 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 
   Future<void> _loadLocal() async {
-    final inc   = await LocalDB.getIncidents();
-    final users = await LocalDB.getAllUsers();
+    final scope = await PlantScope.forUser(widget.user);
+    // Filter at source, not in the widgets: a locked user's _incidents list must
+    // never contain another plant's records, or any getter added later silently
+    // reintroduces the leak.
+    final inc   = await scope.filterIncidents(await LocalDB.getIncidents());
+    final users = _usersInScope(await LocalDB.getAllUsers(), scope);
     if (!mounted) return;
     setState(() {
+      _scope        = scope;
       _incidents    = inc;
       _allUsers     = users.isNotEmpty ? users : _fallbackUsers();
       _selectedUser ??= _findUser(widget.user?['username']?.toString() ?? '');
       _selectedUser ??= _allUsers.isNotEmpty ? _allUsers.first : widget.user;
+      // If the previously selected user is no longer in scope (scope resolved
+      // after the first paint, or the admin moved them), fall back to self.
+      if (_selectedUser != null && !_isUserInList(_selectedUser!, _allUsers)) {
+        _selectedUser = _allUsers.isNotEmpty ? _allUsers.first : widget.user;
+      }
       _loading = false;
     });
+  }
+
+  /// Users a locked plant user may inspect: their own plant's, plus always
+  /// themselves (so a user whose own plant string is odd still sees their data).
+  List<Map<String, dynamic>> _usersInScope(
+      List<Map<String, dynamic>> users, PlantScope scope) {
+    if (scope.seesAllPlants) return users;
+    if (scope.plant.isEmpty) return _fallbackUsers();
+    final myPno  = widget.user?['pno']?.toString() ?? '';
+    final myUser = widget.user?['username']?.toString() ?? '';
+    return users.where((u) {
+      if (myPno.isNotEmpty && u['pno']?.toString() == myPno) return true;
+      if (myUser.isNotEmpty && u['username']?.toString() == myUser) return true;
+      return AdminMasterData.canonicalPlantFrom(
+              u['plant']?.toString() ?? '', _plants) ==
+          scope.plant;
+    }).toList();
+  }
+
+  bool _isUserInList(
+      Map<String, dynamic> u, List<Map<String, dynamic>> list) {
+    final key = u['username']?.toString() ?? u['name']?.toString() ?? '';
+    if (key.isEmpty) return false;
+    return list.any((x) =>
+        x['username']?.toString() == key || x['name']?.toString() == key);
   }
 
   Future<void> _refreshFromSheets() async {
     if (_refreshing) return;
     setState(() => _refreshing = true);
     try {
+      // Scope the freshly fetched rows too. These two setState calls used the
+      // server lists verbatim, so a background refresh re-populated the screen
+      // with every plant's data a few seconds after _loadLocal() had filtered it.
+      final scope = _scope ?? await PlantScope.forUser(widget.user);
       final sheetUsers = await SyncService.fetchUsers();
-      if (sheetUsers.isNotEmpty && mounted) setState(() => _allUsers = sheetUsers);
+      if (sheetUsers.isNotEmpty && mounted) {
+        final scoped = _usersInScope(sheetUsers, scope);
+        setState(() => _allUsers = scoped.isNotEmpty ? scoped : _fallbackUsers());
+      }
       final sheetInc = await SyncService.fetchIncidents();
-      if (sheetInc.isNotEmpty && mounted) setState(() => _incidents = sheetInc);
+      if (sheetInc.isNotEmpty) {
+        final scopedInc = await scope.filterIncidents(sheetInc);
+        if (mounted) setState(() => _incidents = scopedInc);
+      }
     } catch (_) {}
     if (mounted) setState(() => _refreshing = false);
   }
@@ -157,10 +248,7 @@ class _DashboardTabState extends State<DashboardTab> {
   int get _nearMiss => _userIncidents.where((i) =>
       (i['type']?.toString().toUpperCase() ?? '').contains('NEAR') ||
       (i['type']?.toString().toUpperCase() ?? '').contains('MISS')).length;
-  int get _resolved => _userIncidents.where((i) {
-      final s = i['status']?.toString().toUpperCase() ?? '';
-      return s == 'CLOSED' || s == 'RESOLVED';
-    }).length;
+  int get _resolved => _userIncidents.where(_isDoneInc).length;
   int get _critical => _userIncidents.where((i) =>
       (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL').length;
   int get _high     => _userIncidents.where((i) =>
@@ -204,10 +292,11 @@ class _DashboardTabState extends State<DashboardTab> {
       code ??= result.containsKey('OTHER') ? 'OTHER' : null;
       if (code == null || !result.containsKey(code)) continue;
       result[code]!['total'] = (result[code]!['total'] ?? 0) + 1;
-      final status   = inc['status']?.toString().toUpperCase()   ?? '';
       final severity = inc['severity']?.toString().toUpperCase() ?? '';
       final type     = inc['type']?.toString().toUpperCase()     ?? '';
-      if (status == 'OPEN')       result[code]!['open']     = (result[code]!['open']     ?? 0) + 1;
+      // Every non-terminal stage counts as open, not just a literal 'OPEN' —
+      // INVESTIGATING and ACTION TAKEN are open work too.
+      if (_isOpenInc(inc))        result[code]!['open']     = (result[code]!['open']     ?? 0) + 1;
       if (severity == 'CRITICAL') result[code]!['critical'] = (result[code]!['critical'] ?? 0) + 1;
       if (severity == 'HIGH')     result[code]!['high']     = (result[code]!['high']     ?? 0) + 1;
       if (type.contains('AI') || type.contains('SCAN'))
@@ -216,22 +305,38 @@ class _DashboardTabState extends State<DashboardTab> {
     return result;
   }
 
+  /// The plant code for the signed-in user.
+  ///
+  /// Uses the shared canonicaliser instead of `startsWith(code)` plus a
+  /// first-word `contains()`, which matched far too loosely — 'BSP Bhilai'
+  /// satisfied both 'BSP' and 'BSP_MINES', and any plant whose name began with
+  /// a common word could win on the second test.
   String _myPlantCode() {
-    final plant = widget.user?['plant']?.toString() ?? '';
+    final raw = widget.user?['plant']?.toString() ?? '';
+    if (raw.trim().isEmpty) return '';
+    final canon =
+        AdminMasterData.canonicalPlantFrom(raw, _plants).toUpperCase();
+    if (canon.isEmpty) return '';
+    final dash = canon.indexOf(' — ');
+    final code = dash > 0 ? canon.substring(0, dash) : canon;
+    // Only return a code the master list actually contains.
     for (final p in _plants) {
-      if (plant.toUpperCase().startsWith(p['code']!) ||
-          plant.toLowerCase().contains(p['name']!.split(' ').first.toLowerCase()))
-        return p['code']!;
+      if ((p['code'] ?? '').toUpperCase() == code) return p['code']!;
     }
     return '';
   }
 
+  /// Admin check — reads `isAdmin` ONLY, via the one shared definition.
+  ///
+  /// This used to also return true when the user's own `designation` contained
+  /// 'agm', 'gm', 'manager' or 'admin'. Designation is free text the user types
+  /// into their own registration form, so anyone who wrote "Manager" granted
+  /// themselves admin visibility — and note 'gm' is a substring of many words.
+  /// home_tab used isAdmin alone, so the two screens also disagreed about who
+  /// was an admin.
   bool _isAdmin() {
-    final desig = widget.user?['designation']?.toString().toLowerCase() ?? '';
-    final role  = widget.user?['isAdmin']?.toString().toLowerCase()     ?? '';
-    return role == 'true' ||
-        desig.contains('agm') || desig.contains('gm') ||
-        desig.contains('manager') || desig.contains('admin');
+    final u = widget.user;
+    return u != null && PlantScope.isAdminUser(u);
   }
 
   @override
@@ -253,6 +358,7 @@ class _DashboardTabState extends State<DashboardTab> {
                     padding: const EdgeInsets.fromLTRB(14, 14, 14, 100),
                     sliver: SliverList(
                       delegate: SliverChildListDelegate([
+                        _scopeBanner(sl),
                         _buildUserSwitcher(sl),
                         const SizedBox(height: 16),
                         _buildPlantSummary(sl),
@@ -323,6 +429,29 @@ class _DashboardTabState extends State<DashboardTab> {
         icon: Icon(Icons.logout_rounded, color: sl.text3, size: 20)),
     ],
   );
+
+  /// Shows an unresolved scope. Never silently widen: if we can't tell which
+  /// plant this user belongs to, say so instead of showing an empty dashboard
+  /// that looks like "no incidents reported".
+  Widget _scopeBanner(SL sl) {
+    final problem = _scope?.problem;
+    if (problem == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.amber.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.amber.withOpacity(0.4))),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.info_outline_rounded,
+            color: AppColors.amber, size: 16),
+        const SizedBox(width: 8),
+        Expanded(child: Text(problem,
+            style: TextStyle(color: sl.text2, fontSize: 11, height: 1.35))),
+      ]),
+    );
+  }
 
   Widget _buildUserSwitcher(SL sl) => Container(
     padding: const EdgeInsets.all(12),
@@ -432,10 +561,7 @@ class _DashboardTabState extends State<DashboardTab> {
           color: AppColors.green, icon: Icons.check_circle_outline_rounded, sl: sl,
           onTap: () => _showCasesSheet(
             title: 'Resolved cases',
-            filter: (i) {
-              final s = i['status']?.toString().toUpperCase() ?? '';
-              return s == 'CLOSED' || s == 'RESOLVED';
-            }, sl: sl))),
+            filter: _isDoneInc, sl: sl))),
       ]),
     ],
   );
@@ -532,12 +658,22 @@ class _DashboardTabState extends State<DashboardTab> {
 
   /// ★ NEW: Plant-specific summary for the user's plant
   Widget _buildPlantSummary(SL sl) {
-    final userPlant = widget.user?['plant']?.toString() ?? 'Unknown';
+    final rawUserPlant = (widget.user?['plant']?.toString() ?? '').trim();
+    if (rawUserPlant.isEmpty) return const SizedBox.shrink();
+
+    // Canonicalise once, then compare canonical-to-canonical. The old test was
+    // `incPlant.contains(userPlant)`, which pulled "BSP_MINES" records into a
+    // "BSP" user's summary — and with a short plant code could match almost
+    // anything.
+    final userPlant =
+        AdminMasterData.canonicalPlantFrom(rawUserPlant, _plants);
+    if (userPlant.isEmpty) return const SizedBox.shrink();
 
     // Filter incidents for user's plant only
     final plantIncidents = _incidents.where((inc) {
-      final incPlant = inc['plant']?.toString() ?? '';
-      return incPlant == userPlant || incPlant.toUpperCase().contains(userPlant.toUpperCase());
+      return AdminMasterData.canonicalPlantFrom(
+              inc['plant']?.toString() ?? '', _plants) ==
+          userPlant;
     }).toList();
 
     if (plantIncidents.isEmpty) {
@@ -549,10 +685,7 @@ class _DashboardTabState extends State<DashboardTab> {
     final total = plantIncidents.length;
     final critical = plantIncidents.where((i) =>
       (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL').length;
-    final open = plantIncidents.where((i) {
-      final status = i['status']?.toString().toUpperCase() ?? 'OPEN';
-      return _openStatuses.contains(status);
-    }).length;
+    final open = plantIncidents.where(_isOpenInc).length;
 
     // Last 30 days trend
     final last30Days = DateTime.now().subtract(const Duration(days: 30));
@@ -725,7 +858,15 @@ class _DashboardTabState extends State<DashboardTab> {
   Widget _buildPlantSection(SL sl) {
     final stats  = _plantStats();
     final myCode = _myPlantCode();
-    final sorted = List<Map<String, String>>.from(_plants)
+    final locked = _scope?.isLocked ?? false;
+    // A locked user's _incidents contain only their own plant, so every other
+    // row here would read 0 across the board — a table that looks like real
+    // data but isn't. Show just their plant instead.
+    final visible = locked
+        ? _plants.where((p) => (p['code'] ?? '') == myCode).toList()
+        : List<Map<String, String>>.from(_plants);
+    if (visible.isEmpty) return const SizedBox.shrink();
+    final sorted = visible
       ..sort((a, b) {
         if (a['code'] == myCode) return -1;
         if (b['code'] == myCode) return 1;
@@ -737,15 +878,17 @@ class _DashboardTabState extends State<DashboardTab> {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         Expanded(child: _sectionHeader('🏭  Plant-wise Safety Status', sl)),
-        TextButton(
-          onPressed: () => _showAllPlantsSheet(stats, myCode, sl),
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            minimumSize: Size.zero),
-          child: const Text('View all →', style: TextStyle(
-              color: AppColors.accent, fontSize: 11, fontWeight: FontWeight.w600))),
+        if (!locked)
+          TextButton(
+            onPressed: () => _showAllPlantsSheet(stats, myCode, sl),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: Size.zero),
+            child: const Text('View all →', style: TextStyle(
+                color: AppColors.accent, fontSize: 11, fontWeight: FontWeight.w600))),
       ]),
-      Text('All SAIL plants · tap row for details',
+      Text(locked ? 'Your plant · tap row for details'
+                  : 'All SAIL plants · tap row for details',
         style: TextStyle(color: sl.text4, fontSize: 10)),
       const SizedBox(height: 10),
       Container(
@@ -816,29 +959,22 @@ class _DashboardTabState extends State<DashboardTab> {
             _miniBadge('C:$critical', AppColors.crit,
               onTap: () => _showAllCasesSheet(
                 title: '$code — Critical cases',
-                filter: (i) {
-                  final p = i['plant']?.toString().toUpperCase() ?? '';
-                  return p.startsWith(code) &&
-                      (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL';
-                }, sl: sl)),
+                filter: (i) => _matchesPlantCode(i, code) &&
+                    (i['severity']?.toString().toUpperCase() ?? '') == 'CRITICAL',
+                sl: sl)),
             const SizedBox(width: 4),
             _miniBadge('O:$open', AppColors.amber,
               onTap: () => _showAllCasesSheet(
                 title: '$code — Open cases',
-                filter: (i) {
-                  final p = i['plant']?.toString().toUpperCase() ?? '';
-                  final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
-                  return p.startsWith(code) && _openStatuses.contains(s);
-                }, sl: sl)),
+                filter: (i) => _matchesPlantCode(i, code) && _isOpenInc(i),
+                sl: sl)),
             const SizedBox(width: 4),
             _miniBadge('S:$scans', AppColors.accent,
               onTap: () => _showAllCasesSheet(
                 title: '$code — AI Scans',
-                filter: (i) {
-                  final p = i['plant']?.toString().toUpperCase() ?? '';
-                  return p.startsWith(code) &&
-                      (i['type']?.toString().toUpperCase() ?? '').contains('SCAN');
-                }, sl: sl)),
+                filter: (i) => _matchesPlantCode(i, code) &&
+                    (i['type']?.toString().toUpperCase() ?? '').contains('SCAN'),
+                sl: sl)),
           ]),
           const SizedBox(width: 6),
           Icon(Icons.chevron_right_rounded, color: sl.text4, size: 18),
@@ -879,10 +1015,8 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 
   void _showPlantSheet(String code, String name, Map<String, int> stats, SL sl) {
-    final plantCases = _incidents.where((i) {
-      final p = i['plant']?.toString().toUpperCase() ?? '';
-      return p.startsWith(code);
-    }).toList();
+    final plantCases =
+        _incidents.where((i) => _matchesPlantCode(i, code)).toList();
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1055,6 +1189,7 @@ class _CaseCardState extends State<_CaseCard> {
   void initState() {
     super.initState();
     _inc = Map<String, dynamic>.from(widget.inc);
+    _loadClosingStatus();
   }
 
   Color _sevColor(String s) {
@@ -1067,8 +1202,20 @@ class _CaseCardState extends State<_CaseCard> {
     }
   }
 
+  /// Terminal-status check against the admin's ladder rather than the literal
+  /// 'CLOSED'. Seeded from the shared const so the first frame has a value;
+  /// [_loadClosingStatus] replaces it with the configured one.
+  String _closingStatus = AdminMasterData.defaultStatuses.last;
+
   bool get _isClosed =>
-      (_inc['status']?.toString().toUpperCase() ?? '') == 'CLOSED';
+      _closingStatus.isNotEmpty &&
+      (_inc['status']?.toString().trim().toUpperCase() ?? '') ==
+          _closingStatus.trim().toUpperCase();
+
+  Future<void> _loadClosingStatus() async {
+    final s = await AdminMasterData.lastStatus();
+    if (mounted && s != _closingStatus) setState(() => _closingStatus = s);
+  }
 
   // ── Quick Close Dialog ────────────────────────────────────────
   Future<void> _showQuickCloseDialog() async {
@@ -1157,8 +1304,25 @@ class _CaseCardState extends State<_CaseCard> {
 
     setState(() => _closing = true);
 
+    // Close using the LAST status in the admin's ladder, not the literal
+    // 'CLOSED' — if the admin renames that stage, writing 'CLOSED' would put
+    // the record into a status that no longer exists in any dropdown or count.
+    final closingStatus = await AdminMasterData.lastStatus();
+    if (closingStatus.isEmpty) {
+      // No statuses configured at all: there is nothing to close into, and
+      // inventing one would contradict the admin panel.
+      if (mounted) {
+        setState(() => _closing = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No statuses are configured — ask the admin to set '
+              'up the status list before closing cases.'),
+        ));
+      }
+      return;
+    }
+
     final now = DateTime.now().toIso8601String();
-    _inc['status']           = 'CLOSED';
+    _inc['status']           = closingStatus;
     _inc['correctiveAction'] = corrective;
     _inc['closedBy']         = closedBy;
     _inc['closedAt']         = now;

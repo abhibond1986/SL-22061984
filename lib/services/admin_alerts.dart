@@ -35,6 +35,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'admin_master_data.dart';
 
 class AdminAlerts {
   static const String _kKey = 'admin_alert_rules';
@@ -160,11 +161,21 @@ class AdminAlerts {
   // ── EVALUATE — figure out which rules WOULD fire right now ──────
   // Pure function over current state — does not actually send.
   // ★ v35: Enhanced with AI scan and near-miss triggers + department matching
+  ///
+  /// [openStatuses] and [plants] come from AdminMasterData. They are passed in
+  /// rather than fetched because this stays a synchronous pure function; callers
+  /// await them. When omitted, the shared const defaults are used — never a
+  /// re-typed literal list.
   static List<Map<String, dynamic>> evaluate(
       List<Map<String, dynamic>> rules,
       List<Map<String, dynamic>> incidents,
       {Map<String, dynamic>? latestAiScan,
-       Map<String, dynamic>? latestNearMiss}) {
+       Map<String, dynamic>? latestNearMiss,
+       Set<String>? openStatuses,
+       List<Map<String, String>>? plants}) {
+    final openSet = openStatuses ??
+        AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+    final plantDefs = plants ?? AdminMasterData.sailPlants;
     final firing = <Map<String, dynamic>>[];
     final today = DateTime.now();
     final todayKey = '${today.year}-'
@@ -177,8 +188,19 @@ class AdminAlerts {
       final plant   = r['plant']?.toString() ?? '';
       final dept    = r['department']?.toString() ?? '';
 
-      bool incPlantMatch(Map<String, dynamic> i) =>
-          plant.isEmpty || (i['plant']?.toString() == plant);
+      // Canonicalise both sides: a rule scoped to "BSP" was compared with raw
+      // string equality, so it never matched records stored as "BSP Bhilai" and
+      // the rule silently never fired.
+      final rulePlant = plant.isEmpty
+          ? ''
+          : AdminMasterData.canonicalPlantFrom(plant, plantDefs);
+      bool incPlantMatch(Map<String, dynamic> i) {
+        if (plant.isEmpty) return true;
+        if (rulePlant.isEmpty) return i['plant']?.toString() == plant;
+        return AdminMasterData.canonicalPlantFrom(
+                i['plant']?.toString() ?? '', plantDefs) ==
+            rulePlant;
+      }
 
       bool incDeptMatch(Map<String, dynamic> i) {
         if (dept.isEmpty) return true;
@@ -286,7 +308,11 @@ class AdminAlerts {
             final sev = i['severity']?.toString().toUpperCase() ?? '';
             final st  = i['status']?.toString().toUpperCase() ?? '';
             if (!(sev == 'CRITICAL' || sev == 'HIGH')) return false;
-            if (st == 'CLOSED') return false;
+            // "Still open" per the admin's ladder. Testing `st == 'CLOSED'`
+            // meant renaming the final stage made every closed case look open,
+            // and this rule then fired on work that was already finished.
+            // A blank status counts as open: nothing has closed it.
+            if (st.isNotEmpty && !openSet.contains(st)) return false;
             if (!incPlantMatch(i) || !incDeptMatch(i)) return false;
             final d = DateTime.tryParse(i['date']?.toString() ?? '');
             return d != null && d.isBefore(cutoff);

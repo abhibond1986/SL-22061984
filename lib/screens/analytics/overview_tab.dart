@@ -5,9 +5,17 @@ import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL;
 import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
+import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 
+/// Org overview.
+///
+/// It used to compute every KPI and chart over ALL incidents with no plant
+/// filter, so a plant user's "overview" was actually SAIL-wide. The data is now
+/// scoped through PlantScope at load time. There is deliberately no plant
+/// selector — this screen never had one — so an admin still sees org-wide
+/// figures and a plant user sees only their own plant.
 class OverviewTab extends StatefulWidget {
   const OverviewTab({super.key});
   @override
@@ -25,6 +33,14 @@ class _OverviewTabState extends State<OverviewTab> {
   // pipeline used to hardcode four and silently dropped VERIFIED.
   List<String> _statuses =
       List<String>.from(AdminMasterData.defaultStatuses);
+  // Statuses that mean "still open", from the admin's own ladder. The KPIs used
+  // to test `status != 'CLOSED'`, which counted a renamed final stage as open
+  // and counted VERIFIED as open too.
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+  // The closing status — the last rung of the admin's ladder, not a literal.
+  String _closedStatus = 'CLOSED';
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
 
   @override
   void initState() {
@@ -46,29 +62,56 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   Future<void> _load() async {
-    final inc = await LocalDB.getIncidents();
+    final scope = await PlantScope.forUser();
+    // Scope the data at the source: a non-admin never holds another plant's
+    // records in memory, so no KPI, chart or drill-through sheet below can
+    // reveal them.
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
     final sevs = await AdminMasterData.getSeverities();
     final statuses = await AdminMasterData.getStatuses();
+    final open = await AdminMasterData.getOpenStatuses();
+    final closed = await AdminMasterData.lastStatus();
     if (mounted) {
       setState(() {
+        _scope = scope;
         _incidents = inc;
         _severities = sevs;
         _statuses = statuses;
+        _openStatuses = open;
+        _closedStatus = closed.toUpperCase();
         _loading = false;
       });
     }
   }
 
+  /// A record with no status counts as the FIRST status in the admin's ladder,
+  /// not a literal 'OPEN' — renaming that stage otherwise creates a phantom
+  /// 'OPEN' bucket alongside the real one.
+  String _statusOf(Map<String, dynamic> i) {
+    final s = (i['status']?.toString().trim().toUpperCase() ?? '');
+    if (s.isNotEmpty) return s;
+    return _statuses.isEmpty ? '' : _statuses.first.trim().toUpperCase();
+  }
+
+  /// True when [i] is still open, per the ADMIN's status ladder. Previously
+  /// `status != 'CLOSED'`, which counted a renamed final stage as open and
+  /// treated VERIFIED as open too.
+  bool _isOpen(Map<String, dynamic> i) {
+    final s = _statusOf(i);
+    if (s.isEmpty) return _openStatuses.isNotEmpty;
+    return _openStatuses.contains(s);
+  }
+
+  /// True when [i] sits at the admin's closing status.
+  bool _isClosed(Map<String, dynamic> i) =>
+      _closedStatus.isNotEmpty && _statusOf(i) == _closedStatus;
+
   // ── COMPUTED KPIs ─────────────────────────────────────────────
   int get _total => _incidents.length;
 
-  int get _open => _incidents.where((i) {
-    final s = (i['status']?.toString().toUpperCase() ?? 'OPEN');
-    return s != 'CLOSED';
-  }).length;
+  int get _open => _incidents.where(_isOpen).length;
 
-  int get _closed => _incidents.where((i) =>
-      i['status']?.toString().toUpperCase() == 'CLOSED').length;
+  int get _closed => _incidents.where(_isClosed).length;
 
   double get _closureRate => _total == 0 ? 0 : (_closed / _total * 100);
 
@@ -84,8 +127,9 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   double get _avgClosureTime {
+    // Closed-ness comes from the admin's closing status, not a literal 'CLOSED'.
     final closedInc = _incidents.where((i) =>
-        i['status']?.toString().toUpperCase() == 'CLOSED' &&
+        _isClosed(i) &&
         i['closedAt'] != null && i['date'] != null).toList();
     if (closedInc.isEmpty) return 0;
     double totalDays = 0;
@@ -99,9 +143,10 @@ class _OverviewTabState extends State<OverviewTab> {
     return totalDays / closedInc.length;
   }
 
-  // Status counts
-  int _statusCount(String status) => _incidents.where((i) =>
-      (i['status']?.toString().toUpperCase() ?? 'OPEN') == status).length;
+  // Status counts. A blank status is attributed to the admin's first stage
+  // rather than a hardcoded 'OPEN'.
+  int _statusCount(String status) =>
+      _incidents.where((i) => _statusOf(i) == status).length;
 
   // Severity counts
   Map<String, int> get _severityCounts {
@@ -148,7 +193,8 @@ class _OverviewTabState extends State<OverviewTab> {
   String get _worstPlant {
     final m = <String, int>{};
     for (final i in _incidents) {
-      if ((i['status']?.toString().toUpperCase() ?? 'OPEN') == 'CLOSED') continue;
+      // Skip finished cases via the admin's ladder, not a literal 'CLOSED'.
+      if (!_isOpen(i)) continue;
       final p = i['plant']?.toString() ?? '';
       if (p.isNotEmpty) m[p] = (m[p] ?? 0) + 1;
     }
@@ -169,8 +215,9 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   String get _longestOpen {
-    final openInc = _incidents.where((i) =>
-        (i['status']?.toString().toUpperCase() ?? 'OPEN') != 'CLOSED').toList();
+    // "Open" per the admin's ladder — was `!= 'CLOSED'`, which also counted
+    // VERIFIED cases as still open.
+    final openInc = _incidents.where(_isOpen).toList();
     if (openInc.isEmpty) return '—';
     openInc.sort((a, b) =>
         (a['date']?.toString() ?? '').compareTo(b['date']?.toString() ?? ''));
@@ -187,8 +234,25 @@ class _OverviewTabState extends State<OverviewTab> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
+    // An unresolved scope is reported, not silently widened to all plants.
+    if (_scope.problem != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Text(_scope.problem!,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
+        ),
+      );
+    }
     if (_incidents.isEmpty) {
-      return Center(child: Text('No data recorded yet',
+      // Name the plant for a locked user, so an empty overview can't be read as
+      // "SAIL has no incidents".
+      return Center(child: Text(
+          _scope.isLocked
+              ? 'No data recorded yet for ${_scope.plant}'
+              : 'No data recorded yet',
+          textAlign: TextAlign.center,
           style: TextStyle(color: sl.text3, fontSize: 14)));
     }
 
@@ -199,6 +263,13 @@ class _OverviewTabState extends State<OverviewTab> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Every card below is now plant-scoped, so a locked user gets one
+          // header naming the scope. Without it these figures read as SAIL-wide,
+          // which is exactly how this screen used to be wrong.
+          if (_scope.isLocked) ...[
+            _lockedPlantHeader(sl),
+            const SizedBox(height: 12),
+          ],
           _kpiStrip(sl),
           const SizedBox(height: 16),
           _statusPipeline(sl),
@@ -215,6 +286,39 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
+  //  LOCKED PLANT HEADER — states the scope, no affordance to change it
+  // ═══════════════════════════════════════════════════════════════
+  Widget _lockedPlantHeader(SL sl) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.accent.withOpacity(0.30)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.factory_rounded, size: 16, color: AppColors.accent),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('YOUR PLANT',
+                style: TextStyle(
+                    color: sl.text3,
+                    fontSize: 9,
+                    letterSpacing: 0.8,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 2),
+            Text(_scope.plant,
+                style: TextStyle(
+                    color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   //  KPI STRIP — 5 metric cards (tappable)
   // ═══════════════════════════════════════════════════════════════
   Widget _kpiStrip(SL sl) {
@@ -223,13 +327,15 @@ class _OverviewTabState extends State<OverviewTab> {
         _kpiCard(sl, 'Total', '$_total', Icons.assessment_rounded,
             const Color(0xFF6366F1), () => _showIncidentsSheet('All Incidents', _incidents)),
         const SizedBox(width: 8),
+        // The drill-through lists must agree with the number above them, so they
+        // use the same admin-driven open/closed tests rather than 'CLOSED'.
         _kpiCard(sl, 'Open', '$_open', Icons.warning_amber_rounded,
             AppColors.amber, () => _showIncidentsSheet('Open Incidents',
-                _incidents.where((i) => (i['status']?.toString().toUpperCase() ?? 'OPEN') != 'CLOSED').toList())),
+                _incidents.where(_isOpen).toList())),
         const SizedBox(width: 8),
         _kpiCard(sl, 'Avg Close', '${_avgClosureTime.toStringAsFixed(1)}d',
             Icons.timer_outlined, AppColors.cyan, () => _showIncidentsSheet('Closed Incidents',
-                _incidents.where((i) => i['status']?.toString().toUpperCase() == 'CLOSED').toList())),
+                _incidents.where(_isClosed).toList())),
       ]),
       const SizedBox(height: 8),
       Row(children: [
@@ -239,7 +345,7 @@ class _OverviewTabState extends State<OverviewTab> {
         const SizedBox(width: 8),
         _kpiCard(sl, 'Closure %', '${_closureRate.toStringAsFixed(0)}%',
             Icons.check_circle_outline, const Color(0xFF10B981), () => _showIncidentsSheet('Closed Incidents',
-                _incidents.where((i) => i['status']?.toString().toUpperCase() == 'CLOSED').toList())),
+                _incidents.where(_isClosed).toList())),
         const SizedBox(width: 8),
         Expanded(child: Container()),
       ]),
@@ -323,8 +429,10 @@ class _OverviewTabState extends State<OverviewTab> {
                   if (idx > 0)
                     Icon(Icons.chevron_right, color: sl.text4, size: 14),
                   Expanded(child: GestureDetector(
+                    // Same blank-status attribution as the count above, so tapping
+                    // a stage can't show a different number than it displays.
                     onTap: () => _showIncidentsSheet('$label Incidents',
-                        _incidents.where((i) => (i['status']?.toString().toUpperCase() ?? 'OPEN') == label).toList()),
+                        _incidents.where((i) => _statusOf(i) == label).toList()),
                     child: Column(children: [
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -630,7 +738,8 @@ class _OverviewTabState extends State<OverviewTab> {
     }
     final date = inc['date']?.toString() ?? '';
     final dateStr = date.length >= 10 ? date.substring(0, 10) : date;
-    final status = inc['status']?.toString().toUpperCase() ?? 'OPEN';
+    // Blank status shows the admin's first stage, not a literal 'OPEN'.
+    final status = _statusOf(inc);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),

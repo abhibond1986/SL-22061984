@@ -451,16 +451,41 @@ class LocalDB {
     return list;
   }
 
+  /// Write one incident, replacing any existing record with the same id.
+  ///
+  /// [stampUpdatedAt] must be false when the record came from the server —
+  /// otherwise the incoming row gets marked with the local clock and
+  /// [saveIncidentFromServer] would mistake it for an unsynced local edit on
+  /// the next update, permanently pinning stale values.
   static Future<void> saveIncident(
-      Map<String, dynamic> incident) async {
+      Map<String, dynamic> incident, {bool stampUpdatedAt = true}) async {
     final all  = await getIncidents();
     final user = await getCurrentUser();
 
-    incident['id']          ??= DateTime.now().millisecondsSinceEpoch.toString();
-    incident['date']        ??= DateTime.now().toIso8601String();
-    incident['reportedBy']  ??= user?['name'] ?? 'Unknown';
-    incident['reporterPno'] ??= user?['pno']  ?? '';
-    incident['status']      ??= 'OPEN';
+    incident['id']            ??= DateTime.now().millisecondsSinceEpoch.toString();
+    incident['date']          ??= DateTime.now().toIso8601String();
+    incident['reportedBy']    ??= user?['name'] ?? 'Unknown';
+    // 'reportedByPno' — NOT 'reporterPno'. This defaulted the wrong key, so
+    // every reader (and the only server column, reported_by_pno) saw a blank
+    // PNO whenever the creator hadn't set it explicitly.
+    incident['reportedByPno'] ??= user?['pno'] ?? '';
+    // First status comes from the admin's own ladder, not a hardcoded 'OPEN' —
+    // if the admin renames the first status, new records must use the new name.
+    incident['status']        ??= await AdminMasterData.firstStatus();
+
+    // Stamp the local modification time so live sync can tell an incoming
+    // server row apart from a newer unsynced local edit.
+    //
+    // Deliberately UTC. `DateTime.now().toIso8601String()` yields local time
+    // with NO timezone offset, which a Postgres timestamptz column reads as
+    // UTC — in IST that returns the value 5h30m in the past, so a genuinely
+    // newer local edit compared as older and got overwritten. Writing UTC with
+    // its trailing 'Z' makes the comparison correct whether the column is text
+    // or timestamptz. DateTime.tryParse handles the 'Z' on read, and both sides
+    // of the comparison in mergeServerIncident are then in the same frame.
+    if (stampUpdatedAt) {
+      incident['updatedAt'] = DateTime.now().toUtc().toIso8601String();
+    }
 
     // ✅ GPS Location fields (optional - may be null if GPS unavailable)
     // incident['latitude']        - GPS latitude
@@ -530,6 +555,107 @@ class LocalDB {
       if (!keepIds.contains(id)) inc.remove('imageBase64');
     }
   }
+
+  /// Apply an incident row that came FROM the server (realtime or a pull).
+  ///
+  /// Why this is not just [saveIncident]: saveIncident replaces the whole
+  /// record. A server row legitimately lacks device-only fields (imageRef,
+  /// imageBase64, thumbnailBase64) and, until the workflow columns existed,
+  /// lacked the closure fields too — so every incoming UPDATE erased the
+  /// corrective action and closure remarks the user had just typed but not yet
+  /// synced. This merges instead:
+  ///
+  ///  • Device-only keys are always preserved (the server never has them).
+  ///  • If the local copy is NEWER than the server copy (by `updatedAt`), the
+  ///    local values win for the keys the server would otherwise blank out —
+  ///    the pending push will reconcile them shortly.
+  ///  • Otherwise the server value wins, which is what we want for a genuine
+  ///    remote edit by another user.
+  ///  • A key the server sends as null/empty never overwrites a non-empty
+  ///    local value; that is data loss with no upside.
+  static Future<void> saveIncidentFromServer(
+      Map<String, dynamic> serverInc) async {
+    final id = serverInc['id']?.toString() ?? '';
+    if (id.isEmpty) return;
+
+    final all = await getIncidents();
+    final idx = all.indexWhere((i) => i['id']?.toString() == id);
+    if (idx < 0) {
+      // Brand-new to this device — nothing to preserve.
+      await saveIncident(Map<String, dynamic>.from(serverInc),
+          stampUpdatedAt: false);
+      return;
+    }
+
+    await saveIncident(
+        mergeServerIncident(local: all[idx], server: serverInc),
+        stampUpdatedAt: false);
+  }
+
+  /// The single merge rule for "a server row met a local row of the same id".
+  ///
+  /// Pure and synchronous so the bulk-pull path in SyncService can apply the
+  /// SAME rule without re-reading storage per record — two different merge
+  /// rules is how one path ends up protecting an edit that the other discards.
+  static Map<String, dynamic> mergeServerIncident({
+    required Map<String, dynamic> local,
+    required Map<String, dynamic> server,
+  }) {
+    final merged = Map<String, dynamic>.from(local);
+
+    final localTs  = DateTime.tryParse(local['updatedAt']?.toString() ?? '');
+    final serverTs = DateTime.tryParse(server['updatedAt']?.toString() ?? '');
+    // Mixed frames are safe here: records written before the UTC change carry a
+    // naive local-time string, which DateTime.tryParse flags as local, and
+    // isAfter compares absolute epoch values — so a legacy naive value and a
+    // new 'Z' value still compare correctly. Do not "normalise" these to UTC
+    // after parsing; that would misread the legacy values.
+    //
+    // Treat local as newer only when we can actually prove it. If either row
+    // carries no timestamp we can't compare, so we don't claim local wins —
+    // except for keys the server omitted entirely, handled below.
+    final localIsNewer =
+        localTs != null && serverTs != null && localTs.isAfter(serverTs);
+
+    bool blank(Object? v) => v == null || (v is String && v.trim().isEmpty);
+
+    for (final entry in server.entries) {
+      // A blank server value must never erase a real local one.
+      if (blank(entry.value) && !blank(local[entry.key])) continue;
+      if (localIsNewer &&
+          _workflowKeys.contains(entry.key) &&
+          !blank(local[entry.key])) {
+        continue; // unsynced local edit wins until its push lands
+      }
+      merged[entry.key] = entry.value;
+    }
+
+    // Device-only fields: the server has no column for these, so an incoming
+    // row must never be read as "the user cleared them".
+    for (final k in _deviceOnlyKeys) {
+      if (local.containsKey(k) && !server.containsKey(k)) merged[k] = local[k];
+    }
+
+    // Keep the local timestamp when local won, so the preserved edit stays
+    // recognisable as local. Without this the server's older updatedAt would
+    // overwrite the local one and the NEXT incoming row would win the
+    // comparison, silently discarding the edit we just protected.
+    if (localIsNewer) merged['updatedAt'] = local['updatedAt'];
+    return merged;
+  }
+
+  /// Fields the user edits locally through the incident workflow. These are the
+  /// ones worth protecting from a stale server row.
+  static const Set<String> _workflowKeys = {
+    'status', 'correctiveAction', 'rootCause', 'closedBy', 'closingRemarks',
+    'closedAt', 'investigationStartedAt', 'actionTakenAt', 'assignedTo',
+    'assignedAt', 'targetDate',
+  };
+
+  /// Fields that exist only on this device and have no server column.
+  static const Set<String> _deviceOnlyKeys = {
+    'imageRef', 'imageBase64', 'thumbnailBase64', 'shareImageBase64',
+  };
 
   static Future<void> deleteIncident(String id) async {
     // Read the RAW list (getIncidents() already hides tombstoned ids).
@@ -687,6 +813,18 @@ class LocalDB {
         .map((i) => AdminMasterData.canonicalPlantFrom(
             i['plant']?.toString() ?? '', master))
         .toList();
+    // 'open' counts every non-terminal status from the admin's ladder. This
+    // used to be `status == 'OPEN'` exactly, so INVESTIGATING and
+    // ACTION TAKEN cases — genuinely open work — counted as zero, and a
+    // renamed first status made the count zero altogether.
+    final openStatuses = await AdminMasterData.getOpenStatuses();
+    final firstStatus  = await AdminMasterData.firstStatus();
+    final firstUpper   = firstStatus.trim().toUpperCase();
+    bool isOpen(Map<String, dynamic> i) {
+      var s = (i['status']?.toString().trim().toUpperCase() ?? '');
+      if (s.isEmpty) s = firstUpper;
+      return s.isNotEmpty && openStatuses.contains(s);
+    }
     for (final p in labels) {
       final pInc = <Map<String, dynamic>>[];
       for (var k = 0; k < inc.length; k++) {
@@ -694,7 +832,7 @@ class LocalDB {
       }
       result[p] = {
         'total':    pInc.length,
-        'open':     pInc.where((i) => i['status']   == 'OPEN').length,
+        'open':     pInc.where(isOpen).length,
         'critical': pInc.where((i) => i['severity'] == 'CRITICAL').length,
         'high':     pInc.where((i) => i['severity'] == 'HIGH').length,
       };

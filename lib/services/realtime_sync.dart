@@ -120,7 +120,12 @@ class RealtimeSync {
           if (id.isEmpty) return;
           // A record re-created remotely must be un-tombstoned so it shows.
           await LocalDB.removeDeletedIncidentId(id);
-          await LocalDB.saveIncident(inc);
+          // MERGE, don't replace. This used to call saveIncident(), which
+          // overwrites the whole local record — so an incoming UPDATE wiped
+          // the corrective action / closure remarks the user had just typed
+          // but not yet pushed, and also dropped device-only fields like the
+          // local image reference.
+          await LocalDB.saveIncidentFromServer(inc);
           break;
         case PostgresChangeEvent.delete:
           final old = Map<String, dynamic>.from(payload.oldRecord);

@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL;
 import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
+import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 
 class DataAnalysisTab extends StatefulWidget {
@@ -21,9 +22,38 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   bool _loading = true;
 
   // ── Interactive filters ──────────────────────────────────────────────
-  // Type toggle: 'ALL' | 'AI_SCAN' | 'NEAR_MISS'. Plant: null = all plants.
+  // Type toggle: 'ALL' | 'AI_SCAN' | 'NEAR_MISS'. Plant: null = all plants,
+  // which is only reachable by a user who may see all plants — _load() pins a
+  // locked user to their own plant instead.
   String _typeFilter = 'ALL';
   String? _plantFilter;
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
+  // Active canonical plant list (admin-editable) for name normalization.
+  // Fetched once per load: canonicalising per record would re-read
+  // SharedPreferences for every incident.
+  List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
+  // Admin-configured status ladder + the subset that counts as "open work".
+  List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+
+  /// Effective status: the record's own, or the first configured stage when
+  /// blank. The Open card tested `status == 'OPEN'`, so it read zero as soon as
+  /// the admin renamed the first stage, and never counted INVESTIGATING or
+  /// ACTION TAKEN — cases that are very much still open.
+  bool _isOpen(Map<String, dynamic> i) {
+    var s = (i['status']?.toString().trim().toUpperCase() ?? '');
+    if (s.isEmpty) s = _statuses.isEmpty ? '' : _statuses.first.trim().toUpperCase();
+    return s.isNotEmpty && _openStatuses.contains(s);
+  }
+
+  /// Canonical plant label for an incident (dedupes name variants).
+  /// The filter and the option list both used the RAW `plant` string, so "DSP"
+  /// and "DSP Durgapur" appeared as two separate options and picking either
+  /// hid half that plant's records.
+  String _canonPlant(Map<String, dynamic> i) =>
+      AdminMasterData.canonicalPlantFrom(
+          i['plant']?.toString() ?? '', _plantDefs);
 
   /// The incident set every chart/summary reads from, after applying the
   /// active type + plant filters to the raw [_incidents].
@@ -33,19 +63,19 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
           (i['type']?.toString().toUpperCase() ?? '') != _typeFilter) {
         return false;
       }
-      if (_plantFilter != null &&
-          (i['plant']?.toString() ?? 'Other') != _plantFilter) {
+      if (_plantFilter != null && _canonPlant(i) != _plantFilter) {
         return false;
       }
       return true;
     }).toList();
   }
 
-  /// Distinct plant names present in the data (for the filter dropdown).
+  /// Distinct CANONICAL plants present in the data (each appears once).
   List<String> get _plantOptions {
     final set = <String>{};
     for (final i in _incidents) {
-      set.add(i['plant']?.toString() ?? 'Other');
+      final p = _canonPlant(i);
+      if (p.isNotEmpty) set.add(p);
     }
     final list = set.toList()..sort();
     return list;
@@ -71,15 +101,28 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   }
 
   Future<void> _load() async {
-    final inc = await LocalDB.getIncidents();
+    final scope = await PlantScope.forUser();
+    // Scope the data at the source: a non-admin never holds another plant's
+    // records in memory, so no chart below can total them in.
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
+    final plants = await AdminMasterData.getPlants();
     final wsa = await AdminMasterData.getWsaCauses();
     final sevs = await AdminMasterData.getSeverities();
+    final allStatuses = await AdminMasterData.getStatuses();
+    final openStatuses = await AdminMasterData.getOpenStatuses();
     if (mounted) {
       setState(() {
+        _scope = scope;
         _incidents = inc;
+        _plantDefs = plants;
+        _statuses = allStatuses;
+        _openStatuses = openStatuses;
         _wsaCategories = wsa;
         _severities = sevs;
         _loading = false;
+        // Locked to the user's own plant. null (all plants) is not a state a
+        // plant user may be in, including on the first build.
+        if (scope.isLocked) _plantFilter = scope.plant;
       });
     }
   }
@@ -101,7 +144,10 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   Map<String, int> get _plantCounts {
     final map = <String, int>{};
     for (final i in _view) {
-      final plant = i['plant']?.toString() ?? 'Other';
+      // Canonical, like the filter above: keyed on the raw string this chart
+      // drew one bar for "DSP" and another for "DSP Durgapur".
+      final plant = _canonPlant(i);
+      if (plant.isEmpty) continue;
       map[plant] = (map[plant] ?? 0) + 1;
     }
     final sorted = map.entries.toList()
@@ -164,8 +210,23 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
+    // An unresolved scope is reported, not silently widened to all plants.
+    if (_scope.problem != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Text(_scope.problem!,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
+        ),
+      );
+    }
     if (_incidents.isEmpty) {
-      return Center(child: Text('No data recorded yet',
+      return Center(child: Text(
+          _scope.isLocked
+              ? 'No data recorded yet for ${_scope.plant}'
+              : 'No data recorded yet',
+          textAlign: TextAlign.center,
           style: TextStyle(color: sl.text3, fontSize: 14)));
     }
 
@@ -250,53 +311,65 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
             ],
           ),
           const SizedBox(height: 10),
-          // Plant dropdown
+          // Plant row: a picker for a user who may see all plants, a plain
+          // label for a locked one. The 'All plants' item and the 'Clear' link
+          // are both omitted when locked — either would have reset the plant
+          // back to null and shown every plant's data.
           Row(
             children: [
               Icon(Icons.factory_outlined, size: 16, color: sl.text3),
               const SizedBox(width: 8),
-              Expanded(
-                child: DropdownButtonHideUnderline(
-                  child: DropdownButton<String?>(
-                    value: _plantFilter,
-                    isExpanded: true,
-                    isDense: true,
-                    dropdownColor: sl.glassColor,
-                    style: TextStyle(fontSize: 12.5, color: sl.text1),
-                    hint: Text('All plants',
-                        style: TextStyle(fontSize: 12.5, color: sl.text2)),
-                    items: [
-                      DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text('All plants',
-                            style: TextStyle(fontSize: 12.5, color: sl.text1)),
-                      ),
-                      ..._plantOptions.map((p) => DropdownMenuItem<String?>(
-                            value: p,
-                            child: Text(p,
-                                style: TextStyle(fontSize: 12.5, color: sl.text1),
-                                overflow: TextOverflow.ellipsis),
-                          )),
-                    ],
-                    onChanged: (v) => setState(() => _plantFilter = v),
+              if (_scope.isLocked)
+                Expanded(
+                  child: Text(_scope.plant,
+                      style: TextStyle(fontSize: 12.5, color: sl.text1,
+                          fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis),
+                )
+              else ...[
+                Expanded(
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String?>(
+                      value: _plantFilter,
+                      isExpanded: true,
+                      isDense: true,
+                      dropdownColor: sl.glassColor,
+                      style: TextStyle(fontSize: 12.5, color: sl.text1),
+                      hint: Text('All plants',
+                          style: TextStyle(fontSize: 12.5, color: sl.text2)),
+                      items: [
+                        DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text('All plants',
+                              style: TextStyle(fontSize: 12.5, color: sl.text1)),
+                        ),
+                        ..._plantOptions.map((p) => DropdownMenuItem<String?>(
+                              value: p,
+                              child: Text(p,
+                                  style: TextStyle(fontSize: 12.5, color: sl.text1),
+                                  overflow: TextOverflow.ellipsis),
+                            )),
+                      ],
+                      onChanged: (v) => setState(() => _plantFilter = v),
+                    ),
                   ),
                 ),
-              ),
-              if (_plantFilter != null || _typeFilter != 'ALL')
-                GestureDetector(
-                  onTap: () => setState(() {
-                    _plantFilter = null;
-                    _typeFilter = 'ALL';
-                  }),
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 8),
-                    child: Text('Clear',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.accent,
-                            fontWeight: FontWeight.w600)),
+                if (_plantFilter != null || _typeFilter != 'ALL')
+                  GestureDetector(
+                    onTap: () => setState(() {
+                      _plantFilter = null;
+                      _typeFilter = 'ALL';
+                    }),
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Text('Clear',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.accent,
+                              fontWeight: FontWeight.w600)),
+                    ),
                   ),
-                ),
+              ],
             ],
           ),
         ],
@@ -332,8 +405,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   Widget _summaryCards(SL sl) {
     final total = _view.length;
     final critical = _severityCounts['CRITICAL'] ?? 0;
-    final open = _view.where(
-        (i) => i['status']?.toString().toUpperCase() == 'OPEN').length;
+    final open = _view.where(_isOpen).length;
     return Row(
       children: [
         _miniCard(sl, 'Total', '$total', AppColors.accent),

@@ -4,9 +4,17 @@ import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL;
 import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
+import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 
+/// Plant dashboard.
+///
+/// For a plant user this is THEIR plant, locked: no plant chips to switch away
+/// with, and a department drill-down inside the plant instead. It used to
+/// default to `_plants.first` — the alphabetically-first plant present in the
+/// data, which for most users was somebody else's plant — and let anyone tap
+/// through to any other plant. An admin still gets the chips.
 class PlantWiseTab extends StatefulWidget {
   const PlantWiseTab({super.key});
   @override
@@ -17,9 +25,15 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   List<Map<String, dynamic>> _all = [];
   bool _loading = true;
   String? _selectedPlant;
+  /// Department drill-down within the plant. Empty = all departments.
+  String _dept = '';
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
   List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
+  Set<String> _openStatuses =
+      AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+  String _closedStatus = 'CLOSED';
 
   /// Canonical plant label for an incident (dedupes name variants).
   String _canonPlant(Map<String, dynamic> i) =>
@@ -44,20 +58,56 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   }
 
   Future<void> _load() async {
-    final inc = await LocalDB.getIncidents();
-    final plants = await AdminMasterData.getPlants();
+    final scope    = await PlantScope.forUser();
+    // Scope the data at the source: a non-admin never holds another plant's
+    // records in memory, so no widget below can accidentally reveal them.
+    final inc      = await scope.filterIncidents(await LocalDB.getIncidents());
+    final plants   = await AdminMasterData.getPlants();
     final statuses = await AdminMasterData.getStatuses();
+    final open     = await AdminMasterData.getOpenStatuses();
+    final closed   = await AdminMasterData.lastStatus();
+    final depts    = await AdminMasterData.getDepartments();
     if (mounted) {
       setState(() {
-        _all = inc;
-        _plantDefs = plants;
-        _statuses = statuses;
-        _loading = false;
-        if (_selectedPlant == null && _plants.isNotEmpty) {
+        _scope        = scope;
+        _all          = inc;
+        _plantDefs    = plants;
+        _statuses     = statuses;
+        _openStatuses = open;
+        _closedStatus = closed.toUpperCase();
+        _deptOrder    = depts;
+        _loading      = false;
+        if (scope.isLocked) {
+          // Locked to the user's own plant — never the first plant in the data.
+          _selectedPlant = scope.plant;
+        } else if (_selectedPlant == null && _plants.isNotEmpty) {
           _selectedPlant = _plants.first;
         }
+        // A department that just vanished from the admin list (or from this
+        // plant's data) must not stay silently applied as a filter.
+        if (_dept.isNotEmpty && !_deptOptions.contains(_dept)) _dept = '';
       });
     }
+  }
+
+  /// The admin's configured department list, in the admin's own order.
+  /// Deliberately starts EMPTY rather than seeded with defaultDepartments: if
+  /// the admin has cleared the list, the drill-down must show nothing, not a
+  /// built-in fallback.
+  List<String> _deptOrder = const [];
+
+  /// Departments available for drill-down: those the admin has configured AND
+  /// that this plant has actually reported. Departments are global in
+  /// AdminMasterData (there is no plant→department mapping), so intersecting
+  /// with this plant's own records is the only way to scope them.
+  List<String> get _deptOptions {
+    final present = _plantIncidentsAllDepts
+        .map((i) => (i['dept']?.toString() ?? '').trim().toUpperCase())
+        .where((d) => d.isNotEmpty)
+        .toSet();
+    return _deptOrder
+        .where((d) => present.contains(d.trim().toUpperCase()))
+        .toList();
   }
 
   // Unique CANONICAL plants present in the data (each appears once).
@@ -71,22 +121,40 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return list;
   }
 
-  List<Map<String, dynamic>> get _plantIncidents {
-    if (_selectedPlant == null) return [];
+  /// Everything for the selected plant, BEFORE the department drill-down.
+  /// The department option list must come from this — filtering by a department
+  /// and then deriving the options from the result would leave exactly one
+  /// option and trap the user in it.
+  List<Map<String, dynamic>> get _plantIncidentsAllDepts {
+    if (_selectedPlant == null) return const [];
     return _all.where((i) => _canonPlant(i) == _selectedPlant).toList();
   }
 
-  // KPIs for selected plant
+  /// What the dashboard actually renders: plant + optional department.
+  List<Map<String, dynamic>> get _plantIncidents =>
+      PlantScope.filterByDepartment(_plantIncidentsAllDepts, _dept);
+
+  /// True when [i] is still open, per the ADMIN's status ladder. Previously
+  /// `status != 'CLOSED'`, which counted a renamed final stage as open and
+  /// treated VERIFIED as open too.
+  bool _isOpen(Map<String, dynamic> i) {
+    final s = (i['status']?.toString().trim().toUpperCase() ?? '');
+    if (s.isEmpty) return _openStatuses.isNotEmpty;
+    return _openStatuses.contains(s);
+  }
+
+  bool _isClosedInc(Map<String, dynamic> i) =>
+      _closedStatus.isNotEmpty &&
+      (i['status']?.toString().trim().toUpperCase() ?? '') == _closedStatus;
+
+  // KPIs for selected plant (+ department, if drilled down)
   int get _pTotal => _plantIncidents.length;
-  int get _pOpen => _plantIncidents.where((i) =>
-      (i['status']?.toString().toUpperCase() ?? 'OPEN') != 'CLOSED').length;
+  int get _pOpen => _plantIncidents.where(_isOpen).length;
   int get _pCritical => _plantIncidents.where((i) =>
       i['severity']?.toString().toUpperCase() == 'CRITICAL').length;
   double get _pClosureRate {
     if (_pTotal == 0) return 0;
-    final closed = _plantIncidents.where((i) =>
-        i['status']?.toString().toUpperCase() == 'CLOSED').length;
-    return closed / _pTotal * 100;
+    return _plantIncidents.where(_isClosedInc).length / _pTotal * 100;
   }
 
   // Top 5 hazard categories for this plant
@@ -136,8 +204,15 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   // Previously hardcoded four statuses, which silently omitted VERIFIED.
   Map<String, int> get _statusDist {
     final m = <String, int>{for (final s in _statuses) s.toUpperCase(): 0};
+    // A record with no status counts as the FIRST status in the admin's ladder,
+    // not a literal 'OPEN' — otherwise renaming that stage creates a phantom
+    // 'OPEN' bucket alongside the real one.
+    final fallback =
+        _statuses.isEmpty ? '' : _statuses.first.trim().toUpperCase();
     for (final i in _plantIncidents) {
-      final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
+      var s = (i['status']?.toString().trim().toUpperCase() ?? '');
+      if (s.isEmpty) s = fallback;
+      if (s.isEmpty) continue;
       m[s] = (m[s] ?? 0) + 1;
     }
     return m;
@@ -161,16 +236,36 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
+    // An unresolved scope is reported, not silently widened to all plants.
+    if (_scope.problem != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Text(_scope.problem!,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
+        ),
+      );
+    }
     if (_all.isEmpty) {
-      return Center(child: Text('No data recorded yet',
-          style: TextStyle(color: sl.text3, fontSize: 14)));
+      return Center(
+        child: Text(
+            _scope.isLocked
+                ? 'No data recorded yet for ${_scope.plant}'
+                : 'No data recorded yet',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: sl.text3, fontSize: 14)),
+      );
     }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Plant selector chips
-        _plantSelector(sl),
+        // Locked users get a plant header; admins get the switcher chips.
+        if (_scope.isLocked) _lockedPlantHeader(sl) else _plantSelector(sl),
+        const SizedBox(height: 10),
+        // Department drill-down within the plant.
+        _deptSelector(sl),
         const SizedBox(height: 14),
 
         if (_selectedPlant != null && _plantIncidents.isNotEmpty) ...[
@@ -195,7 +290,10 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
             child: Center(child: Text(
               _selectedPlant == null
                   ? 'Select a plant above'
-                  : 'No incidents for $_selectedPlant',
+                  : _dept.isEmpty
+                      ? 'No incidents for $_selectedPlant'
+                      : 'No incidents for $_dept in $_selectedPlant',
+              textAlign: TextAlign.center,
               style: TextStyle(color: sl.text3, fontSize: 13))),
           ),
       ]),
@@ -203,7 +301,97 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  PLANT SELECTOR — horizontal scrollable chips
+  //  LOCKED PLANT HEADER — shown instead of the switcher chips
+  // ═══════════════════════════════════════════════════════════════
+  /// A plant user sees their plant as a label, not a control. Rendering a
+  /// single disabled chip would still imply "there are others"; a header states
+  /// the scope plainly and leaves no affordance to switch.
+  Widget _lockedPlantHeader(SL sl) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.accent.withOpacity(0.30)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.factory_rounded, size: 16, color: AppColors.accent),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('YOUR PLANT',
+                style: TextStyle(
+                    color: sl.text3,
+                    fontSize: 9,
+                    letterSpacing: 0.8,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 2),
+            Text(_scope.plant,
+                style: TextStyle(
+                    color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  DEPARTMENT DRILL-DOWN — within the plant
+  // ═══════════════════════════════════════════════════════════════
+  Widget _deptSelector(SL sl) {
+    final opts = _deptOptions;
+    // Nothing to drill into: either the admin configured no departments, or
+    // this plant has never reported one. Show nothing rather than an empty
+    // control — the admin panel is authoritative.
+    if (opts.isEmpty) return const SizedBox.shrink();
+
+    Widget chip(String label, String value) {
+      final active = _dept == value;
+      return Padding(
+        padding: const EdgeInsets.only(right: 7),
+        child: GestureDetector(
+          onTap: () => setState(() => _dept = value),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: active ? AppColors.cyan : sl.glassColor,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                  color: active ? AppColors.cyan : sl.glassBorder),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    color: active ? Colors.white : sl.text2,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600)),
+          ),
+        ),
+      );
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('DEPARTMENT',
+          style: TextStyle(
+              color: sl.text3,
+              fontSize: 9,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700)),
+      const SizedBox(height: 7),
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(children: [
+          // '' means all departments in the plant — the drill-down is a
+          // refinement, so there must always be a way back out of it.
+          chip('All departments', ''),
+          for (final d in opts) chip(d, d),
+        ]),
+      ),
+    ]);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  PLANT SELECTOR — horizontal scrollable chips (admins only)
   // ═══════════════════════════════════════════════════════════════
   Widget _plantSelector(SL sl) {
     return SingleChildScrollView(
@@ -214,7 +402,13 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
-              onTap: () => setState(() => _selectedPlant = p),
+              // Reset the department too — the previous plant's department
+              // almost certainly doesn't exist in the new one, and leaving it
+              // applied shows a confusingly empty dashboard.
+              onTap: () => setState(() {
+                _selectedPlant = p;
+                _dept = '';
+              }),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
@@ -238,21 +432,25 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   //  PLANT KPI CARDS (tappable)
   // ═══════════════════════════════════════════════════════════════
   Widget _plantKpis(SL sl) {
+    // Titles carry the department when one is applied, so a drill-through
+    // sheet can't be mistaken for the whole plant.
+    final scopeLabel =
+        _dept.isEmpty ? '$_selectedPlant' : '$_dept, $_selectedPlant';
     return Row(children: [
       _miniKpi(sl, 'Total', '$_pTotal', const Color(0xFF6366F1),
-          () => _showIncidentsSheet('All — $_selectedPlant', _plantIncidents)),
+          () => _showIncidentsSheet('All — $scopeLabel', _plantIncidents)),
       const SizedBox(width: 8),
       _miniKpi(sl, 'Open', '$_pOpen', AppColors.amber,
-          () => _showIncidentsSheet('Open — $_selectedPlant',
-              _plantIncidents.where((i) => (i['status']?.toString().toUpperCase() ?? 'OPEN') != 'CLOSED').toList())),
+          () => _showIncidentsSheet('Open — $scopeLabel',
+              _plantIncidents.where(_isOpen).toList())),
       const SizedBox(width: 8),
       _miniKpi(sl, 'Critical', '$_pCritical', AppColors.crit,
-          () => _showIncidentsSheet('Critical — $_selectedPlant',
+          () => _showIncidentsSheet('Critical — $scopeLabel',
               _plantIncidents.where((i) => i['severity']?.toString().toUpperCase() == 'CRITICAL').toList())),
       const SizedBox(width: 8),
       _miniKpi(sl, 'Closed %', '${_pClosureRate.toStringAsFixed(0)}%', AppColors.green,
-          () => _showIncidentsSheet('Closed — $_selectedPlant',
-              _plantIncidents.where((i) => i['status']?.toString().toUpperCase() == 'CLOSED').toList())),
+          () => _showIncidentsSheet('Closed — $scopeLabel',
+              _plantIncidents.where(_isClosedInc).toList())),
     ]);
   }
 
@@ -312,9 +510,16 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
               // hardcoded four-way ladder that defaulted everything unknown
               // to 'CLOSED'.
               final statusKey = label.toUpperCase();
+              final fallbackKey = _statuses.isEmpty
+                  ? '' : _statuses.first.trim().toUpperCase();
               return Expanded(child: GestureDetector(
-                onTap: () => _showIncidentsSheet('$label — $_selectedPlant',
-                    _plantIncidents.where((i) => (i['status']?.toString().toUpperCase() ?? 'OPEN') == statusKey).toList()),
+                onTap: () => _showIncidentsSheet(
+                    '$label — ${_dept.isEmpty ? _selectedPlant : '$_dept, $_selectedPlant'}',
+                    _plantIncidents.where((i) {
+                      var s = (i['status']?.toString().trim().toUpperCase() ?? '');
+                      if (s.isEmpty) s = fallbackKey;
+                      return s == statusKey;
+                    }).toList()),
                 child: Column(children: [
                   Text('$count', style: TextStyle(
                       color: color, fontSize: 18, fontWeight: FontWeight.w800)),

@@ -7,6 +7,7 @@ import '../main.dart' show AppColors, SL;
 import '../services/i18n.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
+import '../services/plant_scope.dart';
 
 class WsaBarChart extends StatefulWidget {
   const WsaBarChart({super.key});
@@ -26,6 +27,11 @@ class _WsaBarChartState extends State<WsaBarChart> {
   List<Map<String, String>> _plants = [
     {'code': 'all',  'name': 'Entire SAIL'},
   ];
+  /// This widget is embedded in the landing screen, where it used to offer an
+  /// "Entire SAIL" option to every user — an all-plants control on a screen that
+  /// otherwise has no plant selector. A locked user now gets neither the option
+  /// nor the dropdown.
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
 
   @override
   void initState() {
@@ -34,17 +40,23 @@ class _WsaBarChartState extends State<WsaBarChart> {
   }
 
   Future<void> _loadData() async {
-    final inc = await LocalDB.getIncidents();
+    final scope = await PlantScope.forUser();
+    // Scope at the source, so even the 'all' code can only ever mean "all the
+    // plants this user may see".
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
     // ✅ v23: Load WSA categories from AdminMasterData (same source as admin panel)
     final wsa = await AdminMasterData.getWsaCauses();
     final plants = await AdminMasterData.getPlants();
     if (mounted) setState(() {
+      _scope = scope;
       _incidents = inc;
       _wsaCategories = wsa;
       _plantDefs = plants;
       // Build plant dropdown from loaded master data
       _plants = [
-        {'code': 'all',  'name': 'Entire SAIL'},
+        // 'all' is offered only to a user who may actually see all plants.
+        if (scope.seesAllPlants)
+          <String, String>{'code': 'all', 'name': 'Entire SAIL'},
         ...plants.map((p) {
           final code = p['code'] ?? '';
           final name = p['name'] ?? '';
@@ -53,9 +65,16 @@ class _WsaBarChartState extends State<WsaBarChart> {
           return {'code': code, 'name': displayName};
         }).toList(),
       ];
+      // Pin a locked user to their own plant instead of leaving the stale 'all'.
+      if (scope.isLocked) _selectedPlant = _codeOf(scope.plant);
       _loading = false;
     });
   }
+
+  /// Code token of a canonical "CODE — Name" label, used as the filter value.
+  String _codeOf(String canonicalLabel) => canonicalLabel.contains(' — ')
+      ? canonicalLabel.split(' — ').first.trim()
+      : canonicalLabel.trim();
 
   List<Map<String, dynamic>> get _filteredIncidents {
     if (_selectedPlant == 'all') return _incidents;
@@ -112,6 +131,23 @@ class _WsaBarChartState extends State<WsaBarChart> {
         child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
       );
     }
+    // An unresolved scope is reported, not silently widened to all plants.
+    if (_scope.problem != null) {
+      return Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: sl.border),
+        ),
+        child: Center(
+          child: Text(_scope.problem!,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: sl.text3, fontSize: 12, height: 1.5)),
+        ),
+      );
+    }
 
     final counts = _wsaCounts;
     final maxCount = counts.values.fold(0, (a, b) => a > b ? a : b);
@@ -139,7 +175,35 @@ class _WsaBarChartState extends State<WsaBarChart> {
               I18n.t('dashboard.wsaChart'),
               style: TextStyle(color: sl.text1, fontSize: 15,
                 fontWeight: FontWeight.w700))),
-            // Plant filter dropdown
+            // Plant filter — a locked user gets their plant as a plain label in
+            // the same pill, with no affordance to switch away from it.
+            if (_scope.isLocked)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppColors.accent.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: AppColors.accent.withOpacity(0.3))),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.factory_rounded,
+                      size: 12, color: AppColors.accent),
+                  const SizedBox(width: 5),
+                  // Bounded rather than Flexible: this Row sits in an unbounded
+                  // slot of the header row, where a flex child would throw.
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 130),
+                    child: Text(_scope.plant,
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                        style: const TextStyle(
+                            color: AppColors.accent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+              )
+            else
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
               decoration: BoxDecoration(

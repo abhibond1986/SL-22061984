@@ -6,6 +6,7 @@ import '../../main.dart' show AppColors, SL;
 import '../../services/local_db.dart';
 import '../../services/image_storage.dart';
 import '../../services/admin_master_data.dart';
+import '../../services/plant_scope.dart';
 import '../../services/pdf_export.dart';
 import '../../services/sync_service.dart';
 import '../../services/realtime_sync.dart';
@@ -23,6 +24,9 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   bool _loading = true;
 
   // Filters
+  /// 'All' is only ever a real option for a user who may see all plants. For a
+  /// plant user _load() pins this to their own plant; it used to default to
+  /// 'All' for everyone, which showed every plant's incidents.
   String _plantFilter = 'All';
   String _departmentFilter = 'All'; // ★ NEW: Department filter
   final Set<String> _sevFilter = {};
@@ -33,6 +37,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   String _currentUserName = '';
   String _currentUserPno = '';
   bool _currentUserIsAdmin = false;
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
   List<String> _departments = []; // ★ NEW: Department list
@@ -127,7 +132,11 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   }
 
   Future<void> _load() async {
-    final inc = await LocalDB.getIncidents();
+    final scope = await PlantScope.forUser();
+    // Scope the data at the source: a non-admin never holds another plant's
+    // records in memory, so no filter, card, PDF export or delete action below
+    // can reach them.
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
     final user = await LocalDB.getCurrentUser();
     final plants = await AdminMasterData.getPlants();
     final depts = await AdminMasterData.getDepartments(); // ★ NEW: Load departments
@@ -138,8 +147,12 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         ? adminVal
         : adminVal?.toString().toLowerCase() == 'true';
     if (mounted) setState(() {
+      _scope = scope;
       _all = inc;
       _plantDefs = plants;
+      // A locked user's plant filter is pinned, not chosen — so a stale 'All'
+      // (or a plant carried over from a previous session) can't widen the view.
+      if (scope.isLocked) _plantFilter = scope.plant;
       _departments = ['All', ...depts]; // ★ NEW: Set departments
       _severities = sevs;
       _statuses = statuses;
@@ -223,6 +236,10 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       if (p.isNotEmpty) s.add(p);
     }
     final list = s.toList()..sort();
+    // 'All' is offered only to a user who may actually see all plants.
+    // Prepending it unconditionally handed a locked user a way back out of
+    // their own scope.
+    if (_scope.isLocked) return [_scope.plant];
     return ['All', ...list];
   }
 
@@ -231,6 +248,17 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final sl = SL.of(context);
     if (_loading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    // An unresolved scope is reported, not silently widened to all plants.
+    if (_scope.problem != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Text(_scope.problem!,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
+        ),
+      );
     }
 
     final filtered = _filtered;
@@ -246,14 +274,18 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
               style: TextStyle(color: sl.text3, fontSize: 11,
                   fontWeight: FontWeight.w600)),
           const Spacer(),
+          // The pinned plant doesn't count as an active filter for a locked
+          // user, and "Clear filters" must not reset it to 'All' — that was the
+          // one control that could have widened the view back out.
           if (_sevFilter.isNotEmpty || _statusFilter.isNotEmpty ||
-              _plantFilter != 'All' || _departmentFilter != 'All' ||
+              (!_scope.isLocked && _plantFilter != 'All') ||
+              _departmentFilter != 'All' ||
               _typeFilter != 'All' || _myReportsOnly)
             GestureDetector(
               onTap: () => setState(() {
                 _sevFilter.clear();
                 _statusFilter.clear();
-                _plantFilter = 'All';
+                if (!_scope.isLocked) _plantFilter = 'All';
                 _departmentFilter = 'All'; // ★ NEW: Clear department filter
                 _typeFilter = 'All';
                 _dateRange = '90 days';
@@ -296,8 +328,13 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         // Row 1: Plant dropdown + Department dropdown + Date range
         Row(children: [
-          Expanded(child: _dropdownChip(sl, _plantFilter, _plants, (v) =>
-              setState(() => _plantFilter = v))),
+          // A locked user gets their plant as a label, not a control: a
+          // single-item dropdown would still read as "there are others to pick".
+          // The department dropdown beside it stays fully usable.
+          Expanded(child: _scope.isLocked
+              ? _lockedPlantLabel(sl)
+              : _dropdownChip(sl, _plantFilter, _plants, (v) =>
+                  setState(() => _plantFilter = v))),
           const SizedBox(width: 8),
           Expanded(child: _dropdownChip(sl, _departmentFilter, _departments, (v) =>
               setState(() => _departmentFilter = v))),
@@ -331,6 +368,27 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
               _statusChip(sl, s.toUpperCase(), _statusColorFor(s)),
           ]),
         ),
+      ]),
+    );
+  }
+
+  /// The plant shown as plain text, in the same pill as the dropdowns beside
+  /// it so the filter row keeps its shape. No affordance to change it.
+  Widget _lockedPlantLabel(SL sl) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+      decoration: BoxDecoration(
+        color: sl.glassColor,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: sl.glassBorder),
+      ),
+      child: Row(children: [
+        const Icon(Icons.factory_rounded, size: 13, color: AppColors.accent),
+        const SizedBox(width: 6),
+        Expanded(child: Text(_scope.plant,
+            style: TextStyle(color: sl.text1, fontSize: 12,
+                fontWeight: FontWeight.w600),
+            overflow: TextOverflow.ellipsis)),
       ]),
     );
   }

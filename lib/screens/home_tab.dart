@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../main.dart' show AppColors, SL;
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
+import '../services/plant_scope.dart';
 import '../services/sync_service.dart';
 import '../services/i18n.dart';
 import '../services/realtime_sync.dart';
@@ -51,6 +52,15 @@ class _HomeTabState extends State<HomeTab> {
   // adding a workflow stage doesn't silently exclude those incidents.
   Set<String> _openStatuses =
       AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
+  // Full status ladder, used to attribute a blank status to the admin's FIRST
+  // stage instead of a literal 'OPEN'.
+  List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
+  // The closing status — the last rung of the admin's ladder, not 'CLOSED'.
+  String _closedStatus = 'CLOSED';
+  /// Which plant's data this landing screen may show. Every stat below used to
+  /// be computed over ALL incidents with no plant filter, so a plant user's
+  /// "home" numbers were really SAIL-wide.
+  PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
 
   @override
   void initState() {
@@ -76,14 +86,24 @@ class _HomeTabState extends State<HomeTab> {
   /// Refresh from the local cache only (realtime already updated LocalDB) —
   /// avoids a redundant fullSync round-trip on every live change.
   Future<void> _loadLocalOnly() async {
-    final inc = await LocalDB.getIncidents();
+    // Re-resolve the scope on every reload: the admin can change a user's plant
+    // (or admin flag) live, and a stale scope would keep the old visibility.
+    final scope = await PlantScope.forUser();
+    // Scope at the source so no stat, chart or activity row below can reach
+    // another plant's records.
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
     final plants = await AdminMasterData.getPlants();
     final openStatuses = await AdminMasterData.getOpenStatuses();
+    final statuses = await AdminMasterData.getStatuses();
+    final closed = await AdminMasterData.lastStatus();
     if (!mounted) return;
     setState(() {
+      _scope = scope;
       _incidents = inc;
       _plantDefs = plants;
       _openStatuses = openStatuses;
+      _statuses = statuses;
+      _closedStatus = closed.toUpperCase();
       _loading = false;
     });
   }
@@ -97,14 +117,20 @@ class _HomeTabState extends State<HomeTab> {
       await SyncService.fullSync()
           .timeout(const Duration(seconds: 12), onTimeout: () => <String, dynamic>{});
     } catch (_) {}
-    final inc = await LocalDB.getIncidents();
+    final scope = await PlantScope.forUser();
+    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
     final plants = await AdminMasterData.getPlants();
     final openStatuses = await AdminMasterData.getOpenStatuses();
+    final statuses = await AdminMasterData.getStatuses();
+    final closed = await AdminMasterData.lastStatus();
     if (!mounted) return;
     setState(() {
+      _scope = scope;
       _incidents = inc;
       _plantDefs = plants;
       _openStatuses = openStatuses;
+      _statuses = statuses;
+      _closedStatus = closed.toUpperCase();
       _loading = false;
     });
   }
@@ -122,13 +148,25 @@ class _HomeTabState extends State<HomeTab> {
   }
 
   // ── COMPUTED STATS ─────────────────────────────────────────────
+  /// A blank status counts as the FIRST status in the admin's ladder, not a
+  /// literal 'OPEN' — renaming that stage otherwise leaves those records
+  /// uncounted in every bucket.
+  String _statusOf(Map<String, dynamic> i) {
+    final s = i['status']?.toString().trim().toUpperCase() ?? '';
+    if (s.isNotEmpty) return s;
+    return _statuses.isEmpty ? '' : _statuses.first.trim().toUpperCase();
+  }
+
   int get _total    => _incidents.length;
   int get _open     => _incidents.where((i) {
-    final s = i['status']?.toString().toUpperCase() ?? 'OPEN';
+    final s = _statusOf(i);
+    if (s.isEmpty) return _openStatuses.isNotEmpty;
     return _openStatuses.contains(s);
   }).length;
+  // Closed-ness comes from the admin's closing status, not a literal 'CLOSED',
+  // so renaming the final stage doesn't zero this card.
   int get _closed   => _incidents.where((i) =>
-      i['status']?.toString().toUpperCase() == 'CLOSED').length;
+      _closedStatus.isNotEmpty && _statusOf(i) == _closedStatus).length;
   int get _critical => _incidents.where((i) =>
       i['severity']?.toString().toUpperCase() == 'CRITICAL').length;
 
@@ -253,6 +291,16 @@ class _HomeTabState extends State<HomeTab> {
       ),
       body: _loading
         ? Center(child: CircularProgressIndicator(color: AppColors.accent))
+        // An unresolved scope is reported, not silently widened to all plants.
+        : _scope.problem != null
+        ? Padding(
+            padding: const EdgeInsets.all(24),
+            child: Center(
+              child: Text(_scope.problem!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
+            ),
+          )
         : RefreshIndicator(
             onRefresh: _load,
             color: AppColors.accent,
@@ -273,8 +321,13 @@ class _HomeTabState extends State<HomeTab> {
                 const SizedBox(height: 18),
                 _weeklyTrendCard(sl),
                 const SizedBox(height: 18),
-                _topPlantsCard(sl),
-                const SizedBox(height: 18),
+                // "Top 5 plants" compares plants against each other, which is
+                // meaningless once the data is scoped to one plant — it would
+                // render a single full-width bar. Admins keep the comparison.
+                if (!_scope.isLocked) ...[
+                  _topPlantsCard(sl),
+                  const SizedBox(height: 18),
+                ],
                 _recentActivity(sl),
                 const SizedBox(height: 24),
               ]),
@@ -534,11 +587,13 @@ class _HomeTabState extends State<HomeTab> {
               Icons.assessment_rounded, const Color(0xFF6366F1),
               onTap: () => _goReports(null, null))),
           const SizedBox(width: 8),
-          // Open → Reports filtered by OPEN status
+          // Open → Reports filtered by the admin's FIRST status, not a literal
+          // 'OPEN' that no longer exists once the stage is renamed.
           Expanded(child: _statTile(
               sl, I18n.t('home.openCases'), '$_open',
               Icons.lock_open_rounded, const Color(0xFFF59E0B),
-              onTap: () => _goReports(null, 'OPEN'))),
+              onTap: () => _goReports(null,
+                  _statuses.isEmpty ? null : _statuses.first.toUpperCase()))),
         ]),
         const SizedBox(height: 8),
         Row(children: [
@@ -548,11 +603,12 @@ class _HomeTabState extends State<HomeTab> {
               Icons.warning_rounded, const Color(0xFFEF4444),
               onTap: () => _goReports('CRITICAL', null))),
           const SizedBox(width: 8),
-          // Closed → Reports filtered by CLOSED status
+          // Closed → Reports filtered by the admin's closing status.
           Expanded(child: _statTile(
               sl, I18n.t('home.closedCases'), '$_closed',
               Icons.check_circle_rounded, const Color(0xFF10B981),
-              onTap: () => _goReports(null, 'CLOSED'))),
+              onTap: () => _goReports(null,
+                  _closedStatus.isEmpty ? null : _closedStatus))),
         ]),
       ]),
     );
@@ -979,7 +1035,8 @@ class _HomeTabState extends State<HomeTab> {
 
   Widget _recentItem(SL sl, Map<String, dynamic> i) {
     final sev = i['severity']?.toString().toUpperCase() ?? 'MEDIUM';
-    final status = i['status']?.toString().toUpperCase() ?? 'OPEN';
+    // Blank status resolves to the admin's first stage, not a literal 'OPEN'.
+    final status = _statusOf(i);
     Color sevColor;
     switch (sev) {
       case 'CRITICAL': sevColor = AppColors.crit; break;

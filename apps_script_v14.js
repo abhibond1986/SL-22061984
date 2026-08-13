@@ -58,13 +58,27 @@ const GOOGLE_MODEL     = 'gemini-2.0-flash';  // free tier — most reliable pri
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash'; // best free-tier vision via OpenRouter
 const OPENROUTER_MODEL_PAID = 'anthropic/claude-sonnet-4'; // paid fallback if free fails
 
+// The authoritative sheet header list. upsertIncident() only writes columns
+// that appear here, and getSheet() repairs the header row to match, so ANY app
+// field missing from this array is silently dropped on write AND absent on read
+// — no error, {ok:true} returned.
+//
+// ⚠ This must stay in step with _appToDb in lib/services/supabase_service.dart.
+// It previously omitted rootCause, assignedTo, assignedAt, targetDate and
+// updatedAt. That mattered because this is the documented SAFE ROLLBACK path
+// (SupabaseConfig.enabled = false): with it active, a target date or assignment
+// was pushed, acknowledged as saved, then erased by the next fetch. Losing
+// updatedAt was worse still — mergeServerIncident() needs a server timestamp to
+// decide that a local edit is newer, so without it every unsynced local change
+// was overwritten by the server copy.
 const INCIDENT_COLS = [
   'id', 'date', 'title', 'plant', 'dept', 'location', 'severity',
   'wsaCategory', 'obsType', 'desc', 'people', 'immediateAction',
   'type', 'status', 'reportedBy', 'reportedByPno', 'riskScore',
-  'confidence', 'summary', 'correctiveAction', 'closedBy',
+  'confidence', 'summary', 'correctiveAction', 'rootCause', 'closedBy',
   'closingRemarks', 'closedAt', 'investigationStartedAt',
-  'actionTakenAt', 'imageHash', 'hazardCount', 'imageBase64',
+  'actionTakenAt', 'assignedTo', 'assignedAt', 'targetDate', 'updatedAt',
+  'imageHash', 'hazardCount', 'imageBase64',
   'hazards', 'pdfUrl', 'syncedAt'
 ];
 

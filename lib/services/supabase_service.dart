@@ -43,6 +43,18 @@ class SupabaseService {
   //  FIELD MAPPING — app (camelCase) ↔ DB (snake_case)
   // ══════════════════════════════════════════════════════════════════════════
   // Only the keys we persist are mapped; unknown keys are dropped on write.
+  //
+  // ⚠ Adding a key here is only half the job — the column must also exist in
+  // the `incidents` table, or the whole upsert fails (PostgREST rejects the
+  // entire row for one unknown column, so a missing column silently breaks
+  // ALL syncing, not just that field). See migration_workflow_fields.sql.
+  //
+  // This map used to omit every closure/assignment field: closedBy,
+  // closingRemarks, closedAt, assignedTo, assignedAt, investigationStartedAt
+  // and actionTakenAt. A user could type a corrective action and close an
+  // incident, and none of it left the device — then the next realtime UPDATE
+  // for that id replaced the local record with a server row that lacked those
+  // fields, erasing the work. That is why the workflow block below exists.
   static const Map<String, String> _appToDb = {
     'id': 'id',
     'title': 'title',
@@ -60,6 +72,16 @@ class SupabaseService {
     'immediateAction': 'immediate_action',
     'rootCause': 'root_cause',
     'correctiveAction': 'corrective_action',
+    // ── Workflow / closure fields ──
+    'investigationStartedAt': 'investigation_started_at',
+    'actionTakenAt': 'action_taken_at',
+    'closedBy': 'closed_by',
+    'closingRemarks': 'closing_remarks',
+    'closedAt': 'closed_at',
+    'assignedTo': 'assigned_to',
+    'assignedAt': 'assigned_at',
+    'targetDate': 'target_date',
+    'updatedAt': 'updated_at',
     'hazards': 'hazards',
     'riskScore': 'risk_score',
     'confidence': 'confidence',

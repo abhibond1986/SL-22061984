@@ -798,11 +798,12 @@ class SyncService {
         if (!localMap.containsKey(id)) {
           localMap[id] = remote;
         } else {
-          final merged = Map<String, dynamic>.from(localMap[id]!);
-          remote.forEach((k, v) {
-            if (v != null && v.toString().isNotEmpty) merged[k] = v;
-          });
-          localMap[id] = merged;
+          // Use LocalDB's single merge rule rather than a local variant. The
+          // old inline merge let ANY non-empty server value overwrite local,
+          // so a Sync Now discarded a corrective action typed while offline
+          // (and the realtime path had different behaviour again).
+          localMap[id] = LocalDB.mergeServerIncident(
+              local: localMap[id]!, server: remote);
         }
       }
       await LocalDB.replaceAllIncidents(localMap.values.toList());
@@ -886,12 +887,10 @@ class SyncService {
         if (!localMap.containsKey(id)) {
           localMap[id] = remote;
         } else {
-          // Existing — merge server data over local
-          final merged = Map<String, dynamic>.from(localMap[id]!);
-          remote.forEach((k, v) {
-            if (v != null && v.toString().isNotEmpty) merged[k] = v;
-          });
-          localMap[id] = merged;
+          // Existing — merge via LocalDB's single shared rule, which protects
+          // unsynced local workflow edits and device-only fields.
+          localMap[id] = LocalDB.mergeServerIncident(
+              local: localMap[id]!, server: remote);
         }
       }
       // Replace all local incidents with merged data
@@ -1398,6 +1397,10 @@ class SyncService {
           [incident],
           latestAiScan: isAiScan ? incident : null,
           latestNearMiss: isNearMiss ? incident : null,
+          // Pass the admin's live status ladder and plant list so a renamed
+          // stage or plant doesn't quietly stop rules from matching.
+          openStatuses: await AdminMasterData.getOpenStatuses(),
+          plants: await AdminMasterData.getPlants(),
         );
 
         if (firingRules.isNotEmpty) {

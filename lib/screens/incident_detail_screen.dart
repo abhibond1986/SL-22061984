@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
+import '../services/plant_scope.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
@@ -46,11 +47,26 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   List<String> _statusOrder =
       List<String>.from(AdminMasterData.defaultStatuses);
 
+  /// Whether this user is allowed to advance/close THIS incident.
+  ///
+  /// There was previously no authorisation check anywhere on this screen: any
+  /// signed-in user who could open a record could drive it to CLOSED, including
+  /// another plant's record. Starts false and is set once the check resolves, so
+  /// the action bar can't be tapped during the async gap.
+  bool _canAct = false;
+  bool _permChecked = false;
+
+  /// Target date for completing the corrective action. Stored as an ISO date
+  /// string ('yyyy-MM-dd') in the `targetDate` field.
+  DateTime? _targetDate;
+
   @override
   void initState() {
     super.initState();
     _inc = Map<String, dynamic>.from(widget.incident);
+    _targetDate = DateTime.tryParse(_inc['targetDate']?.toString() ?? '');
     _loadStatuses();
+    _checkPermission();
     AdminMasterData.revision.addListener(_loadStatuses);
     _actionCtrl.text   = _inc['correctiveAction']?.toString() ?? '';
     _closedByCtrl.text = _inc['closedBy']?.toString()         ?? '';
@@ -58,6 +74,16 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     // Kick off image resolution once (handles mobile file storage where the
     // inline base64 is stripped, plus Supabase-URL images synced from cloud).
     _evidenceImageFuture = _resolveImageBytes();
+  }
+
+  Future<void> _checkPermission() async {
+    final scope = await PlantScope.forUser();
+    final ok = await scope.canActOn(_inc);
+    if (!mounted) return;
+    setState(() {
+      _canAct = ok;
+      _permChecked = true;
+    });
   }
 
   Future<void> _loadStatuses() async {
@@ -75,7 +101,15 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     super.dispose();
   }
 
-  String get _status   => (_inc['status']?.toString() ?? 'OPEN').toUpperCase();
+  /// Effective status. A blank status resolves to the FIRST configured stage,
+  /// not a literal 'OPEN' — which, once the admin renamed that stage, matched
+  /// nothing in [_statusOrder], so `indexOf` returned -1 and the pipeline
+  /// showed the case as off-ladder with no next stage to advance to.
+  String get _status {
+    final s = (_inc['status']?.toString().trim() ?? '').toUpperCase();
+    if (s.isNotEmpty) return s;
+    return _statusOrder.isEmpty ? '' : _statusOrder.first;
+  }
   /// True once the incident has reached the FINAL workflow stage, whatever the
   /// admin named it — comparing to the literal 'CLOSED' meant renaming the last
   /// stage left every closed incident permanently editable.
@@ -114,8 +148,52 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     return [];
   }
 
+  /// Copy the form fields onto [_inc]. Shared by "Save progress" and by
+  /// advancing the status, so the two can never disagree about what is stored.
+  void _applyFormFields() {
+    _inc['correctiveAction'] = _actionCtrl.text.trim();
+    _inc['closedBy']         = _closedByCtrl.text.trim();
+    _inc['closingRemarks']   = _remarksCtrl.text.trim();
+    // Date only — the time of day is meaningless for a completion target, and a
+    // bare 'yyyy-MM-dd' sorts and compares correctly as a string.
+    // Written unconditionally: writing only when non-null meant clearing the
+    // date left the old value on the record and it reappeared on reload.
+    _inc['targetDate'] = _targetDate == null
+        ? '' : DateFormat('yyyy-MM-dd').format(_targetDate!);
+  }
+
+  /// Re-resolve authorisation at the point of WRITE, not only when building the
+  /// buttons. Hiding a button is presentation; this is the actual gate, and it
+  /// re-checks in case the admin changed this user's plant mid-session.
+  Future<bool> _assertCanAct() async {
+    final scope = await PlantScope.forUser();
+    if (await scope.canActOn(_inc)) return true;
+    if (!mounted) return false;
+    setState(() { _canAct = false; _permChecked = true; });
+    _snack('You can only update incidents of your own plant.', AppColors.red);
+    return false;
+  }
+
+  /// Persist the corrective action, target date and remarks WITHOUT advancing
+  /// the status. Without this, a target date could only be saved as a
+  /// side-effect of moving the case to the next stage — so anyone who set a date
+  /// and left the screen lost it silently.
+  Future<void> _saveProgress() async {
+    if (_saving) return;
+    if (!await _assertCanAct()) return;
+    setState(() => _saving = true);
+    _applyFormFields();
+    await LocalDB.saveIncident(_inc);
+    SyncService.pushIncident(_inc).catchError((_) => false);
+    if (!mounted) return;
+    setState(() => _saving = false);
+    widget.onStatusChanged?.call();
+    _snack('✅ Progress saved', AppColors.accent);
+  }
+
   Future<void> _advanceStatus(String newStatus) async {
     if (_saving) return;
+    if (!await _assertCanAct()) return;
     // Require a corrective action before entering the FINAL stage, whatever
     // the admin renamed it to — hardcoding 'CLOSED' meant a renamed final
     // stage could be reached with the action field left blank.
@@ -125,10 +203,8 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     }
     setState(() => _saving = true);
     final now = DateTime.now().toIso8601String();
-    _inc['status']           = newStatus;
-    _inc['correctiveAction'] = _actionCtrl.text.trim();
-    _inc['closedBy']         = _closedByCtrl.text.trim();
-    _inc['closingRemarks']   = _remarksCtrl.text.trim();
+    _inc['status'] = newStatus;
+    _applyFormFields();
     // Stage timestamps. The final-stage stamp follows _statusOrder; the two
     // named stamps only apply if the admin still has those stages.
     if (isFinal)                      _inc['closedAt']               = now;
@@ -136,6 +212,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     if (newStatus == 'ACTION TAKEN')  _inc['actionTakenAt']          = now;
     await LocalDB.saveIncident(_inc);
     SyncService.pushIncident(_inc).catchError((_) => false);
+    if (!mounted) return;
     setState(() => _saving = false);
     widget.onStatusChanged?.call();
     _snack(
@@ -468,7 +545,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                 color: AppColors.accent, size: 22)),
         ],
       ),
-      bottomNavigationBar: _isClosed ? null : _buildBottomBar(sl, bgColor),
+      // No action bar when the case is at its final stage, or while the
+      // permission check is still resolving, or when this user may not act on
+      // this plant's records.
+      bottomNavigationBar: (_isClosed || !_permChecked || !_canAct)
+          ? null : _buildBottomBar(sl, bgColor),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -516,10 +597,14 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           _buildHazardsList(sl, bgColor),
 
           // ── MITIGATION / CLOSED ──────────────────────────────
-          if (!_isClosed)
-            _buildMitigationForm(sl, bgColor)
+          // A user who may not act on this record gets the read-only summary,
+          // not an editable form whose Save button would be rejected.
+          if (_isClosed)
+            _buildClosedSummary(sl, bgColor)
+          else if (_permChecked && !_canAct)
+            _buildReadOnlyNotice(sl, bgColor)
           else
-            _buildClosedSummary(sl, bgColor),
+            _buildMitigationForm(sl, bgColor),
           const SizedBox(height: 10),
 
           // ── TIMELINE ─────────────────────────────────────────
@@ -858,9 +943,110 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       _formLabel('Closed / Verified by', sl),
       _formField(_closedByCtrl, 'Name and designation', 1, sl, bg),
       const SizedBox(height: 10),
+      _formLabel('Target date for completion', sl),
+      _targetDatePicker(sl, bg),
+      const SizedBox(height: 10),
       _formLabel('Additional remarks', sl),
       _formField(_remarksCtrl, 'Any other notes…', 2, sl, bg),
     ]));
+
+  /// Target completion date. A tappable field rather than a text box so the
+  /// stored value is always a valid, uniformly formatted date.
+  Widget _targetDatePicker(SL sl, Color bg) {
+    final fieldBg = sl.isDark
+        ? const Color(0xFF2A2D42) : const Color(0xFFF0F1F5);
+    final overdue = _targetDate != null &&
+        _targetDate!.isBefore(DateTime.now()) && !_isClosed;
+    return InkWell(
+      borderRadius: BorderRadius.circular(9),
+      onTap: () async {
+        final now = DateTime.now();
+        final picked = await showDatePicker(
+          context: context,
+          initialDate: _targetDate ?? now.add(const Duration(days: 7)),
+          // Allow a past date: a target may legitimately have already lapsed
+          // when it is being recorded after the fact.
+          firstDate: DateTime(now.year - 2),
+          lastDate: DateTime(now.year + 5),
+        );
+        if (picked != null && mounted) setState(() => _targetDate = picked);
+      },
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(11),
+        decoration: BoxDecoration(
+          color: fieldBg,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: overdue
+              ? AppColors.red.withOpacity(0.7)
+              : sl.border.withOpacity(0.5))),
+        child: Row(children: [
+          Icon(Icons.event_rounded,
+              size: 15, color: overdue ? AppColors.red : sl.text4),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            _targetDate == null
+                ? 'Tap to set a target date'
+                : DateFormat('dd MMM yyyy').format(_targetDate!),
+            style: TextStyle(
+                color: _targetDate == null ? sl.text4 : sl.text1,
+                fontSize: 12.5,
+                fontWeight: _targetDate == null
+                    ? FontWeight.w400 : FontWeight.w600))),
+          if (overdue)
+            const Text('OVERDUE', style: TextStyle(
+                color: AppColors.red, fontSize: 9.5,
+                fontWeight: FontWeight.w800)),
+          if (_targetDate != null && !overdue)
+            IconButton(
+              tooltip: 'Clear',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () => setState(() => _targetDate = null),
+              icon: Icon(Icons.close_rounded, size: 15, color: sl.text4)),
+        ]),
+      ),
+    );
+  }
+
+  /// Shown instead of the mitigation form when this user may not act on the
+  /// record. Says why, and still surfaces whatever progress has been recorded,
+  /// so viewing another plant's case is informative rather than just blocked.
+  Widget _buildReadOnlyNotice(SL sl, Color bg) {
+    final rows = <List<String>>[
+      ['Corrective Action', _inc['correctiveAction']?.toString() ?? ''],
+      ['Target Date',       _inc['targetDate']?.toString() ?? ''],
+      ['Assigned To',       _inc['assignedTo']?.toString() ?? ''],
+    ].where((r) => r[1].isNotEmpty).toList();
+
+    return Container(
+      decoration: _card(sl, bg, borderColor: sl.border.withOpacity(0.5)),
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.visibility_outlined, size: 16, color: sl.text3),
+          const SizedBox(width: 7),
+          Text('View only', style: TextStyle(color: sl.text2, fontSize: 13,
+              fontWeight: FontWeight.w700)),
+        ]),
+        const SizedBox(height: 6),
+        Text('This incident belongs to another plant, so it can be reviewed '
+             'here but only updated by that plant or an admin.',
+          style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.4)),
+        if (rows.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          ...rows.map((r) => Padding(
+            padding: const EdgeInsets.only(bottom: 7),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SizedBox(width: 110, child: Text(r[0],
+                style: TextStyle(color: sl.text4, fontSize: 10,
+                    fontWeight: FontWeight.w600))),
+              Expanded(child: Text(r[1],
+                style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4))),
+            ]))),
+        ],
+      ]));
+  }
 
   Widget _formLabel(String lbl, SL sl) => Padding(
     padding: const EdgeInsets.only(bottom: 5),
@@ -908,6 +1094,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       const SizedBox(height: 10),
       ...([
         ['Corrective Action', _inc['correctiveAction']],
+        ['Target Date',       _inc['targetDate']],
         ['Closed By',         _inc['closedBy']],
         ['Remarks',           _inc['closingRemarks']],
         ['Closed At',         _inc['closedAt'] != null
@@ -1003,24 +1190,24 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
         border: Border(top: BorderSide(
             color: sl.border.withOpacity(0.4)))),
       child: Row(children: [
-        if (_status == 'OPEN') ...[
-          Expanded(child: OutlinedButton.icon(
-            onPressed: _saving
-                ? null : () => _advanceStatus('INVESTIGATING'),
-            icon: const Icon(Icons.search_rounded,
-                color: Color(0xFFD97706), size: 15),
-            label: const Text('Investigate',
-              style: TextStyle(color: Color(0xFFD97706),
-                  fontWeight: FontWeight.w700, fontSize: 12)),
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(
-                  color: Color(0xFFD97706), width: 1.5),
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10))),
-          )),
-          const SizedBox(width: 8),
-        ],
+        // Save without advancing. Replaces the old hardcoded "Investigate"
+        // shortcut, which named a stage the admin may have renamed or removed
+        // and duplicated the advance button's job — while the far more useful
+        // action, saving a target date and corrective action in place, had no
+        // button at all.
+        Expanded(child: OutlinedButton.icon(
+          onPressed: _saving ? null : _saveProgress,
+          icon: Icon(Icons.save_outlined, color: sl.text2, size: 15),
+          label: Text('Save',
+            style: TextStyle(color: sl.text2,
+                fontWeight: FontWeight.w700, fontSize: 12)),
+          style: OutlinedButton.styleFrom(
+            side: BorderSide(color: sl.border, width: 1.5),
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10))),
+        )),
+        const SizedBox(width: 8),
         if (hasNext)
           Expanded(flex: 2, child: ElevatedButton.icon(
             onPressed: _saving ? null : () => _advanceStatus(nextSt!),

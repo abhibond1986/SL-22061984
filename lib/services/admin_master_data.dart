@@ -270,6 +270,36 @@ class AdminMasterData {
   static Future<Set<String>> getOpenStatuses() async =>
       openStatusesFrom(await getStatuses());
 
+  /// True if [status] means "finished". Compares against the admin's own
+  /// terminal set rather than a literal, so a renamed final stage still counts.
+  static Future<bool> isTerminalStatus(String status) async {
+    final s = status.trim().toUpperCase();
+    if (s.isEmpty) return false;
+    final all = await getStatuses();
+    if (all.isEmpty) return false;
+    // The last configured status is always terminal by definition — that's the
+    // end of the admin's ladder — plus anything in the canonical terminal set
+    // that the admin has kept.
+    final last = all.last.trim().toUpperCase();
+    return s == last || terminalStatuses.contains(s);
+  }
+
+  /// The status a newly created record starts in — the first rung of the
+  /// admin's ladder, not a hardcoded 'OPEN'. Returns '' if the admin has
+  /// deleted every status, since an empty list is a legitimate configuration
+  /// and inventing a value would contradict the admin panel.
+  static Future<String> firstStatus() async {
+    final all = await getStatuses();
+    return all.isEmpty ? '' : all.first;
+  }
+
+  /// The status that closes a record — the last rung of the admin's ladder.
+  /// '' if no statuses are configured.
+  static Future<String> lastStatus() async {
+    final all = await getStatuses();
+    return all.isEmpty ? '' : all.last;
+  }
+
   // ── DEFAULT OBSERVATION TYPES ────────────────────────────────────
   static const List<String> defaultObservationTypes = [
     'Unsafe Act', 'Unsafe Condition', 'Near Miss', 'First Aid Case',
