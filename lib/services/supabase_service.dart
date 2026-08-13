@@ -544,4 +544,85 @@ class SupabaseService {
       return false;
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  AI RUN TELEMETRY  (table `ai_runs`, see supabase_ai_runs_setup.sql)
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // ⚠ Every key here must exist as a column in ai_runs. PostgREST rejects the
+  // WHOLE row if it mentions one unknown column, so adding a key below without
+  // the matching ALTER TABLE stops ALL telemetry reaching the server — silently,
+  // because AiRunLog deliberately swallows its own errors.
+  static const Map<String, String> _runAppToDb = {
+    'id': 'id',
+    'runType': 'run_type',
+    'outcome': 'outcome',
+    'failReason': 'fail_reason',
+    'provider': 'provider',
+    'model': 'model',
+    'durationMs': 'duration_ms',
+    'hazardCount': 'hazard_count',
+    'confidence': 'confidence',
+    'imageHash': 'image_hash',
+    'plant': 'plant',
+    'dept': 'dept',
+    'userName': 'user_name',
+    'userPno': 'user_pno',
+    'appVersion': 'app_version',
+    'platform': 'platform',
+    'createdAt': 'created_at',
+  };
+  static final Map<String, String> _runDbToApp = {
+    for (final e in _runAppToDb.entries) e.value: e.key,
+  };
+
+  /// Fetch AI runs, newest first.
+  ///
+  /// Capped at 5000 rows: this is append-only telemetry that grows with every
+  /// scan across every device, and an unbounded select would eventually stall
+  /// the admin panel. The dashboard only ever reports on recent windows.
+  static Future<List<Map<String, dynamic>>> fetchAiRuns({int limit = 5000}) async {
+    if (!isReady) return [];
+    try {
+      final rows = await _db
+          .from('ai_runs')
+          .select()
+          .order('created_at', ascending: false)
+          .limit(limit)
+          .timeout(const Duration(seconds: 8));
+      return (rows as List)
+          .map((r) => _runFromRow(Map<String, dynamic>.from(r as Map)))
+          .toList();
+    } catch (_) {
+      // Missing table / offline / timeout — the dashboard falls back to the
+      // local ring buffer rather than showing an error.
+      return [];
+    }
+  }
+
+  /// Insert or update one AI run record (keyed by id).
+  static Future<bool> upsertAiRun(Map<String, dynamic> run) async {
+    if (!isReady) return false;
+    try {
+      final row = <String, dynamic>{};
+      _runAppToDb.forEach((appKey, dbCol) {
+        if (!run.containsKey(appKey)) return;
+        row[dbCol] = run[appKey];
+      });
+      if ((row['id']?.toString() ?? '').isEmpty) return false;
+      await _db.from('ai_runs').upsert(row, onConflict: 'id');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Map<String, dynamic> _runFromRow(Map<String, dynamic> row) {
+    final r = <String, dynamic>{};
+    row.forEach((dbCol, v) {
+      final appKey = _runDbToApp[dbCol];
+      if (appKey != null) r[appKey] = v;
+    });
+    return r;
+  }
 }

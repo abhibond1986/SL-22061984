@@ -22,6 +22,10 @@ import 'knowledge_service.dart';
 // For LocalDB.kbRevision — the KB context cache below is keyed to it so an
 // admin knowledge upload reaches the analyser without an app restart.
 import 'local_db.dart';
+// Run telemetry. This file is the single instrumentation point for image
+// analysis — see the comment on analyseImageBytes for why it is here and not
+// at the call sites.
+import 'ai_run_log.dart';
 
 class GeminiVision {
   // OpenRouter vision models (free tier), tried in order.
@@ -111,17 +115,63 @@ class GeminiVision {
   }
 
   // ── analyseImage (mobile / File path) ─────────────────────────────────────
-  static Future<Map<String, dynamic>?> analyseImage(File imageFile) async {
+  static Future<Map<String, dynamic>?> analyseImage(File imageFile,
+      {String runType = AiRunLog.typeHazardScan,
+      String plant = '',
+      String dept = ''}) async {
     final bytes = await imageFile.readAsBytes();
-    return analyseImageBytes(bytes);
+    return analyseImageBytes(bytes, runType: runType, plant: plant, dept: dept);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  MAIN ENTRY: 4-PROVIDER ANALYSIS (maximum reliability, never fails)
   // ══════════════════════════════════════════════════════════════════════════
+  //
+  // TELEMETRY: every exit point below records exactly one AiRunLog row, and
+  // this is deliberately the ONLY place image-analysis runs are logged.
+  //
+  // Instrumenting the CALLERS instead would both double-count (ai_scan_tab and
+  // near_miss_tab each call this) and, worse, miss most failures: this method
+  // never throws and never returns null on failure — it returns
+  // _offlineFallback(), a well-formed map that the caller cannot distinguish
+  // from a real answer without reading private flags. That is precisely why
+  // AI failures were invisible before.
+  //
+  // [runType] lets one instrumentation point serve both entry points, so the
+  // dashboard can still separate hazard scans from near-miss analyses.
   static Future<Map<String, dynamic>?> analyseImageBytes(Uint8List bytes,
-      {int retryCount = 0}) async {
+      {int retryCount = 0,
+      String runType = AiRunLog.typeHazardScan,
+      String plant = '',
+      String dept = ''}) async {
     final stopwatch = Stopwatch()..start();
+
+    // Records one run and passes the result straight through, so each exit
+    // stays a single `return _logged(...)` and none can be forgotten.
+    // Fire-and-forget: telemetry must never delay or break a scan.
+    Map<String, dynamic>? logged(
+      Map<String, dynamic>? result, {
+      required String outcome,
+      String failReason = '',
+      String model = '',
+      String imageHash = '',
+    }) {
+      final hazards = result?['hazards'];
+      AiRunLog.record(
+        runType: runType,
+        outcome: outcome,
+        failReason: failReason,
+        provider: (result?['_source'] ?? '').toString(),
+        model: model.isNotEmpty ? model : (result?['_model'] ?? '').toString(),
+        durationMs: stopwatch.elapsedMilliseconds,
+        hazardCount: hazards is List ? hazards.length : 0,
+        confidence: int.tryParse(result?['confidence']?.toString() ?? '') ?? 0,
+        imageHash: imageHash,
+        plant: plant,
+        dept: dept,
+      );
+      return result;
+    }
 
     try {
       print('GeminiVision: ═══ STARTING ANALYSIS ═══ (${bytes.length} bytes)');
@@ -137,7 +187,11 @@ class GeminiVision {
       if (cached != null) {
         print('GeminiVision: ✓ Returning CACHED result for image $imgHash (consistent)');
         cached['_fromCache'] = true;
-        return cached;
+        // CACHED is its own outcome, never SUCCESS: a cache hit returns in a
+        // few ms, so counting it in the timing would flatter the average badly,
+        // and counting it as a model success would let a warm cache hide a
+        // completely broken provider chain.
+        return logged(cached, outcome: AiRunLog.outcomeCached, imageHash: imgHash);
       }
 
       // Prevent concurrent analysis
@@ -148,7 +202,12 @@ class GeminiVision {
           if (!_isAnalyzing) break;
         }
         if (_isAnalyzing) {
-          return await _offlineFallback(bytes, reason: 'Another analysis in progress');
+          return logged(
+            await _offlineFallback(bytes, reason: 'Another analysis in progress'),
+            outcome: AiRunLog.outcomeFailed,
+            failReason: AiRunLog.reasonConcurrent,
+            imageHash: imgHash,
+          );
         }
       }
       _isAnalyzing = true;
@@ -167,7 +226,12 @@ class GeminiVision {
         if (!networkStatus['hasInternet']!) {
           print('GeminiVision: No internet → offline fallback');
           _isAnalyzing = false;
-          return await _offlineFallback(bytes, reason: 'No internet connection');
+          return logged(
+            await _offlineFallback(bytes, reason: 'No internet connection'),
+            outcome: AiRunLog.outcomeFailed,
+            failReason: AiRunLog.reasonNoInternet,
+            imageHash: imgHash,
+          );
         }
       }
 
@@ -249,7 +313,13 @@ class GeminiVision {
               _isAnalyzing = false;
               // Cache so the SAME image always returns THIS result.
               await _writeCachedResult(imgHash, orResult);
-              return orResult;
+              // The only SUCCESS path: a real provider returned hazards for
+              // this image. Model is passed explicitly so the dashboard can
+              // compare the primary and secondary models' latency.
+              return logged(orResult,
+                  outcome: AiRunLog.outcomeSuccess,
+                  model: model,
+                  imageHash: imgHash);
             }
           } catch (e) {
             print('GeminiVision: ✗ OpenRouter $label exception: $e');
@@ -265,12 +335,25 @@ class GeminiVision {
       print('GeminiVision: ✗ OpenRouter unavailable. Total: ${stopwatch.elapsedMilliseconds}ms');
       _lastCallTime = DateTime.now();
       _isAnalyzing = false;
-      return await _offlineFallback(bytes,
-          reason: 'AI vision unavailable (${stopwatch.elapsedMilliseconds}ms)');
+      // Every provider was tried and none returned a usable result. This is the
+      // failure the admin most needs to see, and the one that was completely
+      // invisible before: the user still gets a checklist, so nothing looked
+      // wrong. A missing API key lands here too (chain skipped entirely).
+      return logged(
+        await _offlineFallback(bytes,
+            reason: 'AI vision unavailable (${stopwatch.elapsedMilliseconds}ms)'),
+        outcome: AiRunLog.outcomeFailed,
+        failReason: AiRunLog.reasonExhausted,
+        imageHash: imgHash,
+      );
     } catch (e) {
       print('GeminiVision: Unexpected error: $e');
       _isAnalyzing = false;
-      return await _offlineFallback(bytes, reason: e.toString());
+      return logged(
+        await _offlineFallback(bytes, reason: e.toString()),
+        outcome: AiRunLog.outcomeFailed,
+        failReason: AiRunLog.reasonException,
+      );
     }
   }
 

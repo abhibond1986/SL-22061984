@@ -535,6 +535,16 @@ If the text is already fine, return it unchanged.''';
     if (_aiRefining || rawText.length < 10) return;
     setState(() => _aiRefining = true);
 
+    // TELEMETRY: this method has three exits (Groq success, Apps Script
+    // success, silent fall-through) plus a catch-all. Rather than a log call at
+    // each — where one is easy to miss and the fall-through path had no
+    // handling at all — the outcome is captured in locals and recorded once in
+    // `finally`, which every path must pass through.
+    final sw = Stopwatch()..start();
+    var refineOk = false;
+    var refineProvider = '';
+    var refineReason = AiRunLog.reasonExhausted;
+
     try {
       // ★ v29: Detect language from the raw text before sending to AI
       _detectLanguageFromText(rawText);
@@ -560,12 +570,18 @@ If the text is already fine, return it unchanged.''';
       ).timeout(const Duration(seconds: 15), onTimeout: () => null);
 
       if (groqResult != null && mounted) {
+        refineOk = true;
+        refineProvider = 'groq';
         setState(() {
           _aiSuggestion = groqResult;
           _aiRefining = false;
         });
         return;
       }
+      // Groq returned null — either a genuine failure or the 15s timeout above.
+      // Recorded as a timeout only if we actually spent that long, so a fast
+      // rejection isn't mislabelled as a slow network.
+      if (sw.elapsedMilliseconds >= 15000) refineReason = AiRunLog.reasonTimeout;
 
       if (!mounted) return;
 
@@ -624,8 +640,10 @@ If the input does NOT qualify as a near miss, set isNearMiss=false and clearly e
 Respond ONLY with the JSON — no explanations outside JSON.''';
 
       Map<String, dynamic>? body = await SyncService.callAiText(prompt);
+      var viaDirectFallback = false;
       if (body == null) {
         body = await _callAiTextFallback(prompt);
+        viaDirectFallback = true;
       }
       if (!mounted) return;
 
@@ -646,6 +664,9 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
 
           try {
             final parsed = jsonDecode(jsonStr) as Map<String, dynamic>;
+            refineOk = true;
+            refineProvider =
+                viaDirectFallback ? 'apps_script_direct' : 'apps_script';
             if (mounted) {
               setState(() {
                 _aiSuggestion = parsed;
@@ -653,13 +674,29 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
               });
             }
             return;
-          } catch (_) {}
+          } catch (_) {
+            // The model replied but not with usable JSON. That is a model
+            // quality problem, not an outage, so it must not be filed under
+            // connectivity failures.
+            refineReason = AiRunLog.reasonEmptyResult;
+          }
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      refineReason = AiRunLog.reasonException;
+    }
     // ★ v29: ALWAYS reset _aiRefining — prevents stuck state
     finally {
       if (mounted && _aiRefining) setState(() => _aiRefining = false);
+      AiRunLog.record(
+        runType: AiRunLog.typeNearMissText,
+        outcome: refineOk ? AiRunLog.outcomeSuccess : AiRunLog.outcomeFailed,
+        failReason: refineOk ? '' : refineReason,
+        provider: refineProvider,
+        durationMs: sw.elapsedMilliseconds,
+        plant: _plant,
+        dept: _effectiveDept,
+      );
     }
   }
 
@@ -963,6 +1000,17 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     final networkStatus = await NetworkChecker.getNetworkStatus();
 
     if (!networkStatus['hasInternet']!) {
+      // Recorded here because this path returns BEFORE GeminiVision is called,
+      // so the instrumentation inside it never sees this run. Without this the
+      // dashboard would under-report exactly the failures caused by shop-floor
+      // connectivity — the most common kind.
+      AiRunLog.record(
+        runType: AiRunLog.typeNearMissImage,
+        outcome: AiRunLog.outcomeFailed,
+        failReason: AiRunLog.reasonNoInternet,
+        plant: _plant,
+        dept: _effectiveDept,
+      );
       _snack('Offline - Image analysis skipped. Fill form manually.', const Color(0xFFD97706));
       setState(() {
         _isOnlineMode = false;
@@ -989,9 +1037,20 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     }
     try {
       setState(() => _step = steps.last);
+      // runType/plant/dept are passed so the ONE instrumentation point inside
+      // GeminiVision can attribute this run to near-miss rather than to a
+      // hazard scan. The three 700ms fake-progress delays above are outside the
+      // measured window (the Stopwatch starts inside analyseImageBytes), so
+      // they do not inflate the reported response time.
       Map<String, dynamic>? result = kIsWeb
-          ? await GeminiVision.analyseImageBytes(_imageBytes!)
-          : await GeminiVision.analyseImage(File(_pickedFile!.path));
+          ? await GeminiVision.analyseImageBytes(_imageBytes!,
+              runType: AiRunLog.typeNearMissImage,
+              plant: _plant,
+              dept: _effectiveDept)
+          : await GeminiVision.analyseImage(File(_pickedFile!.path),
+              runType: AiRunLog.typeNearMissImage,
+              plant: _plant,
+              dept: _effectiveDept);
 
       final hazards = (result?['hazards'] as List?) ?? [];
       final isOnline = result?['_isOnline'] == true;
