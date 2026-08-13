@@ -184,15 +184,25 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
       decoration: BoxDecoration(
-        color: sl.isDark
-            ? const Color(0xFF1E1B3A).withOpacity(0.95)
-            : sl.glassColor,
+        // Matches the employee shell's nav bar (home_screen.dart) so the two
+        // shells don't look like two different apps.
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: sl.isDark
+              ? [
+                  const Color(0xFF191F38).withOpacity(0.98),
+                  const Color(0xFF0D1117).withOpacity(0.98),
+                ]
+              : [
+                  const Color(0xFFE9ECFB).withOpacity(0.94),
+                  const Color(0xFFF8F9FE).withOpacity(0.94),
+                ],
+        ),
         border: Border(
           top: BorderSide(
-            color: sl.isDark
-                ? Colors.white.withOpacity(0.15)
-                : sl.glassBorder,
-            width: 0.5),
+            color: AppColors.accent.withOpacity(sl.isDark ? 0.28 : 0.20),
+            width: 1),
         ),
       ),
       child: SafeArea(

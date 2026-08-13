@@ -10,7 +10,12 @@ class Validators {
   static const int maxNameLength = 100;
   static const int maxEmailLength = 100;
   static const int maxPhoneLength = 15;
-  static const int minPasswordLength = 4;
+  // Raised from 4. `app_users` password hashes are readable with the anon key
+  // (see auth_service.dart), and a 4-character password is trivially recovered
+  // from a salted SHA-256 by brute force. This is only enforced where a
+  // password is CHOSEN — login does not check strength, so nobody with an
+  // existing shorter password is locked out of their own account.
+  static const int minPasswordLength = 6;
   static const int maxPasswordLength = 50;
 
   // ── Email validation ─────────────────────────────────────────────

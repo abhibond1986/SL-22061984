@@ -394,8 +394,31 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
         filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
         child: Container(
           decoration: BoxDecoration(
-            color: sl.glassColor,
-            border: Border(bottom: BorderSide(color: sl.glassBorder, width: 0.5))),
+            // Subtle brand-tinted ribbon. Previously a flat sl.glassColor
+            // (plain white at 8%/45%), which made the header read as a washed
+            // -out band and left the title fighting whatever scrolled beneath
+            // it. The tint is low-chroma indigo→teal at high opacity: enough
+            // colour to feel deliberate, opaque enough that text stays legible.
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: sl.isDark
+                  ? [
+                      const Color(0xFF1D2444).withOpacity(0.92), // indigo
+                      const Color(0xFF14203A).withOpacity(0.92), // indigo→teal
+                    ]
+                  : [
+                      const Color(0xFFECEEFD).withOpacity(0.92), // pale indigo
+                      const Color(0xFFF2FAFC).withOpacity(0.92), // pale teal
+                    ],
+            ),
+            border: Border(
+              bottom: BorderSide(
+                color: AppColors.accent.withOpacity(sl.isDark ? 0.26 : 0.18),
+                width: 1)),
+            // NB: no boxShadow here — the enclosing ClipRRect clips to the
+            // container's rect, so any drop shadow would be cut away anyway.
+          ),
           child: SafeArea(
             bottom: false,
             child: Padding(
@@ -439,7 +462,9 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 if (widget.subtitle != null)
                   Text(widget.subtitle!,
-                      style: TextStyle(color: sl.text4, fontSize: 9.5),
+                      // 9.5px was below the 11px hint-text floor — unreadable
+                      // on a plant floor, especially through safety glasses.
+                      style: TextStyle(color: sl.text3, fontSize: 11),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
               ])),
 

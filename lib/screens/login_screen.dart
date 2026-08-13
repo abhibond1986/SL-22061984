@@ -2,12 +2,12 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
-import '../services/local_db.dart';
-import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/app_updater.dart';
-import '../services/auth_token_service.dart';
-import '../services/crypto_utils.dart';
+// Every credential operation on this screen goes through AuthService — one
+// hashing scheme, one place that talks to Supabase. See auth_service.dart for
+// why the previous per-screen hashing was broken.
+import '../services/auth_service.dart';
 import '../services/validators.dart';
 import '../services/i18n.dart';
 import '../widgets/glass_card.dart';
@@ -32,12 +32,20 @@ class _LoginScreenState extends State<LoginScreen> {
   final _regNameCtrl   = TextEditingController();
   final _regUserCtrl   = TextEditingController();
   final _regPassCtrl   = TextEditingController();
+  final _regConfirmCtrl = TextEditingController();
   final _regDesigCtrl  = TextEditingController();
   final _regPnoCtrl    = TextEditingController();
+  final _regMobileCtrl = TextEditingController();
   final _regOtherPlantCtrl = TextEditingController();
 
   String? _selectedPlant;
   bool _isOtherPlant = false;
+
+  /// Reveal state for the password fields. A hidden password field on a phone
+  /// held in a gloved hand is how people end up locked out by a typo they
+  /// cannot see.
+  bool _showLoginPass = false;
+  bool _showRegPass = false;
 
   /// Latest released version shown on the download button. Fetched from the
   /// GitHub Releases API rather than hardcoded, because the CI workflow bumps
@@ -113,6 +121,7 @@ class _LoginScreenState extends State<LoginScreen> {
     AdminMasterData.revision.removeListener(_loadPlants);
     _userCtrl.dispose(); _passCtrl.dispose();
     _regNameCtrl.dispose(); _regUserCtrl.dispose(); _regPassCtrl.dispose();
+    _regConfirmCtrl.dispose(); _regMobileCtrl.dispose();
     _regDesigCtrl.dispose(); _regPnoCtrl.dispose(); _regOtherPlantCtrl.dispose();
     super.dispose();
   }
@@ -133,114 +142,40 @@ class _LoginScreenState extends State<LoginScreen> {
     // Validate inputs
     final usernameErr = Validators.validateRequired(username, 'Username');
     if (usernameErr != null) { setState(() => _err = usernameErr); return; }
-    final passwordErr = Validators.validatePassword(password);
-    if (passwordErr != null) { setState(() => _err = passwordErr); return; }
+    if (password.isEmpty) {
+      setState(() => _err = 'Enter your password'); return;
+    }
+    // NOTE: no strength check on LOGIN. The old code ran
+    // Validators.validatePassword() here, so anyone whose existing password
+    // predated the current rules was told their own valid password was
+    // "too short" and could never get in. Strength is enforced where a
+    // password is CHOSEN (register / reset), which is the only place it means
+    // anything.
 
     setState(() { _loading = true; _err = ''; });
     try {
-      // 1. Try local DB first (fast, works offline)
-      var user = await LocalDB.signIn(username, password);
-      bool gotServerToken = false;
-
-      // 2. If local login fails, try the remote backend (Google Sheets)
-      //    This handles cross-device login (e.g. registered on web, login on mobile)
-      if (user == null) {
-        final passwordHash = _simpleHash(password);
-        final remoteUser = await SyncService.loginOnline(username, passwordHash);
-        if (remoteUser != null) {
-          // Cache the user locally WITH password credentials for future offline logins
-          remoteUser['username'] ??= username;
-          remoteUser['status'] ??= 'active';
-          // Store a proper CryptoUtils hash so LocalDB.signIn works offline
-          final salt = CryptoUtils.generateSalt();
-          remoteUser['salt'] = salt;
-          remoteUser['passwordHash'] = CryptoUtils.hashPassword(password, salt);
-          await LocalDB.upsertUser(remoteUser);
-          // Set as current user (without credentials) so HomeScreen sees it
-          user = Map<String, dynamic>.from(remoteUser)
-            ..remove('passwordHash')..remove('password')..remove('salt');
-          await LocalDB.setCurrentUser(user!);
-          gotServerToken = true; // loginOnline already stored the server token
-        }
-      }
-
+      // One call. AuthService tries local → Supabase → legacy backend, upgrades
+      // legacy credential formats on the way through, caches the account for
+      // offline use, and reports WHY it failed.
+      final res = await AuthService.signIn(username, password);
       if (!mounted) return;
-      // Debug-only diagnostic; stripped from release builds.
-      assert(() {
-        print('LoginScreen._login: user=${user != null ? "found" : "null"}, gotServerToken=$gotServerToken');
-        return true;
-      }());
-      if (user != null) {
-        final Map<String, dynamic> confirmedUser = user;
-        if (!gotServerToken) {
-          // ✅ FIX: For local login, also obtain a server session token
-          // so that API calls (addIncident, etc.) are authenticated.
-          // Fire this in background — don't block login on network.
-          final passwordHash = _simpleHash(password);
-          // Meanwhile, store a local token as fallback
-          final userId = confirmedUser['pno']?.toString() ?? confirmedUser['username']?.toString() ?? '';
-          await AuthTokenService.generateToken(userId);
-          // Try server login; if it fails, ensure user exists on server
-          // so cross-device login works next time.
-          SyncService.loginOnline(username, passwordHash).then((result) {
-            if (result == null) {
-              // Server doesn't know this user — push them
-              final pushData = <String, dynamic>{
-                'name': confirmedUser['name']?.toString() ?? '',
-                'username': username,
-                'designation': confirmedUser['designation']?.toString() ?? '',
-                'plant': confirmedUser['plant']?.toString() ?? '',
-                'pno': confirmedUser['pno']?.toString() ?? '',
-                'passwordHash': passwordHash,
-                'isAdmin': confirmedUser['isAdmin']?.toString() ?? 'false',
-                'status': 'active',
-              };
-              SyncService.pushUser(pushData);
-            }
-          }).catchError((_) => null);
-        }
+      if (res.ok) {
         _goHome();
       } else {
-        setState(() => _err = 'Invalid credentials');
+        setState(() => _err = res.message);
       }
     } catch (e) {
-      setState(() => _err = 'Login failed: $e');
+      if (mounted) setState(() => _err = 'Login failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
-  }
-
-  /// Simple hash for online login — MUST match Apps Script's simpleHash exactly:
-  /// ```js
-  /// function simpleHash(str) {
-  ///   var h = 0;
-  ///   for (var i = 0; i < str.length; i++) {
-  ///     h = ((h << 5) - h) + str.charCodeAt(i);
-  ///     h = h & h;  // Convert to 32-bit signed integer
-  ///   }
-  ///   if (h < 0) return '-' + ((-h) >>> 0).toString(36);
-  ///   return h.toString(36);
-  /// }
-  /// ```
-  String _simpleHash(String str) {
-    int h = 0;
-    for (int i = 0; i < str.length; i++) {
-      h = ((h << 5) - h) + str.codeUnitAt(i);
-      // Emulate JavaScript's `h = h & h` (converts to 32-bit signed int)
-      h = (h & 0xFFFFFFFF).toSigned(32);
-    }
-    if (h < 0) {
-      // Emulate JS: (-h) >>> 0 converts to unsigned 32-bit
-      final unsigned = (-h) & 0xFFFFFFFF;
-      return '-${unsigned.toRadixString(36)}';
-    }
-    return h.toRadixString(36);
   }
 
   Future<void> _register() async {
     final name  = _regNameCtrl.text.trim();
     final user  = _regUserCtrl.text.trim();
     final pass  = _regPassCtrl.text;
+    final confirm = _regConfirmCtrl.text;
     final desig = _regDesigCtrl.text.trim();
     final plant = _effectivePlant;
 
@@ -251,40 +186,42 @@ class _LoginScreenState extends State<LoginScreen> {
     if (userErr != null) { setState(() => _err = userErr); return; }
     final passErr = Validators.validatePassword(pass);
     if (passErr != null) { setState(() => _err = passErr); return; }
+    if (confirm != pass) {
+      setState(() => _err = 'Passwords do not match'); return;
+    }
     if (desig.isEmpty) { setState(() => _err = 'Designation is required'); return; }
     if (plant.isEmpty) { setState(() => _err = 'Please select a plant'); return; }
     setState(() { _loading = true; _err = ''; });
     try {
-      final userData = {
-        'name': name, 'username': user, 'password': pass,
-        'designation': desig, 'plant': plant,
+      // Profile fields only — the password travels as its own argument so a
+      // plaintext value never sits in a map that could be logged or persisted.
+      final userData = <String, dynamic>{
+        'name': name,
+        'username': user.toLowerCase(),
+        'designation': desig,
+        'plant': plant,
         'pno': _regPnoCtrl.text.trim(),
-        'isAdmin': 'false', 'status': 'active',
+        'mobile': _regMobileCtrl.text.trim(),
+        'isAdmin': 'false',
+        'status': 'active',
       };
-      final ok = await LocalDB.register(userData);
+      // AuthService checks the username against the SERVER as well as locally
+      // and writes the account to Supabase before creating it locally — so an
+      // account can no longer exist on one device only, invisible to the admin
+      // panel and unable to log in anywhere else.
+      final res = await AuthService.register(userData, pass);
       if (!mounted) return;
-      if (ok != null) {
-        // ✅ FIX: Register user on backend so other devices can login
-        // Uses both register (for new users) and upsertUser (to update hash)
-        final pushData = Map<String, dynamic>.from(userData);
-        pushData.remove('password'); // Don't send plaintext password
-        pushData['passwordHash'] = _simpleHash(pass); // Backend expects this
-        // Try registration first (direct, public action); if it doesn't land,
-        // push reliably (enqueues for retry) so the user reliably reaches the
-        // backend — and therefore the admin panel on other devices.
-        SyncService.registerOnline(pushData).then((registered) {
-          if (!registered) SyncService.pushUserReliable(pushData);
-        }).catchError((_) => SyncService.pushUserReliable(pushData));
+      if (res.ok) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('${I18n.t('common.success')}! Welcome, $name'),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 2)));
         _goHome();
       } else {
-        setState(() => _err = 'Username already taken');
+        setState(() => _err = res.message);
       }
     } catch (e) {
-      setState(() => _err = 'Registration failed: $e');
+      if (mounted) setState(() => _err = 'Registration failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -629,8 +566,10 @@ class _LoginScreenState extends State<LoginScreen> {
     _field('Username', _userCtrl, sl,
       textInputAction: TextInputAction.next),
     const SizedBox(height: 12),
-    _field('Password', _passCtrl, sl, obscure: true,
+    _field('Password', _passCtrl, sl, obscure: !_showLoginPass,
       textInputAction: TextInputAction.done,
+      onToggleObscure: () => setState(() => _showLoginPass = !_showLoginPass),
+      obscured: !_showLoginPass,
       onSubmitted: () { if (!_loading) _login(); }),
     const SizedBox(height: 8),
     Align(
@@ -646,66 +585,205 @@ class _LoginScreenState extends State<LoginScreen> {
     ),
   ];
 
+  /// Self-service password reset.
+  ///
+  /// Replaces a dialog that asked only for a username and then set the account
+  /// to the hardcoded string `sail@123`, on the local device only. That meant:
+  /// anyone could reset anyone's password by guessing their username; the "new"
+  /// password was a value printed in the source code; and because it never
+  /// reached Supabase, the user still could not log in on any other device —
+  /// including the web app they were most likely using.
+  ///
+  /// Now: the user proves identity with a detail already on their record, picks
+  /// their OWN password, and it is written to Supabase before we claim success.
   void _showForgotPassword() {
-    final ctrl = TextEditingController();
-    final sl = SL.of(context);
+    final userCtrl = TextEditingController(text: _userCtrl.text.trim());
+    final proofCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: sl.card,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text('Reset Password',
-            style: TextStyle(color: sl.text1, fontSize: 16, fontWeight: FontWeight.w700)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text('Enter your username to reset password.',
-              style: TextStyle(color: sl.text3, fontSize: 12)),
-          const SizedBox(height: 14),
-          TextField(
-            controller: ctrl,
-            style: TextStyle(color: sl.text1, fontSize: 14),
-            decoration: InputDecoration(
-              hintText: 'Username',
-              hintStyle: TextStyle(color: sl.text4),
-              filled: true,
-              fillColor: sl.glassColor,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: sl.glassBorder)),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: sl.glassBorder)),
+      barrierDismissible: false,
+      builder: (ctx) {
+        final sl = SL.of(ctx);
+        var busy = false;
+        var err = '';
+        var reveal = false;
+
+        InputDecoration deco(String hint, {Widget? suffix}) => InputDecoration(
+          hintText: hint,
+          hintStyle: TextStyle(color: sl.text4, fontSize: 12),
+          isDense: true,
+          suffixIcon: suffix,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          filled: true,
+          // Opaque, not sl.glassColor: this sits inside an AlertDialog, where a
+          // translucent fill leaves the typed text competing with whatever is
+          // behind the dialog.
+          fillColor:
+              sl.isDark ? const Color(0xFF252840) : const Color(0xFFF4F5FA),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: sl.border)),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: sl.border)),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: AppColors.accent, width: 1.5)),
+        );
+
+        return StatefulBuilder(builder: (ctx, setSt) {
+          Future<void> submit() async {
+            final username = userCtrl.text.trim();
+            final proof = proofCtrl.text.trim();
+            final pass = passCtrl.text;
+
+            if (username.isEmpty) {
+              setSt(() => err = 'Enter your username.'); return;
+            }
+            if (proof.isEmpty) {
+              setSt(() => err =
+                  'Enter your employee number, mobile, or email.'); return;
+            }
+            final passErr = Validators.validatePassword(pass);
+            if (passErr != null) { setSt(() => err = passErr); return; }
+            if (pass != confirmCtrl.text) {
+              setSt(() => err = 'Passwords do not match.'); return;
+            }
+
+            setSt(() { busy = true; err = ''; });
+            final res = await AuthService.resetPasswordWithProof(
+              username: username, proof: proof, newPassword: pass);
+            if (!ctx.mounted) return;
+
+            if (!res.ok) {
+              setSt(() { busy = false; err = res.message; });
+              return;
+            }
+            Navigator.pop(ctx);
+            if (!mounted) return;
+            // Pre-fill the username so they can log straight in.
+            setState(() {
+              _userCtrl.text = username;
+              _passCtrl.clear();
+              _err = '';
+            });
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text(
+                'Password updated. You can now log in on any device.',
+                style: TextStyle(fontSize: 12)),
+              backgroundColor: AppColors.green,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ));
+          }
+
+          return AlertDialog(
+            backgroundColor: sl.card,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Text('Reset your password',
+                style: TextStyle(
+                    color: sl.text1, fontSize: 16,
+                    fontWeight: FontWeight.w700)),
+            content: SizedBox(
+              width: 340,
+              child: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text(
+                    'Confirm who you are, then choose a new password. '
+                    'It will apply on every device.',
+                    style:
+                        TextStyle(color: sl.text3, fontSize: 12, height: 1.4)),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: userCtrl,
+                    enabled: !busy,
+                    style: TextStyle(color: sl.text1, fontSize: 13),
+                    decoration: deco('Username')),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: proofCtrl,
+                    enabled: !busy,
+                    style: TextStyle(color: sl.text1, fontSize: 13),
+                    decoration: deco('Employee No., mobile, or email')),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: passCtrl,
+                    enabled: !busy,
+                    obscureText: !reveal,
+                    style: TextStyle(color: sl.text1, fontSize: 13),
+                    decoration: deco('New password',
+                      suffix: IconButton(
+                        tooltip: reveal ? 'Hide password' : 'Show password',
+                        icon: Icon(
+                          reveal
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                          color: sl.text3, size: 18),
+                        onPressed: () => setSt(() => reveal = !reveal)))),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: confirmCtrl,
+                    enabled: !busy,
+                    obscureText: !reveal,
+                    onSubmitted: busy ? null : (_) => submit(),
+                    style: TextStyle(color: sl.text1, fontSize: 13),
+                    decoration: deco('Confirm new password')),
+                  if (err.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppColors.crit.withOpacity(0.10),
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                            Border.all(color: AppColors.crit.withOpacity(0.4))),
+                      child: Row(children: [
+                        const Icon(Icons.error_outline,
+                            color: AppColors.crit, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(err,
+                            style: const TextStyle(
+                                color: AppColors.crit, fontSize: 12,
+                                height: 1.35))),
+                      ])),
+                  ],
+                  const SizedBox(height: 12),
+                  Text(
+                    'No employee number on file? Ask your safety admin to '
+                    'reset it from the Admin panel.',
+                    style:
+                        TextStyle(color: sl.text4, fontSize: 11, height: 1.35)),
+                ]),
+              ),
             ),
-          ),
-        ]),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text('Cancel', style: TextStyle(color: sl.text3)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.accent,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-            onPressed: () async {
-              final username = ctrl.text.trim();
-              if (username.isEmpty) return;
-              Navigator.pop(ctx);
-              final success = await LocalDB.resetPassword(username);
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text(success
-                    ? 'Password reset to sail@123. Please change after login.'
-                    : 'Username not found. Contact your admin.',
-                    style: const TextStyle(fontSize: 12)),
-                backgroundColor: success ? AppColors.green : AppColors.crit,
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ));
-            },
-            child: const Text('Reset', style: TextStyle(color: Colors.white, fontSize: 13)),
-          ),
-        ],
-      ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.pop(ctx),
+                child: Text('Cancel', style: TextStyle(color: sl.text3))),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.accent,
+                  disabledBackgroundColor: sl.card2,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8))),
+                onPressed: busy ? null : submit,
+                child: busy
+                    ? const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                    : const Text('Update password',
+                        style: TextStyle(color: Colors.white, fontSize: 13))),
+            ],
+          );
+        });
+      },
     );
   }
 
@@ -714,12 +792,28 @@ class _LoginScreenState extends State<LoginScreen> {
     const SizedBox(height: 12),
     _field('Username', _regUserCtrl, sl, hint: 'Choose a username'),
     const SizedBox(height: 12),
-    _field('Password', _regPassCtrl, sl, obscure: true),
+    _field('Password', _regPassCtrl, sl,
+      obscure: !_showRegPass,
+      hint: 'At least 6 characters',
+      onToggleObscure: () => setState(() => _showRegPass = !_showRegPass),
+      obscured: !_showRegPass),
+    const SizedBox(height: 12),
+    // Confirm field: registration is the one moment a typo is unrecoverable
+    // without a reset, because the user never sees what they typed.
+    _field('Confirm Password', _regConfirmCtrl, sl,
+      obscure: !_showRegPass, hint: 'Re-enter your password'),
     const SizedBox(height: 12),
     _field('Designation', _regDesigCtrl, sl,
       hint: 'e.g. AGM Safety, Safety Officer'),
     const SizedBox(height: 12),
-    _field('Employee No. (P.No.)', _regPnoCtrl, sl, hint: 'Optional'),
+    // P.No. / mobile are no longer cosmetic: they are what the self-service
+    // password reset checks against, so the copy says so.
+    _field('Employee No. (P.No.)', _regPnoCtrl, sl,
+      hint: 'Used to verify you if you forget your password'),
+    const SizedBox(height: 12),
+    _field('Mobile', _regMobileCtrl, sl,
+      hint: 'Optional — also usable for password recovery',
+      keyboardType: TextInputType.phone),
     const SizedBox(height: 12),
 
     Column(
@@ -791,7 +885,9 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _field(String label, TextEditingController ctrl, SL sl,
       {bool obscure = false, String? hint,
-       VoidCallback? onSubmitted, TextInputAction? textInputAction}) {
+       VoidCallback? onSubmitted, TextInputAction? textInputAction,
+       TextInputType? keyboardType,
+       VoidCallback? onToggleObscure, bool obscured = true}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -804,11 +900,21 @@ class _LoginScreenState extends State<LoginScreen> {
           controller: ctrl,
           obscureText: obscure,
           textInputAction: textInputAction,
+          keyboardType: keyboardType,
           onSubmitted: onSubmitted == null ? null : (_) => onSubmitted(),
           style: TextStyle(color: sl.text1, fontSize: 13),
           decoration: InputDecoration(
             hintText: hint,
             hintStyle: TextStyle(color: sl.text4, fontSize: 11),
+            suffixIcon: onToggleObscure == null ? null : IconButton(
+              tooltip: obscured ? 'Show password' : 'Hide password',
+              icon: Icon(
+                obscured
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+                color: sl.text3, size: 18),
+              onPressed: onToggleObscure,
+            ),
             filled: true,
             fillColor: sl.isDark
                 ? Colors.white.withOpacity(0.06)

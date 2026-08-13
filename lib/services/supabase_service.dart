@@ -307,15 +307,35 @@ class SupabaseService {
     return u;
   }
 
+  /// Last error from an app_users operation. Empty when the last call
+  /// succeeded. Auth failures used to be indistinguishable from "user not
+  /// found" because every method swallowed its exception — which is how a
+  /// missing table or an RLS denial ended up being reported to the user as
+  /// "Invalid credentials".
+  static String usersLastError = '';
+
+  /// True when the last failure means the table/columns aren't there yet
+  /// (i.e. the migration SQL was never run), as opposed to a network blip.
+  static bool get usersSchemaMissing {
+    final e = usersLastError.toLowerCase();
+    return e.contains('42p01') ||
+        e.contains('pgrst205') ||
+        e.contains('42703') || // undefined_column
+        e.contains('does not exist') ||
+        e.contains('could not find the');
+  }
+
   /// Fetch all users. Returns [] on error.
   static Future<List<Map<String, dynamic>>> fetchUsers() async {
     if (!isReady) return [];
     try {
       final rows = await _db.from('app_users').select();
+      usersLastError = '';
       return (rows as List)
           .map((r) => _userFromRow(Map<String, dynamic>.from(r as Map)))
           .toList();
-    } catch (_) {
+    } catch (e) {
+      usersLastError = _describeError(e);
       return [];
     }
   }
@@ -326,10 +346,69 @@ class SupabaseService {
     try {
       final row = _userToRow(user);
       if ((row['username']?.toString() ?? '').isEmpty) return false;
-      await _db.from('app_users').upsert(row, onConflict: 'username');
+      await _db
+          .from('app_users')
+          .upsert(row, onConflict: 'username')
+          .timeout(const Duration(seconds: 12));
+      usersLastError = '';
       return true;
-    } catch (_) {
+    } catch (e) {
+      usersLastError = _describeError(e);
       return false;
+    }
+  }
+
+  /// Write ONLY the credential columns for an existing user.
+  ///
+  /// Deliberately not upsertUser(): a password change must not carry the
+  /// caller's stale copy of name/plant/designation/status back to the server
+  /// and clobber edits made elsewhere. It also nulls `password` so a legacy
+  /// plaintext column (if one exists) can't keep authorising the OLD password
+  /// after a reset — the bug where "reset the password" left both working.
+  ///
+  /// Returns true only if a row was actually updated, so the caller can tell
+  /// "changed" from "no such user".
+  static Future<bool> updateUserCredentials(
+      String username, String passwordHash, String salt) async {
+    if (!isReady || username.isEmpty) return false;
+    try {
+      final echoed = await _db
+          .from('app_users')
+          .update({
+            'password_hash': passwordHash,
+            'salt': salt,
+          })
+          .eq('username', username)
+          .select('username')
+          .timeout(const Duration(seconds: 12));
+      usersLastError = '';
+      return (echoed as List).isNotEmpty;
+    } catch (e) {
+      usersLastError = _describeError(e);
+      return false;
+    }
+  }
+
+  /// Whether a username is already taken on the server.
+  ///
+  /// Returns null when the answer is UNKNOWN (cloud off, offline, table
+  /// missing). Callers must treat null as "can't confirm" rather than "free" —
+  /// otherwise two people register the same username on two devices and the
+  /// second upsert silently overwrites the first one's credentials.
+  static Future<bool?> usernameExists(String username) async {
+    if (!isReady || username.isEmpty) return null;
+    try {
+      final rows = await _db
+          .from('app_users')
+          .select('username')
+          .eq('username', username)
+          .limit(1)
+          .timeout(const Duration(seconds: 10));
+      usersLastError = '';
+      return (rows as List).isNotEmpty;
+    } catch (e) {
+      usersLastError = _describeError(e);
+      return null;
     }
   }
 
@@ -353,11 +432,17 @@ class SupabaseService {
           .from('app_users')
           .select()
           .eq('username', username)
-          .limit(1);
+          .limit(1)
+          .timeout(const Duration(seconds: 12));
+      usersLastError = '';
       final list = rows as List;
       if (list.isEmpty) return null;
       return _userFromRow(Map<String, dynamic>.from(list.first as Map));
-    } catch (_) {
+    } catch (e) {
+      // Record it: a null return here previously meant either "no such user"
+      // or "the request blew up", and the login screen showed the same
+      // "Invalid credentials" for both.
+      usersLastError = _describeError(e);
       return null;
     }
   }

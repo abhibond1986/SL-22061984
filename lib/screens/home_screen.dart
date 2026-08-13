@@ -157,14 +157,28 @@ class _HomeScreenState extends State<HomeScreen>
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
           decoration: BoxDecoration(
-            color: sl.isDark
-                ? const Color(0xFF0D1117).withOpacity(0.98) // darker, more neutral dark background
-                : sl.glassColor,
+            // Subtle indigo wash instead of a flat neutral slab, so the nav bar
+            // reads as part of the brand surface rather than a grey strip. Kept
+            // very low-chroma on purpose — it must never compete with the
+            // accent-coloured selected tab.
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: sl.isDark
+                  ? [
+                      const Color(0xFF191F38).withOpacity(0.98), // indigo-tinted
+                      const Color(0xFF0D1117).withOpacity(0.98), // near-black base
+                    ]
+                  : [
+                      const Color(0xFFE9ECFB).withOpacity(0.94), // pale indigo
+                      const Color(0xFFF8F9FE).withOpacity(0.94),
+                    ],
+            ),
             border: Border(
+              // Accent-tinted hairline: separates the bar from content and
+              // echoes the selected-tab colour.
               top: BorderSide(
-                color: sl.isDark
-                    ? Colors.white.withOpacity(0.1)
-                    : sl.glassBorder,
+                color: AppColors.accent.withOpacity(sl.isDark ? 0.28 : 0.20),
                 width: 1),
             ),
           ),

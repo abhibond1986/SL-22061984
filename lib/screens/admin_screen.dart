@@ -31,6 +31,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
+// All credential reads/writes go through AuthService so the admin panel can't
+// invent its own password format (it used to store plaintext).
+import '../services/auth_service.dart';
 import '../services/admin_audit.dart';
 import '../services/admin_master_data.dart';
 import '../services/admin_alerts.dart';
@@ -278,8 +281,16 @@ class _AdminScreenState extends State<AdminScreen>
 
     if (!ok) {
       try {
-        final localUser = await LocalDB.signIn(u, p);
-        if (localUser != null) {
+        // startSession: false — this gate re-verifies an identity to unlock the
+        // admin panel. It must NOT overwrite the app's stored "current user",
+        // which is what LocalDB.signIn (used here before) did as a side effect.
+        //
+        // Going through AuthService also means an admin whose account lives only
+        // in Supabase can get in on a fresh device, which the local-only lookup
+        // could never do.
+        final res = await AuthService.signIn(u, p, startSession: false);
+        final localUser = res.user;
+        if (res.ok && localUser != null) {
           final isAdm = localUser['isAdmin'] == true ||
               localUser['isAdmin']?.toString().toLowerCase() == 'true';
           if (isAdm) {
@@ -3411,17 +3422,35 @@ class _AdminScreenState extends State<AdminScreen>
             child: const Text('Reset', style: TextStyle(color: Colors.white))),
         ]));
     if (ok != true) return;
-    u['password'] = ctrl.text.trim();
-    try {
-      await LocalDB.upsertUser(u);
-      try { await SyncService.pushUser(u); } catch (_) {}
-    } catch (_) {}
+
+    // This block used to be:
+    //     u['password'] = ctrl.text.trim();
+    //     await LocalDB.upsertUser(u);
+    //     await SyncService.pushUser(u);
+    // which was broken three ways at once:
+    //   1. It stored the password in PLAINTEXT.
+    //   2. It left the existing passwordHash/salt untouched, so the OLD
+    //      password kept working and the new one never did.
+    //   3. `password` isn't in the Supabase column map, so the change was
+    //      dropped on the way to the server — the reset never left the device.
+    // AuthService.adminSetPassword hashes it, clears the stale credential, and
+    // writes to both stores.
+    final newPw = ctrl.text.trim();
+    final uname = u['username']?.toString() ?? '';
+    final res = await AuthService.adminSetPassword(uname, newPw);
+    if (!mounted) return;
+    if (!res.ok) {
+      _toast(res.message, AppColors.red);
+      return;
+    }
     await AdminAudit.log(
       action: AdminAudit.actUserPwReset,
       actor: _currentActor,
-      target: u['username']?.toString(),
+      target: uname,
       targetName: u['name']?.toString());
-    _toast('Password reset to: ${ctrl.text}', const Color(0xFF8E24AA));
+    await _loadAll();
+    if (!mounted) return;
+    _toast('Password for $uname set to: $newPw', const Color(0xFF8E24AA));
   }
 
   Future<void> _userChangePlant(Map<String, dynamic> u) async {
@@ -3625,10 +3654,14 @@ class _AdminScreenState extends State<AdminScreen>
     final effectiveDept = showOtherDept
         ? deptOtherCtrl.text.trim()
         : (selectedDept ?? '');
+    // Profile fields only. The password is passed separately to AuthService,
+    // which hashes it. Previously it was put in `password` as plaintext, and
+    // since `password` is not in the Supabase column map it was dropped on the
+    // way to the server: the admin created an account that existed on their own
+    // device only and that the new user could not log into anywhere.
     final userData = <String, dynamic>{
       'name':        nameCtrl.text.trim(),
       'username':    unameCtrl.text.trim().toLowerCase(),
-      'password':    passCtrl.text.trim(),
       'designation': desigCtrl.text.trim(),
       'pno':         pnoCtrl.text.trim(),
       'plant':       selectedPlant ?? '',
@@ -3637,10 +3670,15 @@ class _AdminScreenState extends State<AdminScreen>
       'status':      'active',
     };
 
-    try {
-      await LocalDB.upsertUser(userData);
-      try { await SyncService.pushUser(userData); } catch (_) {}
-    } catch (_) {}
+    // signIn: false — creating an account for someone else must not replace the
+    // admin's own session with the new user's.
+    final res = await AuthService.register(
+        userData, passCtrl.text.trim(), signIn: false);
+    if (!mounted) return;
+    if (!res.ok) {
+      _toast(res.message, AppColors.red);
+      return;
+    }
     await AdminAudit.log(
       action: AdminAudit.actUserEdit,
       actor: _currentActor,
@@ -3648,6 +3686,7 @@ class _AdminScreenState extends State<AdminScreen>
       targetName: userData['name'],
       meta: {'action': 'created'});
     await _loadAll();
+    if (!mounted) return;
     _toast('User ${userData['username']} created', const Color(0xFF3949AB));
   }
 

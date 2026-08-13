@@ -333,20 +333,35 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
                       value: _plantFilter,
                       isExpanded: true,
                       isDense: true,
-                      dropdownColor: sl.glassColor,
-                      style: TextStyle(fontSize: 12.5, color: sl.text1),
+                      // MUST be opaque. This was sl.glassColor — a
+                      // white-at-8%/45% overlay meant for panels sitting ON the
+                      // background. A dropdown menu floats in an overlay above
+                      // the page, so a translucent fill made the plant names
+                      // render on top of the charts and stat cards behind them:
+                      // the list was there, but effectively unreadable and
+                      // impossible to aim at. Every other dropdown in the app
+                      // already uses a solid surface; this one was the outlier.
+                      dropdownColor:
+                          sl.isDark ? const Color(0xFF252840) : Colors.white,
+                      elevation: 8,
+                      borderRadius: BorderRadius.circular(12),
+                      // Long plant names ("ISP — IISCO Steel Plant Burnpur")
+                      // otherwise run off the edge of the menu.
+                      menuMaxHeight: 320,
+                      style: TextStyle(fontSize: 13, color: sl.text1),
                       hint: Text('All plants',
-                          style: TextStyle(fontSize: 12.5, color: sl.text2)),
+                          style: TextStyle(fontSize: 13, color: sl.text2)),
                       items: [
                         DropdownMenuItem<String?>(
                           value: null,
                           child: Text('All plants',
-                              style: TextStyle(fontSize: 12.5, color: sl.text1)),
+                              style: TextStyle(fontSize: 13, color: sl.text1,
+                                  fontWeight: FontWeight.w600)),
                         ),
                         ..._plantOptions.map((p) => DropdownMenuItem<String?>(
                               value: p,
                               child: Text(p,
-                                  style: TextStyle(fontSize: 12.5, color: sl.text1),
+                                  style: TextStyle(fontSize: 13, color: sl.text1),
                                   overflow: TextOverflow.ellipsis),
                             )),
                       ],

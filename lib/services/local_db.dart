@@ -187,14 +187,17 @@ class LocalDB {
         return safeUser;
       }
 
-      // Legacy fallback: old simpleHash (from backend)
-      if (storedHash.isNotEmpty && salt.isEmpty && storedHash == password) {
-        await _migratePassword(u, password);
-        final safeUser = Map<String, dynamic>.from(u)
-          ..remove('password')..remove('passwordHash')..remove('salt');
-        await _prefs.setString(_kCurrentUser, jsonEncode(safeUser));
-        return safeUser;
-      }
+      // REMOVED — authentication bypass.
+      //
+      // This used to read:
+      //     if (storedHash.isNotEmpty && salt.isEmpty && storedHash == password)
+      //
+      // i.e. it accepted the STORED HASH ITSELF as the password. Because
+      // app_users is readable with the anon key, anyone who could read a row
+      // could log in as that user by typing the hash. The legitimate legacy
+      // case (an unsalted Apps Script hash) is now handled correctly in
+      // AuthService._matchFormat, which compares against
+      // legacySimpleHash(password) rather than against the raw input.
     }
 
     // Check cached users from backend
@@ -272,12 +275,27 @@ class LocalDB {
     return safeUser;
   }
 
-  static Future<bool> resetPassword(String username, {String newPassword = 'sail@123'}) async {
-    final users = await getUsers();
+  /// Set a password locally. The new password is REQUIRED.
+  ///
+  /// It used to default to `newPassword = 'sail@123'`, and the "Forgot
+  /// password?" dialog called it with no argument — so the reset flow set every
+  /// account to a fixed string that is printed in the source code, on one
+  /// device only. Callers must now say what the password is; the user-facing
+  /// flows go through AuthService, which also writes it to Supabase.
+  static Future<bool> resetPassword(String username, {required String newPassword}) async {
+    if (newPassword.isEmpty) return false;
+    // Read RAW so a tombstone-filtered write can't drop deleted records; the
+    // old version wrote back the FILTERED list, permanently deleting every
+    // tombstoned user as a side effect of a password reset.
+    final raw = _prefs.getString(_kUsers);
+    final users = raw == null
+        ? <Map<String, dynamic>>[]
+        : (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e)).toList();
+    final target = username.trim().toLowerCase();
     bool found = false;
     for (int i = 0; i < users.length; i++) {
-      if (users[i]['username']?.toString() == username ||
-          users[i]['email']?.toString() == username) {
+      if ((users[i]['username']?.toString() ?? '').trim().toLowerCase() == target ||
+          (users[i]['email']?.toString() ?? '').trim().toLowerCase() == target) {
         final salt = CryptoUtils.generateSalt();
         users[i]['salt'] = salt;
         users[i]['passwordHash'] = CryptoUtils.hashPassword(newPassword, salt);
@@ -290,6 +308,39 @@ class LocalDB {
       await _prefs.setString(_kUsers, jsonEncode(users));
     }
     return found;
+  }
+
+  /// Strip legacy plaintext credentials for a user from BOTH local buckets.
+  ///
+  /// Needed because upsertUser() MERGES — writing a fresh salt/passwordHash
+  /// leaves any pre-existing `password` key untouched, and AuthService still
+  /// honours plaintext for old admin-created accounts. Without this, changing
+  /// a password left the old one working forever.
+  static Future<void> clearLegacyPassword(String username) async {
+    final target = username.trim().toLowerCase();
+    if (target.isEmpty) return;
+
+    Future<void> scrub(String key) async {
+      final raw = _prefs.getString(key);
+      if (raw == null || raw.isEmpty) return;
+      try {
+        final list = (jsonDecode(raw) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        var changed = false;
+        for (final u in list) {
+          final uname = (u['username']?.toString() ?? '').trim().toLowerCase();
+          if (uname != target) continue;
+          if (u.remove('password') != null) changed = true;
+        }
+        if (changed) await _prefs.setString(key, jsonEncode(list));
+      } catch (_) {
+        // Corrupt bucket — leave it alone rather than destroying it.
+      }
+    }
+
+    await scrub(_kUsers);
+    await scrub(_kCachedUsers);
   }
 
   static Future<void> signOut() async {
