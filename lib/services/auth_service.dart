@@ -44,10 +44,19 @@
 // `app_users` currently has a policy equivalent to `for all to anon using
 // (true)`, so the anon key can read every row including password_hash and
 // salt. Salted SHA-256 is fast to brute-force offline. Until that policy is
-// tightened (see supabase_app_users_setup.sql), treat these hashes as
-// recoverable. The SQL file added alongside this service explains the fix.
+// tightened (see supabase_app_users_setup.sql — STEP 5 has the hardening, and
+// it needs a client change, so read it before running it), treat these hashes
+// as recoverable.
 //
-// ignore_for_file: avoid_print
+// ─────────────────────────────────────────────────────────────────────────────
+// ALSO KNOWN, AND BOUNDED
+// ─────────────────────────────────────────────────────────────────────────────
+// Verification is offline-first, so a device holding a cached credential can
+// still accept a password that was changed elsewhere. `_revalidateAgainstServer`
+// closes that after one login rather than blocking every login on a network
+// round trip. A device that never comes online again keeps accepting the old
+// password — unavoidable without giving up offline login, which the plant floor
+// needs more than it needs that guarantee.
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
@@ -214,7 +223,14 @@ class AuthService {
   /// signed in.
   static Future<AuthResult> signIn(String username, String password,
       {bool startSession = true}) async {
-    final uname = username.trim();
+    // Lower-cased, not just trimmed. `register` stores the username in lower
+    // case and `SupabaseService.getUserByUsername` filters with `.eq()`, which
+    // is case-SENSITIVE in Postgres. Without this, someone who registered as
+    // "rkumar" but types "RKumar" matched locally (_findLocal is
+    // case-insensitive) yet got "no account found" on any device that didn't
+    // have them cached — reproducing the exact cross-device failure this
+    // service was written to eliminate.
+    final uname = username.trim().toLowerCase();
     if (uname.isEmpty) {
       return AuthResult.fail(AuthFailure.invalidInput, 'Enter your username.');
     }
@@ -234,8 +250,15 @@ class AuthService {
         if (format != 'salted') {
           // Upgrade in place, and push the upgrade to the server so other
           // devices stop relying on the weak format too.
+          //
+          // requireRemote:false on purpose. This is an opportunistic upgrade
+          // during a login that has ALREADY succeeded — with the default
+          // (true), an offline login would abort _persistCredential before the
+          // local write, so the weak credential would survive on this device
+          // as well and the upgrade would never happen at all.
           await _persistCredential(local['username']?.toString() ?? uname,
-              password, pushRemote: true);
+              password,
+              pushRemote: true, requireRemote: false, seed: local);
           debugPrint('[Auth] upgraded $uname from $format to salted');
         }
         final safe = sanitize(local);
@@ -243,6 +266,13 @@ class AuthService {
           await LocalDB.setCurrentUser(safe);
           await _issueLocalToken(safe);
         }
+        // A password changed on another device does not invalidate this
+        // device's cached hash, so the OLD password would keep working here
+        // forever. Re-check against the server without blocking the login —
+        // a stale cache is scrubbed so the next attempt must go through
+        // Supabase. This narrows the window to a single login instead of
+        // making the user wait on a network round trip every time.
+        _revalidateAgainstServer(uname, password);
         return AuthResult.success(safe);
       }
       // Wrong password for a known local account. Still fall through: the
@@ -332,7 +362,14 @@ class AuthService {
           ..['passwordHash'] = cred['passwordHash'];
         await LocalDB.upsertUser(cached);
         final safe = sanitize(cached);
-        if (startSession) await LocalDB.setCurrentUser(safe);
+        if (startSession) {
+          await LocalDB.setCurrentUser(safe);
+          // The other two success paths issue one; omitting it here left this
+          // path relying on SyncService having stored a server token, so a
+          // server that answered without one produced a signed-in user with
+          // no token at all.
+          await _issueLocalToken(safe);
+        }
         return AuthResult.success(safe);
       }
     } catch (e) {
@@ -456,7 +493,7 @@ class AuthService {
     required String currentPassword,
     required String newPassword,
   }) async {
-    final uname = username.trim();
+    final uname = username.trim().toLowerCase();
     if (newPassword.length < minPasswordLength) {
       return AuthResult.fail(AuthFailure.invalidInput,
           'New password must be at least $minPasswordLength characters.');
@@ -482,7 +519,8 @@ class AuthService {
           AuthFailure.badCredentials, 'Your current password is incorrect.');
     }
 
-    return _persistCredential(uname, newPassword, pushRemote: true);
+    return _persistCredential(uname, newPassword,
+        pushRemote: true, seed: record);
   }
 
   /// Self-service reset: the user proves who they are, then CHOOSES their own
@@ -502,7 +540,7 @@ class AuthService {
     required String proof,
     required String newPassword,
   }) async {
-    final uname = username.trim();
+    final uname = username.trim().toLowerCase();
     final answer = proof.trim().toLowerCase();
 
     if (uname.isEmpty) {
@@ -558,7 +596,8 @@ class AuthService {
           'That doesn\'t match our records for "$uname".');
     }
 
-    return _persistCredential(uname, newPassword, pushRemote: true);
+    return _persistCredential(uname, newPassword,
+        pushRemote: true, seed: record);
   }
 
   /// Admin-initiated reset. No current password required, but the new one is
@@ -566,7 +605,7 @@ class AuthService {
   /// cleared so the previous password stops working.
   static Future<AuthResult> adminSetPassword(
       String username, String newPassword) async {
-    final uname = username.trim();
+    final uname = username.trim().toLowerCase();
     if (uname.isEmpty) {
       return AuthResult.fail(AuthFailure.invalidInput, 'Missing username.');
     }
@@ -574,8 +613,15 @@ class AuthService {
       return AuthResult.fail(AuthFailure.invalidInput,
           'Password must be at least $minPasswordLength characters.');
     }
+    // requireRemote MUST be true here. An admin resets a password for someone
+    // standing in front of them and then reads it out — if the write only
+    // landed on the admin's own device, that person cannot log in anywhere and
+    // has been told a password that works for nobody. This is bug (2) in the
+    // header comment; letting it degrade to a local write would reintroduce it.
+    // The local write is near-useless for an admin reset anyway: the account
+    // holder is on a different device.
     return _persistCredential(uname, newPassword,
-        pushRemote: true, requireRemote: false);
+        pushRemote: true, requireRemote: true);
   }
 
   /// The ONE place a credential is written. Local always; server too when
@@ -586,26 +632,36 @@ class AuthService {
   /// be worse than failing: the user would believe their password changed, it
   /// would work on this device, and it would keep rejecting them everywhere
   /// else with no explanation.
+  ///
+  /// [seed] is the full profile record the caller already looked up. Pass it
+  /// whenever you have it: without it, resetting a password for an account that
+  /// exists on the server but not yet on THIS device wrote a local row
+  /// containing nothing but {username, salt, passwordHash}. That stub then won
+  /// the lookup race in `signIn` step 1, so the session user had no name,
+  /// plant, designation, pno or isAdmin — the profile header read "User", plant
+  /// filters came up empty, and an admin quietly lost their admin rights.
   static Future<AuthResult> _persistCredential(
     String username,
     String newPassword, {
     bool pushRemote = true,
     bool requireRemote = true,
+    Map<String, dynamic>? seed,
   }) async {
+    final uname = username.trim().toLowerCase();
     final cred = _newCredential(newPassword);
 
     if (pushRemote && SupabaseConfig.enabled) {
       var ok = await SupabaseService.updateUserCredentials(
-          username, cred['passwordHash']!, cred['salt']!);
+          uname, cred['passwordHash']!, cred['salt']!);
 
       if (!ok && SupabaseService.usersLastError.isEmpty) {
         // Update touched zero rows: the account exists locally but was never
         // pushed. Create it server-side so the change is durable.
-        final local = await _findLocal(username);
-        if (local != null) {
-          final row = Map<String, dynamic>.from(local)
+        final base = seed ?? await _findLocal(uname);
+        if (base != null) {
+          final row = Map<String, dynamic>.from(base)
             ..remove('password')
-            ..['username'] = username
+            ..['username'] = uname
             ..['salt'] = cred['salt']
             ..['passwordHash'] = cred['passwordHash'];
           ok = await SupabaseService.upsertUser(row);
@@ -614,7 +670,7 @@ class AuthService {
 
       if (!ok && requireRemote) {
         final err = SupabaseService.usersLastError;
-        debugPrint('[Auth] credential write failed for $username — $err');
+        debugPrint('[Auth] credential write failed for $uname — $err');
         return AuthResult.fail(
             AuthFailure.backendError,
             SupabaseService.usersSchemaMissing
@@ -624,23 +680,28 @@ class AuthService {
                     'was changed. Check your connection and try again.');
       }
       if (!ok) {
-        debugPrint('[Auth] remote credential write failed for $username; '
-            'queueing local-only change');
+        debugPrint('[Auth] remote credential write failed for $uname; '
+            'applying local-only change');
       }
     }
 
     // Local write. Explicitly clears the legacy plaintext key — LocalDB's
     // upsert MERGES, so a stale `password` would otherwise survive and keep
     // authenticating the old value via the legacy-plain path.
-    final local = await _findLocal(username);
+    //
+    // `seed` first, then the local row: the local copy wins on any field both
+    // hold, but the seed fills in a profile this device has never seen, so we
+    // never persist a credential-only stub (see the doc comment above).
+    final local = await _findLocal(uname);
     final record = <String, dynamic>{
+      ...?seed,
       ...?local,
-      'username': local?['username']?.toString() ?? username,
+      'username': uname,
       'salt': cred['salt'],
       'passwordHash': cred['passwordHash'],
     }..remove('password');
     await LocalDB.upsertUser(record);
-    await LocalDB.clearLegacyPassword(username);
+    await LocalDB.clearLegacyPassword(uname);
 
     return AuthResult.success(sanitize(record), 'Password updated.');
   }
@@ -670,6 +731,55 @@ class AuthService {
       if (matches(u)) return u;
     }
     return null;
+  }
+
+  /// Fire-and-forget staleness check after a successful LOCAL login.
+  ///
+  /// The problem it solves: local verification is offline-first, so device B
+  /// keeps authenticating against its own cached salt+hash. If the password was
+  /// changed or reset on device A, device B has no way to know — the OLD
+  /// password went on working there indefinitely, which quietly defeats the
+  /// point of a password reset.
+  ///
+  /// Deliberately NOT awaited by [signIn]. Blocking every login on a Supabase
+  /// round trip (12 s timeout) would punish the offline case this whole service
+  /// exists to support. Instead we let the user in, then check; if the server
+  /// disagrees, the local credential is scrubbed so the NEXT login is forced
+  /// through Supabase and the old password stops working. That leaves a
+  /// one-login window, which is a real limitation but a bounded one — and a
+  /// large improvement on "forever".
+  static void _revalidateAgainstServer(String uname, String password) {
+    if (!SupabaseConfig.enabled) return;
+    Future(() async {
+      try {
+        final remote = await SupabaseService.getUserByUsername(uname);
+        // No row, or the lookup failed → nothing trustworthy to compare. Never
+        // invalidate a working local credential on the strength of a network
+        // error; that would lock people out of their own offline accounts.
+        if (remote == null) return;
+        final salt = remote['salt']?.toString() ?? '';
+        final hash = remote['passwordHash']?.toString() ?? '';
+        if (salt.isEmpty || hash.isEmpty) return; // legacy row, can't judge
+        if (CryptoUtils.verifyPassword(password, salt, hash)) return; // current
+
+        // The server holds a DIFFERENT password. Adopt the server's credential
+        // so this device stops accepting the stale one.
+        final local = await _findLocal(uname);
+        final refreshed = <String, dynamic>{
+          ...?local,
+          ...remote,
+          'username': uname,
+          'salt': salt,
+          'passwordHash': hash,
+        }..remove('password');
+        await LocalDB.upsertUser(refreshed);
+        await LocalDB.clearLegacyPassword(uname);
+        debugPrint('[Auth] local credential for $uname was stale; '
+            'refreshed from server — the old password no longer works here');
+      } catch (e) {
+        debugPrint('[Auth] revalidation skipped for $uname: $e');
+      }
+    });
   }
 
   static bool _isBlocked(Map<String, dynamic> u) {

@@ -314,6 +314,15 @@ class SupabaseService {
   /// "Invalid credentials".
   static String usersLastError = '';
 
+  /// Set when the Supabase client isn't initialised at all. It must be a
+  /// distinct, non-empty value: the app_users helpers used to return
+  /// false/null on `!isReady` WITHOUT touching usersLastError, so callers
+  /// evaluated `usersSchemaMissing` against a stale error left by some earlier
+  /// unrelated call — and told the user to "run the app_users migration" when
+  /// the real problem was that the cloud was switched off. Worded so it can
+  /// never satisfy usersSchemaMissing.
+  static const String _notReady = 'cloud client not initialised';
+
   /// True when the last failure means the table/columns aren't there yet
   /// (i.e. the migration SQL was never run), as opposed to a network blip.
   static bool get usersSchemaMissing {
@@ -327,7 +336,10 @@ class SupabaseService {
 
   /// Fetch all users. Returns [] on error.
   static Future<List<Map<String, dynamic>>> fetchUsers() async {
-    if (!isReady) return [];
+    if (!isReady) {
+      usersLastError = _notReady;
+      return [];
+    }
     try {
       final rows = await _db.from('app_users').select();
       usersLastError = '';
@@ -342,10 +354,20 @@ class SupabaseService {
 
   /// Insert or update a user (keyed by username). Returns true on success.
   static Future<bool> upsertUser(Map<String, dynamic> user) async {
-    if (!isReady) return false;
+    if (!isReady) {
+      usersLastError = _notReady;
+      return false;
+    }
     try {
       final row = _userToRow(user);
-      if ((row['username']?.toString() ?? '').isEmpty) return false;
+      if ((row['username']?.toString() ?? '').isEmpty) {
+        usersLastError = 'username missing';
+        return false;
+      }
+      // Usernames are matched case-insensitively by the app but `onConflict`
+      // is a plain equality check in Postgres, so "RKumar" and "rkumar" would
+      // become two rows. Normalise here as a backstop, not just at the caller.
+      row['username'] = row['username'].toString().trim().toLowerCase();
       await _db
           .from('app_users')
           .upsert(row, onConflict: 'username')
@@ -362,15 +384,26 @@ class SupabaseService {
   ///
   /// Deliberately not upsertUser(): a password change must not carry the
   /// caller's stale copy of name/plant/designation/status back to the server
-  /// and clobber edits made elsewhere. It also nulls `password` so a legacy
-  /// plaintext column (if one exists) can't keep authorising the OLD password
-  /// after a reset — the bug where "reset the password" left both working.
+  /// and clobber edits made elsewhere.
+  ///
+  /// Only `password_hash` and `salt` are written — always together, never one
+  /// without the other, since a hash whose salt belongs to the previous
+  /// password can never be verified. There is intentionally no plaintext
+  /// `password` column to clear (supabase_app_users_setup.sql drops one if it
+  /// was ever created by hand), so naming it here would just error.
   ///
   /// Returns true only if a row was actually updated, so the caller can tell
   /// "changed" from "no such user".
   static Future<bool> updateUserCredentials(
       String username, String passwordHash, String salt) async {
-    if (!isReady || username.isEmpty) return false;
+    if (!isReady) {
+      usersLastError = _notReady;
+      return false;
+    }
+    if (username.isEmpty) {
+      usersLastError = 'username missing';
+      return false;
+    }
     try {
       final echoed = await _db
           .from('app_users')
@@ -378,7 +411,7 @@ class SupabaseService {
             'password_hash': passwordHash,
             'salt': salt,
           })
-          .eq('username', username)
+          .eq('username', username.trim().toLowerCase())
           .select('username')
           .timeout(const Duration(seconds: 12));
       usersLastError = '';
@@ -396,12 +429,16 @@ class SupabaseService {
   /// otherwise two people register the same username on two devices and the
   /// second upsert silently overwrites the first one's credentials.
   static Future<bool?> usernameExists(String username) async {
-    if (!isReady || username.isEmpty) return null;
+    if (!isReady) {
+      usersLastError = _notReady;
+      return null;
+    }
+    if (username.isEmpty) return null;
     try {
       final rows = await _db
           .from('app_users')
           .select('username')
-          .eq('username', username)
+          .eq('username', username.trim().toLowerCase())
           .limit(1)
           .timeout(const Duration(seconds: 10));
       usersLastError = '';
@@ -413,12 +450,33 @@ class SupabaseService {
   }
 
   /// Delete a user by username. Returns true on success.
+  ///
+  /// Records its failure in [usersLastError] rather than swallowing it. That
+  /// silence was doing real damage: the admin panel deleted the local row and
+  /// reported success while the server row survived (RLS grants no delete
+  /// policy unless the migration added one), so the account reappeared on the
+  /// next fetchUsers() AND the username stayed permanently un-registerable,
+  /// because `usernameExists` kept answering true with no way out from the app.
   static Future<bool> deleteUser(String username) async {
-    if (!isReady || username.isEmpty) return false;
+    if (!isReady) {
+      usersLastError = _notReady;
+      return false;
+    }
+    if (username.isEmpty) return false;
     try {
-      await _db.from('app_users').delete().eq('username', username);
-      return true;
-    } catch (_) {
+      final echoed = await _db
+          .from('app_users')
+          .delete()
+          .eq('username', username.trim().toLowerCase())
+          .select('username')
+          .timeout(const Duration(seconds: 12));
+      usersLastError = '';
+      // An empty echo means RLS silently dropped the delete (or the row was
+      // already gone). Treat "nothing was deleted" as a failure so the caller
+      // can say so instead of claiming success.
+      return (echoed as List).isNotEmpty;
+    } catch (e) {
+      usersLastError = _describeError(e);
       return false;
     }
   }
@@ -426,12 +484,18 @@ class SupabaseService {
   /// Look up one user by username (for cross-device login). Returns the app-shaped
   /// map (including password_hash/salt so the caller can verify), or null.
   static Future<Map<String, dynamic>?> getUserByUsername(String username) async {
-    if (!isReady || username.isEmpty) return null;
+    if (!isReady) {
+      usersLastError = _notReady;
+      return null;
+    }
+    if (username.isEmpty) return null;
     try {
       final rows = await _db
           .from('app_users')
           .select()
-          .eq('username', username)
+          // Lower-cased: rows are stored lower-case and `.eq` is case-sensitive
+          // in Postgres, so "RKumar" would look like a non-existent account.
+          .eq('username', username.trim().toLowerCase())
           .limit(1)
           .timeout(const Duration(seconds: 12));
       usersLastError = '';

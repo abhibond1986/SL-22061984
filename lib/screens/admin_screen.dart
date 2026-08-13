@@ -46,6 +46,7 @@ import '../services/pdf_kb_extractor.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
 import '../services/supabase_service.dart';
+import '../services/supabase_config.dart';
 import '../services/image_storage.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -3523,6 +3524,28 @@ class _AdminScreenState extends State<AdminScreen>
         ]));
     if (ok != true) return;
     final uname = u['username']?.toString() ?? '';
+
+    // The server delete used to be fire-and-forget inside a bare `catch (_)`,
+    // and the toast claimed success either way. When it failed (no RLS delete
+    // policy, or no connection) the local row vanished but the server row
+    // survived, so the account reappeared on the next sync AND the username
+    // stayed permanently unavailable — usernameExists kept answering "taken"
+    // with nothing in the app able to clear it. Delete the SERVER copy first
+    // and stop if it didn't work.
+    bool removedRemote = true;
+    if (SupabaseConfig.enabled) {
+      removedRemote = await SupabaseService.deleteUser(uname);
+      if (!removedRemote) {
+        final err = SupabaseService.usersLastError;
+        if (!mounted) return;
+        _toast(
+            err.isEmpty
+                ? 'Could not delete $uname on the server — nothing was changed.'
+                : 'Server refused the delete: $err',
+            AppColors.red);
+        return;
+      }
+    }
     try {
       await LocalDB.deleteUser(uname);
       try { await SyncService.deleteUser(uname); } catch (_) {}
@@ -3534,6 +3557,7 @@ class _AdminScreenState extends State<AdminScreen>
       targetName: u['name']?.toString());
     setState(() => _userExpandedUname = null);
     await _loadAll();
+    if (!mounted) return;
     _toast('User deleted', AppColors.red);
   }
 
@@ -3541,7 +3565,12 @@ class _AdminScreenState extends State<AdminScreen>
     final sl = SL.of(context);
     final nameCtrl  = TextEditingController();
     final unameCtrl = TextEditingController();
-    final passCtrl  = TextEditingController(text: 'sail@123');
+    // Was pre-filled with 'sail@123'. That value is in the published source of
+    // this app, and every account the admin created in a hurry ended up sharing
+    // it — a single known password for an unknown number of real accounts, on a
+    // table whose hashes are readable with the anon key. The admin now has to
+    // type one, and is told to.
+    final passCtrl  = TextEditingController();
     final desigCtrl = TextEditingController();
     final pnoCtrl   = TextEditingController();
     final deptOtherCtrl = TextEditingController();
@@ -3640,8 +3669,22 @@ class _AdminScreenState extends State<AdminScreen>
             child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
           ElevatedButton(
             onPressed: () {
-              if (nameCtrl.text.trim().isEmpty || unameCtrl.text.trim().isEmpty
-                  || passCtrl.text.trim().isEmpty) return;
+              // Nothing was pre-filled any more, and this button used to just
+              // `return` silently on an empty field — which looked like the
+              // dialog was broken. Enforce the same minimum AuthService does,
+              // so the admin isn't told "too short" only after confirming.
+              if (nameCtrl.text.trim().isEmpty ||
+                  unameCtrl.text.trim().isEmpty) {
+                _toast('Name and username are required.', AppColors.amber);
+                return;
+              }
+              if (passCtrl.text.trim().length < AuthService.minPasswordLength) {
+                _toast(
+                    'Set a password of at least '
+                    '${AuthService.minPasswordLength} characters.',
+                    AppColors.amber);
+                return;
+              }
               Navigator.pop(context, true);
             },
             style: ElevatedButton.styleFrom(

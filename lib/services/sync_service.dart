@@ -1137,30 +1137,22 @@ class SyncService {
   //  ★ v25: Also stores the server-issued session token for
   //  authenticated API calls (addIncident, updateIncident, etc.)
   // ═══════════════════════════════════════════════════════════════
+  //
+  //  This is now the LEGACY (Apps Script) path only. Do not add callers:
+  //  AuthService.signIn is the single entry point for authentication, and it
+  //  reaches this method only when Supabase is disabled.
+  //
+  //  A Supabase branch used to sit at the top of this method and accepted the
+  //  login when the client's TRANSPORTED hash equalled the STORED hash. That
+  //  makes the hash itself a working credential — and `app_users` is readable
+  //  with the anon key that ships in every build, so anyone who could read a
+  //  row could log in as that person without ever knowing their password. It
+  //  has been removed. Cross-device login now happens in AuthService.signIn,
+  //  which re-hashes the typed password with the row's OWN salt and never
+  //  compares two hashes that both came off the wire.
+  // ═══════════════════════════════════════════════════════════════
   static Future<Map<String, dynamic>?> loginOnline(
       String username, String passwordHash) async {
-    // ★ Supabase path: look the user up in app_users and verify the hash.
-    // The local salted-hash verification in LocalDB.signIn is the primary
-    // check; this enables CROSS-DEVICE login (registered on device A, first
-    // login on device B). We compare the app's transported hash against the
-    // stored one, matching the same fields the Sheets backend used.
-    if (SupabaseConfig.enabled) {
-      try {
-        final u = await SupabaseService.getUserByUsername(username);
-        if (u == null) return null;
-        final stored = u['passwordHash']?.toString() ?? '';
-        // Accept if the transported hash matches the stored hash. (Both come
-        // from the same client hashing path used at registration.)
-        if (stored.isNotEmpty && stored == passwordHash) {
-          final safe = Map<String, dynamic>.from(u)
-            ..remove('passwordHash')..remove('salt');
-          return safe;
-        }
-        return null;
-      } catch (_) {
-        return null;
-      }
-    }
     if (!await isConfigured) {
       print('SyncService.loginOnline: backend not configured');
       return null;

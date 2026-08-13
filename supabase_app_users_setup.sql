@@ -135,10 +135,16 @@ create policy "app_users read"   on app_users for select using (true);
 create policy "app_users insert" on app_users for insert with check (true);
 create policy "app_users update" on app_users for update using (true);
 
--- Deliberately NO delete policy. The app deactivates people by setting
--- status = 'disabled' (AuthService._isBlocked honours it) and never deletes,
--- because incidents reference the reporter by name and PNO. Leaving delete
--- unpolicied means a leaked anon key cannot wipe the user table.
+-- Delete is granted because the admin panel offers "Delete user" and, without
+-- a policy, that action failed silently: the local row went away, the server
+-- row survived, so the account came back on the next sync AND the username
+-- became permanently un-registerable (usernameExists kept answering true).
+--
+-- PREFER DISABLING. Setting status = 'disabled' blocks login (AuthService
+-- ._isBlocked honours 'disabled' | 'blocked' | 'inactive') while preserving the
+-- name and PNO that historic incidents were reported under. Deleting a user
+-- does not delete their incidents, so those records lose their author.
+create policy "app_users delete" on app_users for delete using (true);
 
 -- ── STEP 4 : verify ────────────────────────────────────────────────────────
 select column_name, data_type, is_nullable

@@ -602,6 +602,17 @@ class _LoginScreenState extends State<LoginScreen> {
     final passCtrl = TextEditingController();
     final confirmCtrl = TextEditingController();
 
+    // These four controllers are owned by the dialog, not by the State, so
+    // they are not covered by dispose(). Released when the dialog closes —
+    // otherwise every visit to "Forgot password" leaked four of them, along
+    // with the text the user had typed into them.
+    void release() {
+      userCtrl.dispose();
+      proofCtrl.dispose();
+      passCtrl.dispose();
+      confirmCtrl.dispose();
+    }
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -784,7 +795,11 @@ class _LoginScreenState extends State<LoginScreen> {
           );
         });
       },
-    );
+      // Runs whichever way the dialog closed — Cancel, a successful reset, or
+      // the system back button. Safe here and nowhere else: after this future
+      // completes the dialog's widgets are gone, so nothing can read the
+      // controllers again.
+    ).then((_) => release());
   }
 
   List<Widget> _registerFields(SL sl) => [
