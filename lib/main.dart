@@ -13,6 +13,7 @@ import 'services/background_sync.dart';
 import 'services/realtime_sync.dart';
 import 'services/gemini_vision.dart';
 import 'services/ai_run_log.dart';
+import 'services/visitor_service.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
@@ -41,18 +42,29 @@ void main() async {
   //   device shows the SAME data for a given user (desktop == mobile).
   //   Non-blocking: screens refresh when it completes / on pull-to-refresh.
   SyncService.fullSync().catchError((_) => <String, dynamic>{});
-  // ★ v24: Pull latest master data (plants, depts, WSA) from backend on startup
-  // Await with timeout so UI renders with fresh data (not stale defaults)
-  await AdminMasterData.syncFromBackend()
-      .timeout(const Duration(seconds: 10), onTimeout: () => false)
-      .catchError((_) => false);
-  // Warm the synchronous master-data snapshot used by code paths that can't
-  // await (LocalAI.processText, called inline by the near-miss form), and keep
-  // it warm on every later change.
+  // ★ v24: master data (plants, depts, WSA).
+  //
+  // This block used to `await` syncFromBackend() with a 10s timeout BEFORE
+  // runApp, so on a slow or blocked network every launch stared at a blank
+  // screen for up to ten seconds. Now it is cache-first: prime the snapshot from
+  // local storage (fast, no network), then let the refresh land in the
+  // background and re-prime via the revision listener.
+  //
+  // ORDER IS LOAD-BEARING. primeSnapshots() and the listener must both be in
+  // place BEFORE the unawaited sync starts, otherwise a sync that completes
+  // quickly would bump `revision` with no listener attached and the fresh data
+  // would sit unread until the next change.
+  //
+  // Warms the synchronous master-data snapshot used by code paths that can't
+  // await (LocalAI.processText, called inline by the near-miss form).
   await AdminMasterData.primeSnapshots();
   AdminMasterData.revision.addListener(() {
     AdminMasterData.primeSnapshots();
   });
+  // Unawaited: screens refresh themselves when this lands.
+  AdminMasterData.syncFromBackend()
+      .timeout(const Duration(seconds: 10), onTimeout: () => false)
+      .catchError((_) => false);
   // ★ v25: Pull latest Knowledge Base from backend (non-blocking)
   SyncService.syncKnowledgeBase().catchError((_) => false);
   // Any knowledge-base change must reach the AI hazard analyser immediately.
@@ -68,6 +80,11 @@ void main() async {
   // ★ Live cross-device sync: push incident/AI-hazard/near-miss add-edit-delete
   //   to every connected user in real time (no-op unless Supabase is enabled).
   RealtimeSync.start().catchError((_) {});
+  // Unique-visitor counter for the admin dashboard. Fire-and-forget: it must
+  // never delay first paint, and it no-ops when Supabase isn't configured.
+  // Counts anonymous visitors too; the employee ID is attached here if a session
+  // already exists, and again by login_screen for a fresh sign-in.
+  VisitorService.recordVisit().catchError((_) {});
   runApp(const SafetyLensApp());
 }
 

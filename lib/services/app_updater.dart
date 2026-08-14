@@ -23,8 +23,14 @@ class AppUpdater {
   static const String _owner = 'abhibond1986';
   static const String _repo = 'SL-22061984';
 
-  /// Fallback version if native query fails — should match pubspec.yaml
-  static const String _fallbackVersion = '1.0.97';
+  /// Fallback version if native query fails — MUST match pubspec.yaml `version:`.
+  ///
+  /// Bump this with every release. It is not cosmetic: getCurrentVersion() reads
+  /// the real version through an Android-only MethodChannel, so on WEB this
+  /// fallback is always what gets used — and it is now also recorded as
+  /// `app_version` on every row in the visitor table. It had drifted to 1.0.97
+  /// while pubspec said 1.0.98.
+  static const String _fallbackVersion = '1.0.98';
 
   /// How often to check for updates (in minutes) — aggressive for enterprise deployment
   static const int _checkIntervalMinutes = 15;

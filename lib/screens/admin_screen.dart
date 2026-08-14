@@ -47,6 +47,7 @@ import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_config.dart';
+import '../services/visitor_service.dart';
 import '../services/image_storage.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -330,8 +331,24 @@ class _AdminScreenState extends State<AdminScreen>
   // ══════════════════════════════════════════════════════════════════
   //  DATA LOADING
   // ══════════════════════════════════════════════════════════════════
+
+  /// Aggregate visitor counters. null means "could not read" (Supabase off, or
+  /// supabase_visitors_setup.sql not run yet) and is NOT the same as zero — the
+  /// KPI cards render "—" for null so an unconfigured backend can't be mistaken
+  /// for "nobody has used the app".
+  VisitorStats? _visitorStats;
+
+  Future<void> _loadVisitorStats() async {
+    final stats = await VisitorService.fetchStats();
+    if (!mounted) return;
+    setState(() => _visitorStats = stats);
+  }
+
   Future<void> _loadAll() async {
     setState(() => _loading = true);
+    // Deliberately not awaited: the whole dashboard should never sit behind a
+    // spinner waiting on a visitor counter. It fills in when it arrives.
+    _loadVisitorStats().catchError((_) {});
     try {
       List<Map<String, dynamic>> sheetsUsers = [];
       try { sheetsUsers = await SyncService.fetchUsers(); } catch (_) {}
@@ -900,6 +917,24 @@ class _AdminScreenState extends State<AdminScreen>
           _kpi('Today', '$todayCount',
               Icons.today_rounded, const Color(0xFF8E24AA), sl,
               sub: today),
+          // ── Unique visitor counters ───────────────────────────
+          // Two separate numbers on purpose: devices reached (including people
+          // who never signed in) vs. distinct staff who actually signed in.
+          // Colours come from the theme-aware sl.* getters, not raw AppColors —
+          // AppColors.cyan/green fail WCAG AA as text on light backgrounds.
+          // '—' (never '0') when stats are unavailable.
+          _kpi('Unique Visitors',
+              _visitorStats == null ? '—' : '${_visitorStats!.uniqueVisitors}',
+              Icons.devices_other_rounded, sl.cyanText, sl,
+              sub: _visitorStats == null
+                  ? 'run setup SQL'
+                  : '${_visitorStats!.visitorsToday} today'),
+          _kpi('Signed-in Staff',
+              _visitorStats == null ? '—' : '${_visitorStats!.uniqueEmployees}',
+              Icons.badge_rounded, sl.greenText, sl,
+              sub: _visitorStats == null
+                  ? 'run setup SQL'
+                  : '${_visitorStats!.totalVisits} total visits'),
         ]),
 
       const SizedBox(height: 16),

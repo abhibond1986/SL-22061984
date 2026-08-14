@@ -9,6 +9,7 @@ import '../services/app_updater.dart';
 // why the previous per-screen hashing was broken.
 import '../services/auth_service.dart';
 import '../services/validators.dart';
+import '../services/visitor_service.dart';
 import '../services/i18n.dart';
 import '../widgets/glass_card.dart';
 import 'home_screen.dart';
@@ -127,6 +128,13 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _goHome() {
+    // Attach the now-known employee ID to this device's visitor row, so the
+    // admin panel can report unique SIGNED-IN staff as well as unique devices.
+    // _goHome is the single funnel both sign-in and registration pass through,
+    // and AuthService has already written the session by this point.
+    // (Contractor entry navigates directly to ContractorHomeScreen and so is
+    // intentionally not counted here — contractors have no employee ID.)
+    VisitorService.recordLogin().catchError((_) {});
     Navigator.pushReplacement(context, PageRouteBuilder(
       pageBuilder: (_, a, __) =>
           HomeScreen(toggleTheme: widget.toggleTheme),

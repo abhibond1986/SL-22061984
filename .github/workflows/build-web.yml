@@ -40,15 +40,37 @@ jobs:
         run: flutter pub get
 
       - name: Build web (release)
-        run: flutter build web --release --base-href "/" --no-tree-shake-icons
+        # Icon tree-shaking re-enabled 2026-08-14. It was disabled defensively,
+        # but it ships the FULL MaterialIcons font (~1 MB) on the critical path.
+        # Audited: `lib/` contains zero `IconData(...)` constructions and no
+        # string->icon lookup maps, so every icon is a const `Icons.*` the
+        # compiler can see. If a dynamic icon is ever added, tree-shaking will
+        # render empty boxes at runtime with NO build error — restore
+        # --no-tree-shake-icons if that ever appears.
+        run: flutter build web --release --base-href "/"
 
       - name: List web output
         run: ls -la build/web/
 
-      - name: Copy app icon as favicon and web root icon
+      # NOTE: a step here used to `cp assets/images/app_icon.png` over both
+      # build/web/app_icon.png and build/web/favicon.png. That asset was a 1 MB
+      # 1024px PNG, so it put ~2 MB of images on the landing-page critical path
+      # (the favicon alone renders at 16 px). web/app_icon.png and
+      # web/favicon.png are now correctly-sized files committed in the repo and
+      # copied by `flutter build web` itself — do not re-add that copy step.
+      # Regenerate them with `python3 tools/gen_icons.py`.
+
+      - name: Verify web icons are not oversized
+        # Guard so the 1 MB regression cannot come back unnoticed.
         run: |
-          cp assets/images/app_icon.png build/web/app_icon.png
-          cp assets/images/app_icon.png build/web/favicon.png
+          for f in build/web/app_icon.png build/web/favicon.png; do
+            sz=$(stat -c%s "$f")
+            echo "$f = $sz bytes"
+            if [ "$sz" -gt 204800 ]; then
+              echo "::error::$f is $sz bytes (>200KB). Run tools/gen_icons.py."
+              exit 1
+            fi
+          done
 
       - name: Add SPA fallback for routing
         run: cp build/web/index.html build/web/404.html

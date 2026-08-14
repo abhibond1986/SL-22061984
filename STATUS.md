@@ -26,9 +26,26 @@ Supabase → Database → Replication. Without it, live cross-device updates nev
 fire, and nothing surfaces an error; the app just quietly stops agreeing with
 itself across devices.
 
-This is now the only unverified deploy step.
+### 2. Run `supabase_visitors_setup.sql` (required for the visitor counter)
 
-### 2. Confirm row-level security is enforced on `incidents`
+**Still open — one-time, takes a minute.** Supabase → SQL Editor → New query →
+paste the whole file → Run. Idempotent, so re-running is safe.
+
+Until this is run, the "Unique Visitors" and "Signed-in Staff" cards in BOTH
+admin panels show `—`. They are deliberately never `0`, so "not set up" cannot be
+mistaken for "nobody has used the app". Nothing else breaks: the client swallows
+the missing-function error and startup is unaffected.
+
+Verify with `select public.get_visitor_stats();` — a fresh install returns a JSON
+object of zeros.
+
+Note the security model, and don't "fix" it by adding a policy: the table has RLS
+on with **no anon policies at all**, and all access goes through two
+`SECURITY DEFINER` functions. That is what keeps the public anon key from being
+able to enumerate who visited — it can only record its own visit and read
+aggregate counts.
+
+### 3. Confirm row-level security is enforced on `incidents`
 
 **Unverified, and worth doing deliberately.** The Supabase URL and anon key are
 committed in plaintext in `lib/services/supabase_config.dart`, in a repo that has
@@ -96,6 +113,42 @@ select relname, relrowsecurity from pg_class where relname = 'incidents';
   migration costs those fields instead of the whole record.
   `SupabaseService.incidentSchemaGaps` lists any it has hit — surface it in the
   admin panel rather than letting it fail silently.
+
+## Web load performance
+
+Addressed 2026-08-14. First paint used to be gated on three independent things,
+which is why it felt so slow:
+
+- **A 10-second blocking network call.** `main()` awaited
+  `AdminMasterData.syncFromBackend()` with a 10s timeout *before* `runApp`, so a
+  slow or blocked network meant up to ten seconds of blank screen. Now
+  cache-first: snapshots are primed from local storage, the refresh runs
+  unawaited, and the `revision` listener re-primes when it lands. The listener
+  must be attached *before* the sync starts — see the comment in `main.dart`.
+- **~2 MB of oversized icons on the critical path.** One 1024px, 1.03 MB PNG was
+  serving as the runtime asset, the splash image, three `<link rel=icon>`s, and
+  (via a CI copy step) the favicon. All four PWA icons were the same 558×447
+  non-square file, so the sizes in `manifest.json` were false. Regenerate with
+  `python3 tools/gen_icons.py`; CI now fails if a web icon exceeds 200 KB.
+- **Engine boot waiting on `window.onload`**, which does not fire until every
+  subresource has downloaded. Now boots on `DOMContentLoaded`.
+
+Also re-enabled icon-font tree-shaking (`--no-tree-shake-icons` removed), worth
+~1 MB. Audited first: `lib/` contains zero `IconData(...)` constructions and no
+string→icon maps. **If anyone ever adds a dynamically-built icon, tree-shaking
+renders empty boxes at runtime with no build error** — restore the flag if that
+appears.
+
+### Still worth doing: self-host the fonts
+
+`google_fonts` fetches Inter and Poppins from `fonts.gstatic.com` at **runtime**,
+on every cold load, from a plant network that may well be slow or filtered. Only
+`preconnect` hints were added (a real but small win); the actual fix is to vendor
+the `.ttf` files into `assets/fonts/`, declare them in `pubspec.yaml`, and use
+`TextStyle(fontFamily: ...)` instead of `GoogleFonts.*`. That also makes the app
+render correctly with no internet at all, which matches how it is actually used.
+Not done because it touches every screen's typography and deserves its own visual
+check.
 
 ## Readability / design debt
 

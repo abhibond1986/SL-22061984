@@ -342,6 +342,11 @@ body.theme-dark .auth-card { background: var(--surface); }
         <div class="sc"><div class="sc-lbl">Employees</div><div class="sc-val" id="st-emps">—</div><div class="sc-sub">normal users</div></div>
         <div class="sc"><div class="sc-lbl">Active</div><div class="sc-val" style="color:var(--success)" id="st-active">—</div><div class="sc-sub">accounts</div></div>
         <div class="sc"><div class="sc-lbl">Plants</div><div class="sc-val" id="st-plants">—</div><div class="sc-sub">represented</div></div>
+        <!-- Unique visitor counters. Two distinct numbers: devices reached
+             (anonymous included) vs. distinct staff who signed in. Both stay "—"
+             until supabase_visitors_setup.sql has been run. -->
+        <div class="sc"><div class="sc-lbl">Unique Visitors</div><div class="sc-val" style="color:var(--accent)" id="st-visitors">—</div><div class="sc-sub" id="st-visitors-sub">devices</div></div>
+        <div class="sc"><div class="sc-lbl">Signed-in Staff</div><div class="sc-val" style="color:var(--success)" id="st-visitor-emps">—</div><div class="sc-sub" id="st-visitor-emps-sub">unique employees</div></div>
       </div>
 
       <div class="tcard">
@@ -353,7 +358,7 @@ body.theme-dark .auth-card { background: var(--surface); }
           <div class="tactions">
             <input class="srch" placeholder="🔍 Search…" oninput="filterUsers(this.value)" id="u-srch">
             <button class="bsm b-ac" onclick="openAddModal()">+ Add User</button>
-            <button class="bsm b-gh" onclick="loadUsers(true)" title="Refresh">🔄</button>
+            <button class="bsm b-gh" onclick="loadUsers(true); loadVisitorStats()" title="Refresh">🔄</button>
           </div>
         </div>
         <div class="filter-row">
@@ -724,6 +729,7 @@ function enterAdmin(){
   loadUsers();
   loadGasCode();
   loadPlants();
+  loadVisitorStats();
 }
 
 function doLogout(){ SESSION=null; ls('sl_session',null); showPg('pg-login'); toast('Signed out'); }
@@ -1096,6 +1102,54 @@ function copyCode(){
 
 // ─────────────────────────────────────────
 //  MASTER DATA — PLANTS MANAGEMENT
+// ─── Unique visitor stats (Supabase RPC) ─────────────────────────────
+// This is the PUBLIC anon key — the same one shipped in the Flutter web bundle.
+// It was copied programmatically from lib/services/supabase_config.dart; if you
+// ever rotate it, update BOTH places. The visitor table itself has RLS enabled
+// with no anon policies, so this key can only call the two aggregate functions,
+// never read individual visitor rows.
+const SUPA_URL  = 'https://mptdergmcakhufsmcogd.supabase.co';
+const SUPA_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wdGRlcmdtY2FraHVmc21jb2dkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1MTg0ODAsImV4cCI6MjA5OTA5NDQ4MH0.zkK7JSvp6AJ1JiVqCjd130f9PwS4412VygPhGX1ga4Y';
+
+async function loadVisitorStats(){
+  const el = id => document.getElementById(id);
+  // Render "—", never 0, on any failure: "backend not set up" must not be
+  // indistinguishable from "nobody has used the app".
+  const fail = sub => {
+    el('st-visitors').textContent = '—';
+    el('st-visitor-emps').textContent = '—';
+    el('st-visitors-sub').textContent = sub;
+    el('st-visitor-emps-sub').textContent = sub;
+  };
+  try {
+    const r = await fetch(SUPA_URL + '/rest/v1/rpc/get_visitor_stats', {
+      method: 'POST',
+      headers: {
+        'apikey': SUPA_ANON,
+        'Authorization': 'Bearer ' + SUPA_ANON,
+        'Content-Type': 'application/json'
+      },
+      body: '{}'
+    });
+    if(!r.ok){
+      // 404 here means the function does not exist yet, which is by far the
+      // most likely cause: the one-time setup SQL has not been run.
+      fail(r.status >= 400 && r.status < 500
+        ? 'run supabase_visitors_setup.sql' : 'unavailable');
+      return;
+    }
+    const d = await r.json();
+    if(!d || typeof d !== 'object'){ fail('unavailable'); return; }
+    el('st-visitors').textContent = d.unique_visitors || 0;
+    el('st-visitors-sub').textContent =
+      (d.visitors_today || 0) + ' today \u00b7 ' + (d.visitors_7d || 0) + ' this week';
+    el('st-visitor-emps').textContent = d.unique_employees || 0;
+    el('st-visitor-emps-sub').textContent = (d.total_visits || 0) + ' total visits';
+  } catch(e){
+    fail('unavailable');
+  }
+}
+
 // ─────────────────────────────────────────
 let PLANTS = [];
 

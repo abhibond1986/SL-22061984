@@ -13,9 +13,23 @@
   <meta name="theme-color" content="#0D1117">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <link rel="manifest" href="manifest.json?v=2">
-  <link rel="icon" type="image/png" href="app_icon.png?v=3"/>
-  <link rel="icon" type="image/png" sizes="32x32" href="app_icon.png?v=3"/>
-  <link rel="icon" type="image/png" sizes="16x16" href="app_icon.png?v=3"/>
+  <!-- These three used to point at app_icon.png, which was a 1 MB 1024px PNG.
+       A favicon renders at 16-32 px, so that was ~1 MB of blocking download for
+       nothing. favicon.png is the same artwork at 64px / ~5 KB. Bump ?v= when
+       regenerating via tools/gen_icons.py so caches don't serve the old file. -->
+  <link rel="icon" type="image/png" href="favicon.png?v=4"/>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png?v=4"/>
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon.png?v=4"/>
+  <!-- flutter.js is the gate on everything else, so start fetching it during
+       HTML parse instead of waiting for the tag at the end of the body. -->
+  <link rel="preload" href="flutter.js" as="script"/>
+  <!-- google_fonts fetches Inter/Poppins at RUNTIME from these origins, and the
+       Supabase call fires during startup. Doing the DNS + TLS handshake now
+       removes it from the critical path later. (Bundling the fonts locally would
+       be the bigger win — noted in STATUS.md.) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link rel="preconnect" href="https://mptdergmcakhufsmcogd.supabase.co" crossorigin/>
   <title>Safety Lens · SAIL</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -216,7 +230,11 @@
   <div id="loading">
     <div class="glass-card">
       <div class="logo-ring">
-        <img src="app_icon.png" alt="Safety Lens Badge"
+        <!-- width/height match the CSS so the card doesn't reflow once the
+             image lands. fetchpriority=high: this is the only thing the user
+             can actually see while the engine boots. -->
+        <img src="app_icon.png?v=4" alt="Safety Lens Badge"
+          width="80" height="80" fetchpriority="high" decoding="async"
           onerror="this.src='icons/Icon-192.png'">
       </div>
       <div class="brand">
@@ -232,21 +250,38 @@
 
   <script src="flutter.js" defer></script>
   <script>
-    window.addEventListener('load', function(ev) {
-      _flutter.loader.loadEntrypoint({
-        onEntrypointLoaded: function(engineInitializer) {
-          engineInitializer.initializeEngine().then(function(appRunner) {
-            appRunner.runApp().then(function() {
-              var loading = document.getElementById('loading');
-              if (loading) {
+    // Previously this waited on window 'load', which does not fire until EVERY
+    // subresource (all icons, the manifest, fonts) has finished downloading — so
+    // the engine sat idle behind assets it does not need. 'DOMContentLoaded'
+    // fires as soon as the document is parsed, which is the earliest point
+    // flutter.js (deferred) is guaranteed to have run.
+    //
+    // Both listeners are attached and boot() is idempotent via `started`,
+    // because this inline script runs BEFORE the deferred loader tag above, so
+    // window._flutter does not exist yet at this point. Whichever event finds
+    // the loader first wins; the second call returns immediately.
+    (function () {
+      var started = false;
+      function boot() {
+        if (started || !window._flutter) return;
+        started = true;
+        _flutter.loader.loadEntrypoint({
+          onEntrypointLoaded: function (engineInitializer) {
+            engineInitializer.initializeEngine().then(function (appRunner) {
+              appRunner.runApp().then(function () {
+                var loading = document.getElementById('loading');
+                if (!loading) return;
                 loading.style.opacity = '0';
-                setTimeout(function() { loading.remove(); }, 600);
-              }
+                setTimeout(function () { loading.remove(); }, 600);
+              });
             });
-          });
-        }
-      });
-    });
+          }
+        });
+      }
+      if (window._flutter) boot();
+      else document.addEventListener('DOMContentLoaded', boot);
+      window.addEventListener('load', boot);
+    })();
   </script>
 </body>
 </html>
