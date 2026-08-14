@@ -8,13 +8,17 @@ import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 
-/// Plant dashboard.
+/// Plant dashboard — cross-plant, for everyone.
 ///
-/// For a plant user this is THEIR plant, locked: no plant chips to switch away
-/// with, and a department drill-down inside the plant instead. It used to
-/// default to `_plants.first` — the alphabetically-first plant present in the
-/// data, which for most users was somebody else's plant — and let anyone tap
-/// through to any other plant. An admin still gets the chips.
+/// EVERY user can select ANY plant here, via a dropdown of the full admin plant
+/// list, with a department drill-down inside the chosen plant. This screen is
+/// intentionally exempt from PlantScope's plant lock: comparing plants is the
+/// point of it. The lock still applies everywhere else.
+///
+/// It does still OPEN on the viewer's own plant, which is the one thing the
+/// earlier versions got wrong in both directions — first defaulting to
+/// `_plants.first` (the alphabetically-first plant with data, i.e. usually
+/// somebody else's), then locking a plant user to their own with no way out.
 class PlantWiseTab extends StatefulWidget {
   const PlantWiseTab({super.key});
   @override
@@ -28,11 +32,20 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// Department drill-down within the plant. Empty = all departments.
   String _dept = '';
   PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
-  /// Plants this user is ALLOWED to choose between, from
-  /// PlantScope.selectablePlants(): every admin-configured plant for an admin
-  /// or org-level user, exactly one for a plant-locked user. Loaded rather than
-  /// derived from the data so a plant with no incidents yet is still selectable
-  /// — the old chip row could only offer plants that already had records.
+  /// Kept separate from `_scope.problem`: a signed-in user with a misconfigured
+  /// plant must still get the full dropdown. See build().
+  bool _signedIn = true;
+  /// EVERY admin-configured plant, for EVERY user.
+  ///
+  /// This screen is deliberately outside the plant lock. Plant Wise exists to
+  /// compare plants, and a dashboard that can only ever show the viewer's own
+  /// plant cannot do that — so a plant user sees the same list here as an admin.
+  /// That is a conscious visibility decision, not an oversight: it applies to
+  /// this tab only, and PlantScope still governs the operational screens.
+  ///
+  /// Loaded from the admin list rather than derived from the data so a plant
+  /// that has reported nothing yet is still selectable (and visibly empty),
+  /// which the old chip row could not do.
   List<String> _selectable = const [];
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
@@ -64,19 +77,27 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   }
 
   Future<void> _load() async {
-    final scope    = await PlantScope.forUser();
-    // Scope the data at the source: a non-admin never holds another plant's
-    // records in memory, so no widget below can accidentally reveal them.
-    final inc      = await scope.filterIncidents(await LocalDB.getIncidents());
+    // Read the user once and hand it to forUser(), so `signedIn` and the scope
+    // can never disagree about whether anybody is logged in.
+    final user     = await LocalDB.getCurrentUser();
+    final scope    = await PlantScope.forUser(user);
+    // DELIBERATELY UNFILTERED — see the note on _selectable. Plant Wise is a
+    // cross-plant comparison screen, so it loads every plant's records for
+    // everyone. scope.filterIncidents() is still applied on the operational
+    // screens (incident log, dashboard, near miss); it is only skipped here.
+    final inc      = await LocalDB.getIncidents();
     final plants   = await AdminMasterData.getPlants();
     final statuses = await AdminMasterData.getStatuses();
     final open     = await AdminMasterData.getOpenStatuses();
     final closed   = await AdminMasterData.lastStatus();
     final depts    = await AdminMasterData.getDepartments();
-    final choices  = await scope.selectablePlants();
+    // Every configured plant, not scope.selectablePlants() — a plant-locked
+    // user gets the same list as an admin on this screen.
+    final choices  = await AdminMasterData.getPlantLabels();
     if (mounted) {
       setState(() {
         _scope        = scope;
+        _signedIn     = user != null;
         _all          = inc;
         _plantDefs    = plants;
         _statuses     = statuses;
@@ -131,20 +152,18 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         .toList();
   }
 
-  /// Everything the dropdown offers.
+  /// Everything the dropdown offers, identical for every user.
   ///
-  /// For an admin: the admin's plant list, in the admin's own order, PLUS any
-  /// canonical plant label that appears in the data but not in that list. The
-  /// second part matters — incidents are saved with the reporter's own plant
-  /// string, and unmatched ones canonicalise to themselves (e.g. the
-  /// 'SAIL Safety Organisation' default in ai_scan_tab). Offering only the
-  /// admin list would make those records unreachable from this screen.
+  /// The admin's plant list, in the admin's own order, PLUS any canonical plant
+  /// label that appears in the data but not in that list. The second part
+  /// matters — incidents are saved with the reporter's own plant string, and
+  /// unmatched ones canonicalise to themselves (e.g. the 'SAIL Safety
+  /// Organisation' default in ai_scan_tab). Offering only the admin list would
+  /// make those records unreachable from this screen.
   ///
-  /// For a plant-locked user: exactly their own plant, never anything else.
-  /// The data is already scope-filtered, but the option list must not imply
-  /// access either.
+  /// No `seesAllPlants` branch: it used to return just the viewer's own plant
+  /// for a plant user. See the note on [_selectable] for why that was dropped.
   List<String> get _plantOptions {
-    if (!_scope.seesAllPlants) return _selectable;
     final out = <String>[..._selectable];
     for (final p in _plants) {
       if (!out.contains(p)) out.add(p);
@@ -289,12 +308,21 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
-    // An unresolved scope is reported, not silently widened to all plants.
-    if (_scope.problem != null) {
+    // Only a missing SESSION blocks this screen now.
+    //
+    // This used to bail out on any `_scope.problem`, which also covers "your
+    // profile has no plant set" and "your plant doesn't match the admin list".
+    // Those were fatal while the screen could only ever show the viewer's own
+    // plant. They aren't any more: what's displayed no longer depends on the
+    // viewer's plant, only on the dropdown selection. Such a user simply gets
+    // no pre-selected plant and picks one — blocking them would deny the
+    // cross-plant access this screen is now meant to give everyone.
+    if (!_signedIn) {
       return Padding(
         padding: const EdgeInsets.all(24),
         child: Center(
-          child: Text(_scope.problem!,
+          child: Text(
+              _scope.problem ?? 'Not signed in — no plant data available.',
               textAlign: TextAlign.center,
               style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5)),
         ),
@@ -312,9 +340,9 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Dropdown of every plant this user may see; a locked user gets a
-        // plain header instead. Scope is enforced in _plantOptions, and the
-        // data itself was already filtered in _load().
+        // Dropdown of EVERY plant, for every user — this screen is exempt from
+        // the plant lock on purpose. It falls back to a plain header only when
+        // a single plant exists, never as a permission check.
         _plantSelector(sl),
         const SizedBox(height: 10),
         // Department drill-down within the plant.
@@ -354,20 +382,16 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  LOCKED PLANT HEADER — shown instead of the switcher chips
+  //  SINGLE PLANT HEADER — shown instead of a one-item dropdown
   // ═══════════════════════════════════════════════════════════════
-  /// A plant user sees their plant as a label, not a control. Rendering a
-  /// single disabled chip would still imply "there are others"; a header states
-  /// the scope plainly and leaves no affordance to switch.
-  ///
-  /// Also used when there is genuinely only one plant to choose from. In that
-  /// case the label comes from the selection, not from `_scope.plant`, which is
-  /// empty for an admin — reading it unconditionally rendered a blank header.
-  Widget _lockedPlantHeader(SL sl) {
-    final label = _scope.isLocked
-        ? _scope.plant
-        : (_selectedPlant ??
-            (_plantOptions.isEmpty ? '' : _plantOptions.first));
+  /// Used ONLY when there is genuinely one plant to choose from, so a dropdown
+  /// would open to a single row and read as broken. This is no longer the
+  /// plant-locked case: every user now gets the full dropdown (see
+  /// [_selectable]), so the label comes from the selection rather than from
+  /// `_scope.plant`, which is empty for an admin and rendered a blank header.
+  Widget _singlePlantHeader(SL sl) {
+    final label = _selectedPlant ??
+        (_plantOptions.isEmpty ? '' : _plantOptions.first);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
@@ -381,7 +405,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         const SizedBox(width: 9),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(_scope.isLocked ? 'YOUR PLANT' : 'PLANT',
+            Text('PLANT',
                 style: TextStyle(
                     color: sl.text3,
                     fontSize: 9,
@@ -466,9 +490,10 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     // show nothing rather than a built-in fallback list.
     if (options.isEmpty) return const SizedBox.shrink();
 
-    // One option and no freedom to change it: a dropdown would imply there are
-    // others to pick. State the scope instead.
-    if (_scope.isLocked || options.length == 1) return _lockedPlantHeader(sl);
+    // Exactly one plant exists: a dropdown would open to a single row and imply
+    // there are others. State it plainly instead. NOT a permission check — the
+    // plant lock no longer applies on this screen.
+    if (options.length == 1) return _singlePlantHeader(sl);
 
     final counts = _plantCounts;
     final value  = (_selectedPlant != null && options.contains(_selectedPlant))
