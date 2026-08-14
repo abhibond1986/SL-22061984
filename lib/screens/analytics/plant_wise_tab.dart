@@ -28,6 +28,12 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// Department drill-down within the plant. Empty = all departments.
   String _dept = '';
   PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
+  /// Plants this user is ALLOWED to choose between, from
+  /// PlantScope.selectablePlants(): every admin-configured plant for an admin
+  /// or org-level user, exactly one for a plant-locked user. Loaded rather than
+  /// derived from the data so a plant with no incidents yet is still selectable
+  /// — the old chip row could only offer plants that already had records.
+  List<String> _selectable = const [];
   // Active canonical plant list (admin-editable) for name normalization.
   List<Map<String, String>> _plantDefs = AdminMasterData.sailPlants;
   List<String> _statuses = List<String>.from(AdminMasterData.defaultStatuses);
@@ -67,6 +73,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     final open     = await AdminMasterData.getOpenStatuses();
     final closed   = await AdminMasterData.lastStatus();
     final depts    = await AdminMasterData.getDepartments();
+    final choices  = await scope.selectablePlants();
     if (mounted) {
       setState(() {
         _scope        = scope;
@@ -76,14 +83,26 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         _openStatuses = open;
         _closedStatus = closed.toUpperCase();
         _deptOrder    = depts;
+        _selectable   = choices;
         _loading      = false;
-        // Default to user's own plant if available, otherwise first plant in data
-        if (_selectedPlant == null && _plants.isNotEmpty) {
-          if (scope.plant.isNotEmpty && _plants.contains(scope.plant)) {
+        // Own plant first; otherwise the first plant that actually HAS records,
+        // so an admin doesn't land on an empty dashboard just because the
+        // admin list happens to start with a plant that has reported nothing.
+        final options = _plantOptions;
+        if (_selectedPlant == null && options.isNotEmpty) {
+          if (scope.plant.isNotEmpty && options.contains(scope.plant)) {
             _selectedPlant = scope.plant;
           } else {
-            _selectedPlant = _plants.first;
+            final counts = _plantCounts;
+            _selectedPlant = options.firstWhere(
+                (p) => (counts[p] ?? 0) > 0,
+                orElse: () => options.first);
           }
+        }
+        // A plant the admin has just deleted must not stay selected.
+        if (_selectedPlant != null && !options.contains(_selectedPlant)) {
+          _selectedPlant = options.isEmpty ? null : options.first;
+          _dept = '';
         }
         // A department that just vanished from the admin list (or from this
         // plant's data) must not stay silently applied as a filter.
@@ -110,6 +129,38 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return _deptOrder
         .where((d) => present.contains(d.trim().toUpperCase()))
         .toList();
+  }
+
+  /// Everything the dropdown offers.
+  ///
+  /// For an admin: the admin's plant list, in the admin's own order, PLUS any
+  /// canonical plant label that appears in the data but not in that list. The
+  /// second part matters — incidents are saved with the reporter's own plant
+  /// string, and unmatched ones canonicalise to themselves (e.g. the
+  /// 'SAIL Safety Organisation' default in ai_scan_tab). Offering only the
+  /// admin list would make those records unreachable from this screen.
+  ///
+  /// For a plant-locked user: exactly their own plant, never anything else.
+  /// The data is already scope-filtered, but the option list must not imply
+  /// access either.
+  List<String> get _plantOptions {
+    if (!_scope.seesAllPlants) return _selectable;
+    final out = <String>[..._selectable];
+    for (final p in _plants) {
+      if (!out.contains(p)) out.add(p);
+    }
+    return out;
+  }
+
+  /// Incident count per canonical plant, so the dropdown can show which plants
+  /// actually have records instead of making the user select each one to find out.
+  Map<String, int> get _plantCounts {
+    final m = <String, int>{};
+    for (final i in _all) {
+      final p = _canonPlant(i);
+      if (p.isNotEmpty) m[p] = (m[p] ?? 0) + 1;
+    }
+    return m;
   }
 
   // Unique CANONICAL plants present in the data (each appears once).
@@ -261,7 +312,9 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // All users can select any plant to view its reports
+        // Dropdown of every plant this user may see; a locked user gets a
+        // plain header instead. Scope is enforced in _plantOptions, and the
+        // data itself was already filtered in _load().
         _plantSelector(sl),
         const SizedBox(height: 10),
         // Department drill-down within the plant.
@@ -306,7 +359,15 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// A plant user sees their plant as a label, not a control. Rendering a
   /// single disabled chip would still imply "there are others"; a header states
   /// the scope plainly and leaves no affordance to switch.
+  ///
+  /// Also used when there is genuinely only one plant to choose from. In that
+  /// case the label comes from the selection, not from `_scope.plant`, which is
+  /// empty for an admin — reading it unconditionally rendered a blank header.
   Widget _lockedPlantHeader(SL sl) {
+    final label = _scope.isLocked
+        ? _scope.plant
+        : (_selectedPlant ??
+            (_plantOptions.isEmpty ? '' : _plantOptions.first));
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
@@ -320,14 +381,14 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         const SizedBox(width: 9),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('YOUR PLANT',
+            Text(_scope.isLocked ? 'YOUR PLANT' : 'PLANT',
                 style: TextStyle(
                     color: sl.text3,
                     fontSize: 9,
                     letterSpacing: 0.8,
                     fontWeight: FontWeight.w700)),
             const SizedBox(height: 2),
-            Text(_scope.plant,
+            Text(label,
                 style: TextStyle(
                     color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
           ]),
@@ -391,41 +452,99 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  PLANT SELECTOR — horizontal scrollable chips (admins only)
+  //  PLANT SELECTOR — dropdown over every plant this user may see
   // ═══════════════════════════════════════════════════════════════
+  /// Was a horizontal chip row built from `_plants`, i.e. only plants that
+  /// already had incidents. With one plant reporting, that rendered as a single
+  /// chip which looked like a button that did nothing. A dropdown states the
+  /// full list up front and shows the record count beside each entry.
   Widget _plantSelector(SL sl) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: _plants.map((p) {
-          final active = p == _selectedPlant;
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
-              // Reset the department too — the previous plant's department
-              // almost certainly doesn't exist in the new one, and leaving it
-              // applied shows a confusingly empty dashboard.
-              onTap: () => setState(() {
+    final options = _plantOptions;
+
+    // Nothing selectable: an unresolved scope is already reported by build(),
+    // so this means the admin's plant list is empty. Admin is authoritative —
+    // show nothing rather than a built-in fallback list.
+    if (options.isEmpty) return const SizedBox.shrink();
+
+    // One option and no freedom to change it: a dropdown would imply there are
+    // others to pick. State the scope instead.
+    if (_scope.isLocked || options.length == 1) return _lockedPlantHeader(sl);
+
+    final counts = _plantCounts;
+    final value  = (_selectedPlant != null && options.contains(_selectedPlant))
+        ? _selectedPlant
+        : null;
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('PLANT',
+          style: TextStyle(
+              color: sl.text3,
+              fontSize: 9,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700)),
+      const SizedBox(height: 7),
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: sl.glassColor,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.accent.withOpacity(0.35)),
+        ),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<String>(
+            value: value,
+            isExpanded: true,
+            hint: Text('Select a plant',
+                style: TextStyle(color: sl.text3, fontSize: 12)),
+            icon: const Icon(Icons.expand_more_rounded,
+                color: AppColors.accent, size: 20),
+            dropdownColor: sl.card,
+            borderRadius: BorderRadius.circular(12),
+            style: TextStyle(
+                color: sl.text1, fontSize: 12, fontWeight: FontWeight.w600),
+            items: options.map((p) {
+              final n = counts[p] ?? 0;
+              return DropdownMenuItem<String>(
+                value: p,
+                child: Row(children: [
+                  const Icon(Icons.factory_rounded,
+                      size: 14, color: AppColors.accent),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(p,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            // A plant with no records is still selectable, but
+                            // muted so the list reads at a glance.
+                            color: n > 0 ? sl.text1 : sl.text3,
+                            fontSize: 12,
+                            fontWeight:
+                                n > 0 ? FontWeight.w600 : FontWeight.w500)),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(n > 0 ? '$n' : '—',
+                      style: TextStyle(
+                          color: n > 0 ? AppColors.accent : sl.text4,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700)),
+                ]),
+              );
+            }).toList(),
+            // Reset the department too — the previous plant's department almost
+            // certainly doesn't exist in the new one, and leaving it applied
+            // shows a confusingly empty dashboard.
+            onChanged: (p) {
+              if (p == null) return;
+              setState(() {
                 _selectedPlant = p;
                 _dept = '';
-              }),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: active ? AppColors.accent : sl.glassColor,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                      color: active ? AppColors.accent : sl.glassBorder),
-                ),
-                child: Text(p, style: TextStyle(
-                    color: active ? Colors.white : sl.text2,
-                    fontSize: 12, fontWeight: FontWeight.w600)),
-              ),
-            ),
-          );
-        }).toList(),
+              });
+            },
+          ),
+        ),
       ),
-    );
+    ]);
   }
 
   // ═══════════════════════════════════════════════════════════════
