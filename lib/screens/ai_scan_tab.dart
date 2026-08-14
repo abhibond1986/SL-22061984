@@ -2171,7 +2171,7 @@ class _AIScanTabState extends State<AIScanTab> {
         : Icons.cloud_off_outlined;
     final String label = online
         ? (fromCache ? 'Online AI Analysis (cached)' : 'Online AI Analysis')
-        : 'Offline Analysis — limited';
+        : 'Not Analysed — AI unavailable';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -2191,8 +2191,8 @@ class _AIScanTabState extends State<AIScanTab> {
               style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700)),
             if (!online) Text(
               reason.isNotEmpty
-                  ? 'AI unavailable — showing example guidance. Connect to the internet and rescan for a real assessment.'
-                  : 'Showing example guidance. Connect to the internet and rescan for a real assessment.',
+                  ? 'This photo was not assessed ($reason). Connect to the internet and rescan.'
+                  : 'This photo was not assessed. Connect to the internet and rescan.',
               style: TextStyle(color: sl.text3, fontSize: 9.5, fontWeight: FontWeight.w500)),
           ],
         )),
@@ -2215,6 +2215,10 @@ class _AIScanTabState extends State<AIScanTab> {
       final sb = sevOrder[(b as Map)['severity']?.toString().toUpperCase() ?? ''] ?? unknownRank;
       return sa.compareTo(sb);
     });
+    // False only on the offline/failed path. When the image was never analysed
+    // there is nothing to rate, so the OVERALL RISK card and the hazard table
+    // are both suppressed — see GeminiVision._offlineFallback for why.
+    final analysed    = _result!['_imageAnalysed'] != false;
     final riskColor   = _sevColor(overallRisk);
     final hasBbox     = hazards.any((h) {
       final bbox = (h as Map)['bbox'];
@@ -2295,7 +2299,7 @@ class _AIScanTabState extends State<AIScanTab> {
         const SizedBox(height: 10),
       ],
 
-      Container(
+      if (analysed) Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: riskColor.withOpacity(0.06),
@@ -2337,7 +2341,7 @@ class _AIScanTabState extends State<AIScanTab> {
                       fontSize: 9, fontStyle: FontStyle.italic))),
           ])),
         ])),
-      const SizedBox(height: 10),
+      if (analysed) const SizedBox(height: 10),
 
       Container(
         padding: const EdgeInsets.all(12),
@@ -2360,7 +2364,10 @@ class _AIScanTabState extends State<AIScanTab> {
         ])),
       const SizedBox(height: 10),
 
-      // ✅ FIX: Don't show hazard table when AI failed (no real hazards)
+      // No hazard table when the image was not analysed. The table used to be
+      // filled with a generic steel-plant checklist on this path, which read as
+      // findings about the photo — see GeminiVision._offlineFallback. An empty
+      // state is the only honest thing to show.
       if (hazards.isNotEmpty)
         _hazardTable(hazards, sl)
       else
@@ -2375,10 +2382,11 @@ class _AIScanTabState extends State<AIScanTab> {
             children: [
               const Icon(Icons.cloud_off_rounded, color: AppColors.amber, size: 32),
               const SizedBox(height: 8),
-              Text('AI Analysis Unavailable',
+              Text('This image was not analysed',
                 style: TextStyle(color: sl.text1, fontSize: 14, fontWeight: FontWeight.w700)),
               const SizedBox(height: 6),
-              Text('Server could not process this image. Tap "New" and retry when connectivity improves.',
+              Text('No hazards are listed because the AI never assessed this '
+                  'photo. Tap "New" and rescan once you are back online.',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
             ]),
