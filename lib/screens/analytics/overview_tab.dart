@@ -782,7 +782,7 @@ class _OverviewTabState extends State<OverviewTab> {
                 child: Text(sev, style: TextStyle(color: sevColor, fontSize: 8, fontWeight: FontWeight.w800)),
               ),
               const SizedBox(height: 4),
-              Text(status, style: TextStyle(color: sl.text4, fontSize: 7, fontWeight: FontWeight.w600)),
+              Text(status, style: TextStyle(color: sl.text4, fontSize: 10, fontWeight: FontWeight.w600)),
             ]),
           ]),
         ),

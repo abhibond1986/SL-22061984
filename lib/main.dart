@@ -101,9 +101,21 @@ class AppColors {
   static const green = Color(0xFF10B981);   // emerald-500 — safe / closed
 
   // Light mode variants with better contrast (WCAG AA compliant)
-  static const critLight  = Color(0xFFC22626);   // 5.1:1 contrast on light bg
-  static const amberLight = Color(0xFFB45309);   // 4.7:1 contrast on light bg
-  static const greenLight = Color(0xFF047857);   // 4.6:1 contrast on light bg
+  static const critLight  = Color(0xFFC22626);   // 5.83:1 on white
+  static const amberLight = Color(0xFFB45309);   // 5.02:1 on white
+  static const greenLight = Color(0xFF047857);   // 5.48:1 on white
+  static const cyanInk    = Color(0xFF0E7490);   // cyan-700 — cyan is 2.97:1 on
+                                                 // white, unusable as text there
+
+  // ── Foreground variants for DARK surfaces ────────────────────────────────
+  // Needed because no single hex can serve both themes as TEXT. Measured on
+  // darkCard (#171F2C) with tools/audit_contrast.py:
+  //   crit 3.43:1 and red 4.40:1 both miss AA on dark, so text needs these.
+  //   amber (7.71:1), green (6.52:1) and cyan (5.57:1) already pass on dark
+  //   and are reused as-is by the SL getters below.
+  static const redBeacon    = Color(0xFFF87171);  // 5.98:1 on darkCard
+  static const accentBeacon = Color(0xFF818CF8);  // 5.55:1 on darkCard
+                                                  // (accent itself is 2.99:1)
 
   // Dark mode — graphite steel base (not purple). Cool, industrial, high-legibility.
   static const darkBg     = Color(0xFF0D1117);   // graphite black
@@ -140,6 +152,40 @@ class SL {
   Color get text3  => isDark ? const Color(0xFFA8B3C7) : const Color(0xFF444444);  // Improved contrast: 7.2:1 dark, 8.5:1 light
   Color get text4  => isDark ? const Color(0xFF7A8BA3) : const Color(0xFF666666);  // Improved contrast: 5.1:1 dark, 5.8:1 light
   Color get surface => isDark ? AppColors.darkCard  : Colors.white;
+
+  // ── Status / accent colours FOR TEXT AND ICONS ───────────────────────────
+  // Use these — never a bare `AppColors.amber`/`red`/`green`/`accent` — whenever
+  // a status colour is the FOREGROUND.
+  //
+  // Why: those bare tokens were tuned as FILLS (chip backgrounds) and reused as
+  // text, where amber lands at 2.15:1 on white and green at 2.54:1 — well below
+  // the 4.5:1 AA floor and genuinely unreadable. The values cannot simply be
+  // "fixed" in place either: a hex dark enough for white text-on-light is too
+  // dark on the graphite dark background and vice versa, which is why this is a
+  // theme-aware getter rather than a new constant.
+  //
+  // Bare AppColors status tokens are left deliberately failing so that
+  // tools/audit_contrast.py keeps flagging any reintroduction as foreground.
+  Color get critText   => isDark ? AppColors.redBeacon    : AppColors.critLight;
+  Color get redText    => isDark ? AppColors.redBeacon    : AppColors.critLight;
+  Color get amberText  => isDark ? AppColors.amber        : AppColors.amberLight;
+  Color get greenText  => isDark ? AppColors.green        : AppColors.greenLight;
+  Color get accentText => isDark ? AppColors.accentBeacon : AppColors.accent;
+  Color get cyanText   => isDark ? AppColors.cyan         : AppColors.cyanInk;
+
+  /// Foreground for an arbitrary severity/status colour, mapped to the nearest
+  /// safe token for the current theme. Use at call sites that receive a colour
+  /// as a parameter and cannot know which status it represents.
+  Color textOn(Color fill) {
+    if (fill == AppColors.crit || fill == AppColors.red ||
+        fill == AppColors.critLight) return critText;
+    if (fill == AppColors.amber || fill == AppColors.amberLight) return amberText;
+    if (fill == AppColors.green || fill == AppColors.greenLight) return greenText;
+    if (fill == AppColors.cyan) return cyanText;
+    if (fill == AppColors.accent || fill == AppColors.accentDark ||
+        fill == AppColors.accentGlow) return accentText;
+    return fill;
+  }
 
   // Glassmorphism properties - improved opacity for better contrast
   Color get glassColor => isDark

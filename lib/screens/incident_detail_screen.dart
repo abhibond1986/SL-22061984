@@ -652,7 +652,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               style: TextStyle(
                 color: done  ? const Color(0xFF16A34A)
                     : active ? color : sl.text4,
-                fontSize: 7,
+                fontSize: 10,
                 fontWeight: active ? FontWeight.w800 : FontWeight.w500),
               maxLines: 1, overflow: TextOverflow.ellipsis),
           ])),
@@ -1265,7 +1265,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       children: [
         Text('$score', style: TextStyle(color: color,
             fontSize: 12, fontWeight: FontWeight.w800)),
-        Text('/100', style: TextStyle(color: color, fontSize: 6)),
+        Text('/100', style: TextStyle(color: color, fontSize: 10)),
       ])));
 
   Widget _secLabel(String lbl, SL sl) => Padding(

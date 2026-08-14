@@ -174,17 +174,113 @@ class SupabaseService {
     }
   }
 
+  // ── Schema-gap tolerance ──────────────────────────────────────────────────
+  // Columns PostgREST has told us do not exist on `incidents`.
+  //
+  // Why this exists: PostgREST rejects the ENTIRE row when ONE column is
+  // unknown. So a single un-run migration does not merely drop a field, it
+  // silently breaks ALL incident syncing — a user closes an incident and types
+  // closing remarks, none of it leaves the device, and then the next realtime
+  // UPDATE for that id replaces the local record with a server row that lacks
+  // those fields, erasing the work. That is a data-loss bug, not a cosmetic
+  // one, and it is invisible because upsert failures were swallowed.
+  //
+  // Rather than lose the whole record, learn the missing column names from the
+  // error, drop just those, and retry so everything else still lands.
+  //
+  // This is a SAFETY NET, not a substitute for running the migration: the
+  // dropped fields genuinely do not persist. [incidentSchemaGaps] is exposed so
+  // the admin panel can say so out loud instead of failing quietly.
+  static final Set<String> _incidentMissingCols = <String>{};
+
+  /// Sorted list of `incidents` columns the server has rejected as unknown.
+  /// Non-empty means a migration is outstanding (see migration_workflow_fields.sql).
+  static List<String> get incidentSchemaGaps =>
+      _incidentMissingCols.toList()..sort();
+
+  /// Last incident-write error, for diagnostics. Empty after a clean write.
+  static String incidentsLastError = '';
+
+  /// Extract the offending column from a PostgREST undefined-column error.
+  /// Three message shapes occur in the wild, so all three are handled:
+  ///   42703    → `column incidents.closed_at does not exist`
+  ///   42703    → `column "closed_by" does not exist`   (quoted identifier)
+  ///   PGRST204 → `Could not find the 'closed_at' column of 'incidents' ...`
+  /// Returns null for any other failure, so genuine network/auth/RLS errors are
+  /// NOT mistaken for a schema gap (which would strip columns for no reason).
+  static String? _missingColumnFrom(Object e) {
+    if (e is! PostgrestException) return null;
+    final code = (e.code ?? '').toUpperCase();
+    final msg = e.message;
+    // 42P01 is a missing TABLE, not a missing column. Its message also ends in
+    // "does not exist", so without this it would fall through to the patterns
+    // below and yield a table name that we would then try to strip as a column.
+    if (code == '42P01') return null;
+    if (code != '42703' && code != 'PGRST204') {
+      // Some gateways omit the code; fall back to the message shape.
+      if (!msg.contains('does not exist') && !msg.contains('Could not find')) {
+        return null;
+      }
+    }
+    // PGRST204: `... the 'closed_at' column of 'incidents' ...`
+    final quoted = RegExp("'([A-Za-z0-9_]+)' column").firstMatch(msg);
+    if (quoted != null) return quoted.group(1);
+    // Quoted identifier. The character class excludes '.' on purpose so that
+    // `relation "public.incidents" does not exist` cannot match here.
+    final dquoted =
+        RegExp(r'"([A-Za-z0-9_]+)"\s+does not exist').firstMatch(msg);
+    if (dquoted != null) return dquoted.group(1);
+    // Bare or qualified: `column incidents.closed_at does not exist` and the
+    // fully-qualified `column public.incidents.assigned_to does not exist`.
+    // The prefix repeats (`*`, not `?`) so schema.table.column also matches.
+    final dotted =
+        RegExp(r'column\s+(?:[A-Za-z0-9_]+\.)*([A-Za-z0-9_]+)\s+does not exist')
+            .firstMatch(msg);
+    if (dotted != null) return dotted.group(1);
+    return null;
+  }
+
   /// Insert or update one incident (keyed by id). Returns true on success.
+  ///
+  /// Tolerates a server whose schema is behind the app: unknown columns are
+  /// dropped and the write is retried, so a missing migration costs those
+  /// fields rather than the entire record.
   static Future<bool> upsertIncident(Map<String, dynamic> incident) async {
     if (!isReady) return false;
-    try {
-      final row = _toRow(incident);
-      if ((row['id']?.toString() ?? '').isEmpty) return false;
-      await _db.from('incidents').upsert(row, onConflict: 'id');
-      return true;
-    } catch (_) {
-      return false;
+    final row = _toRow(incident);
+    if ((row['id']?.toString() ?? '').isEmpty) return false;
+
+    // Skip columns already known to be absent — avoids a guaranteed round trip
+    // on every subsequent write once the gap has been discovered.
+    for (final c in _incidentMissingCols) {
+      row.remove(c);
     }
+
+    // One retry per mappable column, so a schema several columns behind
+    // converges instead of giving up after the first rejection.
+    final maxAttempts = _appToDb.length + 1;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await _db.from('incidents').upsert(row, onConflict: 'id');
+        incidentsLastError = '';
+        return true;
+      } catch (e) {
+        final missing = _missingColumnFrom(e);
+        // Never strip the primary key: without `id` the upsert has no conflict
+        // target and would insert duplicates instead of updating.
+        if (missing == null ||
+            missing == 'id' ||
+            !row.containsKey(missing)) {
+          incidentsLastError = _describeError(e);
+          return false;
+        }
+        _incidentMissingCols.add(missing);
+        row.remove(missing);
+        incidentsLastError = 'dropped unknown column "$missing" — '
+            'run migration_workflow_fields.sql';
+      }
+    }
+    return false;
   }
 
   /// Hard-delete an incident by id. Also removes its evidence image from

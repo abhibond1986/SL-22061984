@@ -48,6 +48,12 @@ create index if not exists idx_incidents_plant_dept
 create index if not exists idx_incidents_status
   on public.incidents (status);
 
+-- Force PostgREST to re-read the schema. Supabase normally does this itself via
+-- an event trigger, but when it lags, the API keeps rejecting the new columns
+-- with PGRST204 ("could not find the column in the schema cache") even though
+-- the DDL above succeeded — which looks exactly like the migration not working.
+notify pgrst, 'reload schema';
+
 -- ── Verify ──
 -- Should list all nine columns added above.
 select column_name, data_type

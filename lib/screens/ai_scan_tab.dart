@@ -1458,7 +1458,7 @@ class _AIScanTabState extends State<AIScanTab> {
                                   (h['severity']?.toString().length ?? 4)
                                   .clamp(0, 4)),
                             style: TextStyle(color: sc,
-                                fontSize: 7, fontWeight: FontWeight.w800))),
+                                fontSize: 10, fontWeight: FontWeight.w800))),
                       ]),
                       if (!closed) ...[
                         const SizedBox(height: 6),

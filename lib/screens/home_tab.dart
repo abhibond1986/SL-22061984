@@ -648,7 +648,7 @@ class _HomeTabState extends State<HomeTab> {
                   color: color.withOpacity(0.12),
                   borderRadius: BorderRadius.circular(4)),
                 child: Text(I18n.t('home.thisWeek'),
-                    style: TextStyle(color: color, fontSize: 7,
+                    style: TextStyle(color: color, fontSize: 10,
                         fontWeight: FontWeight.w700, letterSpacing: 0.3))),
             ]),
             const SizedBox(height: 12),
