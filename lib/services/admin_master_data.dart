@@ -8,6 +8,11 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'sync_service.dart';
+// For the canonical list of Gemini vision model IDs, so backend-synced values
+// are validated against ONE source of truth rather than a duplicated list that
+// would drift as Google retires models. (Dart permits the resulting import
+// cycle; gemini_direct_vision.dart imports this file for the admin vocabularies.)
+import 'gemini_direct_vision.dart';
 
 class AdminMasterData {
   // ── LIVE CHANGE NOTIFICATION ─────────────────────────────────────
@@ -486,8 +491,22 @@ class AdminMasterData {
         updated = true;
       }
       if (remote['geminiModel'] is String && (remote['geminiModel'] as String).isNotEmpty) {
-        await prefs.setString('gemini_vision_model', remote['geminiModel'] as String);
-        updated = true;
+        // Validate before writing. This sync runs on every launch, so an old
+        // backend record holding a model Google has since retired would
+        // otherwise re-poison the pref after GeminiDirectVision.getModel() had
+        // already migrated it — the scan would 404 again on every cold start.
+        // Only accept IDs the app actually offers; ignore anything else and
+        // leave the locally-migrated value in place.
+        final remoteModel = remote['geminiModel'] as String;
+        final isKnown = GeminiDirectVision.availableModels
+            .any((m) => m['id'] == remoteModel);
+        if (isKnown) {
+          await prefs.setString('gemini_vision_model', remoteModel);
+          updated = true;
+        } else {
+          print('AdminMasterData: ⏭ Ignoring unknown/retired Gemini model '
+              'from backend: "$remoteModel"');
+        }
       }
 
       return updated;

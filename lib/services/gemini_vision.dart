@@ -373,8 +373,13 @@ class GeminiVision {
               kbContext: kbContext);
           if (_isValidResult(gemResult)) {
             print('GeminiVision: ✓ Direct Gemini SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
-            final model = await GeminiDirectVision.getModel();
-            gemResult!['_source'] = 'gemini_direct';
+            // analyzeImage walks its own chain and stamps the model that
+            // actually answered. Prefer that over the merely *selected* model,
+            // otherwise the AI dashboard attributes latency to the wrong one.
+            final model = (gemResult!['_model'] ?? '').toString().isNotEmpty
+                ? gemResult['_model'].toString()
+                : await GeminiDirectVision.getModel();
+            gemResult['_source'] = 'gemini_direct';
             gemResult['_model'] = model;
             gemResult['_isOnline'] = true;
             _lastCallTime = DateTime.now();

@@ -1,16 +1,19 @@
 // lib/services/gemini_direct_vision.dart
 // ★ v28: Direct Gemini Vision API for hazard image analysis
 //
-// Uses Google Gemini 2.0 Flash (free tier):
-//   - 15 requests per minute
-//   - 1 million tokens per day
-//   - Supports image input (base64)
-//   - No billing required (just an API key from AI Studio)
+// Free tier: 15 requests/minute, 1M tokens/day, image input via base64,
+// no billing required — just an API key from https://aistudio.google.com/apikey
 //
-// This is the PRIMARY image analysis provider.
-// Falls back to Apps Script if this fails.
+// This runs as TIER 2 of the vision chain in gemini_vision.dart, on a quota
+// separate from OpenRouter's, so it still works when OpenRouter returns 429.
 //
-// Get your free API key: https://aistudio.google.com/apikey
+// ⚠ MODEL IDS EXPIRE. Google retires models on published shutdown dates, after
+// which the endpoint returns HTTP 404 "This model is no longer available" and
+// analysis fails silently. On 2026-08-15 this file still pointed at
+// gemini-2.0-flash and gemini-2.0-flash-lite, both shut down 2026-06-01, so
+// every direct-Gemini scan 404'd. Before editing the chain below, check
+// https://ai.google.dev/gemini-api/docs/deprecations for shutdown dates and add
+// any newly-retired ID to [_retiredModels] so saved user preferences migrate.
 
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show Uint8List;
@@ -21,7 +24,25 @@ import 'admin_master_data.dart';
 class GeminiDirectVision {
   static const String _kApiKey = 'gemini_vision_api_key';
   static const String _kModel = 'gemini_vision_model';
-  static const String defaultModel = 'gemini-2.0-flash';
+  /// Google's documented replacement for the retired gemini-2.0-flash.
+  static const String defaultModel = 'gemini-3.6-flash';
+
+  /// Retired model IDs → their documented replacement.
+  ///
+  /// Why this map is essential and not just cosmetic: the selected model is
+  /// persisted in SharedPreferences on each device. Changing [defaultModel]
+  /// alone does NOT help anyone who already has a retired ID saved — their
+  /// browser keeps sending the dead model forever. [getModel] rewrites through
+  /// this map so existing installs self-heal on the next scan.
+  static const Map<String, String> _retiredModels = {
+    'gemini-2.0-flash': 'gemini-3.6-flash',
+    'gemini-2.0-flash-001': 'gemini-3.6-flash',
+    'gemini-2.0-flash-lite': 'gemini-3.1-flash-lite',
+    'gemini-2.0-flash-lite-001': 'gemini-3.1-flash-lite',
+    'gemini-1.5-flash': 'gemini-3.6-flash',
+    'gemini-1.5-pro': 'gemini-2.5-pro',
+    'gemini-2.5-flash-preview-09-25': 'gemini-3.6-flash',
+  };
 
   static SharedPreferences? _prefs;
 
@@ -48,10 +69,22 @@ class GeminiDirectVision {
     await _prefs!.setString(_kApiKey, key.trim());
   }
 
-  /// Get current model
+  /// Get current model, transparently upgrading a retired saved ID.
+  ///
+  /// The rewrite is persisted so the admin panel dropdown also stops showing a
+  /// dead model, and so this costs one write rather than one lookup per scan.
   static Future<String> getModel() async {
     await _ensurePrefs();
-    return _prefs!.getString(_kModel) ?? defaultModel;
+    final saved = _prefs!.getString(_kModel);
+    if (saved == null || saved.isEmpty) return defaultModel;
+    final replacement = _retiredModels[saved];
+    if (replacement != null) {
+      print('GeminiDirectVision: ⚙ Saved model "$saved" was retired by Google '
+          '— migrating to "$replacement"');
+      await _prefs!.setString(_kModel, replacement);
+      return replacement;
+    }
+    return saved;
   }
 
   /// Set model preference
@@ -60,22 +93,24 @@ class GeminiDirectVision {
     await _prefs!.setString(_kModel, model);
   }
 
-  /// Available models — ordered by RELIABILITY (fastest + most stable first)
+  /// Models offered in the Admin panel dropdown.
+  /// All are current, non-preview, and accept image input. Verified against
+  /// https://ai.google.dev/gemini-api/docs/models on 2026-08-15.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'gemini-2.0-flash', 'name': 'Gemini 2.0 Flash (Most reliable, fast)'},
-    {'id': 'gemini-2.5-flash', 'name': 'Gemini 2.5 Flash (Smarter, slower)'},
-    {'id': 'gemini-2.5-pro', 'name': 'Gemini 2.5 Pro (Most accurate, limited quota)'},
+    {'id': 'gemini-3.6-flash',      'name': 'Gemini 3.6 Flash (Recommended, fast)'},
+    {'id': 'gemini-3.7-flash',      'name': 'Gemini 3.7 Flash (Newest)'},
+    {'id': 'gemini-3.1-flash-lite', 'name': 'Gemini 3.1 Flash-Lite (Highest quota)'},
+    {'id': 'gemini-2.5-flash',      'name': 'Gemini 2.5 Flash (Older, still supported)'},
+    {'id': 'gemini-2.5-pro',        'name': 'Gemini 2.5 Pro (Most accurate, low quota)'},
   ];
 
-  /// Fallback model when primary returns low confidence
-  static const String _fallbackModel = 'gemini-2.5-pro';
-
-  /// ★ v33: Model fallback chain — smartest models first (2.5-flash proved best results)
-  /// Each model has separate quota, so trying all gives us 3x the free-tier capacity
+  /// Tried in order after the admin's selected model, so a per-model rate limit
+  /// or an unexpected retirement does not end the scan. Each entry is a distinct
+  /// model with its own quota bucket.
   static const List<String> _modelFallbackChain = [
-    'gemini-2.5-flash',    // Best quality — actually produces CRITICAL/HIGH responses
-    'gemini-2.0-flash',    // Fast, high quota
-    'gemini-2.0-flash-lite', // Last resort — lowest quality but rarely rate-limited
+    'gemini-3.6-flash',      // Documented replacement for 2.0-flash
+    'gemini-3.1-flash-lite', // Documented replacement for 2.0-flash-lite; high quota
+    'gemini-2.5-flash',      // Older generation, still supported — extra headroom
   ];
 
   // ★ v25: Track if quota is exhausted (429) — all models on same key are blocked
@@ -98,43 +133,45 @@ class GeminiDirectVision {
     _quotaExhausted = false;
 
     final apiKey = await getApiKey();
-    final model = await getModel();
+    final selected = await getModel();
     final base64Image = base64Encode(imageBytes);
 
-    // ── Try primary model only — BAIL FAST on 429 ──
-    print('GeminiDirectVision: ▶ Model: $model');
-    final result = await _callModel(model, apiKey, base64Image, kbContext: kbContext);
+    // Admin's choice first, then the rest of the chain. Deduplicated so the
+    // selected model is not retried, and filtered through _retiredModels so a
+    // dead ID can never enter the attempt list.
+    final attempts = <String>[
+      selected,
+      ..._modelFallbackChain,
+    ].map((m) => _retiredModels[m] ?? m).toSet().toList();
 
-    // 429 detected — don't try any other model
-    if (_quotaExhausted) {
-      print('GeminiDirectVision: ⚡ QUOTA EXHAUSTED on $model — bailing immediately (all models blocked)');
-      return null;
+    for (int i = 0; i < attempts.length; i++) {
+      final model = attempts[i];
+      print('GeminiDirectVision: ▶ [${i + 1}/${attempts.length}] $model');
+      final result =
+          await _callModel(model, apiKey, base64Image, kbContext: kbContext);
+
+      // 429/403 is key-wide, not model-specific, so every remaining attempt
+      // would fail the same way. This bail is correct — unlike the previous
+      // one, which also gave up after a 404, a per-MODEL error the next model
+      // in the chain would have survived.
+      if (_quotaExhausted) {
+        print('GeminiDirectVision: ⚡ Quota/key blocked on $model — '
+            'remaining models share the same key, bailing');
+        return null;
+      }
+
+      if (result != null &&
+          result['hazards'] != null &&
+          (result['hazards'] as List).isNotEmpty) {
+        print('GeminiDirectVision: ✓ SUCCESS on $model');
+        result['_source'] = 'gemini_direct';
+        result['_model'] = model;
+        return result;
+      }
     }
 
-    if (result != null &&
-        result['hazards'] != null &&
-        (result['hazards'] as List).isNotEmpty) {
-      return result;
-    }
-
-    // Only try ONE more fallback (not the whole chain) — and only if NOT quota issue
-    final fallback = model == 'gemini-2.0-flash' ? 'gemini-2.0-flash-lite' : 'gemini-2.0-flash';
-    print('GeminiDirectVision: ▶ Quick fallback: $fallback');
-    final fbResult = await _callModel(fallback, apiKey, base64Image, kbContext: kbContext);
-
-    if (_quotaExhausted) {
-      print('GeminiDirectVision: ⚡ QUOTA EXHAUSTED — bailing');
-      return null;
-    }
-
-    if (fbResult != null &&
-        fbResult['hazards'] != null &&
-        (fbResult['hazards'] as List).isNotEmpty) {
-      fbResult['_source'] = 'gemini_direct_$fallback';
-      return fbResult;
-    }
-
-    print('GeminiDirectVision: ✗ Both models failed');
+    print('GeminiDirectVision: ✗ All ${attempts.length} model(s) failed: '
+        '${attempts.join(", ")}');
     return null;
   }
 
@@ -202,6 +239,16 @@ class GeminiDirectVision {
         print('GeminiDirectVision: [$model] API key invalid or quota exceeded (403)');
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
+        return null;
+      } else if (response.statusCode == 404) {
+        // Model retired by Google. This is per-MODEL, so _quotaExhausted must
+        // NOT be set — the caller has to be free to try the next model. Getting
+        // this wrong is what made the whole tier fail on 2026-08-15.
+        print('GeminiDirectVision: [$model] ⚠ MODEL RETIRED (404) — this ID no '
+            'longer exists. Trying next model in chain.');
+        print('GeminiDirectVision:   If this repeats for every model, update '
+            'availableModels/_modelFallbackChain against '
+            'https://ai.google.dev/gemini-api/docs/deprecations');
         return null;
       } else {
         print('GeminiDirectVision: [$model] Error ${response.statusCode}: ${response.body.substring(0, response.body.length.clamp(0, 200))}');

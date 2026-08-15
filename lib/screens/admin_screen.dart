@@ -2555,7 +2555,17 @@ class _AdminScreenState extends State<AdminScreen>
         _groqVisionModel = visionModel;
         _geminiVisionConfigured = gemKey.isNotEmpty && gemKey.length > 20;
         _geminiVisionKeyCtrl.text = gemKey;
-        _geminiVisionSelectedModel = gemModel;
+        // Normalise here, not just in the widget: this field is what the
+        // "Update Model Selection" button and the key-save path write back (and
+        // push to the backend). If the widget silently displayed a fallback
+        // while this held an unknown ID, the admin would see "Gemini 3.6 Flash"
+        // and save a dead model. A saved ID can be outside availableModels
+        // whenever Google retires one before _retiredModels is updated, or when
+        // a stale backend record seeds the pref.
+        _geminiVisionSelectedModel = GeminiDirectVision.availableModels
+                .any((m) => m['id'] == gemModel)
+            ? gemModel
+            : GeminiDirectVision.defaultModel;
       });
     }
   }
@@ -2678,7 +2688,13 @@ class _AdminScreenState extends State<AdminScreen>
         _apiKeyInputField(_geminiVisionKeyCtrl, 'Gemini API Key (from AI Studio)', sl, isGemini: true),
         const SizedBox(height: 10),
         DropdownButtonFormField<String>(
-          value: _geminiVisionSelectedModel,
+          // Dropdown asserts if value is absent from items, which would red-screen
+          // this whole card. A saved model can legitimately fall outside the list
+          // once Google retires it, so fall back to the default rather than crash.
+          value: GeminiDirectVision.availableModels
+                  .any((m) => m['id'] == _geminiVisionSelectedModel)
+              ? _geminiVisionSelectedModel
+              : GeminiDirectVision.defaultModel,
           items: GeminiDirectVision.availableModels.map((m) => DropdownMenuItem(
             value: m['id'], child: Text(m['name']!, style: TextStyle(fontSize: 11, color: sl.text1)),
           )).toList(),
