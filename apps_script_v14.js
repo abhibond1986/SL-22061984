@@ -352,6 +352,14 @@ function getOpenRouterKey() {
   var props = PropertiesService.getScriptProperties();
   return props.getProperty('OPENROUTER_API_KEY') || props.getProperty('OPENROUTER') || '';
 }
+// Optional SECOND OpenRouter key, used by the app purely as failover when the
+// first is revoked or rate-limited. Set Script Property OPENROUTER_API_KEY_2.
+// NOTE: if both keys belong to the same OpenRouter account this buys no extra
+// quota — 'free-models-per-day' is metered per account, not per key.
+function getOpenRouterKey2() {
+  var props = PropertiesService.getScriptProperties();
+  return props.getProperty('OPENROUTER_API_KEY_2') || '';
+}
 function getGroqKey() {
   return PropertiesService.getScriptProperties().getProperty('GROQ_API_KEY') || '';
 }
@@ -2066,7 +2074,7 @@ function getSheet(name) {
 //  Stored in a 'masterdata' sheet as key-value JSON rows.
 // ════════════════════════════════════════════════════════════════════════
 const SHEET_MASTERDATA = 'masterdata';
-const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'geminiModel'];
+const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'openRouterApiKey2', 'geminiModel'];
 
 function saveMasterData(params) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2118,6 +2126,8 @@ function getMasterData() {
     if (gk) emptyResult['geminiApiKey'] = gk;
     var ork = getOpenRouterKey();
     if (ork) emptyResult['openRouterApiKey'] = ork;
+    var ork2 = getOpenRouterKey2();
+    if (ork2 && ork2 !== ork) emptyResult['openRouterApiKey2'] = ork2;
     var grk = getGroqKey();
     if (grk) emptyResult['groqApiKey'] = grk;
     return { ok: true, data: emptyResult, isEmpty: true };
@@ -2150,6 +2160,14 @@ function getMasterData() {
   var orKey = getOpenRouterKey();
   if (orKey && (!result['openRouterApiKey'] || result['openRouterApiKey'].length < 10)) {
     result['openRouterApiKey'] = orKey;
+  }
+  var orKey2 = getOpenRouterKey2();
+  // Skip if identical to the primary: the client dedupes anyway, but sending it
+  // twice would imply to an admin reading the payload that failover is active
+  // when it is really the same key (and the same quota) twice over.
+  if (orKey2 && orKey2 !== (result['openRouterApiKey'] || '') &&
+      (!result['openRouterApiKey2'] || result['openRouterApiKey2'].length < 10)) {
+    result['openRouterApiKey2'] = orKey2;
   }
   var grKey = getGroqKey();
   if (grKey && (!result['groqApiKey'] || result['groqApiKey'].length < 10)) {

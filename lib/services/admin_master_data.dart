@@ -13,6 +13,11 @@ import 'sync_service.dart';
 // would drift as Google retires models. (Dart permits the resulting import
 // cycle; gemini_direct_vision.dart imports this file for the admin vocabularies.)
 import 'gemini_direct_vision.dart';
+// Imported for the OpenRouter pref-key constants only, so the pref names live
+// in exactly one place. gemini_vision.dart imports this file in turn; Dart
+// permits the cycle and it is preferable to duplicating string literals that
+// must match for key sync to work at all.
+import 'gemini_vision.dart';
 
 class AdminMasterData {
   // ── LIVE CHANGE NOTIFICATION ─────────────────────────────────────
@@ -486,8 +491,16 @@ class AdminMasterData {
         updated = true;
       }
       if (remote['openRouterApiKey'] is String && (remote['openRouterApiKey'] as String).length > 10) {
-        await prefs.setString('openrouter_api_key', remote['openRouterApiKey'] as String);
+        await prefs.setString(GeminiVision.kOpenRouterKey1, remote['openRouterApiKey'] as String);
         print('AdminMasterData: ✓ OpenRouter key synced');
+        updated = true;
+      }
+      // Optional SECOND OpenRouter key (failover). Absent from older backend
+      // records, so a missing field must leave any locally-set key alone rather
+      // than clearing it — hence no `else` branch here.
+      if (remote['openRouterApiKey2'] is String && (remote['openRouterApiKey2'] as String).length > 10) {
+        await prefs.setString(GeminiVision.kOpenRouterKey2, remote['openRouterApiKey2'] as String);
+        print('AdminMasterData: ✓ OpenRouter key #2 synced');
         updated = true;
       }
       if (remote['geminiModel'] is String && (remote['geminiModel'] as String).isNotEmpty) {

@@ -257,8 +257,9 @@ class GeminiVision {
       // Ensure the OpenRouter key is on device (auto-sync from server).
       {
         final p = await SharedPreferences.getInstance();
-        final k = p.getString('openrouter_api_key') ?? '';
-        if (!k.startsWith('sk-or-')) {
+        // Sync only when NO key at all is usable. A device holding just the
+        // secondary key is still workable, so don't force a network round trip.
+        if (_configuredOpenRouterKeys(p).isEmpty) {
           print('GeminiVision: OpenRouter key missing — syncing from backend...');
           try {
             await AdminMasterData.syncFromBackend()
@@ -307,8 +308,8 @@ class GeminiVision {
       // TIER 1 — OPENROUTER free vision chain, fastest model first.
       // ══════════════════════════════════════════════════════════════════════
       final prefs = await SharedPreferences.getInstance();
-      final orKey = prefs.getString('openrouter_api_key') ?? '';
-      if (orKey.isNotEmpty && orKey.startsWith('sk-or-')) {
+      final orKeys = _configuredOpenRouterKeys(prefs);
+      if (orKeys.isNotEmpty) {
         // If an admin pinned a model, use only that one; else walk the chain.
         final pinned = prefs.getString(_kVisionModelPin);
         final List<List<String>> attempts = (pinned != null && pinned.isNotEmpty)
@@ -328,31 +329,53 @@ class GeminiVision {
                 [_orGemmaModel,    'Gemma 4 26B (tertiary)'],
                 [_orDotsModel,     'Dots3-Note Preview (quaternary)'],
               ];
-        for (int i = 0; i < attempts.length; i++) {
-          final model = attempts[i][0];
-          final label = attempts[i][1];
-          print('GeminiVision: ▶ [${i + 1}/${attempts.length}] OpenRouter $label...');
-          try {
-            final orResult = await _callOpenRouterVision(bytes, orKey, model, kbContext: kbContext);
-            if (_isValidResult(orResult)) {
-              print('GeminiVision: ✓ [${i + 1}/${attempts.length}] OpenRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
-              orResult!['_source'] = 'openrouter_client';
-              orResult['_model'] = model;
-              orResult['_isOnline'] = true;
-              _lastCallTime = DateTime.now();
-              _isAnalyzing = false;
-              // Cache so the SAME image always returns THIS result.
-              await _writeCachedResult(imgHash, orResult);
-              // The only SUCCESS path: a real provider returned hazards for
-              // this image. Model is passed explicitly so the dashboard can
-              // compare the primary and secondary models' latency.
-              return logged(orResult,
-                  outcome: AiRunLog.outcomeSuccess,
-                  model: model,
-                  imageHash: imgHash);
+        // Outer loop over KEYS, inner loop over MODELS. See
+        // [_configuredOpenRouterKeys] for what a second key does and does not
+        // buy you.
+        keyLoop:
+        for (int k = 0; k < orKeys.length; k++) {
+          final orKey = orKeys[k];
+          final keyTag = orKeys.length > 1 ? ' {key ${k + 1}/${orKeys.length}}' : '';
+          for (int i = 0; i < attempts.length; i++) {
+            final model = attempts[i][0];
+            final label = attempts[i][1];
+            print('GeminiVision: ▶ [${i + 1}/${attempts.length}]$keyTag OpenRouter $label...');
+            try {
+              final orResult = await _callOpenRouterVision(bytes, orKey, model, kbContext: kbContext);
+              if (_isValidResult(orResult)) {
+                print('GeminiVision: ✓ [${i + 1}/${attempts.length}]$keyTag OpenRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
+                orResult!['_source'] = 'openrouter_client';
+                orResult['_model'] = model;
+                orResult['_isOnline'] = true;
+                _lastCallTime = DateTime.now();
+                _isAnalyzing = false;
+                // Cache so the SAME image always returns THIS result.
+                await _writeCachedResult(imgHash, orResult);
+                // The only SUCCESS path: a real provider returned hazards for
+                // this image. Model is passed explicitly so the dashboard can
+                // compare the primary and secondary models' latency.
+                return logged(orResult,
+                    outcome: AiRunLog.outcomeSuccess,
+                    model: model,
+                    imageHash: imgHash);
+              }
+              // 429/401/402/403 condemn the key, not the model: the other three
+              // models draw on the same account allowance and would fail the
+              // same way. Abandon this key now rather than burning three more
+              // round trips (~3x45s worst case) to learn nothing.
+              if (_lastOrFailureIsKeyWide) {
+                if (k + 1 < orKeys.length) {
+                  print('GeminiVision: ⏩$keyTag blocked (HTTP $_lastOrStatus) — '
+                      'switching to key ${k + 2}/${orKeys.length}');
+                  continue keyLoop;
+                }
+                print('GeminiVision: ⏹$keyTag blocked (HTTP $_lastOrStatus) and '
+                    'no further keys — leaving Tier 1 for direct Gemini');
+                break keyLoop;
+              }
+            } catch (e) {
+              print('GeminiVision: ✗$keyTag OpenRouter $label exception: $e');
             }
-          } catch (e) {
-            print('GeminiVision: ✗ OpenRouter $label exception: $e');
           }
         }
       } else {
@@ -483,6 +506,55 @@ class GeminiVision {
     }
   }
 
+  /// SharedPreferences key for the optional SECOND OpenRouter key.
+  static const String kOpenRouterKey1 = 'openrouter_api_key';
+  static const String kOpenRouterKey2 = 'openrouter_api_key_2';
+
+  /// Every usable OpenRouter key on this device, primary first, deduplicated.
+  ///
+  /// ⚠ READ THIS BEFORE ASSUMING A SECOND KEY RAISES YOUR QUOTA. It does not,
+  /// if both keys belong to the same OpenRouter account. The free allowance
+  /// (`free-models-per-day`) is metered per ACCOUNT, not per key, so two keys
+  /// from one account share one counter and the failover below will simply 429
+  /// twice. What a second key genuinely buys:
+  ///   • failover if the primary is revoked, rotated, or mistyped (401/403),
+  ///   • a paid/org account as backup once the personal free tier is spent.
+  /// The real fix for repeated 429s is credits on the primary account (10 USD
+  /// raises free-model requests from ~50/day to 1000/day) or a Gemini key for
+  /// Tier 2, which is metered by Google entirely separately.
+  ///
+  /// Duplicates are dropped because pasting the same key into both admin fields
+  /// is an easy mistake and would otherwise double every failed scan's latency.
+  static List<String> _configuredOpenRouterKeys(SharedPreferences prefs) {
+    final keys = <String>[];
+    for (final prefKey in const [kOpenRouterKey1, kOpenRouterKey2]) {
+      final v = (prefs.getString(prefKey) ?? '').trim();
+      // Same validity test as before: OpenRouter keys are 'sk-or-...'. A blank
+      // or half-pasted second field must be ignored, not treated as a failure.
+      if (v.startsWith('sk-or-') && !keys.contains(v)) keys.add(v);
+    }
+    return keys;
+  }
+
+  /// HTTP status of the most recent OpenRouter call, or null if the request
+  /// never completed (timeout / socket error).
+  ///
+  /// Exists so the caller can distinguish a failure that is specific to ONE
+  /// MODEL (e.g. 404 bad slug, 502 upstream provider hiccup — try the next
+  /// model) from one that condemns the WHOLE KEY (429 quota, 401 revoked, 402
+  /// no credit, 403 blocked — every model on this key will fail identically, so
+  /// stop wasting requests and move to the next key). Without this the caller
+  /// only saw `null` and had to burn four calls to learn the same thing.
+  static int? _lastOrStatus;
+
+  /// True when [_lastOrStatus] means "this key is finished for now", as opposed
+  /// to "this model didn't work".
+  static bool get _lastOrFailureIsKeyWide =>
+      _lastOrStatus == 429 || // daily/minute quota — counted per ACCOUNT
+      _lastOrStatus == 401 || // key invalid or revoked
+      _lastOrStatus == 402 || // out of credit
+      _lastOrStatus == 403;   // key blocked / privacy policy rejects the model
+
   // ══════════════════════════════════════════════════════════════════════════
   //  OPENROUTER (client) — multimodal vision, model chosen by caller
   // ══════════════════════════════════════════════════════════════════════════
@@ -518,6 +590,7 @@ class GeminiVision {
       'seed': 42,
     };
 
+    _lastOrStatus = null;
     try {
       final response = await http.post(
         Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
@@ -530,6 +603,7 @@ class GeminiVision {
         body: jsonEncode(requestBody),
       ).timeout(const Duration(seconds: 45));
 
+      _lastOrStatus = response.statusCode;
       if (response.statusCode == 200) {
         final data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
         final choices = data['choices'] as List?;
@@ -551,7 +625,14 @@ class GeminiVision {
         print('GeminiVision: ⚠ OpenRouter RATE LIMITED (429) on $model'
             '${detail.isEmpty ? '' : ' — $detail'}');
         print('GeminiVision:   Free-tier quota is account-wide across all '
-            ':free models. Configure a Gemini key in Admin → System Health.');
+            ':free models, so the remaining models on THIS key will also 429. '
+            'Configure a Gemini key in Admin → System Health, or add credits.');
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        print('GeminiVision: ⚠ OpenRouter REJECTED THE KEY '
+            '(${response.statusCode}) on $model — key invalid, revoked, or '
+            'blocked. Check Admin → System Health.');
+      } else if (response.statusCode == 402) {
+        print('GeminiVision: ⚠ OpenRouter OUT OF CREDIT (402) on $model.');
       } else {
         print('GeminiVision: OpenRouter HTTP ${response.statusCode} on $model');
       }
