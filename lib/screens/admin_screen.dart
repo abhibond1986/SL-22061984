@@ -245,6 +245,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   // ── Compliance state ────────────────────────────────────────────
   String _compliancePlantFilter = 'ALL';
+  bool _spiCardExpanded = false;
 
   @override
   void initState() {
@@ -5446,6 +5447,8 @@ class _AdminScreenState extends State<AdminScreen>
 
       const SizedBox(height: 14),
 
+      _spiCard(rows, sl),
+
       _sectionHeader('Plant Scorecards', sl),
       const SizedBox(height: 8),
       if (filtered.isEmpty)
@@ -5589,6 +5592,234 @@ class _AdminScreenState extends State<AdminScreen>
       Text(value, style: TextStyle(
           color: color, fontSize: 14, fontWeight: FontWeight.w800)),
     ]);
+
+  Widget _spiCard(List<_PlantCompliance> rows, SL sl) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF1E88E5).withOpacity(0.3))),
+      child: Column(children: [
+        InkWell(
+          onTap: () => setState(() => _spiCardExpanded = !_spiCardExpanded),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  const Color(0xFF1E88E5).withOpacity(0.12),
+                  const Color(0xFF1565C0).withOpacity(0.06)
+                ]),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12))),
+            child: Row(children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E88E5).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8)),
+                child: const Icon(Icons.assessment_rounded,
+                    color: Color(0xFF1E88E5), size: 20)),
+              const SizedBox(width: 12),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Safety Performance Indicator (SPI)',
+                      style: TextStyle(color: Color(0xFF1E88E5),
+                          fontSize: 14, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 2),
+                  Text('${rows.length} plants monitored',
+                      style: TextStyle(color: sl.text4, fontSize: 10.5)),
+                ])),
+              GestureDetector(
+                onTap: () => _showScoreFormulaDialog(sl),
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E88E5).withOpacity(0.15),
+                    shape: BoxShape.circle),
+                  child: const Icon(Icons.help_outline_rounded,
+                      color: Color(0xFF1E88E5), size: 16))),
+              const SizedBox(width: 8),
+              Icon(_spiCardExpanded
+                  ? Icons.keyboard_arrow_up_rounded
+                  : Icons.keyboard_arrow_down_rounded,
+                  color: const Color(0xFF1E88E5), size: 22),
+            ])),
+        ),
+        if (_spiCardExpanded) ...[
+          const Divider(height: 1),
+          Container(
+            padding: const EdgeInsets.all(12),
+            child: Column(children: [
+              // Header row
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: sl.text4.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(6)),
+                child: Row(children: [
+                  Expanded(flex: 3, child: Text('Plant/Unit',
+                      style: TextStyle(color: sl.text3, fontSize: 10,
+                          fontWeight: FontWeight.w800))),
+                  SizedBox(width: 60, child: Text('Score',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: sl.text3, fontSize: 10,
+                          fontWeight: FontWeight.w800))),
+                  SizedBox(width: 50, child: Text('Total',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: sl.text3, fontSize: 10,
+                          fontWeight: FontWeight.w800))),
+                  SizedBox(width: 50, child: Text('Crit.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: sl.text3, fontSize: 10,
+                          fontWeight: FontWeight.w800))),
+                ])),
+              const SizedBox(height: 6),
+              // Plant rows
+              ...rows.map((pc) {
+                final closureRate = pc.total == 0 ? 0.0 : pc.closed / pc.total;
+                final score = (closureRate * 60) +
+                              (pc.staleHighCritical == 0 ? 25 : math.max(0, 25 - pc.staleHighCritical * 5)) +
+                              (pc.critical == 0 ? 15 : math.max(0, 15 - pc.critical));
+                final scoreI = score.round().clamp(0, 100);
+                final scoreColor = scoreI >= 80 ? AppColors.green
+                                 : scoreI >= 50 ? AppColors.amber
+                                 : AppColors.red;
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: scoreColor.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: scoreColor.withOpacity(0.2))),
+                  child: Row(children: [
+                    Expanded(flex: 3, child: Text(pc.plant,
+                        style: TextStyle(color: sl.text1, fontSize: 11.5,
+                            fontWeight: FontWeight.w700))),
+                    SizedBox(width: 60, child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: scoreColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: scoreColor)),
+                      child: Text('$scoreI',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: scoreColor, fontSize: 12,
+                              fontWeight: FontWeight.w800)))),
+                    SizedBox(width: 50, child: Text('${pc.total}',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: sl.text2, fontSize: 11,
+                            fontWeight: FontWeight.w600))),
+                    SizedBox(width: 50, child: Text('${pc.critical}',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: pc.critical > 0 ? AppColors.crit : sl.text3,
+                            fontSize: 11, fontWeight: FontWeight.w600))),
+                  ]));
+              }).toList(),
+            ])),
+        ],
+      ]));
+  }
+
+  void _showScoreFormulaDialog(SL sl) {
+    showDialog(context: context, builder: (_) =>
+      AlertDialog(
+        backgroundColor: sl.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E88E5).withOpacity(0.15),
+              borderRadius: BorderRadius.circular(6)),
+            child: const Icon(Icons.calculate_rounded,
+                color: Color(0xFF1E88E5), size: 18)),
+          const SizedBox(width: 10),
+          const Text('SPI Score Calculation',
+              style: TextStyle(color: Color(0xFF1E88E5), fontSize: 14,
+                  fontWeight: FontWeight.w800)),
+        ]),
+        content: SingleChildScrollView(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E88E5).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF1E88E5).withOpacity(0.2))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Score = Closure Points + Stale Points + Critical Points',
+                    style: TextStyle(color: sl.text1, fontSize: 12,
+                        fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text('Maximum: 100 points',
+                    style: TextStyle(color: sl.text3, fontSize: 10.5)),
+              ])),
+            const SizedBox(height: 14),
+            _formulaSection('1. Closure Rate Component', '(max 60 points)', [
+              'Closure Rate = Closed Incidents ÷ Total Incidents',
+              'Points = Closure Rate × 60',
+            ], sl),
+            const SizedBox(height: 12),
+            _formulaSection('2. Stale High/Critical Incidents', '(max 25 points)', [
+              'If stale count = 0: 25 points',
+              'Otherwise: max(0, 25 - (stale count × 5))',
+              'Each stale incident (>7 days) costs 5 points',
+            ], sl),
+            const SizedBox(height: 12),
+            _formulaSection('3. Critical Incidents', '(max 15 points)', [
+              'If critical count = 0: 15 points',
+              'Otherwise: max(0, 15 - critical count)',
+              'Each critical incident costs 1 point',
+            ], sl),
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.amber.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppColors.amber.withOpacity(0.3))),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Icon(Icons.info_outline_rounded,
+                    color: AppColors.amber, size: 14),
+                const SizedBox(width: 8),
+                Expanded(child: Text(
+                  'Score ranges: ≥80 Excellent (green), ≥50 Good (amber), <50 Needs Attention (red)',
+                  style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
+              ])),
+          ])),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close',
+                style: TextStyle(color: Color(0xFF1E88E5),
+                    fontWeight: FontWeight.w700))),
+        ]));
+  }
+
+  Widget _formulaSection(String title, String subtitle, List<String> points, SL sl) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title, style: TextStyle(color: sl.text1, fontSize: 11.5,
+          fontWeight: FontWeight.w800)),
+      const SizedBox(height: 2),
+      Text(subtitle, style: TextStyle(color: sl.text4, fontSize: 9.5)),
+      const SizedBox(height: 6),
+      ...points.map((p) => Padding(
+        padding: const EdgeInsets.only(left: 8, bottom: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('• ', style: TextStyle(color: sl.text3, fontSize: 10.5)),
+          Expanded(child: Text(p,
+              style: TextStyle(color: sl.text2, fontSize: 10.5, height: 1.4))),
+        ]))),
+    ]);
+  }
 
   Widget _complianceCheck(String label, bool? state, SL sl) {
     IconData icon;

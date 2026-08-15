@@ -89,6 +89,7 @@ class AdminMasterData {
     {'code': 'COLLIERIES', 'name': 'Collieries Division',         'state': 'Jharkhand/WB', 'kind': 'Mines'},
     {'code': 'SRU',        'name': 'SRU Kulti',                   'state': 'West Bengal',  'kind': 'Refractory'},
     {'code': 'CORP',       'name': 'Corporate — Ranchi',          'state': 'Jharkhand',    'kind': 'HQ'},
+    {'code': 'SSO',        'name': 'SAIL Safety Organisation',    'state': 'Jharkhand',    'kind': 'Safety'},
     {'code': 'OTHER',      'name': 'Others',                      'state': '—',            'kind': 'Other'},
   ];
 
