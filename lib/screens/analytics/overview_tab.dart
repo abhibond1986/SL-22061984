@@ -25,6 +25,7 @@ class OverviewTab extends StatefulWidget {
 class _OverviewTabState extends State<OverviewTab> {
   List<Map<String, dynamic>> _incidents = [];
   bool _loading = true;
+  bool _spiExpanded = false;
   // Admin-configured severities, so charts show exactly the levels the admin
   // defined (a renamed level no longer leaves a phantom zero row).
   List<String> _severities =
@@ -228,6 +229,43 @@ class _OverviewTabState extends State<OverviewTab> {
     return '${oldest['title'] ?? 'Untitled'} ($days days)';
   }
 
+  // ── SPI SCORECARD DATA ───────────────────────────────────────────
+  List<_PlantScore> get _plantScores {
+    final byPlant = <String, _PlantScore>{};
+    final plants = AdminMasterData.sailPlants;
+
+    for (final inc in _incidents) {
+      final plantRaw = inc['plant']?.toString() ?? '';
+      final canon = AdminMasterData.canonicalPlantFrom(plantRaw, plants);
+      final p = canon.isEmpty ? '—' : canon;
+
+      byPlant.putIfAbsent(p, () => _PlantScore(p));
+      final ps = byPlant[p]!;
+      ps.total++;
+
+      final sev = inc['severity']?.toString().toUpperCase() ?? '';
+      final isClosed = _isClosed(inc);
+
+      if (sev == 'CRITICAL') ps.critical++;
+      if (sev == 'HIGH') ps.high++;
+      if (isClosed) {
+        ps.closed++;
+      } else {
+        ps.open++;
+        if (sev == 'CRITICAL' || sev == 'HIGH') {
+          final d = DateTime.tryParse(inc['date']?.toString() ?? '');
+          if (d != null && DateTime.now().difference(d).inDays > 7) {
+            ps.staleHighCritical++;
+          }
+        }
+      }
+    }
+
+    final scores = byPlant.values.toList()
+      ..sort((a, b) => b.score.compareTo(a.score));
+    return scores.where((s) => s.plant != '—').toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     final sl = SL.of(context);
@@ -272,6 +310,10 @@ class _OverviewTabState extends State<OverviewTab> {
           ],
           _kpiStrip(sl),
           const SizedBox(height: 16),
+          if (_scope.seesAllPlants) ...[
+            _spiScorecard(sl),
+            const SizedBox(height: 16),
+          ],
           _statusPipeline(sl),
           const SizedBox(height: 16),
           _monthlyTrendChart(sl),
@@ -816,5 +858,488 @@ class _OverviewTabState extends State<OverviewTab> {
               isAiScan ? Icons.image_search_rounded : Icons.warning_amber_rounded,
               color: sevColor, size: 20),
     );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  SPI SCORECARD — Modern, informative safety performance indicator
+  // ═══════════════════════════════════════════════════════════════
+  Widget _spiScorecard(SL sl) {
+    final scores = _plantScores;
+    if (scores.isEmpty) return const SizedBox();
+
+    final avgScore = scores.fold(0, (sum, s) => sum + s.score) / scores.length;
+    final topPlant = scores.first;
+    final needsAttention = scores.where((s) => s.score < 50).length;
+
+    return GestureDetector(
+      onTap: () => setState(() => _spiExpanded = !_spiExpanded),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  const Color(0xFF1E88E5).withOpacity(0.15),
+                  const Color(0xFF1565C0).withOpacity(0.08),
+                ]),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFF1E88E5).withOpacity(0.4)),
+            ),
+            child: Column(children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF1E88E5), Color(0xFF1565C0)]),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF1E88E5).withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2))
+                      ]),
+                    child: const Icon(Icons.assessment_rounded,
+                        color: Colors.white, size: 22)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Safety Performance Indicator',
+                            style: TextStyle(
+                                color: Color(0xFF1E88E5),
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 3),
+                        Row(children: [
+                          Icon(Icons.factory_rounded,
+                              size: 11, color: sl.text4),
+                          const SizedBox(width: 4),
+                          Text('${scores.length} plants monitored',
+                              style: TextStyle(
+                                  color: sl.text4,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600)),
+                          const SizedBox(width: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: _scoreColor(avgScore.round())
+                                  .withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(
+                                  color: _scoreColor(avgScore.round()))),
+                            child: Text('Avg ${avgScore.round()}',
+                                style: TextStyle(
+                                    color: _scoreColor(avgScore.round()),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800))),
+                        ]),
+                      ]),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      _showScoreFormulaDialog(sl);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E88E5).withOpacity(0.15),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color: const Color(0xFF1E88E5).withOpacity(0.3))),
+                      child: const Icon(Icons.help_outline_rounded,
+                          color: Color(0xFF1E88E5), size: 17))),
+                  const SizedBox(width: 10),
+                  Icon(
+                      _spiExpanded
+                          ? Icons.keyboard_arrow_up_rounded
+                          : Icons.keyboard_arrow_down_rounded,
+                      color: const Color(0xFF1E88E5),
+                      size: 24),
+                ]),
+              ),
+
+              // Compact summary (always visible)
+              if (!_spiExpanded) ...[
+                const Divider(height: 1, thickness: 0.5),
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(children: [
+                    Expanded(
+                      child: _spiQuickStat(
+                          '🏆 Top Performer',
+                          topPlant.plant,
+                          topPlant.score.toString(),
+                          _scoreColor(topPlant.score),
+                          sl)),
+                    Container(
+                        width: 1,
+                        height: 40,
+                        color: sl.border.withOpacity(0.3)),
+                    Expanded(
+                      child: _spiQuickStat(
+                          '⚠️ Needs Attention',
+                          needsAttention == 0 ? 'None' : '$needsAttention ${needsAttention == 1 ? 'plant' : 'plants'}',
+                          needsAttention == 0 ? '—' : '',
+                          needsAttention == 0 ? AppColors.green : AppColors.red,
+                          sl)),
+                  ]),
+                ),
+              ],
+
+              // Expanded detailed view
+              if (_spiExpanded) ...[
+                const Divider(height: 1, thickness: 0.5),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 400),
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(14),
+                    shrinkWrap: true,
+                    itemCount: scores.length,
+                    itemBuilder: (context, i) => _plantScoreCard(scores[i], sl)),
+                ),
+              ],
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _spiQuickStat(String label, String value, String badge, Color color, SL sl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Column(children: [
+        Text(label,
+            style: TextStyle(
+                color: sl.text4, fontSize: 10, fontWeight: FontWeight.w600),
+            textAlign: TextAlign.center),
+        const SizedBox(height: 6),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Flexible(
+            child: Text(value,
+                style: TextStyle(
+                    color: sl.text1, fontSize: 13, fontWeight: FontWeight.w800),
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis)),
+          if (badge.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: color)),
+              child: Text(badge,
+                  style: TextStyle(
+                      color: color, fontSize: 10, fontWeight: FontWeight.w800))),
+          ],
+        ]),
+      ]),
+    );
+  }
+
+  Widget _plantScoreCard(_PlantScore ps, SL sl) {
+    final scoreColor = _scoreColor(ps.score);
+    final closureRate = ps.total == 0 ? 0.0 : (ps.closed / ps.total);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: sl.glassColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scoreColor.withOpacity(0.3)),
+      ),
+      child: Column(children: [
+        // Header row
+        Row(children: [
+          Expanded(
+            child: Text(ps.plant,
+                style: TextStyle(
+                    color: sl.text1, fontSize: 13, fontWeight: FontWeight.w800)),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [
+                scoreColor.withOpacity(0.2),
+                scoreColor.withOpacity(0.1)
+              ]),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: scoreColor, width: 1.5)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Text('${ps.score}',
+                  style: TextStyle(
+                      color: scoreColor, fontSize: 16, fontWeight: FontWeight.w800)),
+              const SizedBox(width: 3),
+              Text('/100',
+                  style: TextStyle(
+                      color: scoreColor.withOpacity(0.7),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ])),
+        ]),
+
+        const SizedBox(height: 10),
+
+        // Progress bar
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: Stack(children: [
+            Container(
+              height: 8,
+              decoration: BoxDecoration(
+                color: sl.border.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(6)),
+            ),
+            FractionallySizedBox(
+              widthFactor: (ps.score / 100).clamp(0.0, 1.0),
+              child: Container(
+                height: 8,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [scoreColor, scoreColor.withOpacity(0.7)]),
+                  borderRadius: BorderRadius.circular(6),
+                  boxShadow: [
+                    BoxShadow(
+                      color: scoreColor.withOpacity(0.4),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1))
+                  ]),
+              )),
+          ]),
+        ),
+
+        const SizedBox(height: 10),
+
+        // Metrics row
+        Row(children: [
+          _spiMetric(Icons.list_alt_rounded, 'Total', '${ps.total}', sl.text2, sl),
+          const SizedBox(width: 12),
+          _spiMetric(Icons.error_outline_rounded, 'Critical', '${ps.critical}',
+              ps.critical > 0 ? AppColors.crit : sl.text3, sl),
+          const SizedBox(width: 12),
+          _spiMetric(Icons.check_circle_outline, 'Closure', '${(closureRate * 100).round()}%',
+              closureRate >= 0.8 ? AppColors.green
+                : closureRate >= 0.5 ? AppColors.amber : AppColors.red, sl),
+          const SizedBox(width: 12),
+          _spiMetric(Icons.access_time_rounded, 'Stale', '${ps.staleHighCritical}',
+              ps.staleHighCritical > 0 ? AppColors.red : AppColors.green, sl),
+        ]),
+
+        if (ps.staleHighCritical > 0) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.red.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppColors.red.withOpacity(0.3))),
+            child: Row(children: [
+              const Icon(Icons.warning_amber_rounded,
+                  color: AppColors.red, size: 14),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '${ps.staleHighCritical} HIGH/CRITICAL incident(s) open >7 days',
+                  style: const TextStyle(
+                      color: AppColors.red, fontSize: 10, fontWeight: FontWeight.w700))),
+            ])),
+        ],
+      ]),
+    );
+  }
+
+  Widget _spiMetric(IconData icon, String label, String value, Color color, SL sl) {
+    return Expanded(
+      child: Column(children: [
+        Icon(icon, color: color, size: 14),
+        const SizedBox(height: 3),
+        Text(value,
+            style: TextStyle(
+                color: color, fontSize: 12, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 1),
+        Text(label,
+            style: TextStyle(
+                color: sl.text4, fontSize: 8, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+
+  Color _scoreColor(int score) {
+    if (score >= 80) return AppColors.green;
+    if (score >= 50) return AppColors.amber;
+    return AppColors.red;
+  }
+
+  void _showScoreFormulaDialog(SL sl) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: sl.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF1E88E5), Color(0xFF1565C0)]),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.calculate_rounded,
+                color: Colors.white, size: 20)),
+          const SizedBox(width: 12),
+          const Text('SPI Score Calculation',
+              style: TextStyle(
+                  color: Color(0xFF1E88E5),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800)),
+        ]),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [
+                    const Color(0xFF1E88E5).withOpacity(0.1),
+                    const Color(0xFF1565C0).withOpacity(0.05)
+                  ]),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                      color: const Color(0xFF1E88E5).withOpacity(0.3))),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Score = Closure + Stale + Critical',
+                        style: TextStyle(
+                            color: sl.text1,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 8),
+                    Text('Maximum: 100 points',
+                        style: TextStyle(color: sl.text3, fontSize: 11)),
+                  ]),
+              ),
+              const SizedBox(height: 16),
+              _formulaSection(
+                  '1. Closure Rate',
+                  '(max 60 points)',
+                  [
+                    'Rate = Closed ÷ Total',
+                    'Points = Rate × 60',
+                  ],
+                  sl),
+              const SizedBox(height: 14),
+              _formulaSection(
+                  '2. Stale HIGH/CRITICAL',
+                  '(max 25 points)',
+                  [
+                    'If stale = 0: 25 points',
+                    'Else: max(0, 25 - stale×5)',
+                    'Each stale (>7d) costs 5 pts',
+                  ],
+                  sl),
+              const SizedBox(height: 14),
+              _formulaSection(
+                  '3. Critical Incidents',
+                  '(max 15 points)',
+                  [
+                    'If critical = 0: 15 points',
+                    'Else: max(0, 15 - critical)',
+                    'Each critical costs 1 point',
+                  ],
+                  sl),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.amber.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.amber.withOpacity(0.4))),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.info_outline_rounded,
+                        color: AppColors.amber, size: 16),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Ranges: ≥80 Excellent (green), ≥50 Good (amber), <50 Needs Attention (red)',
+                        style: TextStyle(
+                            color: sl.text2, fontSize: 10.5, height: 1.4))),
+                  ]),
+              ),
+            ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close',
+                style: TextStyle(
+                    color: Color(0xFF1E88E5), fontWeight: FontWeight.w700))),
+        ]));
+  }
+
+  Widget _formulaSection(String title, String subtitle, List<String> points, SL sl) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title,
+          style: TextStyle(
+              color: sl.text1, fontSize: 12, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 2),
+      Text(subtitle,
+          style: TextStyle(color: sl.text4, fontSize: 10)),
+      const SizedBox(height: 8),
+      ...points.map((p) => Padding(
+            padding: const EdgeInsets.only(left: 10, bottom: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('• ',
+                    style: TextStyle(color: sl.text3, fontSize: 11)),
+                Expanded(
+                  child: Text(p,
+                      style: TextStyle(
+                          color: sl.text2, fontSize: 11, height: 1.4))),
+              ]),
+          )),
+    ]);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PLANT SCORE DATA CLASS
+// ═══════════════════════════════════════════════════════════════
+class _PlantScore {
+  final String plant;
+  int total = 0;
+  int critical = 0;
+  int high = 0;
+  int open = 0;
+  int closed = 0;
+  int staleHighCritical = 0;
+
+  _PlantScore(this.plant);
+
+  int get score {
+    final closureRate = total == 0 ? 0.0 : closed / total;
+    final closurePoints = (closureRate * 60).round();
+    final stalePoints = staleHighCritical == 0
+        ? 25
+        : (25 - staleHighCritical * 5).clamp(0, 25);
+    final criticalPoints = critical == 0 ? 15 : (15 - critical).clamp(0, 15);
+    return (closurePoints + stalePoints + criticalPoints).clamp(0, 100);
   }
 }
