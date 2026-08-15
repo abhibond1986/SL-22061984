@@ -24,6 +24,7 @@ class OverviewTab extends StatefulWidget {
 
 class _OverviewTabState extends State<OverviewTab> {
   List<Map<String, dynamic>> _incidents = [];
+  List<Map<String, dynamic>> _allIncidents = []; // Unscoped incidents for SPI calculation
   bool _loading = true;
   bool _spiExpanded = false;
   bool _spiCardVisible = true; // Admin-controlled setting
@@ -66,10 +67,11 @@ class _OverviewTabState extends State<OverviewTab> {
 
   Future<void> _load() async {
     final scope = await PlantScope.forUser();
+    final allInc = await LocalDB.getIncidents(); // Unscoped incidents for SPI
     // Scope the data at the source: a non-admin never holds another plant's
     // records in memory, so no KPI, chart or drill-through sheet below can
     // reveal them.
-    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
+    final inc = await scope.filterIncidents(allInc);
     final sevs = await AdminMasterData.getSeverities();
     final statuses = await AdminMasterData.getStatuses();
     final open = await AdminMasterData.getOpenStatuses();
@@ -80,6 +82,7 @@ class _OverviewTabState extends State<OverviewTab> {
       setState(() {
         _scope = scope;
         _incidents = inc;
+        _allIncidents = allInc; // Store unscoped for SPI calculation
         _severities = sevs;
         _statuses = statuses;
         _openStatuses = open;
@@ -240,7 +243,8 @@ class _OverviewTabState extends State<OverviewTab> {
     final byPlant = <String, _PlantScore>{};
     final plants = AdminMasterData.sailPlants;
 
-    for (final inc in _incidents) {
+    // Use ALL incidents (unscoped) for organization-wide SPI calculation
+    for (final inc in _allIncidents) {
       final plantRaw = inc['plant']?.toString() ?? '';
       final canon = AdminMasterData.canonicalPlantFrom(plantRaw, plants);
       final p = canon.isEmpty ? '—' : canon;
@@ -316,7 +320,7 @@ class _OverviewTabState extends State<OverviewTab> {
           ],
           _kpiStrip(sl),
           const SizedBox(height: 16),
-          if (_scope.seesAllPlants && _spiCardVisible) ...[
+          if (_spiCardVisible && _allIncidents.isNotEmpty) ...[
             _spiScorecard(sl),
             const SizedBox(height: 16),
           ],
