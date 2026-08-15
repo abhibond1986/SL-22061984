@@ -511,15 +511,33 @@ class AdminMasterData {
 
   /// Get whether SPI scorecard should be shown in frontend Reports
   static Future<bool> getSpiCardVisible() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_kShowSpiCard) ?? true; // Default: visible
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final value = prefs.getBool(_kShowSpiCard);
+      // If never set, default to FALSE (hidden) for safety
+      // Admin must explicitly enable it
+      return value ?? false;
+    } catch (e) {
+      print('Error reading SPI visibility: $e');
+      return false; // Fail-safe: hide by default
+    }
   }
 
   /// Set SPI scorecard visibility
   static Future<void> setSpiCardVisible(bool visible) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kShowSpiCard, visible);
-    _bump();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShowSpiCard, visible);
+      await prefs.reload(); // Force reload to ensure persistence
+      _bump();
+      // Verify it was saved
+      final saved = prefs.getBool(_kShowSpiCard);
+      if (saved != visible) {
+        print('WARNING: SPI visibility not saved correctly! Expected $visible, got $saved');
+      }
+    } catch (e) {
+      print('Error saving SPI visibility: $e');
+    }
   }
 
   /// Get SPI calculation parameters

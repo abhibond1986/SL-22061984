@@ -617,6 +617,15 @@ class LocalDB {
     }
   }
 
+  /// Permanently delete ALL incidents from local storage.
+  /// Used by admin to clear all data and start fresh.
+  /// WARNING: This cannot be undone!
+  static Future<void> clearAllIncidents() async {
+    await _prefs.setString(_kIncidents, jsonEncode([]));
+    // Also clear the tombstone tracking
+    await _prefs.remove(_kDeletedIncidentIds);
+  }
+
   /// Apply an incident row that came FROM the server (realtime or a pull).
   ///
   /// Why this is not just [saveIncident]: saveIncident replaces the whole

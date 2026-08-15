@@ -2145,13 +2145,16 @@ class _AdminScreenState extends State<AdminScreen>
       _spiSettingsCard(sl),
 
       const SizedBox(height: 16),
-      _sectionHeader('Data Normalization', sl),
+      _sectionHeader('Data Management', sl),
       const SizedBox(height: 8),
       _plantNormalizationCard(sl),
+      const SizedBox(height: 10),
+      _deleteAllDataCard(sl),
     ]);
   }
 
   bool _normalizing = false;
+  bool _deleting = false;
 
   Future<void> _normalizePlantNames() async {
     setState(() => _normalizing = true);
@@ -2347,6 +2350,187 @@ class _AdminScreenState extends State<AdminScreen>
         Expanded(child: Text(text,
             style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
       ]));
+
+  Widget _deleteAllDataCard(SL sl) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.red.withOpacity(0.3))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.red.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.delete_forever_rounded,
+                color: AppColors.red, size: 18)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Delete All Incidents',
+                  style: TextStyle(color: AppColors.red,
+                      fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text('Permanently delete all incident data from system',
+                  style: TextStyle(color: sl.text4, fontSize: 10)),
+            ])),
+        ]),
+        const SizedBox(height: 14),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.red.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.red.withOpacity(0.2))),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.warning_rounded, size: 16, color: AppColors.red),
+              const SizedBox(width: 8),
+              Text('⚠️ DANGER ZONE',
+                  style: TextStyle(color: AppColors.red, fontSize: 11,
+                      fontWeight: FontWeight.w800)),
+            ]),
+            const SizedBox(height: 8),
+            Text('This action will:',
+                style: TextStyle(color: sl.text2, fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 6),
+            _deletePoint('Delete ALL ${_incidents.length} incidents (hazards & near misses)', sl),
+            _deletePoint('Clear data for ALL users across all devices', sl),
+            _deletePoint('Cannot be undone - data is permanently lost', sl),
+            _deletePoint('Backend data will also be cleared on next sync', sl),
+          ])),
+        const SizedBox(height: 14),
+        Row(children: [
+          Expanded(
+            child: Text('Total incidents: ${_incidents.length}',
+                style: TextStyle(color: sl.text2, fontSize: 11,
+                    fontWeight: FontWeight.w700))),
+          ElevatedButton.icon(
+            onPressed: _deleting ? null : _confirmDeleteAllData,
+            icon: _deleting
+              ? const SizedBox(width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.delete_forever_rounded, size: 16),
+            label: Text(_deleting ? 'Deleting...' : 'Delete All Data'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)))),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _deletePoint(String text, SL sl) =>
+    Padding(
+      padding: const EdgeInsets.only(bottom: 4, left: 6),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.close, size: 12, color: AppColors.red),
+        const SizedBox(width: 6),
+        Expanded(child: Text(text,
+            style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
+      ]));
+
+  Future<void> _confirmDeleteAllData() async {
+    final sl = SL.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: sl.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(children: [
+          const Icon(Icons.warning_rounded, color: AppColors.red, size: 24),
+          const SizedBox(width: 12),
+          Expanded(child: Text('Delete ALL Incidents?',
+              style: TextStyle(color: sl.text1, fontSize: 15,
+                  fontWeight: FontWeight.w800))),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('You are about to permanently delete:',
+                style: TextStyle(color: sl.text2, fontSize: 12,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.red.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.red.withOpacity(0.3))),
+              child: Column(children: [
+                _statRow('Total Incidents', '${_incidents.length}', AppColors.red, sl),
+                _statRow('Open Incidents', '${_incidents.where(_isOpenInc).length}', AppColors.amber, sl),
+                _statRow('Closed Incidents', '${_incidents.where(_isClosedInc).length}', AppColors.green, sl),
+              ])),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.red.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(6)),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Icon(Icons.info_outline, size: 14, color: AppColors.red),
+                const SizedBox(width: 8),
+                Expanded(child: Text(
+                  'This action cannot be undone. All incident data will be permanently lost.',
+                  style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
+              ])),
+          ]),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel',
+                style: TextStyle(color: sl.text2, fontWeight: FontWeight.w600))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.red,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            child: const Text('Delete All Data',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800))),
+        ]));
+
+    if (confirmed == true) {
+      await _deleteAllData();
+    }
+  }
+
+  Future<void> _deleteAllData() async {
+    setState(() => _deleting = true);
+
+    try {
+      final count = _incidents.length;
+
+      // Clear local incidents
+      await LocalDB.clearAllIncidents();
+
+      // Log the action
+      await AdminAudit.log(
+        action: AdminAudit.actSettingsChange,
+        actor: _currentActor,
+        targetName: 'Delete All Incidents',
+        meta: {'count': count, 'timestamp': DateTime.now().toIso8601String()});
+
+      // Reload data
+      await _loadAll();
+
+      if (mounted) {
+        _toast('✓ Deleted $count incidents. All data cleared.', AppColors.red);
+      }
+    } catch (e) {
+      _toast('Error deleting data: $e', AppColors.red);
+    } finally {
+      if (mounted) setState(() => _deleting = false);
+    }
+  }
 
   bool _groqConfigured = false;
   final _groqKeyCtrl = TextEditingController();

@@ -154,21 +154,18 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
 
   /// Everything the dropdown offers, identical for every user.
   ///
-  /// The admin's plant list, in the admin's own order, PLUS any canonical plant
-  /// label that appears in the data but not in that list. The second part
-  /// matters — incidents are saved with the reporter's own plant string, and
-  /// unmatched ones canonicalise to themselves (e.g. the 'SAIL Safety
-  /// Organisation' default in ai_scan_tab). Offering only the admin list would
-  /// make those records unreachable from this screen.
+  /// ONLY shows plants from the admin's canonical plant list. All incidents
+  /// are normalized to match these canonical names through the canonicalization
+  /// function. This ensures the dropdown never shows outdated or incorrect
+  /// plant names like "SSO Ranchi", "Corporate Ranchi", etc.
   ///
   /// No `seesAllPlants` branch: it used to return just the viewer's own plant
   /// for a plant user. See the note on [_selectable] for why that was dropped.
   List<String> get _plantOptions {
-    final out = <String>[..._selectable];
-    for (final p in _plants) {
-      if (!out.contains(p)) out.add(p);
-    }
-    return out;
+    // Only return plants from admin panel - no data-derived plants
+    // Filter to only show plants that have incidents
+    final counts = _plantCounts;
+    return _selectable.where((p) => counts[p] != null && counts[p]! > 0).toList();
   }
 
   /// Incident count per canonical plant, so the dropdown can show which plants
