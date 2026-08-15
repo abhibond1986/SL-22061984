@@ -1,3 +1,4 @@
+import 'dart:async' show Timer;
 import 'dart:convert' show base64Decode;
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -52,10 +53,36 @@ class _OverviewTabState extends State<OverviewTab> {
     _load();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
     AdminMasterData.revision.addListener(_load);
+    // Reload SPI settings periodically to catch admin changes (especially on web)
+    _startSettingsPoller();
+  }
+
+  Timer? _settingsPoller;
+
+  void _startSettingsPoller() {
+    _settingsPoller = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (mounted) {
+        _reloadSpiSettings();
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  Future<void> _reloadSpiSettings() async {
+    final spiVisible = await AdminMasterData.getSpiCardVisible();
+    final spiParams = await AdminMasterData.getSpiParams();
+    if (mounted && (_spiCardVisible != spiVisible || _spiParams != spiParams)) {
+      setState(() {
+        _spiCardVisible = spiVisible;
+        _spiParams = spiParams;
+      });
+    }
   }
 
   @override
   void dispose() {
+    _settingsPoller?.cancel();
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
     AdminMasterData.revision.removeListener(_load);
     super.dispose();

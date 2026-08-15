@@ -2566,19 +2566,61 @@ class _AdminScreenState extends State<AdminScreen>
         const SizedBox(height: 16),
 
         // Visibility toggle
-        Row(children: [
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Show SPI Card to Users',
-                  style: TextStyle(color: sl.text1, fontSize: 12,
-                      fontWeight: FontWeight.w700)),
-              const SizedBox(height: 3),
-              Text('Display SPI scorecard in Reports → Overview tab',
-                  style: TextStyle(color: sl.text3, fontSize: 10)),
-            ])),
-          Switch(
-            value: _spiCardVisible,
-            onChanged: (v) async {
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: _spiCardVisible
+                ? const Color(0xFF1E88E5).withOpacity(0.08)
+                : sl.text4.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+                color: _spiCardVisible
+                    ? const Color(0xFF1E88E5).withOpacity(0.3)
+                    : sl.border)),
+          child: Row(children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: _spiCardVisible
+                    ? const Color(0xFF1E88E5).withOpacity(0.15)
+                    : sl.text4.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6)),
+              child: Icon(
+                  _spiCardVisible
+                      ? Icons.visibility_rounded
+                      : Icons.visibility_off_rounded,
+                  color: _spiCardVisible ? const Color(0xFF1E88E5) : sl.text4,
+                  size: 18)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Text('Show SPI Card to Users',
+                      style: TextStyle(color: sl.text1, fontSize: 12,
+                          fontWeight: FontWeight.w700)),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: _spiCardVisible
+                          ? AppColors.green.withOpacity(0.15)
+                          : sl.text4.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                          color: _spiCardVisible ? AppColors.green : sl.text4)),
+                    child: Text(_spiCardVisible ? 'VISIBLE' : 'HIDDEN',
+                        style: TextStyle(
+                            color: _spiCardVisible ? AppColors.green : sl.text4,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800))),
+                ]),
+                const SizedBox(height: 3),
+                Text('Display SPI scorecard in Reports → Overview tab',
+                    style: TextStyle(color: sl.text3, fontSize: 10)),
+              ])),
+            Switch(
+              value: _spiCardVisible,
+              onChanged: (v) async {
               await AdminMasterData.setSpiCardVisible(v);
               setState(() => _spiCardVisible = v);
               await AdminAudit.log(
@@ -2586,11 +2628,26 @@ class _AdminScreenState extends State<AdminScreen>
                 actor: _currentActor,
                 targetName: 'SPI Card Visibility',
                 meta: {'visible': v});
-              _toast(v ? 'SPI card enabled' : 'SPI card hidden',
-                  const Color(0xFF1E88E5));
+              _toast(v ? '✓ SPI card enabled for all users' : '✓ SPI card hidden from users',
+                  v ? AppColors.green : AppColors.amber);
             },
             activeColor: const Color(0xFF1E88E5)),
-        ]),
+          ])),
+
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E88E5).withOpacity(0.08),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xFF1E88E5).withOpacity(0.2))),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.info_outline, size: 14, color: Color(0xFF1E88E5)),
+            const SizedBox(width: 8),
+            Expanded(child: Text(
+              'Changes take effect within 5 seconds for all users. Users don\'t need to refresh.',
+              style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
+          ])),
 
         const SizedBox(height: 20),
 
