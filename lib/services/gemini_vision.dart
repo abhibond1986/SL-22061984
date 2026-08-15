@@ -309,6 +309,12 @@ class GeminiVision {
       // ══════════════════════════════════════════════════════════════════════
       final prefs = await SharedPreferences.getInstance();
       final orKeys = _configuredOpenRouterKeys(prefs);
+      // Remembered so the offline message can name the REAL cause. Reading
+      // _lastOrStatus after the loop is not enough: it holds only the final
+      // attempt's status, so an early 429 followed by a 500 on the last model
+      // would report the wrong reason to the user.
+      bool orQuotaHit = false;   // 429 — daily free allowance spent
+      bool orKeyRejected = false; // 401/402 — key invalid or out of credit
       if (orKeys.isNotEmpty) {
         // If an admin pinned a model, use only that one; else walk the chain.
         final pinned = prefs.getString(_kVisionModelPin);
@@ -363,6 +369,10 @@ class GeminiVision {
               // models draw on the same account allowance and would fail the
               // same way. Abandon this key now rather than burning three more
               // round trips (~3x45s worst case) to learn nothing.
+              if (_lastOrStatus == 429) orQuotaHit = true;
+              if (_lastOrStatus == 401 || _lastOrStatus == 402) {
+                orKeyRejected = true;
+              }
               if (_lastOrFailureIsKeyWide) {
                 if (k + 1 < orKeys.length) {
                   print('GeminiVision: ⏩$keyTag blocked (HTTP $_lastOrStatus) — '
@@ -438,9 +448,33 @@ class GeminiVision {
       // failure the admin most needs to see, and the one that was completely
       // invisible before: the user still gets a checklist, so nothing looked
       // wrong. A missing API key lands here too (chain skipped entirely).
+      // Name the ACTUAL cause. This used to read 'AI vision unavailable
+      // (3704ms)', which told the user nothing and — worse — the scan screen
+      // then advised "Connect to the internet and rescan", which is wrong and
+      // sends people hunting for signal when the truth is the day's free AI
+      // allowance is spent and no amount of connectivity will help.
+      final bool geminiAvailable = await GeminiDirectVision.isConfigured;
+      String reason;
+      String hint;
+      if (orKeys.isEmpty && !geminiAvailable) {
+        reason = 'no AI key is configured';
+        hint = 'Ask your administrator to set an AI key in '
+            'Admin → System Health. Nothing is wrong with your phone.';
+      } else if (orQuotaHit) {
+        reason = "today's free AI scan limit has been used up";
+        hint = 'The free allowance resets daily. You can still record this '
+            'observation manually — the form works normally.';
+      } else if (orKeyRejected) {
+        reason = 'the AI service rejected the key';
+        hint = 'Please report this to your administrator — the AI key needs '
+            'renewing. Recording the observation manually still works.';
+      } else {
+        reason = 'the AI service did not respond';
+        hint = 'This is usually temporary. Try the scan again in a minute, '
+            'or record the observation manually.';
+      }
       return logged(
-        await _offlineFallback(bytes,
-            reason: 'AI vision unavailable (${stopwatch.elapsedMilliseconds}ms)'),
+        await _offlineFallback(bytes, reason: reason, hint: hint),
         outcome: AiRunLog.outcomeFailed,
         failReason: AiRunLog.reasonExhausted,
         imageHash: imgHash,
@@ -895,8 +929,12 @@ FIELD RULES:
   // state when hazards is empty and hides the OVERALL RISK card on
   // _imageAnalysed == false; near_miss_tab switches to manual entry on
   // (hazards.isEmpty && !_isOnline).
+  /// [reason] is a lower-case sentence fragment naming the cause, shown to the
+  /// user verbatim. [hint] is the matching "what to do about it" line — pass one
+  /// whenever the generic "get back online" advice would be misleading (a spent
+  /// daily quota is not a connectivity problem).
   static Future<Map<String, dynamic>> _offlineFallback(Uint8List bytes,
-      {String reason = ''}) async {
+      {String reason = '', String hint = ''}) async {
     return {
       // UNKNOWN, never a severity level: an unanalysed image has no risk
       // rating, and 'MEDIUM' here previously drove a coloured OVERALL RISK
@@ -907,12 +945,13 @@ FIELD RULES:
       'people': 0,
       'hazards': const <Map<String, dynamic>>[],
       'summary': 'This image was NOT analysed — $reason.\n\n'
-          'No hazards are listed because nothing examined the photo. '
-          'Retry the scan when you are back online.\n\n'
-          'You can still record the observation manually; '
-          'the form works fully offline.',
+          'No hazards are listed because nothing examined the photo.\n\n'
+          '${hint.isNotEmpty ? hint : 'Retry the scan when you are back online. '
+              'You can still record the observation manually; the form works '
+              'fully offline.'}',
       '_source': 'offline_fallback',
       '_offline_reason': reason,
+      '_offline_hint': hint,
       '_isOnline': false,
       '_imageAnalysed': false,
     };

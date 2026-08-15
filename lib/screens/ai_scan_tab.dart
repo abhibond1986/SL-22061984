@@ -2164,6 +2164,12 @@ class _AIScanTabState extends State<AIScanTab> {
     final online     = _result?['_isOnline'] == true;
     final fromCache  = _result?['_fromCache'] == true;
     final reason     = _result?['_offline_reason']?.toString() ?? '';
+    // Cause-specific advice from GeminiVision._offlineFallback. Falls back to
+    // the old connectivity wording only when no hint was supplied, because
+    // telling someone to "connect to the internet" when the real cause is a
+    // spent daily AI allowance sends them chasing a signal problem that does
+    // not exist.
+    final hint       = _result?['_offline_hint']?.toString() ?? '';
 
     final Color color = online ? AppColors.green : AppColors.amber;
     final IconData icon = online
@@ -2190,9 +2196,14 @@ class _AIScanTabState extends State<AIScanTab> {
             Text(label,
               style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700)),
             if (!online) Text(
-              reason.isNotEmpty
-                  ? 'This photo was not assessed ($reason). Connect to the internet and rescan.'
-                  : 'This photo was not assessed. Connect to the internet and rescan.',
+              [
+                reason.isNotEmpty
+                    ? 'This photo was not assessed because $reason.'
+                    : 'This photo was not assessed.',
+                hint.isNotEmpty
+                    ? hint
+                    : 'Connect to the internet and rescan.',
+              ].join(' '),
               style: TextStyle(color: sl.text3, fontSize: 9.5, fontWeight: FontWeight.w500)),
           ],
         )),
