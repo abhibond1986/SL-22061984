@@ -117,6 +117,21 @@ class AdminMasterData {
   //   2. code appears as a standalone token in the raw string
   //   3. every significant word of a plant name appears in the raw string
   // Falls back to the cleaned original when there is no confident match.
+
+  /// Hardcoded mappings for common variations that should map to canonical names
+  static const Map<String, String> plantNameMappings = {
+    'SSO RANCHI': 'SAIL Safety Organisation',
+    'SSO — RANCHI': 'SAIL Safety Organisation',
+    'CORPORATE RANCHI': 'Corporate — Ranchi',
+    'CORP RANCHI': 'Corporate — Ranchi',
+    'CORPORATE — RANCHI': 'Corporate — Ranchi',
+    'CORP — RANCHI': 'Corporate — Ranchi',
+    'CORPORATE-RANCHI': 'Corporate — Ranchi',
+    'CO-DELHI': 'Corporate Office-Delhi',
+    'SAIL SAFETY ORGANISATION': 'SAIL Safety Organisation',
+    'SAIL SAFETY ORGANIZATION': 'SAIL Safety Organisation',
+  };
+
   static String canonicalPlantFrom(
       String raw, List<Map<String, String>> plants) {
     // Normalise dashes to a single spaced em-dash and collapse whitespace.
@@ -128,6 +143,12 @@ class AdminMasterData {
     if (cleaned.isEmpty) return '';
 
     final upper = cleaned.toUpperCase();
+
+    // Pass 0 — Check hardcoded mappings FIRST (for known problematic variations)
+    if (plantNameMappings.containsKey(upper)) {
+      return plantNameMappings[upper]!;
+    }
+
     // Word set of the raw string for token matching.
     final rawWords = upper
         .replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ')
@@ -521,6 +542,14 @@ class AdminMasterData {
     await prefs.setString(_kSpiParams, jsonEncode(params));
     _bump();
   }
+
+  // ── PLANT NAME DATA MIGRATION ──────────────────────────────────────
+  /// Normalize all incident plant names to canonical names from admin panel.
+  /// This is a one-time migration that should be run when fixing historical data.
+  /// Returns a map with normalization statistics.
+  ///
+  /// NOTE: This method is defined in AdminMasterData but must be called from
+  /// admin_screen.dart where LocalDB is available to avoid circular imports.
 
   // ── SEVERITY SCORING (admin-configurable) ─────────────────────────
   static const String _kSeverityScores = 'admin_severity_scores';

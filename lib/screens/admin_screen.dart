@@ -2143,8 +2143,211 @@ class _AdminScreenState extends State<AdminScreen>
       _sectionHeader('SPI Scorecard Settings', sl),
       const SizedBox(height: 8),
       _spiSettingsCard(sl),
+
+      const SizedBox(height: 16),
+      _sectionHeader('Data Normalization', sl),
+      const SizedBox(height: 8),
+      _plantNormalizationCard(sl),
     ]);
   }
+
+  bool _normalizing = false;
+
+  Future<void> _normalizePlantNames() async {
+    setState(() => _normalizing = true);
+
+    try {
+      final plants = await AdminMasterData.getPlants();
+      final incidents = await LocalDB.getIncidents();
+
+      int normalized = 0;
+      int unchanged = 0;
+      final changes = <String, String>{};
+
+      for (final inc in incidents) {
+        final oldPlant = inc['plant']?.toString() ?? '';
+        if (oldPlant.isEmpty) continue;
+
+        final canonical = AdminMasterData.canonicalPlantFrom(oldPlant, plants);
+
+        if (canonical.isEmpty) {
+          // Skip incidents with no matching plant
+          continue;
+        }
+
+        if (canonical != oldPlant) {
+          inc['plant'] = canonical;
+          changes[oldPlant] = canonical;
+          normalized++;
+          // saveIncident handles both create and update
+          await LocalDB.saveIncident(inc, stampUpdatedAt: false);
+        } else {
+          unchanged++;
+        }
+      }
+
+      await AdminAudit.log(
+        action: AdminAudit.actSettingsChange,
+        actor: _currentActor,
+        targetName: 'Plant Name Normalization',
+        meta: {'normalized': normalized, 'unchanged': unchanged});
+
+      if (mounted) {
+        // Reload data
+        await _loadAll();
+
+        // Show results
+        if (context.mounted) {
+          showDialog(
+            context: context,
+            builder: (_) => AlertDialog(
+              backgroundColor: SL.of(context).card,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              title: Row(children: [
+                const Icon(Icons.check_circle, color: AppColors.green, size: 22),
+                const SizedBox(width: 10),
+                Text('Normalization Complete',
+                    style: TextStyle(color: SL.of(context).text1, fontSize: 14,
+                        fontWeight: FontWeight.w800)),
+              ]),
+              content: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Successfully normalized plant names:',
+                        style: TextStyle(color: SL.of(context).text2, fontSize: 12)),
+                    const SizedBox(height: 12),
+                    _statRow('Normalized', '$normalized', AppColors.green, SL.of(context)),
+                    _statRow('Unchanged', '$unchanged', AppColors.accent, SL.of(context)),
+                    _statRow('Total Incidents', '${incidents.length}', SL.of(context).text2, SL.of(context)),
+                    if (changes.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      Text('Changes Made:',
+                          style: TextStyle(color: SL.of(context).text2, fontSize: 11,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 8),
+                      ...changes.entries.take(10).map((e) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(children: [
+                          Expanded(
+                            child: Text(e.key,
+                                style: TextStyle(color: SL.of(context).text3, fontSize: 10),
+                                overflow: TextOverflow.ellipsis)),
+                          const Icon(Icons.arrow_forward, size: 12, color: AppColors.amber),
+                          Expanded(
+                            child: Text(e.value,
+                                style: TextStyle(color: AppColors.green, fontSize: 10,
+                                    fontWeight: FontWeight.w600),
+                                overflow: TextOverflow.ellipsis)),
+                        ]))),
+                      if (changes.length > 10)
+                        Text('... and ${changes.length - 10} more',
+                            style: TextStyle(color: SL.of(context).text4, fontSize: 9)),
+                    ],
+                  ]),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close',
+                      style: TextStyle(color: AppColors.green,
+                          fontWeight: FontWeight.w700))),
+              ]));
+        }
+      }
+    } catch (e) {
+      _toast('Error normalizing: $e', AppColors.red);
+    } finally {
+      if (mounted) setState(() => _normalizing = false);
+    }
+  }
+
+  Widget _statRow(String label, String value, Color color, SL sl) =>
+    Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(children: [
+        Expanded(child: Text(label, style: TextStyle(
+            color: sl.text3, fontSize: 11))),
+        Text(value, style: TextStyle(
+            color: color, fontSize: 12, fontWeight: FontWeight.w800)),
+      ]));
+
+  Widget _plantNormalizationCard(SL sl) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.amber.withOpacity(0.3))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.amber.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.auto_fix_high_rounded,
+                color: AppColors.amber, size: 18)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Plant Name Cleanup',
+                  style: TextStyle(color: AppColors.amber,
+                      fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text('Normalize all incident plant names to canonical list',
+                  style: TextStyle(color: sl.text4, fontSize: 10)),
+            ])),
+        ]),
+        const SizedBox(height: 14),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.amber.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.amber.withOpacity(0.2))),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('This will:',
+                style: TextStyle(color: sl.text2, fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 6),
+            _normPoint('Convert all variations to canonical names', sl),
+            _normPoint('Map "SSO Ranchi" → "SAIL Safety Organisation"', sl),
+            _normPoint('Map "Corporate Ranchi" → "Corporate — Ranchi"', sl),
+            _normPoint('Use ONLY names from admin panel plant list', sl),
+            _normPoint('Update incidents in local database', sl),
+          ])),
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _normalizing ? null : _normalizePlantNames,
+            icon: _normalizing
+              ? const SizedBox(width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.cleaning_services_rounded, size: 16),
+            label: Text(_normalizing ? 'Normalizing...' : 'Normalize Plant Names'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.amber,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 13),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8))))),
+      ]),
+    );
+  }
+
+  Widget _normPoint(String text, SL sl) =>
+    Padding(
+      padding: const EdgeInsets.only(bottom: 4, left: 6),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.check_circle, size: 12, color: AppColors.amber),
+        const SizedBox(width: 6),
+        Expanded(child: Text(text,
+            style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
+      ]));
+}
 
   bool _groqConfigured = false;
   final _groqKeyCtrl = TextEditingController();

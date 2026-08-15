@@ -524,6 +524,16 @@ class LocalDB {
     // if the admin renames the first status, new records must use the new name.
     incident['status']        ??= await AdminMasterData.firstStatus();
 
+    // Normalize plant name to canonical name from admin panel
+    if (incident['plant'] != null && incident['plant'].toString().isNotEmpty) {
+      final plants = await AdminMasterData.getPlants();
+      final canonical = AdminMasterData.canonicalPlantFrom(
+          incident['plant'].toString(), plants);
+      if (canonical.isNotEmpty) {
+        incident['plant'] = canonical;
+      }
+    }
+
     // Stamp the local modification time so live sync can tell an incoming
     // server row apart from a newer unsynced local edit.
     //
