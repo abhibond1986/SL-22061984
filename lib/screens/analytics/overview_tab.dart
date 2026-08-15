@@ -26,6 +26,8 @@ class _OverviewTabState extends State<OverviewTab> {
   List<Map<String, dynamic>> _incidents = [];
   bool _loading = true;
   bool _spiExpanded = false;
+  bool _spiCardVisible = true; // Admin-controlled setting
+  Map<String, int> _spiParams = Map<String, int>.from(AdminMasterData.defaultSpiParams);
   // Admin-configured severities, so charts show exactly the levels the admin
   // defined (a renamed level no longer leaves a phantom zero row).
   List<String> _severities =
@@ -72,6 +74,8 @@ class _OverviewTabState extends State<OverviewTab> {
     final statuses = await AdminMasterData.getStatuses();
     final open = await AdminMasterData.getOpenStatuses();
     final closed = await AdminMasterData.lastStatus();
+    final spiVisible = await AdminMasterData.getSpiCardVisible();
+    final spiParams = await AdminMasterData.getSpiParams();
     if (mounted) {
       setState(() {
         _scope = scope;
@@ -80,6 +84,8 @@ class _OverviewTabState extends State<OverviewTab> {
         _statuses = statuses;
         _openStatuses = open;
         _closedStatus = closed.toUpperCase();
+        _spiCardVisible = spiVisible;
+        _spiParams = spiParams;
         _loading = false;
       });
     }
@@ -239,7 +245,7 @@ class _OverviewTabState extends State<OverviewTab> {
       final canon = AdminMasterData.canonicalPlantFrom(plantRaw, plants);
       final p = canon.isEmpty ? '—' : canon;
 
-      byPlant.putIfAbsent(p, () => _PlantScore(p));
+      byPlant.putIfAbsent(p, () => _PlantScore(p, _spiParams));
       final ps = byPlant[p]!;
       ps.total++;
 
@@ -310,7 +316,7 @@ class _OverviewTabState extends State<OverviewTab> {
           ],
           _kpiStrip(sl),
           const SizedBox(height: 16),
-          if (_scope.seesAllPlants) ...[
+          if (_scope.seesAllPlants && _spiCardVisible) ...[
             _spiScorecard(sl),
             const SizedBox(height: 16),
           ],
@@ -1236,30 +1242,30 @@ class _OverviewTabState extends State<OverviewTab> {
               const SizedBox(height: 16),
               _formulaSection(
                   '1. Closure Rate',
-                  '(max 60 points)',
+                  '(max ${_spiParams['closureMaxPoints']} points)',
                   [
                     'Rate = Closed ÷ Total',
-                    'Points = Rate × 60',
+                    'Points = Rate × ${_spiParams['closureMaxPoints']}',
                   ],
                   sl),
               const SizedBox(height: 14),
               _formulaSection(
                   '2. Stale HIGH/CRITICAL',
-                  '(max 25 points)',
+                  '(max ${_spiParams['staleMaxPoints']} points)',
                   [
-                    'If stale = 0: 25 points',
-                    'Else: max(0, 25 - stale×5)',
-                    'Each stale (>7d) costs 5 pts',
+                    'If stale = 0: ${_spiParams['staleMaxPoints']} points',
+                    'Else: max(0, ${_spiParams['staleMaxPoints']} - stale×${_spiParams['stalePenalty']})',
+                    'Each stale (>7d) costs ${_spiParams['stalePenalty']} pts',
                   ],
                   sl),
               const SizedBox(height: 14),
               _formulaSection(
                   '3. Critical Incidents',
-                  '(max 15 points)',
+                  '(max ${_spiParams['criticalMaxPoints']} points)',
                   [
-                    'If critical = 0: 15 points',
-                    'Else: max(0, 15 - critical)',
-                    'Each critical costs 1 point',
+                    'If critical = 0: ${_spiParams['criticalMaxPoints']} points',
+                    'Else: max(0, ${_spiParams['criticalMaxPoints']} - critical×${_spiParams['criticalPenalty']})',
+                    'Each critical costs ${_spiParams['criticalPenalty']} point(s)',
                   ],
                   sl),
               const SizedBox(height: 16),
@@ -1324,6 +1330,7 @@ class _OverviewTabState extends State<OverviewTab> {
 // ═══════════════════════════════════════════════════════════════
 class _PlantScore {
   final String plant;
+  final Map<String, int> params;
   int total = 0;
   int critical = 0;
   int high = 0;
@@ -1331,15 +1338,23 @@ class _PlantScore {
   int closed = 0;
   int staleHighCritical = 0;
 
-  _PlantScore(this.plant);
+  _PlantScore(this.plant, this.params);
 
   int get score {
     final closureRate = total == 0 ? 0.0 : closed / total;
-    final closurePoints = (closureRate * 60).round();
+    final closureMaxPts = params['closureMaxPoints'] ?? 60;
+    final staleMaxPts = params['staleMaxPoints'] ?? 25;
+    final critMaxPts = params['criticalMaxPoints'] ?? 15;
+    final stalePenalty = params['stalePenalty'] ?? 5;
+    final critPenalty = params['criticalPenalty'] ?? 1;
+
+    final closurePoints = (closureRate * closureMaxPts).round();
     final stalePoints = staleHighCritical == 0
-        ? 25
-        : (25 - staleHighCritical * 5).clamp(0, 25);
-    final criticalPoints = critical == 0 ? 15 : (15 - critical).clamp(0, 15);
+        ? staleMaxPts
+        : (staleMaxPts - staleHighCritical * stalePenalty).clamp(0, staleMaxPts);
+    final criticalPoints = critical == 0
+        ? critMaxPts
+        : (critMaxPts - critical * critPenalty).clamp(0, critMaxPts);
     return (closurePoints + stalePoints + criticalPoints).clamp(0, 100);
   }
 }

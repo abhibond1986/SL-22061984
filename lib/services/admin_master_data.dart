@@ -475,6 +475,53 @@ class AdminMasterData {
     }
   }
 
+  // ── APP SETTINGS (admin-configurable) ──────────────────────────────
+  static const String _kShowSpiCard = 'admin_show_spi_card';
+  static const String _kSpiParams = 'admin_spi_params';
+
+  /// Default SPI calculation parameters
+  static const Map<String, int> defaultSpiParams = {
+    'closureMaxPoints': 60,      // Max points for closure rate component
+    'staleMaxPoints': 25,        // Max points for stale incidents component
+    'criticalMaxPoints': 15,     // Max points for critical incidents component
+    'stalePenalty': 5,           // Points deducted per stale incident (>7 days)
+    'criticalPenalty': 1,        // Points deducted per critical incident
+  };
+
+  /// Get whether SPI scorecard should be shown in frontend Reports
+  static Future<bool> getSpiCardVisible() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_kShowSpiCard) ?? true; // Default: visible
+  }
+
+  /// Set SPI scorecard visibility
+  static Future<void> setSpiCardVisible(bool visible) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kShowSpiCard, visible);
+    _bump();
+  }
+
+  /// Get SPI calculation parameters
+  static Future<Map<String, int>> getSpiParams() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kSpiParams);
+    if (raw == null) return Map<String, int>.from(defaultSpiParams);
+    try {
+      final map = (jsonDecode(raw) as Map)
+          .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
+      return map;
+    } catch (_) {
+      return Map<String, int>.from(defaultSpiParams);
+    }
+  }
+
+  /// Set SPI calculation parameters
+  static Future<void> setSpiParams(Map<String, int> params) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSpiParams, jsonEncode(params));
+    _bump();
+  }
+
   // ── SEVERITY SCORING (admin-configurable) ─────────────────────────
   static const String _kSeverityScores = 'admin_severity_scores';
 

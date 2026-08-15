@@ -247,6 +247,10 @@ class _AdminScreenState extends State<AdminScreen>
   String _compliancePlantFilter = 'ALL';
   bool _spiCardExpanded = false;
 
+  // ── SPI Settings state ──────────────────────────────────────────
+  bool _spiCardVisible = true;
+  Map<String, int> _spiParams = Map<String, int>.from(AdminMasterData.defaultSpiParams);
+
   @override
   void initState() {
     super.initState();
@@ -429,6 +433,8 @@ class _AdminScreenState extends State<AdminScreen>
       final obs     = await AdminMasterData.getObsTypes();
       final scores  = await AdminMasterData.getSeverityScores();
       final openSts = await AdminMasterData.getOpenStatuses();
+      final spiVisible = await AdminMasterData.getSpiCardVisible();
+      final spiParams = await AdminMasterData.getSpiParams();
 
       if (!mounted) return;
       setState(() {
@@ -447,6 +453,8 @@ class _AdminScreenState extends State<AdminScreen>
         };
         _openStatuses   = openSts;
         _severityScores = scores;
+        _spiCardVisible = spiVisible;
+        _spiParams      = spiParams;
         _scoresLoaded   = true;
         _mastersLoaded  = true;
         _alertsLoaded   = true;
@@ -2130,6 +2138,11 @@ class _AdminScreenState extends State<AdminScreen>
           _intRow('Google Drive (PDF storage)', 'SAIL Safety Lens Reports/',
               AppColors.green, Icons.folder_rounded, sl),
         ])),
+
+      const SizedBox(height: 16),
+      _sectionHeader('SPI Scorecard Settings', sl),
+      const SizedBox(height: 8),
+      _spiSettingsCard(sl),
     ]);
   }
 
@@ -2315,6 +2328,324 @@ class _AdminScreenState extends State<AdminScreen>
           ),
       ]),
     );
+  }
+
+  Widget _spiSettingsCard(SL sl) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF1E88E5).withOpacity(0.3))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF1E88E5), Color(0xFF1565C0)]),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.assessment_rounded,
+                color: Colors.white, size: 18)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('SPI Scorecard Configuration',
+                  style: TextStyle(color: Color(0xFF1E88E5),
+                      fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text('Control visibility and calculation parameters',
+                  style: TextStyle(color: sl.text4, fontSize: 10)),
+            ])),
+        ]),
+
+        const SizedBox(height: 16),
+        const Divider(height: 1),
+        const SizedBox(height: 16),
+
+        // Visibility toggle
+        Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Show SPI Card to Users',
+                  style: TextStyle(color: sl.text1, fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(height: 3),
+              Text('Display SPI scorecard in Reports → Overview tab',
+                  style: TextStyle(color: sl.text3, fontSize: 10)),
+            ])),
+          Switch(
+            value: _spiCardVisible,
+            onChanged: (v) async {
+              await AdminMasterData.setSpiCardVisible(v);
+              setState(() => _spiCardVisible = v);
+              await AdminAudit.log(
+                action: AdminAudit.actSettingsChange,
+                actor: _currentActor,
+                targetName: 'SPI Card Visibility',
+                meta: {'visible': v});
+              _toast(v ? 'SPI card enabled' : 'SPI card hidden',
+                  const Color(0xFF1E88E5));
+            },
+            activeColor: const Color(0xFF1E88E5)),
+        ]),
+
+        const SizedBox(height: 20),
+
+        // Calculation parameters header
+        Row(children: [
+          Icon(Icons.calculate_rounded, size: 16, color: sl.text2),
+          const SizedBox(width: 8),
+          Text('Calculation Parameters',
+              style: TextStyle(color: sl.text2, fontSize: 12,
+                  fontWeight: FontWeight.w700)),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: () => _showSpiFormulaHelp(sl),
+            icon: const Icon(Icons.help_outline, size: 14),
+            label: const Text('Formula', style: TextStyle(fontSize: 10)),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF1E88E5),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4))),
+        ]),
+
+        const SizedBox(height: 12),
+
+        // Parameter inputs
+        _spiParamInput(
+            'Closure Rate Points',
+            'closureMaxPoints',
+            'Maximum points for closure rate (default: 60)',
+            sl),
+        const SizedBox(height: 12),
+        _spiParamInput(
+            'Stale Incident Points',
+            'staleMaxPoints',
+            'Maximum points for stale incidents component (default: 25)',
+            sl),
+        const SizedBox(height: 12),
+        _spiParamInput(
+            'Critical Incident Points',
+            'criticalMaxPoints',
+            'Maximum points for critical incidents component (default: 15)',
+            sl),
+        const SizedBox(height: 12),
+        _spiParamInput(
+            'Stale Incident Penalty',
+            'stalePenalty',
+            'Points deducted per stale incident >7 days (default: 5)',
+            sl),
+        const SizedBox(height: 12),
+        _spiParamInput(
+            'Critical Incident Penalty',
+            'criticalPenalty',
+            'Points deducted per critical incident (default: 1)',
+            sl),
+
+        const SizedBox(height: 16),
+
+        // Action buttons
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                setState(() => _spiParams = Map<String, int>.from(
+                    AdminMasterData.defaultSpiParams));
+                await AdminMasterData.setSpiParams(_spiParams);
+                await AdminAudit.log(
+                  action: AdminAudit.actSettingsChange,
+                  actor: _currentActor,
+                  targetName: 'SPI Parameters',
+                  meta: {'reset': true});
+                _toast('Reset to default parameters', AppColors.amber);
+              },
+              icon: Icon(Icons.restart_alt_rounded, size: 16, color: sl.text2),
+              label: Text('Reset', style: TextStyle(color: sl.text2)),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: sl.border),
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8))))),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: ElevatedButton.icon(
+              onPressed: () async {
+                await AdminMasterData.setSpiParams(_spiParams);
+                await AdminAudit.log(
+                  action: AdminAudit.actSettingsChange,
+                  actor: _currentActor,
+                  targetName: 'SPI Parameters',
+                  meta: _spiParams);
+                _toast('✓ SPI parameters saved', AppColors.green);
+              },
+              icon: const Icon(Icons.save_rounded, size: 16),
+              label: const Text('Save Parameters'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E88E5),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8))))),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _spiParamInput(String label, String key, String hint, SL sl) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label,
+          style: TextStyle(color: sl.text2, fontSize: 11,
+              fontWeight: FontWeight.w600)),
+      const SizedBox(height: 6),
+      TextFormField(
+        initialValue: _spiParams[key]?.toString() ?? '0',
+        keyboardType: TextInputType.number,
+        style: TextStyle(color: sl.text1, fontSize: 12),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: TextStyle(color: sl.text4, fontSize: 10),
+          filled: true,
+          fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide(color: sl.border)),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide(color: sl.border)),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: Color(0xFF1E88E5), width: 1.5)),
+        ),
+        onChanged: (v) {
+          final val = int.tryParse(v);
+          if (val != null && val >= 0) {
+            setState(() => _spiParams[key] = val);
+          }
+        }),
+    ]);
+  }
+
+  void _showSpiFormulaHelp(SL sl) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: sl.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF1E88E5), Color(0xFF1565C0)]),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.calculate_rounded,
+                color: Colors.white, size: 20)),
+          const SizedBox(width: 12),
+          const Text('SPI Score Formula',
+              style: TextStyle(color: Color(0xFF1E88E5),
+                  fontSize: 15, fontWeight: FontWeight.w800)),
+        ]),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [
+                    const Color(0xFF1E88E5).withOpacity(0.1),
+                    const Color(0xFF1565C0).withOpacity(0.05)
+                  ]),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                      color: const Color(0xFF1E88E5).withOpacity(0.3))),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Score = Closure Points + Stale Points + Critical Points',
+                        style: TextStyle(color: sl.text1, fontSize: 13,
+                            fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 8),
+                    Text('Maximum: 100 points',
+                        style: TextStyle(color: sl.text3, fontSize: 11)),
+                  ]),
+              ),
+              const SizedBox(height: 16),
+              _spiFormulaSection('1. Closure Rate Component',
+                  '(max ${_spiParams['closureMaxPoints']} points)', [
+                'Closure Rate = Closed Incidents ÷ Total Incidents',
+                'Points = Closure Rate × ${_spiParams['closureMaxPoints']}',
+              ], sl),
+              const SizedBox(height: 14),
+              _spiFormulaSection('2. Stale HIGH/CRITICAL Incidents',
+                  '(max ${_spiParams['staleMaxPoints']} points)', [
+                'If stale count = 0: ${_spiParams['staleMaxPoints']} points',
+                'Otherwise: max(0, ${_spiParams['staleMaxPoints']} - (stale count × ${_spiParams['stalePenalty']}))',
+                'Each stale incident (>7 days) costs ${_spiParams['stalePenalty']} points',
+              ], sl),
+              const SizedBox(height: 14),
+              _spiFormulaSection('3. Critical Incidents',
+                  '(max ${_spiParams['criticalMaxPoints']} points)', [
+                'If critical count = 0: ${_spiParams['criticalMaxPoints']} points',
+                'Otherwise: max(0, ${_spiParams['criticalMaxPoints']} - (critical count × ${_spiParams['criticalPenalty']}))',
+                'Each critical incident costs ${_spiParams['criticalPenalty']} point(s)',
+              ], sl),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.amber.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.amber.withOpacity(0.4))),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.info_outline_rounded,
+                        color: AppColors.amber, size: 16),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Score ranges: ≥80 Excellent (green), ≥50 Good (amber), <50 Needs Attention (red)',
+                        style: TextStyle(color: sl.text2, fontSize: 10.5,
+                            height: 1.4))),
+                  ]),
+              ),
+            ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close',
+                style: TextStyle(color: Color(0xFF1E88E5),
+                    fontWeight: FontWeight.w700))),
+        ]));
+  }
+
+  Widget _spiFormulaSection(String title, String subtitle,
+      List<String> points, SL sl) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title,
+          style: TextStyle(color: sl.text1, fontSize: 12,
+              fontWeight: FontWeight.w800)),
+      const SizedBox(height: 2),
+      Text(subtitle, style: TextStyle(color: sl.text4, fontSize: 10)),
+      const SizedBox(height: 8),
+      ...points.map((p) => Padding(
+            padding: const EdgeInsets.only(left: 10, bottom: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('• ', style: TextStyle(color: sl.text3, fontSize: 11)),
+                Expanded(
+                  child: Text(p,
+                      style: TextStyle(color: sl.text2, fontSize: 11,
+                          height: 1.4))),
+              ]),
+          )),
+    ]);
   }
 
   Widget _healthRow(String label, String value, Color color, SL sl) =>
@@ -5522,9 +5853,16 @@ class _AdminScreenState extends State<AdminScreen>
 
   Widget _complianceCard(_PlantCompliance pc, SL sl) {
     final closureRate = pc.total == 0 ? 0.0 : pc.closed / pc.total;
-    final score = (closureRate * 60) +
-                  (pc.staleHighCritical == 0 ? 25 : math.max(0, 25 - pc.staleHighCritical * 5)) +
-                  (pc.critical == 0 ? 15 : math.max(0, 15 - pc.critical));
+    // Use dynamic SPI calculation parameters
+    final closureMaxPts = _spiParams['closureMaxPoints'] ?? 60;
+    final staleMaxPts = _spiParams['staleMaxPoints'] ?? 25;
+    final critMaxPts = _spiParams['criticalMaxPoints'] ?? 15;
+    final stalePenalty = _spiParams['stalePenalty'] ?? 5;
+    final critPenalty = _spiParams['criticalPenalty'] ?? 1;
+
+    final score = (closureRate * closureMaxPts) +
+                  (pc.staleHighCritical == 0 ? staleMaxPts : math.max(0, staleMaxPts - pc.staleHighCritical * stalePenalty)) +
+                  (pc.critical == 0 ? critMaxPts : math.max(0, critMaxPts - pc.critical * critPenalty));
     final scoreI = score.round().clamp(0, 100);
     final scoreColor = scoreI >= 80 ? AppColors.green
                      : scoreI >= 50 ? AppColors.amber
@@ -5682,9 +6020,16 @@ class _AdminScreenState extends State<AdminScreen>
               // Plant rows
               ...rows.map((pc) {
                 final closureRate = pc.total == 0 ? 0.0 : pc.closed / pc.total;
-                final score = (closureRate * 60) +
-                              (pc.staleHighCritical == 0 ? 25 : math.max(0, 25 - pc.staleHighCritical * 5)) +
-                              (pc.critical == 0 ? 15 : math.max(0, 15 - pc.critical));
+                // Use dynamic SPI calculation parameters
+                final closureMaxPts = _spiParams['closureMaxPoints'] ?? 60;
+                final staleMaxPts = _spiParams['staleMaxPoints'] ?? 25;
+                final critMaxPts = _spiParams['criticalMaxPoints'] ?? 15;
+                final stalePenalty = _spiParams['stalePenalty'] ?? 5;
+                final critPenalty = _spiParams['criticalPenalty'] ?? 1;
+
+                final score = (closureRate * closureMaxPts) +
+                              (pc.staleHighCritical == 0 ? staleMaxPts : math.max(0, staleMaxPts - pc.staleHighCritical * stalePenalty)) +
+                              (pc.critical == 0 ? critMaxPts : math.max(0, critMaxPts - pc.critical * critPenalty));
                 final scoreI = score.round().clamp(0, 100);
                 final scoreColor = scoreI >= 80 ? AppColors.green
                                  : scoreI >= 50 ? AppColors.amber
@@ -5763,21 +6108,21 @@ class _AdminScreenState extends State<AdminScreen>
                     style: TextStyle(color: sl.text3, fontSize: 10.5)),
               ])),
             const SizedBox(height: 14),
-            _formulaSection('1. Closure Rate Component', '(max 60 points)', [
+            _formulaSection('1. Closure Rate Component', '(max ${_spiParams['closureMaxPoints']} points)', [
               'Closure Rate = Closed Incidents ÷ Total Incidents',
-              'Points = Closure Rate × 60',
+              'Points = Closure Rate × ${_spiParams['closureMaxPoints']}',
             ], sl),
             const SizedBox(height: 12),
-            _formulaSection('2. Stale High/Critical Incidents', '(max 25 points)', [
-              'If stale count = 0: 25 points',
-              'Otherwise: max(0, 25 - (stale count × 5))',
-              'Each stale incident (>7 days) costs 5 points',
+            _formulaSection('2. Stale High/Critical Incidents', '(max ${_spiParams['staleMaxPoints']} points)', [
+              'If stale count = 0: ${_spiParams['staleMaxPoints']} points',
+              'Otherwise: max(0, ${_spiParams['staleMaxPoints']} - (stale count × ${_spiParams['stalePenalty']}))',
+              'Each stale incident (>7 days) costs ${_spiParams['stalePenalty']} points',
             ], sl),
             const SizedBox(height: 12),
-            _formulaSection('3. Critical Incidents', '(max 15 points)', [
-              'If critical count = 0: 15 points',
-              'Otherwise: max(0, 15 - critical count)',
-              'Each critical incident costs 1 point',
+            _formulaSection('3. Critical Incidents', '(max ${_spiParams['criticalMaxPoints']} points)', [
+              'If critical count = 0: ${_spiParams['criticalMaxPoints']} points',
+              'Otherwise: max(0, ${_spiParams['criticalMaxPoints']} - (critical count × ${_spiParams['criticalPenalty']}))',
+              'Each critical incident costs ${_spiParams['criticalPenalty']} point(s)',
             ], sl),
             const SizedBox(height: 14),
             Container(
