@@ -84,44 +84,53 @@ class PdfExport {
       margin: const pw.EdgeInsets.fromLTRB(32, 32, 32, 32),
       header: (ctx) => _pageHeader(ctx.pageNumber > 1),
       footer: (ctx) => _pageFooter(ctx.pageNumber, ctx.pagesCount, reporterName, dateStr),
+      // ─── ONE-PAGE LAYOUT ───────────────────────────────────────────────
+      // Target: the whole report on page 1. Every spacer below is deliberately
+      // tight (10pt between sections, 4pt under a section title) — these were
+      // 18pt and 6pt, which alone pushed ~55pt of whitespace onto a second
+      // page. If you add a section here, keep to the same budget.
       build: (context) {
         final w = <pw.Widget>[];
         w.add(_banner(incident, severity, isAiScan, riskScore, confidence, logoImage));
-        w.add(pw.SizedBox(height: 16));
+        w.add(pw.SizedBox(height: 10));
         w.add(_sectionTitle('INCIDENT DETAILS'));
-        w.add(pw.SizedBox(height: 6));
+        w.add(pw.SizedBox(height: 4));
         w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno));
-        w.add(pw.SizedBox(height: 18));
+        w.add(pw.SizedBox(height: 10));
         if (imgBytes != null) {
           w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
-          w.add(pw.SizedBox(height: 6));
+          w.add(pw.SizedBox(height: 4));
           w.add(_photoAndSummary(imgBytes, hazards.length, summary,
               severity, riskScore, confidence, hazards));
-          w.add(pw.SizedBox(height: 18));
+          w.add(pw.SizedBox(height: 10));
         } else {
           w.add(_sectionTitle('INCIDENT SUMMARY'));
-          w.add(pw.SizedBox(height: 6));
+          w.add(pw.SizedBox(height: 4));
           w.add(_summaryBox(summary));
-          w.add(pw.SizedBox(height: 18));
+          w.add(pw.SizedBox(height: 10));
         }
         if (hazards.isNotEmpty) {
           w.add(_sectionTitle('HAZARDS IDENTIFIED  —  ${hazards.length} TOTAL'));
-          w.add(pw.SizedBox(height: 6));
+          w.add(pw.SizedBox(height: 4));
           w.add(_hazardsTable(hazards));
+          // NOTE: the TOTAL RISK SCORE / OVERALL RISK bar used to be added here.
+          // It was a verbatim duplicate of the risk score already shown in the
+          // right-hand panel of _photoAndSummary (and of the severity pill in
+          // the banner), and being ~100pt tall it was the single biggest reason
+          // the report ran to a second page. Removed deliberately — do not
+          // re-add it. The page-1 panel is the one source of the score.
           w.add(pw.SizedBox(height: 10));
-          w.add(_riskScoreBar(riskScore, severity));
-          w.add(pw.SizedBox(height: 18));
         }
-        // ✅ Add GPS location section if available
+        // GPS is now a single compact strip rather than a ~145pt bordered card
+        // with its own section title, because the coordinates and a Maps link
+        // are all a reader needs.
         final gpsSection = _gpsLocationSection(incident);
         if (gpsSection != null) {
-          w.add(_sectionTitle('GPS LOCATION'));
-          w.add(pw.SizedBox(height: 6));
           w.add(gpsSection);
-          w.add(pw.SizedBox(height: 18));
+          w.add(pw.SizedBox(height: 10));
         }
         w.add(_twoCol(incident));
-        w.add(pw.SizedBox(height: 18));
+        w.add(pw.SizedBox(height: 10));
         w.add(_signOff(reporterName, reporterPno));
         return w;
       },
@@ -261,7 +270,7 @@ class PdfExport {
   }
 
   static pw.Widget _sectionTitle(String t) => pw.Container(
-    padding: const pw.EdgeInsets.fromLTRB(10, 6, 10, 6),
+    padding: const pw.EdgeInsets.fromLTRB(10, 4, 10, 4),
     decoration: pw.BoxDecoration(
       color: _sailLight,
       border: pw.Border(left: pw.BorderSide(color: _sailBlue, width: 3)),
@@ -343,7 +352,7 @@ class PdfExport {
     final c  = (conf is int ? conf : int.tryParse('$conf') ?? 0).clamp(0, 100);
 
     const photoW = 278.0;
-    const photoH = 185.0;
+    const photoH = 148.0; // was 185; -37pt toward the one-page target
 
     final annotatedPhoto = _buildAnnotatedPhoto(img, hazards, photoW, photoH);
 
@@ -618,7 +627,7 @@ class PdfExport {
                 color: _sailBlue),
                 textAlign: pw.TextAlign.center)),
             pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(6, 8, 6, 8),
+              padding: const pw.EdgeInsets.fromLTRB(6, 5, 6, 5),
               color: bg,
               child: pw.Text(_safe(h['name']?.toString() ?? ''),
                 style: pw.TextStyle(fontSize: 8,
@@ -633,19 +642,19 @@ class PdfExport {
                 color: sc),
                 textAlign: pw.TextAlign.center)),
             pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(6, 8, 6, 8),
+              padding: const pw.EdgeInsets.fromLTRB(6, 5, 6, 5),
               color: bg,
               child: pw.Text(_safe(h['description']?.toString() ?? ''),
                 style: pw.TextStyle(fontSize: 7.5, color: _textDark,
                   lineSpacing: 1.4))),
             pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(6, 8, 6, 8),
+              padding: const pw.EdgeInsets.fromLTRB(6, 5, 6, 5),
               color: bg,
               child: pw.Text(_safe(h['regulation']?.toString() ?? ''),
                 style: pw.TextStyle(fontSize: 7, color: _textMed,
                   lineSpacing: 1.3))),
             pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(6, 8, 6, 8),
+              padding: const pw.EdgeInsets.fromLTRB(6, 5, 6, 5),
               color: bg,
               child: pw.Text(_safe(h['correctiveAction']?.toString() ?? ''),
                 style: pw.TextStyle(fontSize: 7.5, color: _textDark,
@@ -656,64 +665,15 @@ class PdfExport {
     );
   }
 
-  static pw.Widget _riskScoreBar(dynamic rawScore, String severity) {
-    final score = (rawScore is int
-        ? rawScore : int.tryParse('$rawScore') ?? 0).clamp(0, 100);
-    final sc = _getSevCol(severity);
-    final sb = _getSevBg(severity);
+  // _riskScoreBar() was deleted here. It rendered TOTAL RISK SCORE / OVERALL
+  // RISK with a 0/50/75/90+ scale bar and was appended after the hazards
+  // table, which put a ~100pt duplicate of the page-1 risk panel at the top
+  // of page 2. The score, severity and confidence all still appear in the
+  // right-hand panel of _photoAndSummary and as the banner severity pill.
 
-    return pw.Container(
-      padding: const pw.EdgeInsets.fromLTRB(10, 8, 10, 8),
-      decoration: pw.BoxDecoration(
-        color: sb,
-        border: pw.Border.all(color: sc, width: 0.8)),
-      child: pw.Row(children: [
-        pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-          pw.Text('TOTAL RISK SCORE', style: pw.TextStyle(
-            fontSize: 7, color: _textLight,
-            fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 2),
-          pw.Row(children: [
-            pw.Text('$score', style: pw.TextStyle(
-              fontSize: 28, fontWeight: pw.FontWeight.bold, color: sc)),
-            pw.Text(' / 100', style: pw.TextStyle(
-              fontSize: 10, color: _textMed)),
-          ]),
-        ]),
-        pw.SizedBox(width: 16),
-        pw.Expanded(child: pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Text('OVERALL RISK: $severity', style: pw.TextStyle(
-              fontSize: 9, fontWeight: pw.FontWeight.bold, color: sc)),
-            pw.SizedBox(height: 6),
-            pw.Stack(children: [
-              pw.Container(
-                height: 8,
-                decoration: pw.BoxDecoration(
-                  color: PdfColors.white,
-                  border: pw.Border.all(color: _divider, width: 0.6))),
-              pw.Container(height: 8, width: (score / 100) * 300, color: sc),
-            ]),
-            pw.SizedBox(height: 4),
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text('0 — LOW', style: pw.TextStyle(
-                  fontSize: 6.5, color: _lowCol)),
-                pw.Text('50 — MEDIUM', style: pw.TextStyle(
-                  fontSize: 6.5, color: _medCol)),
-                pw.Text('75 — HIGH', style: pw.TextStyle(
-                  fontSize: 6.5, color: _highCol)),
-                pw.Text('90+ CRITICAL', style: pw.TextStyle(
-                  fontSize: 6.5, color: _critCol)),
-              ]),
-          ])),
-      ]),
-    );
-  }
+  // hazards_countBySev() was deleted here too: it was dead code that always
+  // returned 0 and had no callers.
 
-  static int hazards_countBySev(List l, String s) => 0;
 
   static pw.Widget _summaryBox(String summary) => pw.Container(
     padding: const pw.EdgeInsets.all(10),
@@ -740,51 +700,46 @@ class PdfExport {
         ? addr
         : '${_toDouble(lat).toStringAsFixed(4)}, ${_toDouble(lon).toStringAsFixed(4)}';
 
+    // Compact single-row strip. This was a ~145pt bordered card with its own
+    // 'GPS LOCATION' section title, a large place name, an accuracy line, a
+    // 'View on Google Maps' link AND the raw URL printed again underneath — the
+    // URL was redundant because the link text is already clickable, and the
+    // whole block was the second-biggest contributor to the report spilling
+    // onto page 2. Now one line, ~26pt, carrying the same information.
     return pw.Container(
-      padding: const pw.EdgeInsets.all(12),
+      padding: const pw.EdgeInsets.fromLTRB(8, 5, 8, 5),
       decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: PdfColor.fromHex('#00838F'), width: 0.8),
-        borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4)),
+        border: pw.Border.all(color: PdfColor.fromHex('#00838F'), width: 0.6),
         color: PdfColor.fromHex('#E0F7FA')),
-      child: pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
         children: [
-          // Header row
-          pw.Row(children: [
-            pw.Text('INCIDENT LOCATION', style: pw.TextStyle(
-              fontSize: 9, color: PdfColor.fromHex('#00695C'),
-              fontWeight: pw.FontWeight.bold)),
-            pw.Spacer(),
-            if (timestamp.isNotEmpty)
-              pw.Text('Captured: ${_formatGpsTimestamp(timestamp)}',
-                style: pw.TextStyle(fontSize: 7, color: _textMed)),
-          ]),
-          pw.SizedBox(height: 8),
-          // ★ PLACE NAME — large and prominent
-          pw.Text(displayLocation, style: pw.TextStyle(
-            fontSize: 10.5, color: _textDark,
-            fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 6),
-          // Accuracy + Map link row — real clickable hyperlink (all platforms)
-          pw.Row(children: [
-            if (acc != null)
-              pw.Text('Accuracy: +/-${_toDouble(acc).toStringAsFixed(0)}m',
-                style: pw.TextStyle(fontSize: 7.5, color: _textMed)),
-            pw.Spacer(),
-            pw.UrlLink(
-              destination: mapsUrl,
-              child: pw.Text('View on Google Maps',
-                style: pw.TextStyle(fontSize: 8.5, color: PdfColor.fromHex('#0D47A1'),
-                  fontWeight: pw.FontWeight.bold,
-                  decoration: pw.TextDecoration.underline)),
-            ),
-          ]),
-          pw.SizedBox(height: 3),
-          // The full URL is also a clickable link (shown small for reference).
+          pw.Text('LOCATION  ', style: pw.TextStyle(
+            fontSize: 7, color: PdfColor.fromHex('#00695C'),
+            fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
+          // Expanded (not Spacer) so a long address ellipsises instead of
+          // wrapping the row onto a second line and undoing the saving.
+          pw.Expanded(
+            child: pw.Text(displayLocation,
+              // maxLines only (no `overflow:`) — kept to the parameters this
+              // pdf version is known to accept, since the row just needs to
+              // stay one line high.
+              maxLines: 1,
+              style: pw.TextStyle(
+                fontSize: 8.5, color: _textDark,
+                fontWeight: pw.FontWeight.bold))),
+          if (acc != null)
+            pw.Text('  +/-${_toDouble(acc).toStringAsFixed(0)}m',
+              style: pw.TextStyle(fontSize: 7, color: _textMed)),
+          if (timestamp.isNotEmpty)
+            pw.Text('  ${_formatGpsTimestamp(timestamp)}',
+              style: pw.TextStyle(fontSize: 7, color: _textMed)),
+          pw.SizedBox(width: 6),
           pw.UrlLink(
             destination: mapsUrl,
-            child: pw.Text(mapsUrl,
-              style: pw.TextStyle(fontSize: 6.5, color: PdfColor.fromHex('#1565C0'),
+            child: pw.Text('Google Maps',
+              style: pw.TextStyle(fontSize: 7.5, color: PdfColor.fromHex('#0D47A1'),
+                fontWeight: pw.FontWeight.bold,
                 decoration: pw.TextDecoration.underline)),
           ),
         ]));
@@ -853,8 +808,11 @@ class PdfExport {
         ])),
     ]);
 
+  // Signature gaps trimmed 20pt -> 13pt and padding 14pt -> 9pt. Still ample
+  // room to sign by hand (13pt is ~4.6mm of clear space above each rule) while
+  // giving back ~31pt toward the one-page target.
   static pw.Widget _signOff(String reporter, String pno) => pw.Container(
-    padding: const pw.EdgeInsets.fromLTRB(14, 14, 14, 14),
+    padding: const pw.EdgeInsets.fromLTRB(9, 9, 9, 9),
     decoration: pw.BoxDecoration(
       border: pw.Border.all(color: _sailBlue, width: 0.8),
       color: _sailLight),
@@ -875,7 +833,7 @@ class PdfExport {
                 color: _textDark)),
               if (pno.isNotEmpty) pw.Text('P.No.: $pno',
                 style: pw.TextStyle(fontSize: 8, color: _textMed)),
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 13),
               pw.Container(width: 120, height: 0.5, color: _textDark),
               pw.SizedBox(height: 3),
               pw.Text('Signature', style: pw.TextStyle(
@@ -890,7 +848,7 @@ class PdfExport {
               pw.SizedBox(height: 4),
               pw.Text('Safety Officer / HOD', style: pw.TextStyle(
                 fontSize: 9, color: _textMed)),
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 13),
               pw.Container(width: 120, height: 0.5, color: _textDark),
               pw.SizedBox(height: 3),
               pw.Text('Signature & Date', style: pw.TextStyle(
@@ -905,16 +863,16 @@ class PdfExport {
               pw.SizedBox(height: 4),
               pw.Text('Plant Head / GM (Safety)', style: pw.TextStyle(
                 fontSize: 9, color: _textMed)),
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 13),
               pw.Container(width: 120, height: 0.5, color: _textDark),
               pw.SizedBox(height: 3),
               pw.Text('Signature & Date', style: pw.TextStyle(
                 fontSize: 7, color: _textLight)),
             ])),
         ]),
-      pw.SizedBox(height: 12),
+      pw.SizedBox(height: 7),
       pw.Container(height: 0.5, color: PdfColor.fromHex('#BBDEFB')),
-      pw.SizedBox(height: 6),
+      pw.SizedBox(height: 4),
       pw.Text(
         'This report is generated by SAIL Safety Lens AI system. '
         'All observations are subject to verification by the Safety Department.',
