@@ -36,8 +36,36 @@ jobs:
       - name: Enable web platform
         run: flutter config --enable-web
 
+      # Retried deliberately. There is no committed pubspec.lock, so every run
+      # re-solves the whole dependency graph over the network. pub.dev
+      # intermittently answers a metadata request with 403 from shared GitHub
+      # Actions IPs, and pub then reports the package as
+      #   "... depends on <pkg> any which doesn't exist (authorization failed)"
+      # and version solving fails with exit code 69 — even though the package is
+      # public and fine. That is exactly what killed run 31894635327
+      # (speech_to_text -> speech_to_text_macos). It is transient, so retry
+      # rather than downgrading a constraint that was never the problem.
       - name: Flutter pub get
-        run: flutter pub get
+        run: |
+          for attempt in 1 2 3 4; do
+            echo "::group::flutter pub get (attempt $attempt/4)"
+            if flutter pub get; then
+              echo "::endgroup::"
+              echo "pub get succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" -lt 4 ]; then
+              # A partially-written cache entry can make the failure sticky,
+              # so clear it before re-resolving.
+              rm -rf "${PUB_CACHE:-$HOME/.pub-cache}/_temp" || true
+              delay=$((attempt * 20))
+              echo "::warning::pub get failed (attempt $attempt). Retrying in ${delay}s."
+              sleep "$delay"
+            fi
+          done
+          echo "::error::flutter pub get failed after 4 attempts. If the log says \"doesn't exist (authorization failed)\" for a package that is public, pub.dev rate-limited this runner — re-run the job. If it persists, commit a pubspec.lock so CI stops re-solving from the network."
+          exit 1
 
       - name: Build web (release)
         # Icon tree-shaking re-enabled 2026-08-14. It was disabled defensively,
