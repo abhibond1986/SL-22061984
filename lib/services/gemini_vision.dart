@@ -222,7 +222,10 @@ class GeminiVision {
         }
         if (_isAnalyzing) {
           return logged(
-            await _offlineFallback(bytes, reason: 'Another analysis in progress'),
+            await _offlineFallback(bytes,
+                reason: 'another scan was still running',
+                hint: 'Only one photo can be analysed at a time. Try this one '
+                    'again in a few seconds.'),
             outcome: AiRunLog.outcomeFailed,
             failReason: AiRunLog.reasonConcurrent,
             imageHash: imgHash,
@@ -246,7 +249,10 @@ class GeminiVision {
           print('GeminiVision: No internet → offline fallback');
           _isAnalyzing = false;
           return logged(
-            await _offlineFallback(bytes, reason: 'No internet connection'),
+            await _offlineFallback(bytes,
+                reason: 'this device has no internet connection',
+                hint: 'Reconnect and scan again. You can record the '
+                    'observation now and it will sync later.'),
             outcome: AiRunLog.outcomeFailed,
             failReason: AiRunLog.reasonNoInternet,
             imageHash: imgHash,
@@ -313,8 +319,10 @@ class GeminiVision {
       // _lastOrStatus after the loop is not enough: it holds only the final
       // attempt's status, so an early 429 followed by a 500 on the last model
       // would report the wrong reason to the user.
-      bool orQuotaHit = false;   // 429 — daily free allowance spent
-      bool orKeyRejected = false; // 401/402 — key invalid or out of credit
+      bool orQuotaHit = false;    // 429 naming the DAILY allowance — spent
+      bool orThrottled = false;   // 429 short-window throttle — clears in ~1 min
+      bool orRefusedUnknown = false; // 429 that named no counter — cause unclear
+      bool orKeyRejected = false; // 401/402/403 — key invalid, unpaid, blocked
       if (orKeys.isNotEmpty) {
         // If an admin pinned a model, use only that one; else walk the chain.
         final pinned = prefs.getString(_kVisionModelPin);
@@ -369,8 +377,29 @@ class GeminiVision {
               // models draw on the same account allowance and would fail the
               // same way. Abandon this key now rather than burning three more
               // round trips (~3x45s worst case) to learn nothing.
-              if (_lastOrStatus == 429) orQuotaHit = true;
-              if (_lastOrStatus == 401 || _lastOrStatus == 402) {
+              if (_lastOrStatus == 429) {
+                // Only a 429 that named the DAILY counter means "come back
+                // tomorrow". A per-minute throttle is recorded separately so the
+                // user is told to retry in a minute, which actually works. A
+                // 429 that named neither sets both false and falls through to
+                // the honest "either one" message.
+                if (_lastOr429Kind == 'daily') {
+                  orQuotaHit = true;
+                } else if (_lastOr429Kind == 'throttle') {
+                  orThrottled = true;
+                } else {
+                  orRefusedUnknown = true;
+                }
+              }
+              // 403 belongs here even though it is deliberately excluded from
+              // _lastOrFailureIsKeyWide: that flag decides whether to abandon
+              // the remaining MODELS (403 can be per-model moderation, so we
+              // keep trying), while this one decides what to TELL THE USER. A
+              // blocked key is not "the service did not respond", and advising
+              // a retry for it would be useless.
+              if (_lastOrStatus == 401 ||
+                  _lastOrStatus == 402 ||
+                  _lastOrStatus == 403) {
                 orKeyRejected = true;
               }
               if (_lastOrFailureIsKeyWide) {
@@ -462,8 +491,38 @@ class GeminiVision {
             'Admin → System Health. Nothing is wrong with your phone.';
       } else if (orQuotaHit) {
         reason = "today's free AI scan limit has been used up";
-        hint = 'The free allowance resets daily. You can still record this '
+        // Give the actual reset clock time rather than a vague "resets daily".
+        // Someone standing at a hazard needs to know whether to wait or to write
+        // it up by hand, and "resets at 5:30 AM" answers that; "daily" does not.
+        String when = 'later today';
+        try {
+          final snap = await freeQuotaSnapshot();
+          final resetLocal =
+              DateTime.parse(snap['resetsAtUtc'] as String).toLocal();
+          final h = resetLocal.hour;
+          final ampm = h < 12 ? 'AM' : 'PM';
+          final h12 = h % 12 == 0 ? 12 : h % 12;
+          when = 'at $h12:${resetLocal.minute.toString().padLeft(2, '0')} $ampm';
+        } catch (_) {
+          // Fall back to the vague wording rather than showing a broken time.
+        }
+        hint = 'The free allowance resets $when. You can still record this '
             'observation manually — the form works normally.';
+      } else if (orThrottled) {
+        // Checked after orQuotaHit: if BOTH happened (one key throttled, the
+        // other genuinely out of quota), the daily message is the useful one.
+        reason = 'too many scans were sent in the last minute';
+        hint = 'This is a short cool-off, not the daily limit. Wait about a '
+            'minute and scan again.';
+      } else if (orRefusedUnknown) {
+        // Deliberately vague, because the service was vague. Naming a specific
+        // cause here would be a guess, and a wrong guess sends the reporter
+        // either to wait out a limit that was never hit or to retry one that
+        // will not clear for hours. Both waste time at a live hazard.
+        reason = 'the AI service declined more scans just now';
+        hint = 'It did not say whether this is a short cool-off or today\'s '
+            'free limit. Try once more in a minute; if it still declines, '
+            'record the observation manually.';
       } else if (orKeyRejected) {
         reason = 'the AI service rejected the key';
         hint = 'Please report this to your administrator — the AI key needs '
@@ -483,7 +542,10 @@ class GeminiVision {
       print('GeminiVision: Unexpected error: $e');
       _isAnalyzing = false;
       return logged(
-        await _offlineFallback(bytes, reason: e.toString()),
+        await _offlineFallback(bytes,
+            reason: 'the scan hit an unexpected error',
+            hint: 'Please try once more. If it keeps happening, report it to '
+                'your administrator — the details are in the app log.'),
         outcome: AiRunLog.outcomeFailed,
         failReason: AiRunLog.reasonException,
       );
@@ -581,6 +643,17 @@ class GeminiVision {
   /// only saw `null` and had to burn four calls to learn the same thing.
   static int? _lastOrStatus;
 
+  /// True when the most recent 429 named the DAILY allowance rather than the
+  /// short-window (per-minute) throttle. Reset on every request so a stale
+  /// value from an earlier scan cannot leak into this one's message.
+  /// Which of the two 429s the last OpenRouter call hit: `'daily'` (allowance
+  /// spent, retrying is pointless until the UTC reset), `'throttle'` (short
+  /// cool-off, retrying in a minute works), `'unknown'` (429 with a body that
+  /// named neither — say so rather than inventing a cause), or `''` (no 429).
+  /// A tri-state, not a bool, precisely so "unknown" cannot masquerade as
+  /// "throttle" and send a user off to retry a limit that will not clear.
+  static String _lastOr429Kind = '';
+
   /// True when [_lastOrStatus] means "this key is finished for now", as opposed
   /// to "this model didn't work".
   /// 403 is deliberately EXCLUDED. OpenRouter returns it for per-model and
@@ -592,6 +665,122 @@ class GeminiVision {
       _lastOrStatus == 429 || // daily/minute quota — counted per ACCOUNT
       _lastOrStatus == 401 || // key invalid or revoked
       _lastOrStatus == 402;   // out of credit
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  FREE-TIER USAGE LEDGER
+  //
+  //  Answers the only question a user actually asks when a scan comes back
+  //  offline: "how many photos can I still analyse today?"
+  //
+  //  OpenRouter does not tell us. The API returns a remaining-quota figure
+  //  nowhere in the vision response, and the /key endpoint reports credits, not
+  //  the free-model day counter. So this device keeps its own tally.
+  //
+  //  READ THE LIMITS OF THIS BEFORE TRUSTING THE NUMBER:
+  //    • It counts requests made FROM THIS DEVICE. The real allowance is per
+  //      OpenRouter ACCOUNT, so if the same key is deployed on ten phones the
+  //      account is spending ten times what any one phone can see. That is why
+  //      the admin panel labels it "this device" and not "remaining quota".
+  //    • Only HTTP 200 is counted — one served analysis. A 429 was refused and
+  //      costs nothing; a 404 bad slug never reached a model. The chain stops at
+  //      the first success, so in normal use one analysed photo == one request,
+  //      which is what makes the count meaningful to a non-technical user.
+  //    • [kFreeVisionRequestsPerDay] is OpenRouter's documented free allowance
+  //      for an account with no credits. It rises to 1000/day once 10 USD of
+  //      credits is added (credits are not spent by ':free' models). It is a
+  //      constant because the API exposes no way to read it, so the panel calls
+  //      the remaining figure an estimate rather than a fact.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /// OpenRouter's free-model allowance per account per day, no credits added.
+  static const int kFreeVisionRequestsPerDay = 50;
+
+  /// Allowance once the account holds at least 10 USD of credits.
+  static const int kFreeVisionRequestsPerDayWithCredits = 1000;
+
+  // Dates here are UTC on purpose. OpenRouter's free counter resets at 00:00
+  // UTC, which is 05:30 IST — so a ledger keyed on LOCAL midnight would clear
+  // itself five and a half hours early every night and tell a user at 01:00 IST
+  // that they had a fresh 50 requests when in fact they had none.
+  static const String _kQuotaDate     = 'or_free_quota_utc_date';
+  static const String _kQuotaUsed     = 'or_free_quota_used';
+  static const String _kQuotaLimitHit = 'or_free_quota_limit_hit_at';
+
+  static String _utcDayKey([DateTime? at]) {
+    final d = (at ?? DateTime.now()).toUtc();
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Record one OpenRouter outcome against today's ledger.
+  ///
+  /// Wrapped so a storage fault can never turn into a scan failure: this is
+  /// bookkeeping running inside the hot path of someone photographing a hazard.
+  static Future<void> _recordFreeUsage({required bool served}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final today = _utcDayKey();
+      if (prefs.getString(_kQuotaDate) != today) {
+        // New quota day — reset before touching the counters, and clear the
+        // limit-hit stamp so yesterday's exhaustion is not shown as today's.
+        await prefs.setString(_kQuotaDate, today);
+        await prefs.setInt(_kQuotaUsed, 0);
+        await prefs.remove(_kQuotaLimitHit);
+      }
+      if (served) {
+        await prefs.setInt(_kQuotaUsed, (prefs.getInt(_kQuotaUsed) ?? 0) + 1);
+      } else {
+        // A 429 is the ground truth that the allowance is gone, and it beats our
+        // own estimate: it is recorded even if the counter says 3 used, because
+        // other devices on the same account spent the rest.
+        await prefs.setString(
+            _kQuotaLimitHit, DateTime.now().toUtc().toIso8601String());
+      }
+    } catch (e) {
+      print('GeminiVision: quota ledger write failed (ignored): $e');
+    }
+  }
+
+  /// What the admin panel shows. All figures are for THIS DEVICE, this UTC day.
+  ///
+  /// `limitReached` is authoritative when true (OpenRouter said 429). `remaining`
+  /// is only an estimate — see the block comment above.
+  static Future<Map<String, dynamic>> freeQuotaSnapshot() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = _utcDayKey();
+    final stale = prefs.getString(_kQuotaDate) != today;
+
+    // A stale ledger is reported as zero rather than rewritten. A read from the
+    // admin panel must not have side effects, and the reset happens naturally on
+    // the next scan.
+    final used = stale ? 0 : (prefs.getInt(_kQuotaUsed) ?? 0);
+    final hitAt = stale ? '' : (prefs.getString(_kQuotaLimitHit) ?? '');
+
+    final now = DateTime.now().toUtc();
+    final resetsAt = DateTime.utc(now.year, now.month, now.day)
+        .add(const Duration(days: 1));
+
+    return <String, dynamic>{
+      'used': used,
+      'limit': kFreeVisionRequestsPerDay,
+      // Clamped at 0: the account-wide limit means this device can legitimately
+      // see more successes than its own assumed share, and a negative
+      // "remaining" would look like a bug.
+      // .toInt() because num.clamp() is only narrowed to int by an analyzer
+      // special case; being explicit keeps the map value a real int for the
+      // `as int?` casts on the reading side.
+      'remaining': (kFreeVisionRequestsPerDay - used).clamp(0, 1 << 30).toInt(),
+      'limitReached': hitAt.isNotEmpty,
+      'limitReachedAt': hitAt,
+      'resetsAtUtc': resetsAt.toIso8601String(),
+      'resetsInMinutes': resetsAt.difference(now).inMinutes,
+      'keysConfigured': _configuredOpenRouterKeys(prefs).length,
+      // Reported alongside so a caller can tell "AI is not set up at all" from
+      // "AI runs on a Gemini key, which this free-tier ledger does not track".
+      // Without it, zero OpenRouter keys looks identical to zero AI.
+      'geminiConfigured': await GeminiDirectVision.isConfigured,
+    };
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  OPENROUTER (client) — multimodal vision, model chosen by caller
@@ -629,6 +818,7 @@ class GeminiVision {
     };
 
     _lastOrStatus = null;
+    _lastOr429Kind = '';
     try {
       final response = await http.post(
         Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
@@ -642,6 +832,12 @@ class GeminiVision {
       ).timeout(const Duration(seconds: 45));
 
       _lastOrStatus = response.statusCode;
+      // Ledger before parsing. A malformed 200 body still spent the request, so
+      // counting it here keeps the tally honest instead of only counting scans
+      // that happened to come back well-formed.
+      if (response.statusCode == 200) {
+        await _recordFreeUsage(served: true);
+      }
       if (response.statusCode == 200) {
         final data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
         final choices = data['choices'] as List?;
@@ -651,20 +847,80 @@ class GeminiVision {
         }
       } else if (response.statusCode == 429) {
         // The single most common real-world failure, and previously logged as a
-        // bare status code that read like an app bug. OpenRouter's free tier is
-        // capped PER ACCOUNT PER DAY across every ':free' model, so this is not
-        // fixable by picking a different free model — the body carries the
-        // actual reset window, so surface it.
+        // bare status code that read like an app bug.
+        //
+        // TWO DIFFERENT LIMITS RETURN 429 AND THEY NEED OPPOSITE ADVICE:
+        //   • free-models-per-day — the account's daily allowance is gone. The
+        //     user must wait for the UTC-midnight reset; retrying is pointless.
+        //   • requests-per-minute — a burst of scans tripped the throttle. It
+        //     clears in under a minute; retrying is exactly the right advice.
+        // Telling a user at 10am that "today's limit is used up" when they only
+        // scanned four photos too quickly is the same class of wrong-cause
+        // message this whole change set exists to eliminate, so the body is
+        // parsed to tell them apart and the ledger is only stamped "exhausted"
+        // when OpenRouter actually named the daily counter.
         String detail = '';
         try {
           final err = jsonDecode(response.body) as Map<String, dynamic>;
           detail = (err['error']?['message'] ?? '').toString();
         } catch (_) {}
+        final d = detail.toLowerCase();
+
+        // Order matters, and so does the third state.
+        //
+        // A plain `contains('per day')` is not safe: OpenRouter appends the
+        // upsell line "Add 10 credits to unlock 1000 free model requests per
+        // day" to rate-limit errors, so a per-MINUTE throttle carrying that
+        // sentence would be misread as the daily cap — and would then stamp the
+        // ledger, making the admin card claim a confirmed exhaustion all day.
+        // So: look for the short-window wording FIRST and let it win, and only
+        // accept "daily" when the phrasing names a counter rather than an offer.
+        //
+        // When the body is empty or unrecognised (bare 'Provider returned
+        // error', HTML from a proxy) neither is claimed. Guessing here would
+        // mean telling a field user a specific wrong cause, which is worse than
+        // admitting the service refused without saying why.
+        // Only explicit short-window counter names count as a throttle. The
+        // generic 'too many requests' is deliberately excluded — it is the
+        // stock HTTP 429 phrase and shows up on daily caps too.
+        final throttleNamed = d.contains('per-minute') ||
+            d.contains('per minute') ||
+            d.contains('per-second') ||
+            d.contains('per second') ||
+            d.contains('rpm');
+        // Likewise only counter names, never the upsell sentence: "Add 10
+        // credits to unlock 1000 free model requests per day" is marketing copy
+        // that rides along with several different 429s.
+        final dailyNamed = d.contains('free-models-per-day') ||
+            d.contains('requests-per-day') ||
+            d.contains('daily limit') ||
+            d.contains('daily quota') ||
+            d.contains('per-day');
+        _lastOr429Kind = throttleNamed
+            ? 'throttle'
+            : (dailyNamed ? 'daily' : 'unknown');
+        if (_lastOr429Kind == 'daily') {
+          await _recordFreeUsage(served: false);
+        }
         print('GeminiVision: ⚠ OpenRouter RATE LIMITED (429) on $model'
             '${detail.isEmpty ? '' : ' — $detail'}');
-        print('GeminiVision:   Free-tier quota is account-wide across all '
-            ':free models, so the remaining models on THIS key will also 429. '
-            'Configure a Gemini key in Admin → System Health, or add credits.');
+        switch (_lastOr429Kind) {
+          case 'daily':
+            print('GeminiVision:   DAILY allowance exhausted. It is '
+                'account-wide across all :free models, so the remaining models '
+                'on THIS key will also 429. Configure a Gemini key in Admin → '
+                'System Health, or add credits.');
+            break;
+          case 'throttle':
+            print('GeminiVision:   Short-window throttle (not the daily cap) — '
+                'this clears within a minute. Ledger NOT marked exhausted.');
+            break;
+          default:
+            print('GeminiVision:   429 named no counter, so the cause is '
+                'UNKNOWN (daily cap or throttle). Ledger NOT marked exhausted '
+                'and the user is told both possibilities. Body: '
+                '${response.body.length > 200 ? '${response.body.substring(0, 200)}…' : response.body}');
+        }
       } else if (response.statusCode == 401 || response.statusCode == 403) {
         print('GeminiVision: ⚠ OpenRouter REJECTED THE KEY '
             '(${response.statusCode}) on $model — key invalid, revoked, or '

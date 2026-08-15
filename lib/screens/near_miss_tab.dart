@@ -1052,6 +1052,12 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           'type':       'Unsafe Condition',
           'severity':   'MEDIUM',
           'confidence': 0,
+          // Hardcoded rather than read from a result: this path returns before
+          // GeminiVision runs, so there is no result to read — but the cause is
+          // known for certain here, which is exactly why it is worth saying.
+          'offlineReason': 'this device has no internet connection',
+          'offlineHint':   'The photo is saved with the report. Fill the form '
+              'manually now, or delete and re-scan once you are back online.',
         };
         _brief.text = 'Describe the near miss observed.';
         _analyzing  = false;
@@ -1098,6 +1104,12 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
             'type':       'Unsafe Condition',
             'severity':   'MEDIUM',
             'confidence': 0,
+            // This is THE offline path for near-miss photos: every fallback
+            // returns no hazards and _isOnline false, so it lands here rather
+            // than in the map further down. The cause has to be carried on this
+            // map or the banner can only ever say "AI could not analyze image".
+            'offlineReason': result?['_offline_reason']?.toString() ?? '',
+            'offlineHint':   result?['_offline_hint']?.toString() ?? '',
           };
           _brief.text       = '';
           _setDeptFromProfile(user?['department']?.toString() ?? 'Operations');
@@ -1147,6 +1159,12 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           'severity':   sev,
           'confidence': result?['confidence'] ?? 75,
           'isOnline':   isOnline,
+          // Carried through so the banner below can name the ACTUAL cause of an
+          // offline result (spent daily allowance, rejected key, throttle, no
+          // internet) instead of always blaming connectivity. GeminiVision sets
+          // these on every fallback; they are absent on a successful analysis.
+          'offlineReason': result?['_offline_reason']?.toString() ?? '',
+          'offlineHint':   result?['_offline_hint']?.toString() ?? '',
         };
         _brief.text           = '${refinedData['name'] ?? ''}. ${refinedData['desc'] ?? ''}'.trim();
         _description.text     = refinedData['desc']?.toString() ?? '';
@@ -1182,6 +1200,11 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           'type':       'Unsafe Condition',
           'severity':   'MEDIUM',
           'confidence': 0,
+          // Deliberately does NOT include e.toString(): a Dart exception string
+          // tells a shop-floor reporter nothing and looks like a broken app.
+          'offlineReason': 'the scan hit an unexpected error',
+          'offlineHint':   'Fill the form manually. If this keeps happening, '
+              'report it to the Safety Lens administrator.',
         };
         _brief.text = 'Describe the near miss observed.';
         _analyzing  = false;
@@ -1984,6 +2007,56 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           Text('Please wait...', style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 10)),
         ]))));
 
+  /// Plain-language reason this photo was not analysed.
+  ///
+  /// Falls back to the old connectivity wording only when GeminiVision supplied
+  /// no reason, because "retry when connected" is actively misleading when the
+  /// device IS connected and the real cause is the account's spent daily AI
+  /// allowance — the user goes hunting for a signal problem that isn't there.
+  String _offlineExplanation() {
+    final reason = _aiBrief?['offlineReason']?.toString() ?? '';
+    final hint   = _aiBrief?['offlineHint']?.toString() ?? '';
+    if (reason.isEmpty && hint.isEmpty) {
+      return 'AI could not analyze image. Fill the form manually or retry when '
+          'connected.';
+    }
+    final parts = <String>[];
+    if (reason.isNotEmpty) {
+      // Spliced after "because", so the fragment must be lower-case.
+      parts.add('Not analysed because '
+          '${reason[0].toLowerCase()}${reason.substring(1)}.');
+    } else {
+      parts.add('This photo was not analysed.');
+    }
+    // Every hint already ends by telling the reporter they can fill the form in
+    // by hand, so appending it again reads as a stutter. Only add it when there
+    // is no hint to carry the message.
+    if (hint.isNotEmpty) {
+      parts.add(hint);
+    } else {
+      parts.add('You can fill the form manually.');
+    }
+    return parts.join(' ');
+  }
+
+  /// The banner icon has to agree with the banner text: a spent quota or a
+  /// rejected key shown next to a wifi-off symbol tells the reporter to go find
+  /// a signal, which is the wrong action and wastes their time.
+  IconData _offlineIcon() {
+    final r = (_aiBrief?['offlineReason']?.toString() ?? '').toLowerCase();
+    if (r.contains('internet') || r.contains('offline')) {
+      return Icons.wifi_off_rounded;
+    }
+    if (r.contains('limit') || r.contains('allowance') || r.contains('used up')) {
+      return Icons.cloud_off_rounded;
+    }
+    if (r.contains('key')) return Icons.vpn_key_off_rounded;
+    if (r.contains('minute') || r.contains('still running')) {
+      return Icons.hourglass_bottom_rounded;
+    }
+    return Icons.info_outline_rounded;
+  }
+
   Widget _imageWithBrief(SL sl) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -2028,11 +2101,11 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 color: AppColors.amber.withOpacity(0.08),
                 borderRadius: BorderRadius.circular(8)),
               child: Row(children: [
-                const Icon(Icons.wifi_off_rounded, color: AppColors.amber, size: 14),
+                Icon(_offlineIcon(), color: AppColors.amber, size: 14),
                 const SizedBox(width: 8),
                 Expanded(child: Text(
-                  'AI could not analyze image. Fill the form manually or retry when connected.',
-                  style: TextStyle(color: AppColors.amber.withOpacity(0.9), fontSize: 10, height: 1.3))),
+                  _offlineExplanation(),
+                  style: TextStyle(color: sl.amberText, fontSize: 10, height: 1.3))),
               ]),
             ),
           ],

@@ -161,6 +161,11 @@ class _AdminScreenState extends State<AdminScreen>
   bool _runsCloudDisabled = false;
   bool _runsRetrying = false;
 
+  // Free-tier budget for image analysis, read from GeminiVision.freeQuotaSnapshot().
+  // Empty until _loadAiRuns() fills it; every reader must handle that, which is
+  // why the card below checks isEmpty rather than assuming keys exist.
+  Map<String, dynamic> _aiQuota = const {};
+
   // ── Knowledge Base state ─────────────────────────────────────────
   bool _kbUploading = false;
   String _kbUploadStatus = '';
@@ -7829,8 +7834,12 @@ class _AdminScreenState extends State<AdminScreen>
       // panel repairs a mirror that failed earlier.
       final list = await AiRunLog.getAllRuns();
       final pending = await AiRunLog.pendingUploadCount();
+      // Local-only read (SharedPreferences), so it cannot fail the panel; kept
+      // inside the same try for uniformity.
+      final quota = await GeminiVision.freeQuotaSnapshot();
       if (mounted) setState(() {
         _aiRuns = list;
+        _aiQuota = quota;
         _runsPendingUpload = pending;
         // The server's own count, not a local derivation: local storage is
         // capped well below what the table holds.
@@ -7871,6 +7880,208 @@ class _AdminScreenState extends State<AdminScreen>
       case '7d':    return 'Last 7 days';
       default:      return 'All time';
     }
+  }
+
+  /// "How many photos can still be analysed today?"
+  ///
+  /// Two DIFFERENT numbers live in this card and they are deliberately labelled
+  /// as different things, because conflating them is the whole trap:
+  ///
+  ///   • BUDGET (used / remaining) comes from this device's own ledger and is
+  ///     keyed to OpenRouter's UTC reset, not local midnight. It is an estimate:
+  ///     the allowance belongs to the OpenRouter ACCOUNT, so other devices
+  ///     sharing the key spend from the same pot invisibly. When OpenRouter has
+  ///     actually said 429 we say so outright and stop calling it an estimate.
+  ///
+  ///   • ACTIVITY (analyses recorded) comes from AiRunLog, covers every device,
+  ///     and follows the window chips above — so it will not tie out against the
+  ///     budget figure, and the card says why rather than letting an admin
+  ///     discover the discrepancy and distrust both numbers.
+  Widget _aiQuotaCard(SL sl) {
+    // Only photo analyses are counted here. Text refinement (FIELD_REFINE) also
+    // costs a request, but the user asked how many PICTURES are left, and mixing
+    // in text runs would make the figure answer a question nobody asked.
+    final since = _runWindowStart;
+    var imgDone = 0, imgOffline = 0, imgCached = 0;
+    for (final r in _aiRuns) {
+      final type = (r['runType'] ?? '').toString();
+      if (type != AiRunLog.typeHazardScan && type != AiRunLog.typeNearMissImage) {
+        continue;
+      }
+      if (since != null) {
+        final t = DateTime.tryParse(r['createdAt']?.toString() ?? '');
+        if (t == null || t.toLocal().isBefore(since)) continue;
+      }
+      switch ((r['outcome'] ?? '').toString()) {
+        case AiRunLog.outcomeSuccess: imgDone++;    break;
+        case AiRunLog.outcomeCached:  imgCached++;  break;
+        default:                      imgOffline++;
+      }
+    }
+
+    final loaded    = _aiQuota.isNotEmpty;
+    final used      = loaded ? (_aiQuota['used'] as int? ?? 0) : 0;
+    final limit     = loaded ? (_aiQuota['limit'] as int? ?? 1) : 1;
+    final remaining = loaded ? (_aiQuota['remaining'] as int? ?? 0) : 0;
+    final hitLimit  = loaded && (_aiQuota['limitReached'] as bool? ?? false);
+    final keyCount  = loaded ? (_aiQuota['keysConfigured'] as int? ?? 0) : 0;
+    final geminiKey  = loaded && (_aiQuota['geminiConfigured'] as bool? ?? false);
+
+    // Exhausted is authoritative (429 seen), so it outranks the estimate.
+    // sl.amberText, NOT AppColors.amber: `tone` is used as a TEXT colour below,
+    // and raw amber measures 2.15:1 on the light theme's white background — the
+    // contrast audit forbids it for text (see the palette notes in main.dart).
+    // Routing it through `tone` would have hidden that from the audit script.
+    final Color tone = !loaded || keyCount == 0
+        ? sl.text3
+        : hitLimit || remaining == 0
+            ? const Color(0xFFD32F2F)
+            : remaining <= (limit * 0.2).ceil()
+                ? sl.amberText
+                : const Color(0xFF43A047);
+
+    String headline;
+    if (!loaded) {
+      headline = 'Reading today\'s AI budget…';
+    } else if (keyCount == 0) {
+      // This budget tracks the OpenRouter free tier only. A site running on a
+      // Gemini Direct key has working AI with no free-tier ledger at all, so
+      // saying "no AI key configured" would send an admin off to change
+      // settings that are already correct.
+      headline = geminiKey
+          ? 'Gemini key in use — no free-tier limit to track'
+          : 'No AI key configured';
+    } else if (hitLimit) {
+      headline = 'Free limit reached — AI scans are offline until reset';
+    } else {
+      // "about" is load-bearing: this is a device-local estimate (see the
+      // caveat text below), and a bare number would be read as a fact.
+      headline = 'About $remaining of $limit photo scans left today';
+    }
+
+    // Derived, never hard-coded. The reset is midnight UTC, which is 5:30 AM in
+    // IST but not anywhere else, and SAIL Safety Lens is also opened on laptops
+    // set to other zones. Printing a literal "5:30 AM IST" would be wrong for
+    // them AND would contradict the relative figure computed right above it.
+    String resetClock = '';
+    // Recomputed at build time from the absolute reset instant rather than read
+    // from the snapshot's resetsInMinutes, which freezes at load time and drifts
+    // while the panel is left open.
+    String resetIn = 'shortly';
+    final resetIso = _aiQuota['resetsAtUtc']?.toString() ?? '';
+    if (resetIso.isNotEmpty) {
+      final t = DateTime.tryParse(resetIso);
+      if (t != null) {
+        final l = t.toLocal();
+        final ampm = l.hour < 12 ? 'AM' : 'PM';
+        final h12 = l.hour % 12 == 0 ? 12 : l.hour % 12;
+        resetClock = '$h12:${l.minute.toString().padLeft(2, '0')} $ampm';
+        final mins = t.difference(DateTime.now().toUtc()).inMinutes;
+        if (mins > 0) {
+          resetIn = mins < 60
+              ? 'in $mins min'
+              : 'in ${mins ~/ 60}h ${(mins % 60).toString().padLeft(2, '0')}m';
+        }
+      }
+    }
+    final resetAtText = resetClock.isEmpty
+        ? 'at midnight UTC'
+        : 'at $resetClock local time (midnight UTC)';
+
+    // Guard the divisor: limit is a constant > 0, but a corrupt snapshot must not
+    // hand LinearProgressIndicator a NaN.
+    final double fill =
+        limit <= 0 ? 0.0 : (used / limit).clamp(0.0, 1.0).toDouble();
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: tone.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: tone.withOpacity(0.25)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(hitLimit ? Icons.battery_alert_rounded : Icons.battery_charging_full_rounded,
+              color: tone, size: 22),
+          const SizedBox(width: 10),
+          Expanded(child: Text(headline, style: TextStyle(
+              color: tone, fontSize: 14, fontWeight: FontWeight.w900))),
+        ]),
+        if (loaded && keyCount > 0) ...[
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: hitLimit ? 1.0 : fill,
+              minHeight: 7,
+              backgroundColor: tone.withOpacity(0.15),
+              valueColor: AlwaysStoppedAnimation<Color>(tone),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            hitLimit
+                ? 'OpenRouter has refused further scans for today: it returned '
+                  'HTTP 429 naming the daily allowance, so this one is '
+                  'confirmed rather than estimated. Resets $resetIn, '
+                  '$resetAtText — OpenRouter rolls the day over then, not at '
+                  'local midnight. A short per-minute throttle is NOT reported '
+                  'here; only the daily cap is.'
+                : '$used scan request(s) sent from this device since the last '
+                  'reset. Resets $resetIn, $resetAtText.',
+            style: TextStyle(color: sl.text2, fontSize: 10, height: 1.4)),
+          const SizedBox(height: 6),
+          Text(
+            'Estimate, not a live reading — treat it as a fuel gauge, not a '
+            'receipt. OpenRouter publishes no remaining-count, so this tallies '
+            'the vision requests this device sent and compares them with the '
+            'documented ${GeminiVision.kFreeVisionRequestsPerDay}/day free '
+            'allowance. Two things make the true figure LOWER than shown: the '
+            'allowance belongs to the OpenRouter account, so every other phone '
+            'using the same key draws from the same pot; and the AI audit '
+            'feature spends from it without being counted here. Adding 10 USD of '
+            'credits raises the allowance to '
+            '${GeminiVision.kFreeVisionRequestsPerDayWithCredits}/day '
+            '(credits themselves are not spent by free models).',
+            style: TextStyle(color: sl.text4, fontSize: 10, height: 1.4)),
+        ] else if (loaded && keyCount == 0) ...[
+          const SizedBox(height: 6),
+          Text(geminiKey
+                  ? 'Scans run on the Gemini Direct key, which is billed to '
+                    'your Google account rather than metered by a free daily '
+                    'allowance — so there is no per-day figure to show here. '
+                    'Add an OpenRouter key only if you want the free tier as a '
+                    'fallback.'
+                  : 'Set an OpenRouter or Gemini key in Admin → System Health. '
+                    'Until then every scan returns the offline checklist.',
+              style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4)),
+        ],
+        const SizedBox(height: 10),
+        Divider(color: sl.glassBorder, height: 1),
+        const SizedBox(height: 8),
+        Text('Photo analyses actually recorded - '
+            '${_runWindowLabel.toLowerCase()}, all devices',
+            style: TextStyle(color: sl.text3, fontSize: 10,
+                fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+        const SizedBox(height: 6),
+        Row(children: [
+          _auditStatCard(sl, 'Analysed', '$imgDone',
+              Icons.image_search_rounded, const Color(0xFF43A047)),
+          const SizedBox(width: 10),
+          _auditStatCard(sl, 'Fell back offline', '$imgOffline',
+              Icons.cloud_off_rounded, const Color(0xFFD32F2F)),
+          const SizedBox(width: 10),
+          _auditStatCard(sl, 'Free (cached)', '$imgCached',
+              Icons.bolt_rounded, const Color(0xFF7E57C2)),
+        ]),
+        const SizedBox(height: 6),
+        Text('Cached repeats cost nothing, so they are not charged against the '
+            'budget above. This row follows the window chips and covers every '
+            'device, so it will not add up to the device-only figure above.',
+            style: TextStyle(color: sl.text4, fontSize: 10, height: 1.4)),
+      ]),
+    );
   }
 
   Widget _moduleAiTelemetry(SL sl) {
@@ -7977,6 +8188,10 @@ class _AdminScreenState extends State<AdminScreen>
             _auditStatCard(sl, 'From Cache', '${stats['cached']}',
                 Icons.bolt_rounded, const Color(0xFF7E57C2)),
           ]),
+          const SizedBox(height: 12),
+
+          // ── How many photo analyses are left today ──
+          _aiQuotaCard(sl),
           const SizedBox(height: 12),
 
           // ── Success rate ──

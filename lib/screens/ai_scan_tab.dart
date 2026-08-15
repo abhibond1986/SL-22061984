@@ -2197,14 +2197,20 @@ class _AIScanTabState extends State<AIScanTab> {
               style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700)),
             if (!online) Text(
               [
+                // Lower-cased at the join, not at the source: the reason is
+                // spliced mid-sentence after "because", and a capitalised
+                // fragment ("...because No internet connection.") reads like a
+                // bug. Guarding here means a future call site cannot reintroduce
+                // it by passing a sentence-cased string.
                 reason.isNotEmpty
-                    ? 'This photo was not assessed because $reason.'
+                    ? 'This photo was not assessed because '
+                        '${reason[0].toLowerCase()}${reason.substring(1)}.'
                     : 'This photo was not assessed.',
                 hint.isNotEmpty
                     ? hint
                     : 'Connect to the internet and rescan.',
               ].join(' '),
-              style: TextStyle(color: sl.text3, fontSize: 9.5, fontWeight: FontWeight.w500)),
+              style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w500)),
           ],
         )),
       ]),
