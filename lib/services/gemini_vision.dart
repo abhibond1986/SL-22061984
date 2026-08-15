@@ -3,8 +3,8 @@
 //
 // PRIORITY CHAIN (stops at first success):
 //   TIER 1 — OpenRouter free vision models, in order:
-//     1. Nemotron Nano 12B VL   — fastest free image model
-//     2. Nemotron 30B Omni      — higher capacity
+//     1. Nemotron 30B Omni      — 30B-A3B multimodal (admin choice, 2026-08-15)
+//     2. Nemotron Nano 12B VL   — fastest free image model
 //     3. Gemma 4 26B            — different vendor
 //     4. Dots3-Note Preview     — 512k context
 //   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured
@@ -313,9 +313,15 @@ class GeminiVision {
         final pinned = prefs.getString(_kVisionModelPin);
         final List<List<String>> attempts = (pinned != null && pinned.isNotEmpty)
             ? [[pinned, 'pinned model']]
+            // Order set by admin request 2026-08-15: Nemotron 30B Omni first.
+            // NOTE this does NOT help with an HTTP 429 — OpenRouter's free
+            // allowance is counted per ACCOUNT per DAY and shared across every
+            // ':free' model, so once it is spent all four fail regardless of
+            // order. Reordering only changes which model answers a scan while
+            // quota remains. The 429 remedy is Tier 2 (Gemini key) or credits.
             : const [
-                [_orNanoVlModel,   'Nemotron Nano 12B VL (primary, fastest)'],
-                [_orNemotronModel, 'Nemotron 30B Omni (secondary)'],
+                [_orNemotronModel, 'Nemotron 30B Omni (primary, 30B-A3B multimodal)'],
+                [_orNanoVlModel,   'Nemotron Nano 12B VL (secondary, fastest)'],
                 // Different vendors/providers, so a per-model or per-provider
                 // throttle no longer ends the scan after two attempts. All four
                 // are verified image-input models on OpenRouter's free tier.
@@ -445,15 +451,17 @@ class GeminiVision {
 
   // ══════════════════════════════════════════════════════════════════════════
   //  VISION MODEL SELECTION (OpenRouter)
-  //  Admin can pin a specific model, or leave 'auto' to try Gemma → Nemotron.
+  //  Admin can pin a specific model, or leave 'auto' to walk the Tier 1 chain
+  //  in the order listed below, then fall through to direct Gemini.
+  //  Keep this order matching the `attempts` list in analyseImageBytes.
   // ══════════════════════════════════════════════════════════════════════════
   static const String _kVisionModelPin = 'vision_model_pinned';
 
   /// Vision models offered in the Admin panel dropdown (id → label).
   static const List<Map<String, String>> groqVisionModels = [
     {'id': 'auto', 'name': 'Auto (tries all 4, then Gemini)'},
+    {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (primary, free)'},
     {'id': _orNanoVlModel,   'name': 'Nemotron Nano 12B VL (fastest, free)'},
-    {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (free)'},
     {'id': _orGemmaModel,    'name': 'Gemma 4 26B (free, slower)'},
     {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
   ];
