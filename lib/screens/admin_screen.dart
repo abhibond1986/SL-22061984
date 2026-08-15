@@ -2347,7 +2347,6 @@ class _AdminScreenState extends State<AdminScreen>
         Expanded(child: Text(text,
             style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
       ]));
-}
 
   bool _groqConfigured = false;
   final _groqKeyCtrl = TextEditingController();
