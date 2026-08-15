@@ -1,14 +1,24 @@
 // lib/services/gemini_vision.dart
 // ★ v25 MAXIMUM RELIABILITY — 4 independent providers, NEVER fails
 //
-// PRIORITY CHAIN (OpenRouter only, stops at first success):
-//   1. OpenRouter Nemotron Nano 12B VL (client) — PRIMARY (fastest free image model)
-//   2. OpenRouter Nemotron 30B Omni (client) — SECONDARY (free, higher capacity)
-//   3. Offline KB fallback (clean message, no network)
-// NOTE: free-tier models share capacity and can queue; a paid endpoint
-//       (drop ":free") is the way to get consistent ~5s latency.
+// PRIORITY CHAIN (stops at first success):
+//   TIER 1 — OpenRouter free vision models, in order:
+//     1. Nemotron Nano 12B VL   — fastest free image model
+//     2. Nemotron 30B Omni      — higher capacity
+//     3. Gemma 4 26B            — different vendor
+//     4. Dots3-Note Preview     — 512k context
+//   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured
+//   TIER 3 — Offline fallback: reports the failure, returns NO hazards
 //
-// FAST-BAIL: On 429/quota errors, skips remaining models on same key immediately.
+// IMPORTANT — why Tier 2 is not optional in practice:
+//   Every OpenRouter ':free' model draws on ONE account-wide daily allowance.
+//   When that cap is hit, all four Tier 1 models return HTTP 429 together, so
+//   switching between free models cannot help. A Gemini key bills against
+//   Google instead, making Tier 2 the only path that still analyses the image.
+//   Set it in Admin → System Health → Gemini Vision.
+//
+// All model IDs above were verified against OpenRouter's /api/v1/models
+// listing as accepting image input — do not add one without checking.
 // ALL keys auto-sync from Apps Script Properties on every app launch.
 
 import 'dart:convert';
@@ -26,6 +36,12 @@ import 'local_db.dart';
 // analysis — see the comment on analyseImageBytes for why it is here and not
 // at the call sites.
 import 'ai_run_log.dart';
+// Direct Google AI Studio vision path. This is a SEPARATE quota from
+// OpenRouter's shared free tier, which is the whole point: when OpenRouter
+// returns 429 (free-tier cap hit, account-wide across every ':free' model),
+// a configured Gemini key is the only thing that can still analyse the image.
+// It was admin-configurable but never called — see the chain below.
+import 'gemini_direct_vision.dart';
 
 class GeminiVision {
   // OpenRouter vision models (free tier), tried in order.
@@ -35,6 +51,9 @@ class GeminiVision {
   static const String _orNanoVlModel   = 'nvidia/nemotron-nano-12b-v2-vl:free';
   static const String _orNemotronModel = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
   static const String _orGemmaModel    = 'google/gemma-4-26b-a4b-it:free';
+  // Mixture-of-experts, 512k context, accepts image input. Confirmed against
+  // OpenRouter's /api/v1/models listing rather than assumed from the name.
+  static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
 
   // Rate-limiting between analyses (kept small — only affects back-to-back scans)
   static DateTime? _lastCallTime;
@@ -285,18 +304,23 @@ class GeminiVision {
       }
 
       // ══════════════════════════════════════════════════════════════════════
-      // OPENROUTER-ONLY vision chain. Fast Nano 12B VL first, then 30B Omni.
+      // TIER 1 — OPENROUTER free vision chain, fastest model first.
       // ══════════════════════════════════════════════════════════════════════
       final prefs = await SharedPreferences.getInstance();
       final orKey = prefs.getString('openrouter_api_key') ?? '';
       if (orKey.isNotEmpty && orKey.startsWith('sk-or-')) {
-        // If an admin pinned a model, use only that one; else Nano VL → Omni.
+        // If an admin pinned a model, use only that one; else walk the chain.
         final pinned = prefs.getString(_kVisionModelPin);
         final List<List<String>> attempts = (pinned != null && pinned.isNotEmpty)
             ? [[pinned, 'pinned model']]
             : const [
                 [_orNanoVlModel,   'Nemotron Nano 12B VL (primary, fastest)'],
                 [_orNemotronModel, 'Nemotron 30B Omni (secondary)'],
+                // Different vendors/providers, so a per-model or per-provider
+                // throttle no longer ends the scan after two attempts. All four
+                // are verified image-input models on OpenRouter's free tier.
+                [_orGemmaModel,    'Gemma 4 26B (tertiary)'],
+                [_orDotsModel,     'Dots3-Note Preview (quaternary)'],
               ];
         for (int i = 0; i < attempts.length; i++) {
           final model = attempts[i][0];
@@ -330,9 +354,50 @@ class GeminiVision {
       }
 
       // ══════════════════════════════════════════════════════════════════════
-      // OPENROUTER UNAVAILABLE → offline KB fallback
+      // TIER 2 — DIRECT GEMINI (separate quota from OpenRouter)
+      //
+      // Why this exists: every OpenRouter ':free' model draws on ONE
+      // account-wide daily allowance, so once that cap is hit the 429 applies
+      // to all of them and extending the chain above cannot help. A Gemini key
+      // is billed against Google, not OpenRouter, so it is the only tier that
+      // can still analyse the image.
+      //
+      // This service was fully implemented and exposed in Admin → System
+      // Health, but nothing ever invoked it: setting a Gemini key had no
+      // effect whatsoever on scanning. That is fixed here.
       // ══════════════════════════════════════════════════════════════════════
-      print('GeminiVision: ✗ OpenRouter unavailable. Total: ${stopwatch.elapsedMilliseconds}ms');
+      if (await GeminiDirectVision.isConfigured) {
+        print('GeminiVision: ▶ Direct Gemini Vision (separate quota)...');
+        try {
+          final gemResult = await GeminiDirectVision.analyzeImage(bytes,
+              kbContext: kbContext);
+          if (_isValidResult(gemResult)) {
+            print('GeminiVision: ✓ Direct Gemini SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
+            final model = await GeminiDirectVision.getModel();
+            gemResult!['_source'] = 'gemini_direct';
+            gemResult['_model'] = model;
+            gemResult['_isOnline'] = true;
+            _lastCallTime = DateTime.now();
+            _isAnalyzing = false;
+            await _writeCachedResult(imgHash, gemResult);
+            return logged(gemResult,
+                outcome: AiRunLog.outcomeSuccess,
+                model: model,
+                imageHash: imgHash);
+          }
+          print('GeminiVision: ✗ Direct Gemini returned no usable result');
+        } catch (e) {
+          print('GeminiVision: ✗ Direct Gemini exception: $e');
+        }
+      } else {
+        print('GeminiVision: ⏭ Direct Gemini skipped (no key configured — '
+            'set one in Admin → System Health to survive OpenRouter 429s)');
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // EVERY PROVIDER UNAVAILABLE → offline fallback (no hazards, by design)
+      // ══════════════════════════════════════════════════════════════════════
+      print('GeminiVision: ✗ All vision providers unavailable. Total: ${stopwatch.elapsedMilliseconds}ms');
       _lastCallTime = DateTime.now();
       _isAnalyzing = false;
       // Every provider was tried and none returned a usable result. This is the
@@ -381,10 +446,11 @@ class GeminiVision {
 
   /// Vision models offered in the Admin panel dropdown (id → label).
   static const List<Map<String, String>> groqVisionModels = [
-    {'id': 'auto', 'name': 'Auto (Nano 12B VL → 30B Omni)'},
+    {'id': 'auto', 'name': 'Auto (tries all 4, then Gemini)'},
     {'id': _orNanoVlModel,   'name': 'Nemotron Nano 12B VL (fastest, free)'},
     {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (free)'},
     {'id': _orGemmaModel,    'name': 'Gemma 4 26B (free, slower)'},
+    {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
   ];
 
   /// Admin-selected preferred vision model ('auto' = try the chain in order).
@@ -458,8 +524,23 @@ class GeminiVision {
           final content = choices[0]['message']?['content']?.toString() ?? '';
           return _parseAIResponse(content);
         }
+      } else if (response.statusCode == 429) {
+        // The single most common real-world failure, and previously logged as a
+        // bare status code that read like an app bug. OpenRouter's free tier is
+        // capped PER ACCOUNT PER DAY across every ':free' model, so this is not
+        // fixable by picking a different free model — the body carries the
+        // actual reset window, so surface it.
+        String detail = '';
+        try {
+          final err = jsonDecode(response.body) as Map<String, dynamic>;
+          detail = (err['error']?['message'] ?? '').toString();
+        } catch (_) {}
+        print('GeminiVision: ⚠ OpenRouter RATE LIMITED (429) on $model'
+            '${detail.isEmpty ? '' : ' — $detail'}');
+        print('GeminiVision:   Free-tier quota is account-wide across all '
+            ':free models. Configure a Gemini key in Admin → System Health.');
       } else {
-        print('GeminiVision: OpenRouter HTTP ${response.statusCode}');
+        print('GeminiVision: OpenRouter HTTP ${response.statusCode} on $model');
       }
     } catch (e) {
       print('GeminiVision: OpenRouter exception: $e');
