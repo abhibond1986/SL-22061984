@@ -370,7 +370,7 @@ class GeminiVision {
                   continue keyLoop;
                 }
                 print('GeminiVision: ⏹$keyTag blocked (HTTP $_lastOrStatus) and '
-                    'no further keys — leaving Tier 1 for direct Gemini');
+                    'no further keys — leaving Tier 1');
                 break keyLoop;
               }
             } catch (e) {
@@ -549,11 +549,15 @@ class GeminiVision {
 
   /// True when [_lastOrStatus] means "this key is finished for now", as opposed
   /// to "this model didn't work".
+  /// 403 is deliberately EXCLUDED. OpenRouter returns it for per-model and
+  /// per-provider conditions too — moderation-flagged input, or a data-policy
+  /// setting that rejects one specific provider — so treating it as key-wide
+  /// would abandon the remaining models on a fault that only affected one, a
+  /// regression against the old unconditional 4-model walk.
   static bool get _lastOrFailureIsKeyWide =>
       _lastOrStatus == 429 || // daily/minute quota — counted per ACCOUNT
       _lastOrStatus == 401 || // key invalid or revoked
-      _lastOrStatus == 402 || // out of credit
-      _lastOrStatus == 403;   // key blocked / privacy policy rejects the model
+      _lastOrStatus == 402;   // out of credit
 
   // ══════════════════════════════════════════════════════════════════════════
   //  OPENROUTER (client) — multimodal vision, model chosen by caller

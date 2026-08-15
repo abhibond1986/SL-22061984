@@ -396,7 +396,18 @@ class SyncService {
       try {
         final keys = await _fetchApiKeysFromAppsScript();
         if (keys != null) {
-          for (final k in const ['openRouterApiKey', 'geminiApiKey', 'groqApiKey', 'geminiModel']) {
+          // This is a WHITELIST: anything absent here is silently dropped
+          // before AdminMasterData.syncFromBackend() ever sees it, and Supabase
+          // is enabled by default, so this is the live path. A new key added to
+          // the Apps Script payload MUST be added here too or it will never
+          // reach the device — 'openRouterApiKey2' was exactly that bug.
+          for (final k in const [
+            'openRouterApiKey',
+            'openRouterApiKey2',
+            'geminiApiKey',
+            'groqApiKey',
+            'geminiModel',
+          ]) {
             if (keys[k] != null && keys[k].toString().isNotEmpty) {
               out[k] = keys[k];
             }
@@ -425,8 +436,8 @@ class SyncService {
   /// Fetch ONLY the AI API keys from Apps Script (getMasterData injects them
   /// from Script Properties). Used when Supabase is the primary backend but the
   /// keys still need to come from the Apps Script AI proxy. Returns the raw
-  /// `data` map (with openRouterApiKey/geminiApiKey/groqApiKey/geminiModel) or
-  /// null on any failure.
+  /// `data` map (with openRouterApiKey, openRouterApiKey2, geminiApiKey,
+  /// groqApiKey, geminiModel) or null on any failure.
   static Future<Map<String, dynamic>?> _fetchApiKeysFromAppsScript() async {
     try {
       final url = await getBackendUrl();
