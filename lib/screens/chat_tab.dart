@@ -328,7 +328,7 @@ class _ChatTabState extends State<ChatTab> {
 
     // 6. ★ Update conversation history for multi-turn context
     _conversationHistory.add({'role': 'user', 'content': question});
-    _conversationHistory.add({'role': 'assistant', 'content': answer ?? ''});
+    _conversationHistory.add({'role': 'assistant', 'content': answer});
     // Keep last 10 exchanges to avoid token overflow
     if (_conversationHistory.length > 20) {
       _conversationHistory.removeRange(0, _conversationHistory.length - 20);
