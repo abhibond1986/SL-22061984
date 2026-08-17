@@ -7180,21 +7180,35 @@ class _AdminScreenState extends State<AdminScreen>
     }
   }
 
-  /// Basic DOCX text extraction — reads paragraph text from the XML
+  /// ★ v30: DOCX text extraction — properly decompresses ZIP archive
+  /// and reads word/document.xml for paragraph text.
   String _extractTextFromDocxBytes(dynamic bytes) {
-    // DOCX is a ZIP. On web, we can use dart:convert and basic decompression.
-    // For a simpler approach: try to find readable text content in the raw bytes.
     try {
-      final text = String.fromCharCodes(bytes as List<int>);
-      // Extract text between <w:t> tags (Word XML paragraphs)
-      final regex = RegExp(r'<w:t[^>]*>([^<]+)</w:t>');
-      final matches = regex.allMatches(text);
+      final byteData = bytes as List<int>;
+      // Use archive package to decompress the DOCX (which is a ZIP file)
+      final archive = ZipDecoder().decodeBytes(byteData);
+
+      // Find the main document XML (word/document.xml)
+      final docFile = archive.firstWhere(
+        (f) => f.name == 'word/document.xml',
+        orElse: () => archive.firstWhere(
+          (f) => f.name.endsWith('.xml'),
+          orElse: () => archive.first,
+        ),
+      );
+
+      final xmlContent = String.fromCharCodes(docFile.content as List<int>);
+
+      // Extract text between <w:t> tags (Word XML paragraph text)
+      final textRegex = RegExp(r'<w:t[^>]*>([^<]+)</w:t>');
+      final matches = textRegex.allMatches(xmlContent);
       if (matches.isNotEmpty) {
         return matches.map((m) => m.group(1) ?? '').join(' ');
       }
-      // Fallback: extract any readable ASCII content
+
+      // Fallback: extract any readable text from the XML
       final buffer = StringBuffer();
-      for (final char in text.codeUnits) {
+      for (final char in xmlContent.codeUnits) {
         if (char >= 32 && char <= 126) buffer.writeCharCode(char);
         else if (char == 10 || char == 13) buffer.write(' ');
       }

@@ -58,6 +58,9 @@ dependencies:
   pdf: ^3.10.7
   printing: ^5.12.0
 
+  # DOCX extraction (ZIP decompression for knowledge base uploads)
+  archive: ^3.6.1
+
   # ── Admin Panel — open in browser ──
   url_launcher: ^6.3.0
 

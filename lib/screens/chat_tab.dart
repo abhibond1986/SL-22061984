@@ -18,7 +18,6 @@ import '../main.dart';
 import '../services/local_ai.dart';
 import '../services/groq_service.dart';
 import '../services/local_db.dart';
-import '../services/knowledge_service.dart';
 import '../services/sync_service.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/error_log_service.dart';
@@ -297,50 +296,33 @@ class _ChatTabState extends State<ChatTab> {
     });
     _scrollToBottom();
 
-    // 1. Search uploaded KB docs for source citations
+    // ★ Search KB docs ONCE (was called twice before — once here, once in
+    // KnowledgeService.getKbDocsContext — which wasted cycles on the same query)
     final kbResults =
         await LocalDB.searchKnowledge(question, limit: 5, snippetChars: 700);
-
-    // 2. Build KB context for the prompt
-    final kbContext = await KnowledgeService.getKbDocsContext(question,
-        maxDocs: 5, snippetChars: 700);
 
     String? answer;
     List<Map<String, dynamic>>? sources;
 
-    // 3. ★ PRIMARY: Try Groq (fast, free, multi-turn)
-    final groqAnswer = await _askGroq(question, kbContext, kbResults);
+    // ★ Filter to clean results for source citations
+    final cleanResults = kbResults.where((r) {
+      final snippet = r['snippet']?.toString() ?? '';
+      return _isReadableText(snippet) && snippet.trim().length > 30;
+    }).toList();
+    if (cleanResults.isNotEmpty) sources = cleanResults;
+
+    // 1. ★ PRIMARY: Try Groq (fast, free, multi-turn)
+    final groqAnswer = await _askGroq(question, kbResults);
     if (groqAnswer != null && groqAnswer.isNotEmpty) {
       answer = groqAnswer;
-      if (kbResults.isNotEmpty) {
-        final cleanResults = kbResults.where((r) {
-          final snippet = r['snippet']?.toString() ?? '';
-          return _isReadableText(snippet) && snippet.trim().length > 30;
-        }).toList();
-        if (cleanResults.isNotEmpty) sources = cleanResults;
-      }
     } else {
-      // 4. ★ FALLBACK: Apps Script → Gemini
-      final geminiAnswer = await _askGemini(question, kbContext, kbResults);
+      // 2. ★ FALLBACK: Apps Script → Gemini
+      final geminiAnswer = await _askGemini(question, kbResults);
       if (geminiAnswer != null && geminiAnswer.isNotEmpty) {
         answer = geminiAnswer;
-        if (kbResults.isNotEmpty) {
-          final cleanResults = kbResults.where((r) {
-            final snippet = r['snippet']?.toString() ?? '';
-            return _isReadableText(snippet) && snippet.trim().length > 30;
-          }).toList();
-          if (cleanResults.isNotEmpty) sources = cleanResults;
-        }
       } else {
-        // 5. ★ OFFLINE: LocalAI with KB
+        // 3. ★ OFFLINE: LocalAI with KB
         answer = _buildOfflineAnswer(question, kbResults);
-        if (kbResults.isNotEmpty) {
-          final cleanResults = kbResults.where((r) {
-            final snippet = r['snippet']?.toString() ?? '';
-            return _isReadableText(snippet) && snippet.trim().length > 30;
-          }).toList();
-          if (cleanResults.isNotEmpty) sources = cleanResults;
-        }
       }
     }
 
@@ -367,20 +349,24 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   // ── GROQ MULTI-TURN CHAT (PRIMARY) ───────────────────────────────
-  Future<String?> _askGroq(String question, String kbContext, List kbResults) async {
+  Future<String?> _askGroq(String question, List kbResults) async {
     try {
-      String legacyKb = '';
+      // ★ Build KB context directly from search results (no double search)
+      String kbBlock = '';
       if (kbResults.isNotEmpty) {
         final cleanKb = kbResults.where((r) {
           final s = r['snippet']?.toString() ?? '';
           return _isReadableText(s) && s.length > 30;
-        }).take(3).toList();
+        }).take(5).toList();
         if (cleanKb.isNotEmpty) {
-          legacyKb = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS:\n' +
+          kbBlock = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS '
+              '(uploaded by the plant safety admin — AUTHORITATIVE. '
+              'Where they conflict with your general knowledge, follow them '
+              'and cite the document title exactly):\n' +
               cleanKb.map((r) =>
-                  '- ${r['title']}: '
+                  '--- ${r['title']} ---\n'
                   '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
-                  .join('\n');
+                  .join('\n\n');
         }
       }
 
@@ -388,7 +374,7 @@ class _ChatTabState extends State<ChatTab> {
         {'role': 'user', 'content': _systemPrompt},
         {'role': 'assistant', 'content': 'Understood. I am Suraksha Saathi, ready to assist.'},
         ..._conversationHistory,
-        {'role': 'user', 'content': '$kbContext$legacyKb\n\nQUESTION: $question\n\n'
+        {'role': 'user', 'content': '$kbBlock\n\nQUESTION: $question\n\n'
             'Answer in MAX 6-8 lines using the structured format. '
             'Give ONLY the specific answer to THIS question.'},
       ];
@@ -409,16 +395,17 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   // ── GEMINI FALLBACK (Apps Script → Gemini) ───────────────────────
-  Future<String?> _askGemini(String question, String kbContext, List kbResults) async {
+  Future<String?> _askGemini(String question, List kbResults) async {
     try {
-      String legacyKb = '';
+      // ★ Build KB context directly from search results
+      String kbBlock = '';
       if (kbResults.isNotEmpty) {
         final cleanKb = kbResults.where((r) {
           final s = r['snippet']?.toString() ?? '';
           return _isReadableText(s) && s.length > 30;
-        }).take(3).toList();
+        }).take(5).toList();
         if (cleanKb.isNotEmpty) {
-          legacyKb = '\n\nADDITIONAL KB MATCHES:\n' +
+          kbBlock = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS:\n' +
               cleanKb.map((r) =>
                   '- ${r['title']}: '
                   '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
@@ -427,7 +414,7 @@ class _ChatTabState extends State<ChatTab> {
       }
 
       final fullPrompt = '$_systemPrompt\n\n'
-          '$kbContext$legacyKb\n\n'
+          '$kbBlock\n\n'
           'QUESTION: $question\n\n'
           'REMEMBER: Answer in MAX 6-8 lines using the structured format. '
           'Give ONLY the specific answer to THIS question. '
