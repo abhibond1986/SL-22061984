@@ -19,6 +19,7 @@ import '../services/local_ai.dart';
 import '../services/groq_service.dart';
 import '../services/local_db.dart';
 import '../services/knowledge_service.dart';
+import '../services/sync_service.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/error_log_service.dart';
 import '../models/error_log_entry.dart';
@@ -644,6 +645,11 @@ class _ChatTabState extends State<ChatTab> {
         content: extractedText,
         source: filename,
       );
+      // ★ Push to cloud so other devices see this doc too
+      try {
+        final allDocs = await LocalDB.getKnowledgeDocs();
+        await SyncService.pushKbDocs(allDocs);
+      } catch (_) {}
       final docs = await LocalDB.getKnowledgeDocs();
       if (mounted) {
         setState(() => _kbDocCount = docs.length);

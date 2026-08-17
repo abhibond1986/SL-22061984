@@ -711,15 +711,30 @@ class SyncService {
     }
   }
 
+  /// ★ v30: Sync knowledge docs from cloud. Now deduplicates — checks if a doc
+  /// with the same title already exists before adding. Previous version appended
+  /// blindly, creating duplicates on every sync cycle.
   static Future<void> syncKnowledgeFromCloud() async {
     final docs = await fetchKnowledgeDocs();
     if (docs.isEmpty) return;
+
+    // ★ Build a set of existing titles to prevent duplicates
+    final existing = await LocalDB.getKnowledgeDocs();
+    final existingTitles = existing
+        .map((d) => (d['title']?.toString() ?? '').toLowerCase().trim())
+        .toSet();
+
+    int added = 0;
     for (final doc in docs) {
+      final title = (doc['title']?.toString() ?? 'Untitled').trim();
+      if (existingTitles.contains(title.toLowerCase())) continue;
       await LocalDB.addKnowledgeDoc(
-        title:   doc['title']?.toString()   ?? 'Untitled',
+        title:   title,
         content: doc['content']?.toString() ?? '',
         source:  doc['source']?.toString()  ?? 'cloud',
       );
+      existingTitles.add(title.toLowerCase());
+      added++;
     }
   }
 
@@ -1162,6 +1177,10 @@ class SyncService {
       // device on stale lists and the frontend deviated from the admin panel
       // until the next cold start.
       final masterUpdated = await AdminMasterData.syncFromBackend();
+
+      // ★ Also sync KB docs during full sync — previously only synced at
+      // startup, so mid-session admin uploads were invisible to other devices.
+      try { await syncKnowledgeBase(); } catch (_) {}
 
       await _markSyncTime();
       return {

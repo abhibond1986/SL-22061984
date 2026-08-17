@@ -1036,16 +1036,11 @@ class LocalDB {
     _bumpKb();
   }
 
-  /// Keyword search over the knowledge base, best match first.
+  /// ★ v30: Smart keyword search over the knowledge base, best match first.
+  /// Now with synonym expansion, fuzzy matching, and phrase matching.
   ///
-  /// [limit] caps how many documents come back. It used to be hardcoded to 3
-  /// here, which silently overrode every caller's own limit — so a caller
-  /// asking for 8 documents of regulation context received 3, and most of a
-  /// large uploaded document set could never reach the model.
-  ///
-  /// [snippetChars] caps each snippet. The old fixed 400 characters truncated
-  /// mid-sentence on long clauses, which is how a citation could arrive at the
-  /// model cut in half.
+  /// [limit] caps how many documents come back.
+  /// [snippetChars] caps each snippet.
   static Future<List<Map<String, dynamic>>> searchKnowledge(
       String query, {
       int limit = 3,
@@ -1053,13 +1048,21 @@ class LocalDB {
       }) async {
     final all = await getKnowledgeDocs();
     if (all.isEmpty) return [];
+    // ★ lowered from 3 to 1 for short terms like "PPE", "LOTO"
     final q = query
         .toLowerCase()
         .split(RegExp(r'[^a-z0-9]+'))
-        .where((w) => w.length > 2)
-        .toSet()   // a word repeated in the query shouldn't inflate the score
+        .where((w) => w.length > 1)
+        .toSet()
         .toList();
     if (q.isEmpty) return [];
+
+    // ★ Synonym expansion: map common safety terms to broader search terms
+    final expanded = <String>{...q};
+    for (final word in q) {
+      final syns = _safetySynonyms[word];
+      if (syns != null) expanded.addAll(syns);
+    }
 
     final results = <Map<String, dynamic>>[];
     for (final doc in all) {
@@ -1068,14 +1071,37 @@ class LocalDB {
       final contentLower = content.toLowerCase();
       final titleLower   = title.toLowerCase();
       int score = 0;
+
+      // ★ Exact word matches (original behavior)
       for (final word in q) {
         score += word.allMatches(contentLower).length;
-        // A hit in the title is a strong relevance signal — a document called
-        // "Confined Space Entry Procedure" should surface for a confined-space
-        // query even if the body phrases it differently. Title matches were
-        // previously ignored entirely.
         if (titleLower.contains(word)) score += 5;
       }
+
+      // ★ Synonym matches (lower weight)
+      for (final syn in expanded) {
+        if (!q.contains(syn)) {
+          score += (syn.allMatches(contentLower).length * 0.5).round();
+          if (titleLower.contains(syn)) score += 2;
+        }
+      }
+
+      // ★ Phrase matching: if query is 2+ words, check if full phrase appears
+      if (q.length >= 2) {
+        final phrase = q.join(' ');
+        if (contentLower.contains(phrase)) score += 10;
+      }
+
+      // ★ Fuzzy matching: allow 1-char difference for words >= 4 chars
+      for (final word in q) {
+        if (word.length >= 4) {
+          final fuzzy = _fuzzyVariants(word);
+          for (final variant in fuzzy) {
+            score += variant.allMatches(contentLower).length;
+          }
+        }
+      }
+
       if (score > 0) {
         final sentences = content.split(RegExp(r'(?<=[.!?])\s+'));
         String bestSnippet      = '';
@@ -1083,7 +1109,7 @@ class LocalDB {
         for (final s in sentences) {
           final sl = s.toLowerCase();
           int ss = 0;
-          for (final word in q) {
+          for (final word in expanded) {
             if (sl.contains(word)) ss++;
           }
           if (ss > bestSnippetScore) {
@@ -1091,9 +1117,6 @@ class LocalDB {
             bestSnippet      = s.trim();
           }
         }
-        // A title-only match scores above zero but matches no sentence, which
-        // used to yield an empty snippet — the document was "found" and then
-        // contributed nothing. Fall back to the opening text.
         if (bestSnippet.isEmpty) bestSnippet = content.trim();
         if (bestSnippet.isEmpty) continue;
         results.add({
@@ -1108,6 +1131,63 @@ class LocalDB {
     results.sort(
         (a, b) => (b['score'] as int).compareTo(a['score'] as int));
     return results.take(limit < 1 ? 1 : limit).toList();
+  }
+
+  // ★ Safety synonym map for KB search expansion
+  static const Map<String, List<String>> _safetySynonyms = {
+    'loto': ['lock', 'tag', 'isolation', 'isolate', 'energy control'],
+    'lockout': ['lock', 'tag', 'isolation', 'isolate'],
+    'lototo': ['lock', 'tag', 'try out', 'isolation', 'energy control'],
+    'confined': ['enclosed', 'closed', 'tight', 'vessel', 'tank'],
+    'height': ['elevated', 'working at height', 'fall', 'harness', 'scaffold'],
+    'harness': ['fall arrest', 'fall restraint', 'lanyard', 'anchor'],
+    'gas': ['cylinder', 'compressed', 'oxygen', 'acetylene', 'lpg'],
+    'cylinder': ['gas', 'compressed', 'bottle'],
+    'permit': ['ptw', 'permit to work', 'authorization'],
+    'hot work': ['welding', 'cutting', 'grinding', 'spark', 'fire'],
+    'fire': ['flame', 'combustion', 'ignition', 'extinguisher'],
+    'electrical': ['electric', 'arc flash', 'shock', 'electrocution', 'voltage'],
+    'ppe': ['personal protective', 'helmet', 'gloves', 'safety shoes', 'goggles'],
+    'helmet': ['hard hat', 'safety hat', 'head protection'],
+    'gloves': ['hand protection', 'hand safety'],
+    'conveyor': ['belt', 'nip point', 'roller', 'transfer'],
+    'crane': ['lifting', 'hoist', 'sling', 'overhead'],
+    'blast furnace': ['bf', 'furnace', 'tuyere', 'cast house'],
+    'coke oven': ['battery', 'coking', 'by-product'],
+    'bof': ['converter', 'sms', 'steelmaking'],
+    'rolling mill': ['hsm', 'crm', 'plate mill', 'bar mill'],
+    'accident': ['incident', 'injury', 'near miss', 'occurrence'],
+    'incident': ['accident', 'injury', 'near miss', 'occurrence'],
+    'near miss': ['close call', 'almost incident', 'hazard'],
+    'hazard': ['danger', 'risk', 'threat', 'unsafe'],
+    'risk': ['hazard', 'danger', 'likelihood', 'severity'],
+    'emergency': ['rescue', 'evacuation', 'first aid', 'response'],
+    'scaffold': ['scaffolding', 'platform', 'working platform'],
+    'welding': ['hot work', 'arc', 'gas welding'],
+    'acid': ['chemical', 'corrosive', 'pickling'],
+    'noise': ['sound', 'decibel', 'hearing protection'],
+    'dust': ['particulate', 'fume', 'vapour', 'aerosol'],
+    'molten': ['liquid metal', 'hot metal', 'molten metal'],
+    'ventilation': ['exhaust', 'fume extraction', 'air flow'],
+    'inspection': ['check', 'audit', 'examination', 'survey'],
+    'maintenance': ['repair', 'overhaul', 'shutdown'],
+  };
+
+  // ★ Generate fuzzy variants (1-char substitution/deletion)
+  static List<String> _fuzzyVariants(String word) {
+    final variants = <String>{};
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz';
+    for (int i = 0; i < word.length; i++) {
+      for (final c in alphabet.split('')) {
+        if (c != word[i]) {
+          variants.add('${word.substring(0, i)}$c${word.substring(i + 1)}');
+        }
+      }
+    }
+    for (int i = 0; i < word.length; i++) {
+      variants.add('${word.substring(0, i)}${word.substring(i + 1)}');
+    }
+    return variants.take(20).toList();
   }
 
   // ═══════════════════════════════════════════════════════════════

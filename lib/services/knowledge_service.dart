@@ -106,7 +106,8 @@ COMMON STEEL PLANT HAZARDS:
     //    maxKbDocs is passed INTO the search: it used to search with the
     //    default (which capped at 3 internally) and then .take(maxKbDocs) the
     //    result, so asking for more than 3 documents was silently impossible.
-    if (query.trim().length >= 3) {
+    // ★ lowered from 3 to 1 so short queries like "LOTO" or "PPE" work
+    if (query.trim().length >= 1) {
       try {
         final kbResults = await LocalDB.searchKnowledge(
           query,
