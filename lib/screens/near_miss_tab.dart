@@ -69,7 +69,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   // ★ Multiple corrective actions
   final List<TextEditingController> _additionalActions = [];
 
-  String _plant   = 'SAIL Safety Organisation';
+  String _plant   = 'SSO Ranchi';
   String _selectedDept = '';          // Currently selected department from dropdown
   bool   _showOtherDept = false;     // Whether "Other" is selected
   String _wsaCause = '5. Equipment failure';

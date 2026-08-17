@@ -399,7 +399,7 @@ class _AdminScreenState extends State<AdminScreen>
       if (!byUname.containsKey('admin')) {
         byUname['admin'] = {
           'username': 'admin', 'name': 'System Admin',
-          'designation': 'Administrator', 'plant': 'Corporate – Ranchi',
+          'designation': 'Administrator', 'plant': 'SSO Ranchi',
           'pno': 'ADMIN001', 'isAdmin': true, 'status': 'active',
         };
       }
@@ -2340,8 +2340,8 @@ class _AdminScreenState extends State<AdminScreen>
                     fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
             _normPoint('Convert all variations to canonical names', sl),
-            _normPoint('Map "SSO Ranchi" → "SAIL Safety Organisation"', sl),
-            _normPoint('Map "Corporate Ranchi" → "Corporate — Ranchi"', sl),
+            _normPoint('Map "Corporate Ranchi" → "SSO Ranchi"', sl),
+            _normPoint('Map "CORP" → "SSO Ranchi"', sl),
             _normPoint('Use ONLY names from admin panel plant list', sl),
             _normPoint('Update incidents in local database', sl),
           ])),

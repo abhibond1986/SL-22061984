@@ -157,7 +157,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// ONLY shows plants from the admin's canonical plant list. All incidents
   /// are normalized to match these canonical names through the canonicalization
   /// function. This ensures the dropdown never shows outdated or incorrect
-  /// plant names like "SSO Ranchi", "Corporate Ranchi", etc.
+  /// plant names like "Corporate Ranchi", "SSO Ranchi", etc.
   ///
   /// No `seesAllPlants` branch: it used to return just the viewer's own plant
   /// for a plant user. See the note on [_selectable] for why that was dropped.

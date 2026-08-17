@@ -115,7 +115,7 @@ class LocalDB {
       final seed = <Map<String, dynamic>>[];
       final seedData = [
         {'username': 'abhishek.kumar', 'name': 'Abhishek Kumar', 'designation': 'AGM',
-         'plant': 'SAIL Safety Organisation', 'pno': 'SAIL-SSO-001',
+         'plant': 'SSO Ranchi', 'pno': 'SAIL-SSO-001',
          'mobile': '9999999999', 'email': 'abhishek@sail.in', 'isAdmin': true},
         {'username': 'demo', 'name': 'R.K. Sharma', 'designation': 'Sr. Safety Officer',
          'plant': 'BSP Bhilai', 'pno': 'BSP-2024-001',

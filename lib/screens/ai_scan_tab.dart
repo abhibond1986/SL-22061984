@@ -1814,7 +1814,7 @@ class _AIScanTabState extends State<AIScanTab> {
     final incident = <String, dynamic>{
       'id':              DateTime.now().millisecondsSinceEpoch.toString(),
       'title':           'AI Hazard Scan: ${firstHazard.toString()}',
-      'plant':           user['plant']?.toString() ?? 'SAIL Safety Organisation',
+      'plant':           user['plant']?.toString() ?? 'SSO Ranchi',
       'dept':            user['department']?.toString().isNotEmpty == true
                          ? user['department'].toString()
                          : detectedSection,

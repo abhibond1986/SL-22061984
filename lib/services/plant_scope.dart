@@ -52,14 +52,8 @@ class PlantScope {
 
   /// Plant designations that mean "not a single operating plant". A user whose
   /// profile says one of these is org-level, so locking them to it would show
-  /// an empty dashboard — the seeded admin user's plant is literally
-  /// 'SAIL Safety Organisation', and near_miss_tab defaults to the same value.
+  /// an empty dashboard — e.g. the admin user's plant, or "ALL"/"OTHERS".
   static const Set<String> orgLevelPlants = {
-    'SAIL SAFETY ORGANISATION',
-    'SAIL SAFETY ORGANIZATION',
-    'SSO',
-    'CORPORATE',
-    'CORP',
     'ALL',
     'OTHERS',
     'OTHER',

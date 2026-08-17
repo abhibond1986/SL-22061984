@@ -137,8 +137,7 @@ class AdminMasterData {
     {'code': 'BSP_MINES',  'name': 'BSP Mines',                   'state': 'Chhattisgarh', 'kind': 'Mines'},
     {'code': 'COLLIERIES', 'name': 'Collieries Division',         'state': 'Jharkhand/WB', 'kind': 'Mines'},
     {'code': 'SRU',        'name': 'SRU Kulti',                   'state': 'West Bengal',  'kind': 'Refractory'},
-    {'code': 'CORP',       'name': 'Corporate — Ranchi',          'state': 'Jharkhand',    'kind': 'HQ'},
-    {'code': 'SSO',        'name': 'SAIL Safety Organisation',    'state': 'Jharkhand',    'kind': 'Safety'},
+    {'code': 'SSO',        'name': 'SSO Ranchi',                     'state': 'Jharkhand',    'kind': 'Safety'},
     {'code': 'OTHER',      'name': 'Others',                      'state': '—',            'kind': 'Other'},
   ];
 
@@ -169,16 +168,17 @@ class AdminMasterData {
 
   /// Hardcoded mappings for common variations that should map to canonical names
   static const Map<String, String> plantNameMappings = {
-    'SSO RANCHI': 'SAIL Safety Organisation',
-    'SSO — RANCHI': 'SAIL Safety Organisation',
-    'CORPORATE RANCHI': 'Corporate — Ranchi',
-    'CORP RANCHI': 'Corporate — Ranchi',
-    'CORPORATE — RANCHI': 'Corporate — Ranchi',
-    'CORP — RANCHI': 'Corporate — Ranchi',
-    'CORPORATE-RANCHI': 'Corporate — Ranchi',
+    'SSO RANCHI': 'SSO Ranchi',
+    'SSO — RANCHI': 'SSO Ranchi',
+    'CORPORATE RANCHI': 'SSO Ranchi',
+    'CORP RANCHI': 'SSO Ranchi',
+    'CORPORATE — RANCHI': 'SSO Ranchi',
+    'CORP — RANCHI': 'SSO Ranchi',
+    'CORPORATE-RANCHI': 'SSO Ranchi',
+    'CORPORATE — RANCHI': 'SSO Ranchi',
     'CO-DELHI': 'Corporate Office-Delhi',
-    'SAIL SAFETY ORGANISATION': 'SAIL Safety Organisation',
-    'SAIL SAFETY ORGANIZATION': 'SAIL Safety Organisation',
+    'SAIL SAFETY ORGANISATION': 'SSO Ranchi',
+    'SAIL SAFETY ORGANIZATION': 'SSO Ranchi',
   };
 
   static String canonicalPlantFrom(
@@ -244,7 +244,7 @@ class AdminMasterData {
     if (match != null) {
       final code = match['code'] ?? '';
       final name = match['name'] ?? '';
-      // If the name already carries its own separator (e.g. "Corporate — Ranchi"),
+      // If the name already carries its own separator (e.g. "SSO Ranchi"),
       // don't prefix the code again — that would double the dash.
       if (name.contains('—')) return name;
       if (code.isNotEmpty && code != 'OTHER' && name.isNotEmpty) {
@@ -257,7 +257,7 @@ class AdminMasterData {
 
   /// The ONE canonical display label for a plant entry: "CODE — Name"
   /// (or just the name when it already carries its own separator, e.g.
-  /// "Corporate — Ranchi", or when there is no useful code).
+  /// "SSO Ranchi", or when there is no useful code).
   /// Every dropdown must use this so labels never diverge between screens.
   static String plantLabel(Map<String, String> p) {
     final code = (p['code'] ?? '').trim();
