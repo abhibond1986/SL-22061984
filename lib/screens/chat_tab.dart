@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import '../main.dart';
 import '../services/local_ai.dart';
+import '../services/groq_service.dart';
 import '../services/local_db.dart';
 import '../services/knowledge_service.dart';
 import '../widgets/universal_app_bar.dart';
@@ -45,6 +46,8 @@ class _ChatTabState extends State<ChatTab> {
   final _ctrl       = TextEditingController();
   final _scrollCtrl = ScrollController();
   final List<Map<String, dynamic>> _messages = [];
+  /// ★ Multi-turn: keep full conversation history for Groq context
+  final List<Map<String, String>> _conversationHistory = [];
   Map<String, dynamic>? _user;
   bool _isAdmin    = false;
   int  _kbDocCount = 0;
@@ -268,19 +271,16 @@ class _ChatTabState extends State<ChatTab> {
       final firstName = u?['name']?.toString().split(' ').first ?? 'there';
       _messages.add({
         'role': 'ai',
-        'text': 'नमस्ते $firstName! मैं SAIL Suraksha Saathi हूँ — आपका सुरक्षा साथी।\n\n'
-            'I know the complete SAIL safety knowledge base:\n\n'
-            '📋 Ministry of Steel Guidelines SG/01–SG/41\n'
-            '⚖️ Factories Act 1948 (S21–S39)\n'
-            '🔴 SMPV Rules 2016 (gas cylinders, pressure vessels)\n'
-            '⚡ CEA Regulations 2023 (electrical safety)\n'
-            '🏭 Process safety: Blast Furnace, Coke Ovens, EAF, BOF, Rolling Mills\n'
-            '⚠️ Line of Fire (LOF) hazards & controls\n'
-            '🦺 IS 14489:2018, all BIS PPE standards\n'
-            '📊 WSA 13 causes + incident classification\n'
-            '🚨 Emergency response procedures\n'
-            '${_kbDocCount > 0 ? "\n📚 + $_kbDocCount uploaded reference documents" : ""}\n\n'
-            'Ask me anything about safety!',
+        'text': 'नमस्ते $firstName! I\'m Suraksha Saathi — your AI safety assistant.\n\n'
+            'I can help with:\n'
+            '📋 MoSteel Guidelines SG/01–41 · Factories Act · SMPV Rules\n'
+            '🏭 BF · SMS · Coke Oven · Rolling Mill · Power Plant safety\n'
+            '⚠️ LOTOTO · Confined Space · Working at Height · Hot Work\n'
+            '🚨 Incident classification · WSA 13 causes · Emergency response\n'
+            '🦺 PPE standards · Gas cylinder codes · Crane safety\n'
+            '${_kbDocCount > 0 ? "\n📚 + $_kbDocCount uploaded plant documents\n" : ""}'
+            '\nAsk me anything — quick answers, regulations, or checklists.',
+        'timestamp': DateTime.now(),
       });
     });
   }
@@ -288,30 +288,29 @@ class _ChatTabState extends State<ChatTab> {
   // ── SEND MESSAGE ─────────────────────────────────────────────────
   void _send(String q) async {
     if (q.trim().isEmpty) return;
+    final question = q.trim();
     setState(() {
-      _messages.add({'role': 'user', 'text': q.trim()});
+      _messages.add({'role': 'user', 'text': question, 'timestamp': DateTime.now()});
       _ctrl.clear();
       _aiLoading = true;
     });
     _scrollToBottom();
 
-    // 1. Search uploaded KB docs. These are shown to the user as sources and
-    //    also fed to the model; 3 was the old hardcoded internal cap.
+    // 1. Search uploaded KB docs for source citations
     final kbResults =
-        await LocalDB.searchKnowledge(q.trim(), limit: 5, snippetChars: 700);
+        await LocalDB.searchKnowledge(question, limit: 5, snippetChars: 700);
 
-    // 2. Try online AI (Apps Script → Gemini with full safety prompt)
-    String? onlineAnswer;
-    try {
-      onlineAnswer = await _askOnlineAI(q.trim(), kbResults);
-    } catch (_) {}
+    // 2. Build KB context for the prompt
+    final kbContext = await KnowledgeService.getKbDocsContext(question,
+        maxDocs: 5, snippetChars: 700);
 
-    // 3. Build final answer
-    String answer;
+    String? answer;
     List<Map<String, dynamic>>? sources;
 
-    if (onlineAnswer != null && onlineAnswer.isNotEmpty) {
-      // Online AI answered
+    // 3. ★ PRIMARY: Try Groq (fast, free, multi-turn)
+    final groqAnswer = await _askGroq(question, kbContext, kbResults);
+    if (groqAnswer != null && groqAnswer.isNotEmpty) {
+      answer = groqAnswer;
       if (kbResults.isNotEmpty) {
         final cleanResults = kbResults.where((r) {
           final snippet = r['snippet']?.toString() ?? '';
@@ -319,37 +318,37 @@ class _ChatTabState extends State<ChatTab> {
         }).toList();
         if (cleanResults.isNotEmpty) sources = cleanResults;
       }
-      answer = onlineAnswer;
     } else {
-      // Offline: LocalAI.chat() with full KB
-      final builtIn = LocalAI.chat(q.trim());
-
-      if (kbResults.isNotEmpty) {
-        final cleanResults = kbResults.where((r) {
-          final snippet = r['snippet']?.toString() ?? '';
-          return _isReadableText(snippet) && snippet.trim().length > 30;
-        }).toList();
-
-        if (cleanResults.isNotEmpty) {
-          final buffer = StringBuffer();
-          buffer.writeln('📚 From your uploaded knowledge base:\n');
-          for (var i = 0; i < cleanResults.length; i++) {
-            final r = cleanResults[i];
-            final snippet = _sanitizeSnippet(r['snippet']?.toString() ?? '');
-            if (snippet.isEmpty) continue;
-            buffer.writeln('${i + 1}. From "${r['title']}":');
-            buffer.writeln('   $snippet\n');
-          }
-          buffer.writeln('\n💡 Standard guidance:');
-          buffer.writeln(builtIn);
-          answer  = buffer.toString();
-          sources = cleanResults;
-        } else {
-          answer = builtIn;
+      // 4. ★ FALLBACK: Apps Script → Gemini
+      final geminiAnswer = await _askGemini(question, kbContext, kbResults);
+      if (geminiAnswer != null && geminiAnswer.isNotEmpty) {
+        answer = geminiAnswer;
+        if (kbResults.isNotEmpty) {
+          final cleanResults = kbResults.where((r) {
+            final snippet = r['snippet']?.toString() ?? '';
+            return _isReadableText(snippet) && snippet.trim().length > 30;
+          }).toList();
+          if (cleanResults.isNotEmpty) sources = cleanResults;
         }
       } else {
-        answer = builtIn;
+        // 5. ★ OFFLINE: LocalAI with KB
+        answer = _buildOfflineAnswer(question, kbResults);
+        if (kbResults.isNotEmpty) {
+          final cleanResults = kbResults.where((r) {
+            final snippet = r['snippet']?.toString() ?? '';
+            return _isReadableText(snippet) && snippet.trim().length > 30;
+          }).toList();
+          if (cleanResults.isNotEmpty) sources = cleanResults;
+        }
       }
+    }
+
+    // 6. ★ Update conversation history for multi-turn context
+    _conversationHistory.add({'role': 'user', 'content': question});
+    _conversationHistory.add({'role': 'assistant', 'content': answer ?? ''});
+    // Keep last 10 exchanges to avoid token overflow
+    if (_conversationHistory.length > 20) {
+      _conversationHistory.removeRange(0, _conversationHistory.length - 20);
     }
 
     if (mounted) {
@@ -357,25 +356,60 @@ class _ChatTabState extends State<ChatTab> {
         _aiLoading = false;
         _messages.add({
           'role': 'ai',
-          'text': answer,
+          'text': answer ?? 'Sorry, I could not generate a response. Please try again.',
           if (sources != null && sources.isNotEmpty) 'sources': sources,
+          'timestamp': DateTime.now(),
         });
       });
       _scrollToBottom();
     }
   }
 
-  // ── ONLINE AI CALL (Apps Script → Gemini with safety prompt + KB) ─────
-  Future<String?> _askOnlineAI(String question, List kbResults) async {
+  // ── GROQ MULTI-TURN CHAT (PRIMARY) ───────────────────────────────
+  Future<String?> _askGroq(String question, String kbContext, List kbResults) async {
     try {
-      // ★ v25: Get comprehensive KB context from KnowledgeService.
-      // maxDocs raised from 3 and snippets from 400 chars: the answer quality
-      // ceiling here was retrieval, not the model. searchKnowledge used to cap
-      // at 3 internally regardless of what was requested — see LocalDB.
-      final kbContext = await KnowledgeService.getKbDocsContext(question,
-          maxDocs: 5, snippetChars: 700);
+      String legacyKb = '';
+      if (kbResults.isNotEmpty) {
+        final cleanKb = kbResults.where((r) {
+          final s = r['snippet']?.toString() ?? '';
+          return _isReadableText(s) && s.length > 30;
+        }).take(3).toList();
+        if (cleanKb.isNotEmpty) {
+          legacyKb = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS:\n' +
+              cleanKb.map((r) =>
+                  '- ${r['title']}: '
+                  '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
+                  .join('\n');
+        }
+      }
 
-      // Also include any directly-searched results (legacy path)
+      final history = [
+        {'role': 'user', 'content': _systemPrompt},
+        {'role': 'assistant', 'content': 'Understood. I am Suraksha Saathi, ready to assist.'},
+        ..._conversationHistory,
+        {'role': 'user', 'content': '$kbContext$legacyKb\n\nQUESTION: $question\n\n'
+            'Answer in MAX 6-8 lines using the structured format. '
+            'Give ONLY the specific answer to THIS question.'},
+      ];
+
+      final result = await GroqService.chat(
+        history: history,
+        temperature: 0.3,
+        maxTokens: 1024,
+      );
+
+      if (result != null && result.trim().length > 20) {
+        return result.trim();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ── GEMINI FALLBACK (Apps Script → Gemini) ───────────────────────
+  Future<String?> _askGemini(String question, String kbContext, List kbResults) async {
+    try {
       String legacyKb = '';
       if (kbResults.isNotEmpty) {
         final cleanKb = kbResults.where((r) {
@@ -416,10 +450,37 @@ class _ChatTabState extends State<ChatTab> {
       }
       return null;
     } catch (e, stackTrace) {
-      // ✅ LOG ERROR to admin panel
       _logChatError(e, stackTrace, question);
       return null;
     }
+  }
+
+  // ── OFFLINE ANSWER BUILDER ───────────────────────────────────────
+  String _buildOfflineAnswer(String question, List kbResults) {
+    final builtIn = LocalAI.chat(question);
+
+    if (kbResults.isNotEmpty) {
+      final cleanResults = kbResults.where((r) {
+        final snippet = r['snippet']?.toString() ?? '';
+        return _isReadableText(snippet) && snippet.trim().length > 30;
+      }).toList();
+
+      if (cleanResults.isNotEmpty) {
+        final buffer = StringBuffer();
+        buffer.writeln('📚 From your uploaded knowledge base:\n');
+        for (var i = 0; i < cleanResults.length; i++) {
+          final r = cleanResults[i];
+          final snippet = _sanitizeSnippet(r['snippet']?.toString() ?? '');
+          if (snippet.isEmpty) continue;
+          buffer.writeln('${i + 1}. From "${r['title']}":');
+          buffer.writeln('   $snippet\n');
+        }
+        buffer.writeln('\n💡 Standard guidance:');
+        buffer.writeln(builtIn);
+        return buffer.toString();
+      }
+    }
+    return builtIn;
   }
 
   /// Log chat API errors to admin panel for tracking
@@ -443,7 +504,6 @@ class _ChatTabState extends State<ChatTab> {
       ));
     } catch (e) {
       // Error logging failed - don't break the app
-      print('Failed to log chat error: $e');
     }
   }
 
@@ -753,7 +813,7 @@ class _ChatTabState extends State<ChatTab> {
         // ── Header ────────────────────────────────────────────────
         UniversalAppBar(
           title: 'Suraksha Saathi',
-          subtitle: 'AI Safety Assistant',
+          subtitle: _aiLoading ? 'Thinking...' : 'AI Safety Assistant',
           user: widget.user ?? _user,
           toggleTheme: widget.toggleTheme,
           onSignOut: widget.onSignOut,
@@ -769,9 +829,10 @@ class _ChatTabState extends State<ChatTab> {
             children: [
               ..._messages.map((m) => _bubble(
                   m['role'].toString(), m['text'].toString(),
-                  m['sources'] as List?)),
+                  m['sources'] as List?,
+                  m['timestamp'] as DateTime?)),
               if (_aiLoading) _loadingBubble(),
-              if (_messages.length <= 1 && !_aiLoading) _suggestionChips(),
+              if (!_aiLoading) _suggestionChips(),
             ],
           ),
         ),
@@ -788,7 +849,7 @@ class _ChatTabState extends State<ChatTab> {
                 controller: _ctrl,
                 style: TextStyle(color: sl.text1, fontSize: 12),
                 decoration: InputDecoration(
-                  hintText: 'Ask about gas cylinders, height safety, LOTOTO, BF gas...',
+                  hintText: 'Ask about LOTOTO, gas safety, height regulations, permits...',
                   hintStyle: TextStyle(color: sl.text4, fontSize: 11),
                   filled: true, fillColor: sl.card2,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -848,14 +909,18 @@ class _ChatTabState extends State<ChatTab> {
                 child: CircularProgressIndicator(
                     strokeWidth: 2, color: AppColors.amber)),
             const SizedBox(width: 8),
-            Text('Thinking...', style: TextStyle(color: sl.text3, fontSize: 11)),
+            Text(_aiLoading ? 'Searching knowledge base...' : 'Thinking...',
+                style: TextStyle(color: sl.text3, fontSize: 11)),
           ])),
       ]));
   }
 
-  Widget _bubble(String role, String text, List? sources) {
+  Widget _bubble(String role, String text, List? sources, [DateTime? ts]) {
     final isUser = role == 'user';
     final sl     = SL.of(context);
+    final timeStr = ts != null
+        ? '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}'
+        : '';
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
@@ -901,6 +966,12 @@ class _ChatTabState extends State<ChatTab> {
                       '📎 ${sources.length} source${sources.length > 1 ? "s" : ""} from knowledge base',
                       style: const TextStyle(color: AppColors.amber,
                           fontSize: 9, fontWeight: FontWeight.w600))),
+                ],
+                // ★ Timestamp
+                if (timeStr.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(timeStr, style: TextStyle(
+                      color: sl.text4, fontSize: 8)),
                 ],
               ]),
             )),
@@ -978,26 +1049,84 @@ class _ChatTabState extends State<ChatTab> {
 
   Widget _suggestionChips() {
     final sl = SL.of(context);
-    // Expanded suggestion chips covering full knowledge base
-    final suggestions = [
-      'Gas cylinder colour codes',
-      'Working at height — what regulation?',
-      'LOTOTO step by step',
-      'Blast furnace gas safety',
-      'Confined space entry checklist',
-      'Hot work permit requirements',
-      'CO gas exposure emergency',
-      'Incident classification LTI FAC RWC',
-      'WSA 13 causes list',
-      'Contractor safety requirements',
-      'Line of Fire hazards in steel plant',
-      'Liquid metal — dry ladle rule',
-      'All Ministry of Steel guidelines list',
-    ];
+    // ★ Dynamic suggestions: context-aware follow-ups after first message,
+    //    or topic starters when chat is empty
+    final bool hasConversation = _messages.length > 1;
+    final List<String> suggestions;
+
+    if (hasConversation) {
+      // Follow-up suggestions based on last AI response
+      final lastAi = _messages.lastWhere(
+        (m) => m['role'] == 'ai', orElse: () => {'text': ''});
+      final lastText = lastAi['text']?.toString().toLowerCase() ?? '';
+
+      if (lastText.contains('lototo') || lastText.contains('lock out')) {
+        suggestions = [
+          'LOTOTO steps for electrical panel',
+          'LOTOTO vs isolation — difference?',
+          'Who authorises LOTO in BF?',
+        ];
+      } else if (lastText.contains('height') || lastText.contains('harness')) {
+        suggestions = [
+          'Harness inspection checklist',
+          'Fall arrest vs fall restraint',
+          'Safety net regulation',
+        ];
+      } else if (lastText.contains('confined space')) {
+        suggestions = [
+          'Gas test before confined space entry',
+          'SCBA vs SABA — when to use',
+          'Confined space rescue plan',
+        ];
+      } else if (lastText.contains('gas') || lastText.contains('cylinder')) {
+        suggestions = [
+          'O2 cylinder colour code',
+          'Cylinder storage distance table',
+          'Gas-free certificate procedure',
+        ];
+      } else if (lastText.contains('hot work') || lastText.contains('permit')) {
+        suggestions = [
+          'Hot work permit checklist',
+          'Fire watch duration after hot work',
+          'Where is hot work NOT allowed?',
+        ];
+      } else if (lastText.contains('electrical') || lastText.contains('arc flash')) {
+        suggestions = [
+          'LOTO for electrical safety',
+          'Arc flash PPE categories',
+          'Minimum approach distance HV',
+        ];
+      } else {
+        suggestions = [
+          'LOTOTO explained',
+          'Confined space entry steps',
+          'Working at height regulation',
+          'Hot work permit requirements',
+          'Gas cylinder colour codes',
+          'Fire extinguisher types use',
+        ];
+      }
+    } else {
+      suggestions = [
+        'LOTOTO step by step',
+        'Gas cylinder colour codes',
+        'Working at height regulation',
+        'Confined space entry checklist',
+        'Hot work permit requirements',
+        'Blast furnace gas safety',
+        'CO gas exposure emergency',
+        'Incident classification LTI FAC RWC',
+        'WSA 13 causes list',
+        'Contractor safety requirements',
+        'Line of Fire hazards',
+        'Electrical arc flash PPE',
+      ];
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('SUGGESTED QUESTIONS',
+        Text(hasConversation ? 'FOLLOW-UP QUESTIONS' : 'SUGGESTED QUESTIONS',
           style: TextStyle(color: sl.text4, fontSize: 9,
               fontWeight: FontWeight.w700, letterSpacing: 0.8)),
         const SizedBox(height: 8),

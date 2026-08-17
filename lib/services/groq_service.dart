@@ -109,18 +109,65 @@ class GroqService {
         }
       } else if (response.statusCode == 429) {
         // Rate limited — caller should fallback
-        print('Groq: Rate limited (429). Falling back.');
         return null;
       } else {
-        final errorText = utf8.decode(response.bodyBytes);
-        print('Groq: Error ${response.statusCode}: ${errorText.substring(0, errorText.length.clamp(0, 200))}');
         return null;
       }
     } catch (e) {
-      print('Groq: Exception: $e');
       return null;
     }
     return null;
+  }
+
+  /// ★ FIX: Multi-turn chat with conversation history.
+  /// Accepts a list of messages [{role: 'user'|'assistant', content: '...'}]
+  /// and returns the assistant's reply. Used by the chatbot for context-aware
+  /// conversations where the bot remembers previous exchanges.
+  static Future<String?> chat({
+    required List<Map<String, String>> history,
+    String? systemPrompt,
+    double temperature = 0.4,
+    int maxTokens = 1024,
+  }) async {
+    if (!await isConfigured || history.isEmpty) return null;
+
+    final apiKey = await getApiKey();
+    final model = await getModel();
+
+    final messages = <Map<String, String>>[];
+    if (systemPrompt != null && systemPrompt.isNotEmpty) {
+      messages.add({'role': 'system', 'content': systemPrompt});
+    }
+    messages.addAll(history);
+
+    try {
+      final response = await http.post(
+        Uri.parse(_apiUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: jsonEncode({
+          'model': model,
+          'messages': messages,
+          'temperature': temperature,
+          'max_tokens': maxTokens,
+        }),
+      ).timeout(const Duration(seconds: 20));
+
+      if (response.statusCode == 200) {
+        final responseText = utf8.decode(response.bodyBytes);
+        final data = jsonDecode(responseText) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final message = choices[0]['message'] as Map<String, dynamic>?;
+          return message?['content']?.toString();
+        }
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
   }
 
   /// Convenience: Call Groq for near-miss text correction
