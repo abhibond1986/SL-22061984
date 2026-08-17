@@ -642,6 +642,17 @@ class SupabaseService {
     }
   }
 
+  /// ★ FIX: Delete a KB doc by id. Returns true on success.
+  static Future<bool> deleteKnowledgeDoc(String id) async {
+    if (!isReady || id.isEmpty) return false;
+    try {
+      await _db.from('knowledge_docs').delete().eq('id', id);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  MASTER DATA (master_data key→jsonb)
   // ══════════════════════════════════════════════════════════════════════════

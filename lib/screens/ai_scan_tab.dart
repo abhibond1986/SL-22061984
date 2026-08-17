@@ -55,6 +55,9 @@ class AIScanTab extends StatefulWidget {
 class _AIScanTabState extends State<AIScanTab> {
   XFile?     _pickedFile;
   Uint8List? _imageBytes;
+  /// The exact bytes the last analysis ran on, kept so a "Re-analyse" writes its
+  /// result under the same content hash. See [_analyze].
+  Uint8List? _analysedBytes;
   bool       _analyzing = false;
   Map<String, dynamic>? _result;
   // Pristine snapshot of the AI output the moment analysis finished, so we can
@@ -172,6 +175,10 @@ class _AIScanTabState extends State<AIScanTab> {
     setState(() {
       _pickedFile     = picked;
       _imageBytes     = bytes;
+      // A new photo invalidates the previous run's byte snapshot, or a
+      // re-analyse could be sent the OLD image. Same for the analysis snapshot.
+      _analysedBytes  = null;
+      _originalAiResult = null;
       _capturedLocation = null;
       _analyzing      = true;
       _result         = null;
@@ -275,8 +282,28 @@ class _AIScanTabState extends State<AIScanTab> {
     }
   }
 
-  Future<void> _analyze() async {
-    setState(() => _step = 'Analyzing hazards…');
+  /// Runs the AI on the current photo.
+  ///
+  /// [forceRefresh] is set only by the explicit "Re-analyse" action, and skips
+  /// the stored-analysis cache for that one call.
+  ///
+  /// It reuses [_analysedBytes] rather than [_imageBytes] — which matters ON WEB
+  /// ONLY, this being the branch that hashes the in-memory bytes. The GPS
+  /// watermark is applied to [_imageBytes] in the background AFTER the first
+  /// analysis starts, so by the time the user taps re-analyse the bytes on screen
+  /// can hash differently from the ones that produced the cached entry, and the
+  /// fresh answer would be filed under a new key while the rejected one stayed
+  /// live under the old. The mobile branch re-reads the picked file from disk on
+  /// every run and is therefore stable by construction.
+  Future<void> _analyze({bool forceRefresh = false}) async {
+    final Uint8List? bytes =
+        forceRefresh ? (_analysedBytes ?? _imageBytes) : _imageBytes;
+    if (bytes == null) return;
+    _analysedBytes = bytes;
+    setState(() {
+      _analyzing = true;
+      _step = forceRefresh ? 'Re-analysing hazards…' : 'Analyzing hazards…';
+    });
     try {
       Map<String, dynamic>? result;
       bool failedDueToInternet = false;
@@ -290,10 +317,16 @@ class _AIScanTabState extends State<AIScanTab> {
 
       try {
         result = kIsWeb
-            ? await GeminiVision.analyseImageBytes(_imageBytes!,
-                runType: AiRunLog.typeHazardScan, plant: tPlant, dept: tDept)
+            ? await GeminiVision.analyseImageBytes(bytes,
+                runType: AiRunLog.typeHazardScan,
+                plant: tPlant,
+                dept: tDept,
+                forceRefresh: forceRefresh)
             : await GeminiVision.analyseImage(File(_pickedFile!.path),
-                runType: AiRunLog.typeHazardScan, plant: tPlant, dept: tDept);
+                runType: AiRunLog.typeHazardScan,
+                plant: tPlant,
+                dept: tDept,
+                forceRefresh: forceRefresh);
       } catch (e, stackTrace) {
         // ✅ FIX: Check if it's a network/connectivity error
         final errorStr = e.toString().toLowerCase();
@@ -310,17 +343,52 @@ class _AIScanTabState extends State<AIScanTab> {
 
         // Show error and stop - don't fall back to demo
         if (mounted) {
-          setState(() { _analyzing = false; _currentStep = 1; });
+          // A failed RE-analysis must not throw away the report the user was
+          // already looking at — they asked for a second opinion, not for their
+          // first one to be deleted. Only a failed first pass falls back to the
+          // preview step.
+          setState(() {
+            _analyzing = false;
+            _currentStep = (forceRefresh && _result != null) ? 3 : 1;
+          });
+          // Say the report was kept, for the same reason the guard below does:
+          // otherwise "Analysis failed" reads as though the user just lost it.
+          final kept = forceRefresh && _result != null
+              ? ' Showing the earlier report.'
+              : '';
           if (failedDueToInternet) {
-            _snack('⚠️ Poor internet connectivity. Please try again later.', AppColors.red);
+            _snack('⚠️ Poor internet connectivity. Please try again later.$kept',
+                AppColors.red);
           } else {
-            _snack('⚠️ Analysis failed: ${e.toString()}', AppColors.red);
+            _snack('⚠️ Analysis failed: ${e.toString()}$kept', AppColors.red);
           }
         }
         return; // Stop here, don't continue
       }
 
       if (mounted) {
+        // A FAILED RE-ANALYSIS MUST NOT DELETE THE REPORT IT WAS ASKED TO
+        // DOUBLE-CHECK. analyseImageBytes never throws and never returns null on
+        // failure — it returns the offline fallback, a well-formed map with no
+        // hazards — so the catch blocks below are NOT the path a spent quota or
+        // a dead provider chain takes. It arrives here, and without this guard it
+        // would overwrite a good analysis with an empty one, dispose the hazard
+        // rows, and leave the user on the "not analysed" empty state with Save
+        // still enabled. The second opinion simply isn't available; say so and
+        // keep what we have.
+        final analysed = result != null &&
+            result['_imageAnalysed'] != false &&
+            result['_isOnline'] == true;
+        if (forceRefresh && !analysed && _result != null) {
+          final reason = result?['_offline_reason']?.toString() ?? '';
+          setState(() => _analyzing = false);
+          _snack(
+              reason.isEmpty
+                  ? 'Could not re-analyse just now — showing the earlier report.'
+                  : 'Could not re-analyse: $reason. Showing the earlier report.',
+              AppColors.amber);
+          return;
+        }
         final hazards = (result?['hazards'] as List?) ?? [];
         _buildHazardKeys(hazards.length);
         setState(() {
@@ -330,6 +398,9 @@ class _AIScanTabState extends State<AIScanTab> {
           _originalAiResult = result == null
               ? null
               : jsonDecode(jsonEncode(result)) as Map<String, dynamic>;
+          // A row index from the PREVIOUS, possibly longer hazard list must not
+          // survive into a re-analysis.
+          _highlightedRow = null;
           _analyzing   = false;
           _currentStep = 3;
         });
@@ -339,10 +410,62 @@ class _AIScanTabState extends State<AIScanTab> {
       _logAnalysisError(e, stackTrace, false);
 
       if (mounted) {
-        setState(() { _analyzing = false; _currentStep = 1; });
+        // Same reasoning as the inner catch: keep an existing report on screen.
+        setState(() {
+          _analyzing = false;
+          _currentStep = (forceRefresh && _result != null) ? 3 : 1;
+        });
         _snack('Analysis failed: $e', AppColors.red);
       }
     }
+  }
+
+  /// Asks before re-running the AI, but only when there is something to lose.
+  ///
+  /// A re-analysis replaces `_result` wholesale and disposes every hazard row, so
+  /// any corrections the user typed into the review sheet — hazard wording,
+  /// regulation, corrective action, the summary — go with it. On an untouched
+  /// report there is nothing to warn about, and a confirm dialog would just be
+  /// friction in front of the thing they asked for.
+  Future<void> _confirmReanalyse() async {
+    bool edited = false;
+    try {
+      edited = _originalAiResult != null &&
+          jsonEncode(_result) != jsonEncode(_originalAiResult);
+    } catch (_) {
+      // A map that won't round-trip is not a reason to block the re-run; assume
+      // unedited rather than trapping the user behind a dialog they can't clear.
+      edited = false;
+    }
+    if (edited) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Theme.of(ctx).colorScheme.surface,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14)),
+          title: const Text('Discard your edits?'),
+          content: const Text(
+              'Re-analysing asks the AI to look at this photo again from '
+              'scratch. The changes you made to this report will be replaced by '
+              'the new result.',
+              style: TextStyle(fontSize: 13, height: 1.4)),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Keep my report')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Re-analyse')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    // Re-checked after the dialog: an await means the scan state may have moved
+    // on while it was open.
+    if (!mounted || _analyzing || _isSaved) return;
+    await _analyze(forceRefresh: true);
   }
 
   /// Log AI analysis errors to admin panel for tracking
@@ -1985,6 +2108,11 @@ class _AIScanTabState extends State<AIScanTab> {
     _hazardClosed.clear();
     setState(() {
       _pickedFile      = null; _imageBytes = null;
+      _analysedBytes   = null;
+      // Cleared with _result, not left dangling: a snapshot of the PREVIOUS
+      // photo's analysis is what the edit-diff feedback loop would compare
+      // against if anything ever read it before the next analysis lands.
+      _originalAiResult = null;
       _result          = null; _analyzing  = false;
       _hazardRowKeys.clear(); _highlightedRow = null;
       _isSaved         = false; _savedIncidentId = null;
@@ -2195,6 +2323,13 @@ class _AIScanTabState extends State<AIScanTab> {
           children: [
             Text(label,
               style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+            // Say plainly what "cached" means, because otherwise a stored
+            // analysis is indistinguishable from a fresh one and there is no
+            // clue that a second opinion is even possible.
+            if (online && fromCache) Text(
+              'This photo was analysed before, so the saved report is shown '
+              'to keep repeat scans consistent. No AI ran just now.',
+              style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w500)),
             if (!online) Text(
               [
                 // Lower-cased at the join, not at the source: the reason is
@@ -2213,6 +2348,29 @@ class _AIScanTabState extends State<AIScanTab> {
               style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w500)),
           ],
         )),
+        // Second opinion. Offered on ANY successful analysis, not just a cached
+        // one: the photo whose first scan came back weak is exactly the one
+        // needing a re-run, and gating on `fromCache` would have forced that user
+        // to reset, re-pick the same photo to be served the poor answer back, and
+        // only then be allowed to question it. Withheld only once the report is
+        // saved — re-running then would leave the stored incident disagreeing
+        // with the screen, and the edit-diff feedback loop compares against the
+        // analysis captured at save time.
+        if (online && !_isSaved)
+          TextButton.icon(
+            onPressed: _analyzing ? null : () => _confirmReanalyse(),
+            icon: const Icon(Icons.refresh_rounded, size: 14),
+            label: const Text('Re-analyse',
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+            style: TextButton.styleFrom(
+              // textOn, not the bare fill colour: AppColors.green measures
+              // 2.54:1 on white, which main.dart forbids for text.
+              foregroundColor: sl.textOn(color),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
       ]),
     );
   }

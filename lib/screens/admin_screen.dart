@@ -167,6 +167,12 @@ class _AdminScreenState extends State<AdminScreen>
   // why the card below checks isEmpty rather than assuming keys exist.
   Map<String, dynamic> _aiQuota = const {};
 
+  // Number of analyses held in GeminiVision's consistency cache ON THIS DEVICE.
+  // Not a cloud figure: the cache is SharedPreferences-local, so clearing it
+  // frees only this device to re-analyse. -1 while unknown.
+  int _resultCacheCount = -1;
+  bool _clearingResultCache = false;
+
   // ── Knowledge Base state ─────────────────────────────────────────
   bool _kbUploading = false;
   String _kbUploadStatus = '';
@@ -7297,6 +7303,8 @@ class _AdminScreenState extends State<AdminScreen>
       ));
     if (ok == true) {
       await LocalDB.replaceAllKnowledgeDocs([]);
+      // ★ FIX: Also clear cloud KB so other devices lose the entries
+      SyncService.clearKnowledgeBaseCloud().catchError((_) {});
       setState(() => _kbDocs = []);
       _toast('Knowledge base cleared', AppColors.red);
       AdminAudit.log(action: 'kb_clear_all', actor: _currentActor);
@@ -7306,6 +7314,8 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _deleteKbEntry(String id) async {
     if (id.isEmpty) return;
     await LocalDB.deleteKnowledgeDoc(id);
+    // ★ FIX: Also delete from cloud so other devices lose the entry
+    SyncService.deleteKnowledgeDocCloud(id).catchError((_) {});
     final updatedDocs = await LocalDB.getKnowledgeDocs();
     setState(() => _kbDocs = updatedDocs);
     _toast('Entry removed', AppColors.amber);
@@ -8054,9 +8064,11 @@ class _AdminScreenState extends State<AdminScreen>
       // Local-only read (SharedPreferences), so it cannot fail the panel; kept
       // inside the same try for uniformity.
       final quota = await GeminiVision.freeQuotaSnapshot();
+      final cacheCount = await GeminiVision.resultCacheSize();
       if (mounted) setState(() {
         _aiRuns = list;
         _aiQuota = quota;
+        _resultCacheCount = cacheCount;
         _runsPendingUpload = pending;
         // The server's own count, not a local derivation: local storage is
         // capped well below what the table holds.
@@ -8320,8 +8332,108 @@ class _AdminScreenState extends State<AdminScreen>
             'budget above. This row follows the window chips and covers every '
             'device, so it will not add up to the device-only figure above.',
             style: TextStyle(color: sl.text4, fontSize: 10, height: 1.4)),
+        const SizedBox(height: 10),
+        Divider(color: sl.glassBorder, height: 1),
+        const SizedBox(height: 8),
+        _resultCacheControl(sl),
       ]),
     );
+  }
+
+  /// Stored-analysis cache: size, what it costs, and a way to empty it.
+  ///
+  /// Exists because the cache is otherwise a one-way door. The same photo always
+  /// returns the same report — good for an audit trail — but if a scan succeeded
+  /// with a WEAK answer (one hazard where there were three), that verdict was
+  /// permanent for that image, with no way to ask a model again. Users get a
+  /// per-scan "Re-analyse" button; this is the blunt instrument for the admin.
+  Widget _resultCacheControl(SL sl) {
+    final n = _resultCacheCount;
+    final known = n >= 0;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Icon(Icons.inventory_2_outlined, size: 14, color: sl.text3),
+        const SizedBox(width: 6),
+        Expanded(child: Text(
+          known
+              ? 'Stored analyses on this device: $n'
+              : 'Stored analyses on this device: —',
+          style: TextStyle(color: sl.text2, fontSize: 11,
+              fontWeight: FontWeight.w700))),
+        TextButton.icon(
+          // Disabled rather than hidden when empty, so the control's existence
+          // (and therefore the behaviour it explains) is always discoverable.
+          onPressed: (!known || n == 0 || _clearingResultCache)
+              ? null
+              : _confirmClearResultCache,
+          icon: _clearingResultCache
+              ? const SizedBox(width: 12, height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.delete_sweep_rounded, size: 15),
+          label: const Text('Clear',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+          style: TextButton.styleFrom(
+            foregroundColor: const Color(0xFFD32F2F),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            minimumSize: const Size(0, 28),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ),
+      ]),
+      Text(
+        'A photo that has been analysed once returns its saved report on every '
+        'later scan, so repeat scans are free and always agree with each other. '
+        'Clearing makes the next scan of each photo call the AI again, which '
+        'spends from the allowance above. Reports already saved as incidents are '
+        'NOT affected — they keep their own copy. This cache is local to this '
+        'device and is never synced, so clearing it changes nothing for anyone '
+        'else.',
+        style: TextStyle(color: sl.text4, fontSize: 10, height: 1.4)),
+    ]);
+  }
+
+  Future<void> _confirmClearResultCache() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).colorScheme.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: const Text('Clear stored analyses?'),
+        content: Text(
+          'The next scan of each of these $_resultCacheCount photo(s) will call '
+          'the AI again and spend from the daily allowance. Saved incident '
+          'reports are not affected. This cannot be undone.',
+          style: const TextStyle(fontSize: 13, height: 1.4)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFD32F2F)),
+              child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _clearingResultCache = true);
+    await GeminiVision.clearResultCache();
+    // Re-read rather than assuming zero: clearResultCache swallows its errors so
+    // a scan cannot be broken by cache maintenance, which means "it worked" is
+    // not something the caller can take on trust.
+    final n = await GeminiVision.resultCacheSize();
+    if (!mounted) return;
+    setState(() {
+      _resultCacheCount = n;
+      _clearingResultCache = false;
+    });
+    if (n == 0) {
+      _toast('Stored analyses cleared', const Color(0xFF43A047));
+    } else {
+      _toast('Could not clear the cache ($n still stored)',
+          const Color(0xFFD32F2F));
+    }
   }
 
   Widget _moduleAiTelemetry(SL sl) {

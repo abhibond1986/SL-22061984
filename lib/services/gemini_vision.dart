@@ -202,6 +202,35 @@ class GeminiVision {
     } catch (_) {}
   }
 
+  /// How many analyses are held in the consistency cache, for the admin panel.
+  static Future<int> resultCacheSize() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kResultCache);
+      if (raw == null) return 0;
+      return (jsonDecode(raw) as Map).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Forget every stored analysis, so the next scan of any image calls a model.
+  ///
+  /// This is a DEVICE-LOCAL cache, never synced, so clearing it here does not
+  /// affect other users. It also cannot alter an incident that has already been
+  /// saved: a saved report carries its own copy of the analysis in LocalDB, and
+  /// nothing re-reads this cache to rebuild it. So the worst this can cost is
+  /// the free-quota spend of re-analysing a photo someone scans again.
+  static Future<void> clearResultCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kResultCache);
+      print('GeminiVision: ✓ result cache cleared');
+    } catch (e) {
+      print('GeminiVision: ✗ could not clear result cache: $e');
+    }
+  }
+
   // Prevent concurrent AI calls
   static bool _isAnalyzing = false;
 
@@ -225,9 +254,14 @@ class GeminiVision {
   static Future<Map<String, dynamic>?> analyseImage(File imageFile,
       {String runType = AiRunLog.typeHazardScan,
       String plant = '',
-      String dept = ''}) async {
+      String dept = '',
+      bool forceRefresh = false}) async {
     final bytes = await imageFile.readAsBytes();
-    return analyseImageBytes(bytes, runType: runType, plant: plant, dept: dept);
+    return analyseImageBytes(bytes,
+        runType: runType,
+        plant: plant,
+        dept: dept,
+        forceRefresh: forceRefresh);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -246,11 +280,19 @@ class GeminiVision {
   //
   // [runType] lets one instrumentation point serve both entry points, so the
   // dashboard can still separate hazard scans from near-miss analyses.
+  //
+  // [forceRefresh] skips the consistency-cache READ for this one call. The write
+  // still happens, so the fresh answer replaces the old one and every later scan
+  // of the same photo is consistent with what the user was last shown. Reserved
+  // for an explicit human "re-analyse" — never set it on an automatic retry, or
+  // a flaky provider chain would burn the daily free quota re-analysing photos
+  // that already have a perfectly good stored answer.
   static Future<Map<String, dynamic>?> analyseImageBytes(Uint8List bytes,
       {int retryCount = 0,
       String runType = AiRunLog.typeHazardScan,
       String plant = '',
-      String dept = ''}) async {
+      String dept = '',
+      bool forceRefresh = false}) async {
     final stopwatch = Stopwatch()..start();
 
     // Records one run and passes the result straight through, so each exit
@@ -289,8 +331,12 @@ class GeminiVision {
       // otherwise yield different hazards/risk. We key results by a content
       // hash and return the stored analysis on a repeat scan.
       // ══════════════════════════════════════════════════════════════════════
+      // ...unless the user explicitly asked for a second opinion. The hash is
+      // still computed, because the fresh result must overwrite the stale entry
+      // under the same key — otherwise the next ordinary scan of this photo
+      // would serve the very analysis the user just rejected.
       final imgHash = _contentHash(bytes);
-      final cached = await _readCachedResult(imgHash);
+      final cached = forceRefresh ? null : await _readCachedResult(imgHash);
       if (cached != null) {
         print('GeminiVision: ✓ Returning CACHED result for image $imgHash (consistent)');
         cached['_fromCache'] = true;

@@ -85,6 +85,42 @@ class AdminMasterData {
     });
   }
 
+  /// ★ FIX: Push with retry — enqueue to pending queue on failure so
+  /// BackgroundSync retries later. Unlike incidents (which have deep payloads),
+  /// master data is a full-replace, so we store the complete data to push.
+  static void _pushWithRetry(
+      Future<bool> Function() push, String what, String action,
+      Map<String, dynamic> payload) {
+    push().then((ok) {
+      if (ok) {
+        lastPushError.value = null;
+      } else {
+        lastPushError.value = 'Failed to save $what to server (queued for retry)';
+        _enqueueMasterData(action, payload);
+      }
+    }).catchError((e) {
+      lastPushError.value = 'Failed to save $what to server (queued for retry): $e';
+      _enqueueMasterData(action, payload);
+      return null;
+    });
+  }
+
+  static Future<void> _enqueueMasterData(
+      String action, Map<String, dynamic> payload) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      const queueKey = 'sync_pending_queue';
+      final raw = prefs.getString(queueKey);
+      final queue = raw != null ? (jsonDecode(raw) as List) : [];
+      queue.add({
+        'action': action,
+        'payload': payload,
+        'queuedAt': DateTime.now().toIso8601String(),
+      });
+      await prefs.setString(queueKey, jsonEncode(queue));
+    } catch (_) {}
+  }
+
   // ── SAIL PLANTS (14 units + Others) ──────────────────────────────
   static const List<Map<String, String>> sailPlants = [
     {'code': 'BSP',        'name': 'Bhilai Steel Plant',          'state': 'Chhattisgarh', 'kind': 'Plant'},
@@ -293,30 +329,41 @@ class AdminMasterData {
   /// `status == 'OPEN' || ... 'INVESTIGATING' || ... 'ACTION TAKEN'`, because
   /// adding one stage in the admin panel would then make it invisible to
   /// every "open cases" count. Use [openStatusesFrom] instead.
-  static const List<String> terminalStatuses = ['VERIFIED', 'CLOSED'];
+  ///
+  /// ★ FIX: This is now only used as a fallback. The primary logic is:
+  ///   - The LAST status in the admin's list is always terminal.
+  ///   - Any status the admin removed from their list is treated as terminal
+  ///     (to prevent stale statuses from counting as "open").
+  static const List<String> _defaultTerminalStatuses = ['VERIFIED', 'CLOSED'];
 
   /// Everything in [statuses] that isn't terminal, upper-cased for comparison.
-  static Set<String> openStatusesFrom(List<String> statuses) => statuses
-      .map((s) => s.trim().toUpperCase())
-      .where((s) => !terminalStatuses.contains(s))
-      .toSet();
+  /// ★ FIX: Only the LAST status in the admin's ladder is terminal.
+  /// This means admin can add/rename statuses without hardcoded assumptions.
+  static Set<String> openStatusesFrom(List<String> statuses) {
+    if (statuses.isEmpty) return {};
+    final last = statuses.last.trim().toUpperCase();
+    return statuses
+        .map((s) => s.trim().toUpperCase())
+        .where((s) => s != last)
+        .toSet();
+  }
 
   /// Convenience async form for callers that don't already hold the list.
   static Future<Set<String>> getOpenStatuses() async =>
       openStatusesFrom(await getStatuses());
 
-  /// True if [status] means "finished". Compares against the admin's own
-  /// terminal set rather than a literal, so a renamed final stage still counts.
+  /// True if [status] means "finished". The last configured status is always
+  /// terminal by definition — that's the end of the admin's ladder.
+  /// ★ FIX: Removed hardcoded terminalStatuses check. Only the last status
+  /// in the admin's list is terminal. If admin renames or removes a status,
+  /// it's no longer terminal.
   static Future<bool> isTerminalStatus(String status) async {
     final s = status.trim().toUpperCase();
     if (s.isEmpty) return false;
     final all = await getStatuses();
     if (all.isEmpty) return false;
-    // The last configured status is always terminal by definition — that's the
-    // end of the admin's ladder — plus anything in the canonical terminal set
-    // that the admin has kept.
     final last = all.last.trim().toUpperCase();
-    return s == last || terminalStatuses.contains(s);
+    return s == last;
   }
 
   /// The status a newly created record starts in — the first rung of the
@@ -390,7 +437,8 @@ class AdminMasterData {
     await prefs.setString(_kPlants, jsonEncode(v));
     _bump();
     if (syncToBackend) {
-      _pushGuarded(() => SyncService.pushMasterData(plants: v), 'plants');
+      _pushWithRetry(() => SyncService.pushMasterData(plants: v), 'plants',
+          'pushMasterData', {'plants': v});
     }
   }
 
@@ -399,22 +447,27 @@ class AdminMasterData {
     await prefs.setString(key, jsonEncode(v));
     _bump();
     if (syncToBackend) {
-      // Push the specific list to backend
+      // Push the specific list to backend with retry on failure
       switch (key) {
         case _kDepts:
-          _pushGuarded(() => SyncService.pushMasterData(departments: v), 'departments');
+          _pushWithRetry(() => SyncService.pushMasterData(departments: v),
+              'departments', 'pushMasterData', {'departments': v});
           break;
         case _kWsa:
-          _pushGuarded(() => SyncService.pushMasterData(wsaCauses: v), 'near-miss causes');
+          _pushWithRetry(() => SyncService.pushMasterData(wsaCauses: v),
+              'near-miss causes', 'pushMasterData', {'wsaCauses': v});
           break;
         case _kSeverities:
-          _pushGuarded(() => SyncService.pushMasterData(severities: v), 'severities');
+          _pushWithRetry(() => SyncService.pushMasterData(severities: v),
+              'severities', 'pushMasterData', {'severities': v});
           break;
         case _kStatuses:
-          _pushGuarded(() => SyncService.pushMasterData(statuses: v), 'statuses');
+          _pushWithRetry(() => SyncService.pushMasterData(statuses: v),
+              'statuses', 'pushMasterData', {'statuses': v});
           break;
         case _kObsTypes:
-          _pushGuarded(() => SyncService.pushMasterData(obsTypes: v), 'observation types');
+          _pushWithRetry(() => SyncService.pushMasterData(obsTypes: v),
+              'observation types', 'pushMasterData', {'obsTypes': v});
           break;
       }
     }
@@ -480,22 +533,46 @@ class AdminMasterData {
         updated = true;
       }
 
+      // ★ FIX: Pull SPI params from backend
+      if (remote['spiParams'] is Map) {
+        final spi = (remote['spiParams'] as Map)
+            .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_kSpiParams, jsonEncode(spi));
+        updated = true;
+      }
+
+      // ★ FIX: Pull SPI card visibility from backend
+      if (remote['spiCardVisible'] != null) {
+        final visible = remote['spiCardVisible'] == true ||
+            remote['spiCardVisible'] == 'true';
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kShowSpiCard, visible);
+        updated = true;
+      }
+
+      // ★ FIX: Pull severity scores from backend
+      if (remote['severityScores'] is Map) {
+        final scores = (remote['severityScores'] as Map)
+            .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_kSeverityScores, jsonEncode(scores));
+        updated = true;
+      }
+
       // ★ v25: Sync ALL API keys from backend — ensures all devices have keys
       // Keys come from Script Properties (permanent) so they survive app redeployments
       final prefs = await SharedPreferences.getInstance();
       if (remote['geminiApiKey'] is String && (remote['geminiApiKey'] as String).length > 10) {
         await prefs.setString('gemini_vision_api_key', remote['geminiApiKey'] as String);
-        print('AdminMasterData: ✓ Gemini key synced (${(remote['geminiApiKey'] as String).substring(0, 8)}...)');
         updated = true;
       }
       if (remote['groqApiKey'] is String && (remote['groqApiKey'] as String).length > 10) {
         await prefs.setString('groq_api_key', remote['groqApiKey'] as String);
-        print('AdminMasterData: ✓ Groq key synced');
         updated = true;
       }
       if (remote['openRouterApiKey'] is String && (remote['openRouterApiKey'] as String).length > 10) {
         await prefs.setString(GeminiVision.kOpenRouterKey1, remote['openRouterApiKey'] as String);
-        print('AdminMasterData: ✓ OpenRouter key synced');
         updated = true;
       }
       // Optional SECOND OpenRouter key (failover). Absent from older backend
@@ -503,7 +580,6 @@ class AdminMasterData {
       // than clearing it — hence no `else` branch here.
       if (remote['openRouterApiKey2'] is String && (remote['openRouterApiKey2'] as String).length > 10) {
         await prefs.setString(GeminiVision.kOpenRouterKey2, remote['openRouterApiKey2'] as String);
-        print('AdminMasterData: ✓ OpenRouter key #2 synced');
         updated = true;
       }
       // NaraRouter (Tier 1b). Prefix-checked, not just length-checked: this
@@ -515,7 +591,6 @@ class AdminMasterData {
           (remote['naraApiKey'] as String).startsWith(NaraVision.keyPrefix)) {
         await prefs.setString(
             NaraVision.kPrefsApiKey, remote['naraApiKey'] as String);
-        print('AdminMasterData: ✓ NaraRouter key synced');
         updated = true;
       }
       // The admin's MODEL choice, validated the same way geminiModel is below.
@@ -529,9 +604,6 @@ class AdminMasterData {
         if (NaraVision.availableModels.any((m) => m['id'] == remoteNaraModel)) {
           await prefs.setString(NaraVision.kPrefsModel, remoteNaraModel);
           updated = true;
-        } else {
-          print('AdminMasterData: ⏭ Ignoring unknown NaraRouter model from '
-              'backend: "$remoteNaraModel"');
         }
       }
       if (remote['geminiModel'] is String && (remote['geminiModel'] as String).isNotEmpty) {
@@ -547,9 +619,6 @@ class AdminMasterData {
         if (isKnown) {
           await prefs.setString('gemini_vision_model', remoteModel);
           updated = true;
-        } else {
-          print('AdminMasterData: ⏭ Ignoring unknown/retired Gemini model '
-              'from backend: "$remoteModel"');
         }
       }
 
@@ -593,6 +662,9 @@ class AdminMasterData {
       await prefs.setBool(_kShowSpiCard, visible);
       await prefs.reload(); // Force reload to ensure persistence
       _bump();
+      // ★ FIX: Push to backend with retry so other devices see the visibility toggle
+      _pushWithRetry(() => SyncService.pushMasterData(spiCardVisible: visible),
+          'SPI visibility', 'pushMasterData', {'spiCardVisible': visible});
       // Verify it was saved
       final saved = prefs.getBool(_kShowSpiCard);
       if (saved != visible) {
@@ -622,6 +694,9 @@ class AdminMasterData {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSpiParams, jsonEncode(params));
     _bump();
+    // ★ FIX: Push to backend with retry so other devices get the updated SPI formula
+    _pushWithRetry(() => SyncService.pushMasterData(spiParams: params),
+        'SPI parameters', 'pushMasterData', {'spiParams': params});
   }
 
   // ── PLANT NAME DATA MIGRATION ──────────────────────────────────────
@@ -659,6 +734,9 @@ class AdminMasterData {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSeverityScores, jsonEncode(scores));
     _bump();
+    // ★ FIX: Push to backend with retry so other devices get the updated risk scores
+    _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
+        'severity scores', 'pushMasterData', {'severityScores': scores});
   }
 
   /// Risk score for a severity label, using the admin-configured scale.
@@ -681,9 +759,22 @@ class AdminMasterData {
     await prefs.remove(_kStatuses);
     await prefs.remove(_kObsTypes);
     await prefs.remove(_kSeverityScores);
+    await prefs.remove(_kSpiParams);
+    await prefs.setBool(_kShowSpiCard, false);
     _bump();
     if (syncToBackend) {
-      _pushGuarded(
+      final resetPayload = <String, dynamic>{
+        'plants': sailPlants.map((p) => Map<String, String>.from(p)).toList(),
+        'departments': List<String>.from(defaultDepartments),
+        'wsaCauses': List<String>.from(defaultWsaCauses),
+        'severities': List<String>.from(defaultSeverities),
+        'statuses': List<String>.from(defaultStatuses),
+        'obsTypes': List<String>.from(defaultObservationTypes),
+        'spiParams': Map<String, int>.from(defaultSpiParams),
+        'spiCardVisible': false,
+        'severityScores': Map<String, int>.from(defaultSeverityScores),
+      };
+      _pushWithRetry(
         () => SyncService.pushMasterData(
           plants: sailPlants.map((p) => Map<String, String>.from(p)).toList(),
           departments: List<String>.from(defaultDepartments),
@@ -691,8 +782,13 @@ class AdminMasterData {
           severities: List<String>.from(defaultSeverities),
           statuses: List<String>.from(defaultStatuses),
           obsTypes: List<String>.from(defaultObservationTypes),
+          spiParams: Map<String, int>.from(defaultSpiParams),
+          spiCardVisible: false,
+          severityScores: Map<String, int>.from(defaultSeverityScores),
         ),
         'reset to defaults',
+        'pushMasterData',
+        resetPayload,
       );
     }
   }

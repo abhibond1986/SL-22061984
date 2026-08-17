@@ -288,6 +288,54 @@ class SyncService {
     }
   }
 
+  /// ★ FIX: Delete a single KB doc from the cloud.
+  /// On Supabase: deletes the row from knowledge_docs.
+  /// On Apps Script: pulls remaining, removes, re-pushes (append-only backend).
+  static Future<bool> deleteKnowledgeDocCloud(String id) async {
+    if (SupabaseConfig.enabled) {
+      try {
+        await SupabaseService.deleteKnowledgeDoc(id);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    // Apps Script: pull, remove, re-push remaining
+    if (!await isConfigured) return false;
+    try {
+      final serverDocs = await pullKbDocs();
+      if (serverDocs == null) return false;
+      serverDocs.removeWhere((d) => d['id']?.toString() == id);
+      return await pushKbDocs(serverDocs);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// ★ FIX: Clear all KB docs from the cloud.
+  /// On Supabase: deletes all rows from knowledge_docs.
+  /// On Apps Script: pushes empty list to clear the KB sheet.
+  static Future<bool> clearKnowledgeBaseCloud() async {
+    if (SupabaseConfig.enabled) {
+      try {
+        final docs = await SupabaseService.fetchKnowledgeDocs();
+        for (final doc in docs) {
+          final id = doc['id']?.toString() ?? '';
+          if (id.isNotEmpty) await SupabaseService.deleteKnowledgeDoc(id);
+        }
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    if (!await isConfigured) return false;
+    try {
+      return await pushKbDocs([]);
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Pull KB documents from backend using existing 'listKnowledge' action.
   /// All devices call this on startup/sync to get admin-uploaded knowledge.
   static Future<List<Map<String, dynamic>>?> pullKbDocs() async {
@@ -347,6 +395,9 @@ class SyncService {
     List<String>? severities,
     List<String>? statuses,
     List<String>? obsTypes,
+    Map<String, int>? spiParams,
+    bool? spiCardVisible,
+    Map<String, int>? severityScores,
     String? updatedBy,
   }) async {
     if (SupabaseConfig.enabled) {
@@ -357,6 +408,9 @@ class SyncService {
       if (severities != null)  any |= await SupabaseService.setMasterData('severities', severities);
       if (statuses != null)    any |= await SupabaseService.setMasterData('statuses', statuses);
       if (obsTypes != null)    any |= await SupabaseService.setMasterData('obs_types', obsTypes);
+      if (spiParams != null)   any |= await SupabaseService.setMasterData('spi_params', spiParams);
+      if (spiCardVisible != null) any |= await SupabaseService.setMasterData('spi_card_visible', {'visible': spiCardVisible});
+      if (severityScores != null) any |= await SupabaseService.setMasterData('severity_scores', severityScores);
       return any;
     }
     if (!await isConfigured) return false;
@@ -369,6 +423,9 @@ class SyncService {
       if (severities != null)  body['severities'] = severities;
       if (statuses != null)    body['statuses'] = statuses;
       if (obsTypes != null)    body['obsTypes'] = obsTypes;
+      if (spiParams != null)   body['spiParams'] = spiParams;
+      if (spiCardVisible != null) body['spiCardVisible'] = spiCardVisible;
+      if (severityScores != null) body['severityScores'] = severityScores;
       if (updatedBy != null)   body['updatedBy'] = updatedBy;
 
       final resp = await _postWithRedirect(url, body);
@@ -394,6 +451,10 @@ class SyncService {
         if (raw['severities'] != null)  'severities':  raw['severities'],
         if (raw['statuses'] != null)    'statuses':    raw['statuses'],
         if (raw['obs_types'] != null)   'obsTypes':    raw['obs_types'],
+        // ★ FIX: Pull SPI params, visibility, and severity scores
+        if (raw['spi_params'] != null)  'spiParams':   raw['spi_params'],
+        if (raw['spi_card_visible'] != null) 'spiCardVisible': (raw['spi_card_visible'] is Map) ? (raw['spi_card_visible'] as Map)['visible'] : raw['spi_card_visible'],
+        if (raw['severity_scores'] != null) 'severityScores': raw['severity_scores'],
       };
 
       // ★ CRITICAL: AI API keys (OpenRouter/Gemini/Groq) do NOT live in the
@@ -745,6 +806,37 @@ class SyncService {
         ok = await deleteIncident(payload['id']?.toString() ?? '');
       } else if (action == 'deleteUser') {
         ok = await deleteUser(payload['username']?.toString() ?? '');
+      } else if (action == 'pushMasterData') {
+        // ★ FIX: Retry failed master data pushes
+        ok = await pushMasterData(
+          plants: payload['plants'] != null
+              ? (payload['plants'] as List).map((e) => Map<String, String>.from(e as Map)).toList()
+              : null,
+          departments: payload['departments'] != null
+              ? (payload['departments'] as List).map((e) => e.toString()).toList()
+              : null,
+          wsaCauses: payload['wsaCauses'] != null
+              ? (payload['wsaCauses'] as List).map((e) => e.toString()).toList()
+              : null,
+          severities: payload['severities'] != null
+              ? (payload['severities'] as List).map((e) => e.toString()).toList()
+              : null,
+          statuses: payload['statuses'] != null
+              ? (payload['statuses'] as List).map((e) => e.toString()).toList()
+              : null,
+          obsTypes: payload['obsTypes'] != null
+              ? (payload['obsTypes'] as List).map((e) => e.toString()).toList()
+              : null,
+          spiParams: payload['spiParams'] != null
+              ? (payload['spiParams'] as Map).map((k, v) =>
+                  MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0))
+              : null,
+          spiCardVisible: payload['spiCardVisible'],
+          severityScores: payload['severityScores'] != null
+              ? (payload['severityScores'] as Map).map((k, v) =>
+                  MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0))
+              : null,
+        );
       } else {
         // Unknown/legacy action — drop it so the queue can't wedge forever.
         ok = true;

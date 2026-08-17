@@ -131,6 +131,8 @@ class AdminAlerts {
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kKey, jsonEncode(list));
+    // ★ FIX: Auto-sync rules to backend so they reach other devices
+    syncToBackend().catchError((_) {});
   }
 
   // ── DELETE ──────────────────────────────────────────────────────
@@ -139,6 +141,8 @@ class AdminAlerts {
     list.removeWhere((r) => r['id']?.toString() == id);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kKey, jsonEncode(list));
+    // ★ FIX: Auto-sync rules to backend so deletions reach other devices
+    syncToBackend().catchError((_) {});
   }
 
   // ── TOGGLE ──────────────────────────────────────────────────────
@@ -149,6 +153,8 @@ class AdminAlerts {
     list[idx]['enabled'] = enabled;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kKey, jsonEncode(list));
+    // ★ FIX: Auto-sync rules to backend so toggle state reaches other devices
+    syncToBackend().catchError((_) {});
   }
 
   // ── CLEAR ALL (for restore) ─────────────────────────────────────
@@ -156,6 +162,8 @@ class AdminAlerts {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kKey);
     await prefs.remove(_kAlertHistory);
+    // ★ FIX: Auto-sync empty rules to backend so clear reaches other devices
+    syncToBackend().catchError((_) {});
   }
 
   // ── EVALUATE — figure out which rules WOULD fire right now ──────
@@ -511,7 +519,6 @@ class AdminAlerts {
 
       return response.statusCode == 200 || response.statusCode == 302;
     } catch (e) {
-      print('[AdminAlerts] Sync failed: $e');
       return false;
     }
   }
@@ -558,7 +565,6 @@ class AdminAlerts {
         return {'ok': false, 'error': 'HTTP ${response.statusCode}'};
       }
     } catch (e) {
-      print('[AdminAlerts] Immediate alert failed: $e');
       return {'ok': false, 'error': e.toString()};
     }
   }

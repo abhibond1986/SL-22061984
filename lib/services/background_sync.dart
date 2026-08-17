@@ -1,5 +1,6 @@
 // lib/services/background_sync.dart
 // ★ v25: Periodic background sync — retries pending items every 5 minutes.
+// ★ FIX: Also pulls master data so admin changes reach users even without navigation.
 // Runs while the app is open. Stops on dispose.
 
 import 'dart:async';
@@ -7,6 +8,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'sync_service.dart';
 import 'app_logger.dart';
 import 'ai_run_log.dart';
+import 'admin_master_data.dart';
 
 class BackgroundSync {
   static Timer? _timer;
@@ -42,6 +44,13 @@ class BackgroundSync {
       // its own queue, so a cycle where the incident queue is empty must still
       // retry stranded runs. Cheap no-op when nothing is pending.
       await AiRunLog.flushUnsynced().catchError((_) => 0);
+
+      // ★ FIX: Always pull master data so admin changes reach users
+      // even when the pending queue is empty. This covers the gap where
+      // users are parked on non-Home screens and fullSync never runs.
+      try {
+        await AdminMasterData.syncFromBackend();
+      } catch (_) {}
 
       final pending = await SyncService.getPendingCount();
       if (pending == 0) {
