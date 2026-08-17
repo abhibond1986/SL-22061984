@@ -175,7 +175,6 @@ class AdminMasterData {
     'CORPORATE — RANCHI': 'SSO Ranchi',
     'CORP — RANCHI': 'SSO Ranchi',
     'CORPORATE-RANCHI': 'SSO Ranchi',
-    'CORPORATE — RANCHI': 'SSO Ranchi',
     'CO-DELHI': 'Corporate Office-Delhi',
     'SAIL SAFETY ORGANISATION': 'SSO Ranchi',
     'SAIL SAFETY ORGANIZATION': 'SSO Ranchi',
