@@ -24,8 +24,20 @@ import 'admin_master_data.dart';
 class GeminiDirectVision {
   static const String _kApiKey = 'gemini_vision_api_key';
   static const String _kModel = 'gemini_vision_model';
-  /// Google's documented replacement for the retired gemini-2.0-flash.
-  static const String defaultModel = 'gemini-3.6-flash';
+  /// Default Tier 2 model when no admin selection is saved.
+  ///
+  /// Flash-Lite, not Flash, since 2026-08-17. Reordering [_modelFallbackChain]
+  /// alone would NOT have taken effect: [analyzeImage] puts the admin's
+  /// `selected` model at the head of the attempt list, and `selected` falls back
+  /// to this constant — so with 3.6-flash here, Flash still went first on every
+  /// device that had never touched the admin dropdown, and the reordered chain
+  /// below only applied from the second attempt onward.
+  ///
+  /// ⚠ Devices with a model ALREADY saved in SharedPreferences keep using it —
+  /// see [_retiredModels] for why changing this constant does not reach them.
+  /// An admin who previously pinned 3.6 Flash must change it in
+  /// Admin → System Health to pick up this new default.
+  static const String defaultModel = 'gemini-3.1-flash-lite';
 
   /// Retired model IDs → their documented replacement.
   ///
@@ -96,10 +108,13 @@ class GeminiDirectVision {
   /// Models offered in the Admin panel dropdown.
   /// All are current, non-preview, and accept image input. Verified against
   /// https://ai.google.dev/gemini-api/docs/models on 2026-08-15.
+  // Order mirrors [_modelFallbackChain] and [defaultModel] — Flash-Lite first.
+  // Keep all three in step; a dropdown that disagrees with the runtime chain is
+  // how an admin ends up "selecting" a model that is not actually tried first.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'gemini-3.6-flash',      'name': 'Gemini 3.6 Flash (Recommended, fast)'},
+    {'id': 'gemini-3.1-flash-lite', 'name': 'Gemini 3.1 Flash-Lite (Recommended — highest quota, fastest)'},
+    {'id': 'gemini-3.6-flash',      'name': 'Gemini 3.6 Flash (fast)'},
     {'id': 'gemini-3.7-flash',      'name': 'Gemini 3.7 Flash (Newest)'},
-    {'id': 'gemini-3.1-flash-lite', 'name': 'Gemini 3.1 Flash-Lite (Highest quota)'},
     {'id': 'gemini-2.5-flash',      'name': 'Gemini 2.5 Flash (Older, still supported)'},
     {'id': 'gemini-2.5-pro',        'name': 'Gemini 2.5 Pro (Most accurate, low quota)'},
   ];
@@ -107,9 +122,15 @@ class GeminiDirectVision {
   /// Tried in order after the admin's selected model, so a per-model rate limit
   /// or an unexpected retirement does not end the scan. Each entry is a distinct
   /// model with its own quota bucket.
+  // ORDER = HIGHEST QUOTA + LOWEST LATENCY FIRST (set 2026-08-17 on admin
+  // request). Flash-Lite leads because this tier only ever runs when Tier 1 has
+  // already failed — usually because a shared free allowance is spent — so the
+  // model with the most quota headroom and the fastest response is the one most
+  // likely to actually finish the scan. The heavier Flash models follow as
+  // quality fallbacks.
   static const List<String> _modelFallbackChain = [
+    'gemini-3.1-flash-lite', // FIRST: highest quota, fastest; documented replacement for 2.0-flash-lite
     'gemini-3.6-flash',      // Documented replacement for 2.0-flash
-    'gemini-3.1-flash-lite', // Documented replacement for 2.0-flash-lite; high quota
     'gemini-2.5-flash',      // Older generation, still supported — extra headroom
   ];
 

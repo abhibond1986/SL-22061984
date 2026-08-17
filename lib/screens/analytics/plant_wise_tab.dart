@@ -161,12 +161,30 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   ///
   /// No `seesAllPlants` branch: it used to return just the viewer's own plant
   /// for a plant user. See the note on [_selectable] for why that was dropped.
-  List<String> get _plantOptions {
-    // Only return plants from admin panel - no data-derived plants
-    // Filter to only show plants that have incidents
-    final counts = _plantCounts;
-    return _selectable.where((p) => counts[p] != null && counts[p]! > 0).toList();
-  }
+  /// EVERY admin-configured plant, including ones with no records yet.
+  ///
+  /// This used to filter to `counts[p] > 0` — plants that already had incidents.
+  /// That filter was the cause of the "dropdown is missing" bug: when it removed
+  /// every entry, [_plantSelector] hit its `options.isEmpty` guard and rendered
+  /// SizedBox.shrink(), while build() simultaneously showed "Select a plant
+  /// above" — telling the user to use a control that had just erased itself.
+  ///
+  /// The filter emptied the list in two ordinary situations, neither of them an
+  /// error state:
+  ///   1. A fresh deployment where no plant has reported yet.
+  ///   2. Any case where incident `plant` strings do not canonicalise onto an
+  ///      admin label. Counts are keyed by canonicalPlantFrom() output while
+  ///      options come from plantLabel(); a single mismatch drops that plant's
+  ///      count, and if it misses for all of them the dropdown vanishes rather
+  ///      than degrading.
+  ///
+  /// The zero-count case was already handled downstream — the dropdown items
+  /// deliberately render a muted row with '—' for `n == 0` — so the filter was
+  /// also contradicting the item builder's own stated intent.
+  ///
+  /// Still admin-only: no data-derived plant names are added, so a plant that is
+  /// not in the admin list cannot appear here. Admin remains authoritative.
+  List<String> get _plantOptions => _selectable;
 
   /// Incident count per canonical plant, so the dropdown can show which plants
   /// actually have records instead of making the user select each one to find out.
@@ -366,13 +384,22 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
           Padding(
             padding: const EdgeInsets.only(top: 40),
             child: Center(child: Text(
-              _selectedPlant == null
-                  ? 'Select a plant above'
-                  : _dept.isEmpty
-                      ? 'No incidents for $_selectedPlant'
-                      : 'No incidents for $_dept in $_selectedPlant',
+              // NEVER say "select a plant above" when there is no selector
+              // above. _plantSelector renders nothing when the admin's plant
+              // list is empty, and this message used to appear anyway — which
+              // is exactly how the missing-dropdown bug presented: an
+              // instruction pointing at a control that was not on screen.
+              // Name the real blocker instead, and say who can clear it.
+              _plantOptions.isEmpty
+                  ? 'No plants configured yet.\nAsk your safety admin to add '
+                      'plants in Admin → Plant & Department Master.'
+                  : _selectedPlant == null
+                      ? 'Select a plant above'
+                      : _dept.isEmpty
+                          ? 'No incidents recorded for $_selectedPlant yet'
+                          : 'No incidents for $_dept in $_selectedPlant',
               textAlign: TextAlign.center,
-              style: TextStyle(color: sl.text3, fontSize: 13))),
+              style: TextStyle(color: sl.text3, fontSize: 13, height: 1.5))),
           ),
       ]),
     );
@@ -479,12 +506,21 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// already had incidents. With one plant reporting, that rendered as a single
   /// chip which looked like a button that did nothing. A dropdown states the
   /// full list up front and shows the record count beside each entry.
+  ///
+  /// Lists every admin-configured plant, with or without records — see
+  /// [_plantOptions] for why filtering by record count made the whole control
+  /// disappear.
   Widget _plantSelector(SL sl) {
     final options = _plantOptions;
 
     // Nothing selectable: an unresolved scope is already reported by build(),
-    // so this means the admin's plant list is empty. Admin is authoritative —
-    // show nothing rather than a built-in fallback list.
+    // so this means the admin's plant list is genuinely empty. Admin is
+    // authoritative — show nothing rather than a built-in fallback list.
+    //
+    // build() prints the matching "no plants configured" explanation for this
+    // case. KEEP THE TWO IN STEP: when this returns shrink() and build() still
+    // says "select a plant above", the user is told to use a control that is not
+    // there, which is precisely the bug this pair was fixed for on 2026-08-17.
     if (options.isEmpty) return const SizedBox.shrink();
 
     // Exactly one plant exists: a dropdown would open to a single row and imply

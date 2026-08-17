@@ -1,16 +1,19 @@
 // lib/services/gemini_vision.dart
-// ★ v25 MAXIMUM RELIABILITY — 4 independent providers, NEVER fails
+// ★ v25 MAXIMUM RELIABILITY — layered providers, NEVER fails
 //
 // PRIORITY CHAIN (stops at first success) — FASTEST FIRST, see _kTier1Budget:
 //   TIER 1 — OpenRouter free vision models, in order:
 //     1. Nemotron Nano 12B VL   — fastest free image model
-//     2. Gemma 4 26B            — different vendor
-//     3. Dots3-Note Preview     — 512k context
-//     4. Nemotron 30B Omni      — highest capacity, but a ':reasoning' model
+//     2. Nemotron 30B Omni      — highest capacity, but a ':reasoning' model
 //                                 and by far the slowest; demoted from first
 //                                 place on 2026-08-17 after it cost a measured
 //                                 45s timeout on a live scan
-//   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured
+//     (Gemma 4 26B and Dots3-Note Preview were removed from the runtime chain
+//      on 2026-08-17 — still pinnable from the admin dropdown, see
+//      groqVisionModels. They are valid image models; they were simply
+//      unreachable inside the 40s Tier 1 budget.)
+//   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
+//            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
 //   TIER 3 — Offline fallback: reports the failure, returns NO hazards
 //
 // LATENCY: each attempt is capped at _kAttemptTimeout and the whole Tier 1
@@ -19,7 +22,7 @@
 //
 // IMPORTANT — why Tier 2 is not optional in practice:
 //   Every OpenRouter ':free' model draws on ONE account-wide daily allowance.
-//   When that cap is hit, all four Tier 1 models return HTTP 429 together, so
+//   When that cap is hit, every Tier 1 model returns HTTP 429 together, so
 //   switching between free models cannot help. A Gemini key bills against
 //   Google instead, making Tier 2 the only path that still analyses the image.
 //   Set it in Admin → System Health → Gemini Vision.
@@ -88,12 +91,16 @@ class GeminiVision {
   // before each attempt.
   //
   // WHY THIS IS NOT OPTIONAL: cutting the per-attempt timeout alone makes the
-  // worst case WORSE in theory, not better. Four models that each stall now
-  // cost 4x20s = 80s and Tier 2 (Gemini) has not even been tried — whereas the
-  // old flow at least abandoned a key wholesale on a 429. This budget restores
-  // a hard bound: once ~40s is gone, stop shopping for a free model and give
-  // the remaining time to Tier 2, which is the tier that can actually still
-  // answer when the free allowance is spent.
+  // worst case WORSE in theory, not better. Every model that stalls costs a
+  // further 20s with Tier 2 (Gemini) not yet tried — whereas the old flow at
+  // least abandoned a key wholesale on a 429. This budget restores a hard bound:
+  // once ~40s is gone, stop shopping for a free model and give the remaining
+  // time to Tier 2, which is the tier that can actually still answer when the
+  // free allowance is spent.
+  //
+  // It also survives the chain being lengthened again: any model added to
+  // `attempts` is automatically bounded by this, so a future addition cannot
+  // reintroduce an unbounded wait.
   //
   // MEASURED FROM THE FIRST TIER 1 ATTEMPT, NOT FROM METHOD ENTRY. The run
   // stopwatch starts before the rate-limit sleep (2s), the key sync (8s) and the
@@ -107,10 +114,11 @@ class GeminiVision {
   // Sized so two full stalled attempts fit (2x20s = 40s) — the 2026-08-17
   // measurement showed the SECOND model was the one that answered, so cutting
   // the chain off after one attempt would have reintroduced the original bug.
-  // Models 3 and 4 are therefore only reached when earlier ones fail FAST (an
-  // error or refusal, not a stall), which is the honest tradeoff for a bounded
-  // wait: a hazard report that arrives in 40s from Gemini beats a better one at
-  // 80s from a fourth free model.
+  // With the chain now two models long this exactly covers both; if either is
+  // restored to four, positions 3+ are only reached when earlier ones fail FAST
+  // (an error or refusal, not a stall). That is the honest tradeoff for a
+  // bounded wait: a hazard report arriving in 40s from Gemini beats a better one
+  // at 80s from a further free model.
   static const Duration _kTier1Budget = Duration(seconds: 40);
 
   // ── CONSISTENCY CACHE ──────────────────────────────────────────────────────
@@ -389,28 +397,34 @@ class GeminiVision {
             // model that never replied. The 30B is a ':reasoning' model — it
             // generates thinking tokens before the JSON, competing for the same
             // 4096 max_tokens — so on a queued free tier it is the SLOWEST of
-            // the four by design, which makes it the worst possible first pick
+            // the chain by design, which makes it the worst possible first pick
             // for someone standing in front of a live hazard.
             //
             // It is kept LAST rather than removed: it is the highest-capacity
             // model here, so it stays as a quality backstop for the case where
-            // the three faster models have all failed and latency is already
-            // lost anyway.
+            // the faster model has failed and latency is already lost anyway.
             //
             // NOTE none of this helps with an HTTP 429 — OpenRouter's free
             // allowance is counted per ACCOUNT per DAY and shared across every
-            // ':free' model, so once it is spent all four fail regardless of
+            // ':free' model, so once it is spent both fail regardless of
             // order. Ordering only changes which model answers a scan, and how
             // fast, while quota remains. The 429 remedy is Tier 2 (Gemini key)
             // or credits.
+            // TWO models, not four (admin request 2026-08-17). Gemma 4 26B and
+            // Dots3-Note Preview were removed from the runtime chain — both are
+            // still valid image-input models on OpenRouter (re-verified against
+            // /api/v1/models on 2026-08-17), so this is not a correctness fix.
+            //
+            // The reason is that they were mostly unreachable anyway: with
+            // _kAttemptTimeout at 20s and _kTier1Budget at 40s, two stalled
+            // attempts exhaust the budget before a third ever starts. Positions
+            // 3 and 4 were paying maintenance cost — stale labels, slug
+            // verification, quota accounting — for slots that almost never ran.
+            // They remain in [groqVisionModels] so an admin can still pin either
+            // one explicitly if a future outage makes that useful.
             : const [
                 [_orNanoVlModel,   'Nemotron Nano 12B VL (primary, fastest free image model)'],
-                // Different vendors/providers, so a per-model or per-provider
-                // throttle no longer ends the scan after two attempts. All four
-                // are verified image-input models on OpenRouter's free tier.
-                [_orGemmaModel,    'Gemma 4 26B (secondary, different vendor)'],
-                [_orDotsModel,     'Dots3-Note Preview (tertiary)'],
-                [_orNemotronModel, 'Nemotron 30B Omni (last — highest capacity, slowest)'],
+                [_orNemotronModel, 'Nemotron 30B Omni (fallback — highest capacity, slowest)'],
               ];
         // Tier 1 spend is timed separately from the run stopwatch. See
         // [_kTier1Budget] for why setup time must not count against it.
@@ -465,7 +479,7 @@ class GeminiVision {
               // 429/401/402/403 condemn the key, not the model: the other three
               // models draw on the same account allowance and would fail the
               // same way. Abandon this key now rather than burning three more
-              // round trips (~3x20s worst case) to learn nothing.
+              // round trip (~20s worst case) to learn nothing.
               if (_lastOrStatus == 429) {
                 // Only a 429 that named the DAILY counter means "come back
                 // tomorrow". A per-minute throttle is recorded separately so the
@@ -668,7 +682,7 @@ class GeminiVision {
 
   /// Vision models offered in the Admin panel dropdown (id → label).
   static const List<Map<String, String>> groqVisionModels = [
-    {'id': 'auto', 'name': 'Auto (fastest first, then Gemini) — recommended'},
+    {'id': 'auto', 'name': 'Auto (Nano VL → Nemotron 30B → Gemini) — recommended'},
     {'id': _orNanoVlModel,   'name': 'Nemotron Nano 12B VL (primary, fastest ~11s)'},
     {'id': _orGemmaModel,    'name': 'Gemma 4 26B (free, slower)'},
     {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
