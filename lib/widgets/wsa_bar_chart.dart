@@ -8,6 +8,12 @@ import '../services/i18n.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
+// For incidentsRevision. This chart used to be refreshed only as a side effect
+// of its parent being destroyed and rebuilt after a sync (the home shell bumped
+// HomeTab's ValueKey). That remount is gone, so the chart now subscribes to the
+// same notifiers as every other data widget — otherwise it renders whatever was
+// in LocalDB at first build and silently disagrees with the stat cards above it.
+import '../services/realtime_sync.dart';
 
 class WsaBarChart extends StatefulWidget {
   const WsaBarChart({super.key});
@@ -33,13 +39,33 @@ class _WsaBarChartState extends State<WsaBarChart> {
   /// nor the dropdown.
   PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
 
+  /// Guards against out-of-order loads. A single sync bumps `revision` once per
+  /// master-data list it writes (six of them) plus `incidentsRevision` once, so
+  /// several `_loadData` calls can be in flight together and finish in any order.
+  /// Without this, a slower earlier load could overwrite a newer snapshot.
+  int _loadGen = 0;
+
   @override
   void initState() {
     super.initState();
     _loadData();
+    RealtimeSync.incidentsRevision.addListener(_reload);
+    AdminMasterData.revision.addListener(_reload);
+  }
+
+  @override
+  void dispose() {
+    RealtimeSync.incidentsRevision.removeListener(_reload);
+    AdminMasterData.revision.removeListener(_reload);
+    super.dispose();
+  }
+
+  void _reload() {
+    if (mounted) _loadData();
   }
 
   Future<void> _loadData() async {
+    final gen = ++_loadGen;
     final scope = await PlantScope.forUser();
     // Scope at the source, so even the 'all' code can only ever mean "all the
     // plants this user may see".
@@ -47,7 +73,7 @@ class _WsaBarChartState extends State<WsaBarChart> {
     // ✅ v23: Load WSA categories from AdminMasterData (same source as admin panel)
     final wsa = await AdminMasterData.getWsaCauses();
     final plants = await AdminMasterData.getPlants();
-    if (mounted) setState(() {
+    if (mounted && gen == _loadGen) setState(() {
       _scope = scope;
       _incidents = inc;
       _wsaCategories = wsa;
@@ -67,6 +93,15 @@ class _WsaBarChartState extends State<WsaBarChart> {
       ];
       // Pin a locked user to their own plant instead of leaving the stale 'all'.
       if (scope.isLocked) _selectedPlant = _codeOf(scope.plant);
+      // Keep the selection inside the rebuilt list. DropdownButton ASSERTS when
+      // its value matches no item, and this list is now rebuilt in place on every
+      // master-data change rather than only on a remount — so an admin deleting
+      // the plant a user happens to have selected would crash their chart. Also
+      // covers the pre-existing case of a user who sees neither 'all' nor any
+      // plant matching the default.
+      if (!_plants.any((p) => p['code'] == _selectedPlant)) {
+        _selectedPlant = _plants.isNotEmpty ? (_plants.first['code'] ?? 'all') : 'all';
+      }
       _loading = false;
     });
   }

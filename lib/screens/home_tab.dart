@@ -86,6 +86,12 @@ class _HomeTabState extends State<HomeTab> {
   /// Refresh from the local cache only (realtime already updated LocalDB) —
   /// avoids a redundant fullSync round-trip on every live change.
   Future<void> _loadLocalOnly() async {
+    // Guards against out-of-order completion. One sync bumps AdminMasterData
+    // .revision once per master-data list it writes (six) plus incidentsRevision
+    // once, and _onRealtime answers each, so seven of these can be in flight
+    // together. Whichever finishes last used to win regardless of which started
+    // last; now a superseded load discards its result.
+    final gen = ++_loadGen;
     // Re-resolve the scope on every reload: the admin can change a user's plant
     // (or admin flag) live, and a stale scope would keep the old visibility.
     final scope = await PlantScope.forUser();
@@ -96,7 +102,7 @@ class _HomeTabState extends State<HomeTab> {
     final openStatuses = await AdminMasterData.getOpenStatuses();
     final statuses = await AdminMasterData.getStatuses();
     final closed = await AdminMasterData.lastStatus();
-    if (!mounted) return;
+    if (!mounted || gen != _loadGen) return;
     setState(() {
       _scope = scope;
       _incidents = inc;
@@ -108,31 +114,39 @@ class _HomeTabState extends State<HomeTab> {
     });
   }
 
+  /// See [_loadLocalOnly] — sequence number for in-flight local reloads.
+  int _loadGen = 0;
+
   void _rebuild() { if (mounted) setState(() {}); }
 
-  Future<void> _load() async {
-    // Pull shared data from the backend first so stats match across devices.
-    // Bounded so a slow network can't hang the refresh; falls back to local.
+  /// Refresh this screen.
+  ///
+  /// CACHE FIRST, NETWORK SECOND. This used to await fullSync() before its first
+  /// setState, so `_loading` stayed true — a spinner, or a wall of zeros — for as
+  /// long as the backend took, up to the full 12s timeout, on every single visit
+  /// to the Home tab. The cached numbers were sitting in LocalDB the whole time.
+  /// Now they are painted immediately and the sync result lands on top when it
+  /// arrives.
+  ///
+  /// [force] is passed through to [SyncService.fullSync]: false for the
+  /// initState call (which happens on every tab switch and should reuse a recent
+  /// sync), true for pull-to-refresh, where the user is explicitly asking the
+  /// network to be consulted.
+  Future<void> _load({bool force = false}) async {
+    // Paint what we already have. Cheap — all local reads.
+    await _loadLocalOnly();
+
+    // Then reconcile with the backend. Bounded so a slow network can't hang the
+    // refresh; the screen is already usable either way.
     try {
-      await SyncService.fullSync()
+      await SyncService.fullSync(force: force)
           .timeout(const Duration(seconds: 12), onTimeout: () => <String, dynamic>{});
     } catch (_) {}
-    final scope = await PlantScope.forUser();
-    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
-    final plants = await AdminMasterData.getPlants();
-    final openStatuses = await AdminMasterData.getOpenStatuses();
-    final statuses = await AdminMasterData.getStatuses();
-    final closed = await AdminMasterData.lastStatus();
     if (!mounted) return;
-    setState(() {
-      _scope = scope;
-      _incidents = inc;
-      _plantDefs = plants;
-      _openStatuses = openStatuses;
-      _statuses = statuses;
-      _closedStatus = closed.toUpperCase();
-      _loading = false;
-    });
+    // Re-read from LocalDB, which the sync has just rewritten. This was a
+    // duplicated copy of _loadLocalOnly's six reads and setState; collapsed so
+    // the two paths cannot drift (and so the generation guard covers both).
+    await _loadLocalOnly();
   }
 
   /// True for admin users. Accepts boolean, 'true', or 'TRUE' string forms.
@@ -302,7 +316,8 @@ class _HomeTabState extends State<HomeTab> {
             ),
           )
         : RefreshIndicator(
-            onRefresh: _load,
+            // A deliberate user gesture, so it bypasses the sync throttle.
+            onRefresh: () => _load(force: true),
             color: AppColors.accent,
             child: SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(),

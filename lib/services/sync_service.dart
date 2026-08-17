@@ -1,3 +1,4 @@
+import 'dart:async' show Completer;
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -10,6 +11,13 @@ import 'admin_alerts.dart';
 import 'supabase_service.dart';
 import 'supabase_config.dart';
 import 'image_storage.dart';
+// For RealtimeSync.incidentsRevision — a completed fullSync bumps it so open
+// screens repaint from the refreshed LocalDB. This DOES close an import cycle
+// (realtime_sync.dart → admin_master_data.dart → this file), the same one the
+// admin_master_data import below already documents. Harmless: both notifiers are
+// `static final`, so they initialise lazily on first touch, and no top-level in
+// either file reads state from the other at load time.
+import 'realtime_sync.dart';
 // Cyclic with admin_master_data (which calls pushMasterData/pullMasterData).
 // Dart permits import cycles; there are no cross-file const/static
 // initialisers between the two, so load order can't bite us here.
@@ -695,7 +703,23 @@ class SyncService {
     await _prefs!.setString(_kPendingQueue, jsonEncode(queue));
   }
 
-  static Future<int> drainPendingQueue() async {
+  /// Push every queued offline item, serialised against any other drain or sync.
+  ///
+  /// THE LOCK IS THE POINT. [_drainPendingQueueUnguarded] is not re-entrant: two
+  /// overlapping drains each read the same queue snapshot and push every item, so
+  /// on the Apps Script path (which APPENDS rather than upserts) the sheet gets
+  /// duplicate rows, and a concurrent fullSync can hold a server snapshot taken
+  /// before the drain finished — its reconcile then deletes the just-pushed
+  /// incident straight back out of LocalDB. Overlap was reachable from app
+  /// startup alone: main.dart calls this and fullSync() within a few lines of
+  /// each other.
+  static Future<int> drainPendingQueue() =>
+      _runExclusive(_drainPendingQueueUnguarded);
+
+  /// The raw drain. Call [drainPendingQueue] instead — EXCEPT from code already
+  /// running inside [_runExclusive], which must call this one: taking the lock
+  /// again from inside the lock would wait on its own release and deadlock.
+  static Future<int> _drainPendingQueueUnguarded() async {
     _prefs ??= await SharedPreferences.getInstance();
     final raw = _prefs!.getString(_kPendingQueue);
     if (raw == null) return 0;
@@ -729,6 +753,20 @@ class SyncService {
         synced++;
       } else {
         remaining.add(item);
+      }
+    }
+    // MERGE, don't overwrite. The loop above spans many network awaits, and
+    // [_addToPendingQueue] is NOT under the sync lock — a write the user makes
+    // while offline mid-drain lands in the queue after our snapshot was taken.
+    // Blindly writing `remaining` would erase it and that incident would be
+    // lost for good. Since enqueue only ever appends, drains are serialised
+    // against each other, and nothing else rewrites the queue, anything past
+    // the snapshot length is a genuine newcomer and must survive.
+    final latestRaw = _prefs!.getString(_kPendingQueue);
+    if (latestRaw != null) {
+      final latest = (jsonDecode(latestRaw) as List).cast<Map<String, dynamic>>();
+      if (latest.length > queue.length) {
+        remaining.addAll(latest.sublist(queue.length));
       }
     }
     await _prefs!.setString(_kPendingQueue, jsonEncode(remaining));
@@ -766,7 +804,198 @@ class SyncService {
   //  FULL SYNC
   // ═══════════════════════════════════════════════════════════════
 
-  static Future<Map<String, dynamic>> fullSync() async {
+  // ── FULL SYNC COALESCING ───────────────────────────────────────────────────
+  //
+  // WHY THIS EXISTS. fullSync() is called from six places: app startup
+  // (main.dart), both home shells' _loadUser, HomeTab.initState and its
+  // pull-to-refresh, and Settings → Sync Now — the last two forced. On the
+  // Supabase path one call means a queue drain, a full incident fetch, a user
+  // fetch and an Apps Script getMasterData round-trip. HomeTab is rebuilt from
+  // scratch every time the user returns to the Home tab (the bottom nav swaps
+  // widgets through an AnimatedSwitcher rather than keeping them alive), so
+  // every navigation fired the whole sequence again — visible in the web console
+  // as getMasterData POSTs and "key synced" lines repeating without end.
+  //
+  // Three guards, deliberately different:
+  //   • _inFlightFullSync coalesces CONCURRENT unforced callers onto one network
+  //     round — startup fires three of these within milliseconds of each other.
+  //   • _lastFullSyncOk suppresses REPEAT syncs for a short window, which is
+  //     what makes tab navigation free. Does not apply to a forced sync.
+  //   • _syncLock serialises EVERY run, forced or not. This one is not an
+  //     optimisation but a correctness requirement: the queue drain is not
+  //     re-entrant, so two overlapping runs each push every queued item
+  //     (duplicate rows on the Apps Script path, which appends rather than
+  //     upserts), and the run that started earlier holds a server snapshot taken
+  //     before the other drained the queue — so its reconcile deletes the
+  //     just-pushed incident back out of LocalDB. Overlap was reachable three
+  //     ways: two forced calls, an unforced call arriving during a forced one,
+  //     and two unforced calls that both suspended on the same await inside the
+  //     freshness check. A lock closes all three at once.
+  static Future<Map<String, dynamic>>? _inFlightFullSync;
+  static DateTime? _lastFullSyncOk;
+
+  /// Tail of the chain of sync runs. Each run waits on the previous one's
+  /// completion before starting, so runs queue instead of racing.
+  static Future<void> _syncLock = Future<void>.value();
+
+  /// Run [body] with no other sync in progress.
+  ///
+  /// Deliberately NOT `async`: the swap of [_syncLock] must happen in the same
+  /// synchronous turn as reading it, or two callers could read the same
+  /// predecessor and both queue behind it — which is the race this is here to
+  /// prevent. `whenComplete` releases the lock even if [body] throws.
+  static Future<T> _runExclusive<T>(Future<T> Function() body) {
+    final predecessor = _syncLock;
+    final release = Completer<void>();
+    _syncLock = release.future;
+    return predecessor
+        .then((_) => body())
+        .whenComplete(release.complete);
+  }
+
+  /// True when a recent successful sync can stand in for a new one.
+  ///
+  /// SYNCHRONOUS ON PURPOSE. It takes [userKey] as a parameter rather than
+  /// reading the current user itself, because an await between this check and
+  /// the assignment of [_inFlightFullSync] lets two callers both decide to sync.
+  static bool _syncIsFresh(String userKey) {
+    final last = _lastFullSyncOk;
+    return last != null &&
+        DateTime.now().difference(last) < _kFullSyncMinInterval &&
+        userKey == _lastFullSyncUser;
+  }
+
+  static Map<String, dynamic> _throttledResult() => {
+        'ok': true,
+        'skipped': 'throttled',
+        'syncTime': _lastFullSyncOk?.toIso8601String(),
+      };
+
+  /// Who [_lastFullSyncOk] belongs to.
+  ///
+  /// The throttle is static and survives a sign-out, so without this a second
+  /// user logging in on the same device within the window would be served the
+  /// previous session's cached incidents, users and master data — LocalDB's
+  /// sign-out only clears the current-user key, not the cached data. Comparing
+  /// identity rather than hooking the sign-out paths means this holds however the
+  /// session changes, including a switch the sign-out UI does not go through.
+  static String? _lastFullSyncUser;
+
+  /// Identity of the signed-in user, for [_lastFullSyncUser].
+  ///
+  /// USERNAME FIRST, and each candidate must be non-empty. Order matters: no user
+  /// map in this app carries an `id` (see SupabaseService._userAppToDb and the
+  /// registration path in login_screen.dart), and `email` is absent from
+  /// registration entirely — so an email-first check would resolve to '' for a
+  /// whole class of users, they would all compare equal, and the throttle would
+  /// survive a switch between them, which is the exact bug this guards. Username
+  /// is set on every login path, so it is the reliable one.
+  static Future<String> _currentUserKey() async {
+    try {
+      final u = await LocalDB.getCurrentUser();
+      if (u == null) return '';
+      for (final field in const ['username', 'pno', 'email']) {
+        final v = (u[field] ?? '').toString().trim();
+        if (v.isNotEmpty) return v;
+      }
+      return '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// How long a successful sync is considered fresh enough to reuse.
+  ///
+  /// Sized against how the data actually changes: incidents arrive over
+  /// RealtimeSync (a Supabase subscription that updates LocalDB and bumps
+  /// `incidentsRevision` within a second), and master-data edits arrive the same
+  /// way. So this window is NOT the staleness bound the user experiences — it
+  /// only bounds how often the belt-and-braces full reconcile runs. 90s is long
+  /// enough to make navigation free and short enough that a device whose
+  /// realtime socket dropped still self-heals quickly.
+  ///
+  /// TWO LIMITS ON THAT ARGUMENT, worth knowing before shortening this window in
+  /// the hope of fresher data — it would not help:
+  ///  • On the Apps Script backend RealtimeSync never starts (it requires
+  ///    Supabase), so this throttle is the ONLY freshness bound there, not a
+  ///    second line of defence.
+  ///  • Nothing polls fullSync. Its unforced callers are app startup, each home
+  ///    shell's _loadUser and HomeTab.initState — so the real bound is "90s AND a
+  ///    visit to the Home tab", and a user parked on Home gets no further full
+  ///    sync at all. That was equally true before this throttle existed; realtime, or a
+  ///    pull-to-refresh, is what actually keeps a parked screen current.
+  static const Duration _kFullSyncMinInterval = Duration(seconds: 90);
+
+  /// Reconcile local data with the backend.
+  ///
+  /// Repeat calls within [_kFullSyncMinInterval] of a success return
+  /// `{'ok': true, 'skipped': 'throttled'}` WITHOUT touching the network, and
+  /// concurrent unforced calls share one round-trip. Runs never overlap — see
+  /// [_runExclusive] and the block comment above [_inFlightFullSync].
+  ///
+  /// Pass `force: true` for anything the user explicitly asked for —
+  /// pull-to-refresh, Settings → Sync Now. A forced sync ignores the freshness
+  /// window and does not JOIN an in-flight run: the queue drain happens at the
+  /// START of a run, so joining one already in progress would report success
+  /// without ever pushing the record the user just typed. It queues behind that
+  /// run instead.
+  static Future<Map<String, dynamic>> fullSync({bool force = false}) async {
+    // Resolved BEFORE the checks below, because from the first check to the
+    // assignment of _inFlightFullSync there must be no await — otherwise two
+    // callers suspend at the same point, both resume to find no run in progress,
+    // and both start one.
+    final userKey = await _currentUserKey();
+
+    if (!force) {
+      final inFlight = _inFlightFullSync;
+      if (inFlight != null) return inFlight;
+      if (_syncIsFresh(userKey)) return _throttledResult();
+    }
+
+    final run = _runExclusive(() async {
+      // Re-checked INSIDE the lock. While this run sat in the queue the run
+      // ahead of it may have refreshed everything, in which case there is
+      // nothing left to do — this is what stops a tab switch during startup from
+      // costing a second full round-trip.
+      if (!force && _syncIsFresh(userKey)) return _throttledResult();
+
+      final result = await _fullSyncUnguarded();
+      // Only a genuine success refreshes the window. A failed sync that set it
+      // would lock the app out of retrying for 90s — exactly when it most needs
+      // to retry.
+      if (result['ok'] == true) {
+        _lastFullSyncOk = DateTime.now();
+        _lastFullSyncUser = userKey;
+        // TELL THE SCREENS. A sync rewrites LocalDB's incident set via
+        // LocalDB.replaceAllIncidents, which notifies nobody — so a completed
+        // sync left every open screen showing pre-sync numbers. Both home shells
+        // worked around that by changing HomeTab's ValueKey to force a full
+        // remount, which threw away its state and re-ran its initState sync.
+        // Bumping the notifier every screen already listens to does the same job
+        // without the remount. Safe against loops: listeners re-read LocalDB and
+        // none of them write to it.
+        RealtimeSync.incidentsRevision.value++;
+      }
+      return result;
+    });
+
+    // Only an unforced run is publishable as the shared in-flight future; a
+    // forced one must not absorb later callers into a round that may predate
+    // their data. No await between the checks above and this line.
+    if (!force) _inFlightFullSync = run;
+    try {
+      return await run;
+    } finally {
+      // identical() so a forced run finishing later cannot clear an unforced
+      // run's future out from under callers still awaiting it.
+      if (identical(_inFlightFullSync, run)) _inFlightFullSync = null;
+    }
+  }
+
+  /// The actual sync. Call [fullSync] instead — this one has no coalescing, no
+  /// freshness check and no mutual exclusion, and will happily run concurrently
+  /// with itself.
+  static Future<Map<String, dynamic>> _fullSyncUnguarded() async {
     if (!await isConfigured) {
       return {
         'ok': false,
@@ -784,7 +1013,8 @@ class SyncService {
     // rows over local. We use fetchIncidentsOrNull so a network failure (null)
     // never triggers a destructive reconcile.
     if (SupabaseConfig.enabled) {
-      final pushed = await drainPendingQueue();
+      // Already inside the sync lock — must use the unguarded drain.
+      final pushed = await _drainPendingQueueUnguarded();
 
       final serverRows = await SupabaseService.fetchIncidentsOrNull();
       if (serverRows == null) {
@@ -854,7 +1084,8 @@ class SyncService {
     }
 
     // Push any queued offline writes
-    final pushed = await drainPendingQueue();
+    // Already inside the sync lock — must use the unguarded drain.
+    final pushed = await _drainPendingQueueUnguarded();
 
     // Pull latest incidents from Sheets
     final pulled = await fetchIncidents();

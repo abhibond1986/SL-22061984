@@ -28,7 +28,6 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   int _tabIndex = 0;
   Map<String, dynamic>? _user;
-  int _syncKey = 0;
   late AnimationController _tabAnim;
 
   // Choose your preferred bottom nav style here!
@@ -52,9 +51,11 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _loadUser() async {
     final u = await LocalDB.getCurrentUser();
     if (mounted) setState(() => _user = u);
-    SyncService.fullSync().then((_) {
-      if (mounted) setState(() => _syncKey++);
-    }).catchError((_) {});
+    // Warm the shared data for the tabs that don't sync themselves (AI Scan,
+    // Near Miss, Reports). Throttled and coalesced inside fullSync, so this and
+    // HomeTab's own call cost one round-trip between them. No setState here: it
+    // used to bump _syncKey, which remounted HomeTab and started a second sync.
+    SyncService.fullSync().catchError((_) => <String, dynamic>{});
   }
 
   Future<void> _signOut() async {
@@ -88,7 +89,16 @@ class _HomeScreenState extends State<HomeScreen>
 
     final tabs = <Widget>[
       HomeTab(
-        key: ValueKey('home_$_syncKey'),
+        // STABLE KEY. This was ValueKey('home_$_syncKey'), bumped when the
+        // sync below finished, which destroyed and rebuilt the whole tab just to
+        // repaint numbers, re-running its initState sync. (It is still rebuilt
+        // on every bottom-nav switch by the AnimatedSwitcher below, so this does
+        // not preserve scroll position across tabs — it removes the second sync
+        // at startup; the throttle in fullSync is what makes navigation cheap.)
+        // HomeTab listens to RealtimeSync.incidentsRevision and
+        // AdminMasterData.revision, and SyncService.fullSync now bumps the
+        // former on completion, so it refreshes itself in place.
+        key: const ValueKey('home'),
         user: _user,
         toggleTheme: widget.toggleTheme,
         onSignOut: _signOut,

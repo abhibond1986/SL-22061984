@@ -91,7 +91,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ─── SYNC NOW ────────────────────────────────────────────────
   Future<void> _syncNow() async {
     setState(() { _busy = true; _status = 'Syncing…'; });
-    final result = await SyncService.fullSync();
+    // force: the user pressed a button labelled "Sync Now" — a throttled
+    // no-op would report "✓ Sync complete" without having synced, and the
+    // Pushed/Pulled counts below only exist on a real run.
+    final result = await SyncService.fullSync(force: true);
     if (!mounted) return;
     setState(() {
       _busy = false;
