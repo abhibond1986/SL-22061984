@@ -36,6 +36,14 @@
 //
 // EXISTING PROPERTY (kept for fallback):
 //   OPENROUTER_API_KEY = sk-or-v1-...
+//
+// OPTIONAL — EXTRA IMAGE-SCAN ALLOWANCE (added 2026-08-17):
+//   NARA_API_KEY = sk-nry-... (from https://router.bynara.id)
+//   Served to the app as 'naraApiKey' so every device picks it up on launch.
+//   The app tries it AFTER the OpenRouter vision models and BEFORE Gemini.
+//   ⚠ Adding the property is not enough on its own — this script must be
+//   REDEPLOYED, otherwise getMasterData() still runs the old code and the app
+//   never sees the field.
 // ============================================================
 
 const CLOUDINARY_CLOUD_NAME    = 'dzt1vxsdg';
@@ -362,6 +370,15 @@ function getOpenRouterKey2() {
 }
 function getGroqKey() {
   return PropertiesService.getScriptProperties().getProperty('GROQ_API_KEY') || '';
+}
+// NaraRouter key (Tier 1b image scanning in the app). Set Script Property
+// NARA_API_KEY = sk-nry-...  This is a SEPARATE account from OpenRouter with its
+// own daily TOKEN allowance, which is the point of having it: an OpenRouter 429
+// applies account-wide across every ':free' model, so a second OpenRouter key
+// cannot rescue a scan but this can. Optional — absent is fine, the app simply
+// skips that tier.
+function getNaraKey() {
+  return PropertiesService.getScriptProperties().getProperty('NARA_API_KEY') || '';
 }
 
 
@@ -2074,7 +2091,7 @@ function getSheet(name) {
 //  Stored in a 'masterdata' sheet as key-value JSON rows.
 // ════════════════════════════════════════════════════════════════════════
 const SHEET_MASTERDATA = 'masterdata';
-const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'openRouterApiKey2', 'geminiModel'];
+const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'openRouterApiKey2', 'geminiModel', 'naraApiKey', 'naraModel'];
 
 function saveMasterData(params) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2130,6 +2147,8 @@ function getMasterData() {
     if (ork2 && ork2 !== ork) emptyResult['openRouterApiKey2'] = ork2;
     var grk = getGroqKey();
     if (grk) emptyResult['groqApiKey'] = grk;
+    var nrk = getNaraKey();
+    if (nrk) emptyResult['naraApiKey'] = nrk;
     return { ok: true, data: emptyResult, isEmpty: true };
   }
 
@@ -2172,6 +2191,13 @@ function getMasterData() {
   var grKey = getGroqKey();
   if (grKey && (!result['groqApiKey'] || result['groqApiKey'].length < 10)) {
     result['groqApiKey'] = grKey;
+  }
+  // Fills the gap only — a valid key already saved in the sheet is left alone,
+  // exactly like the keys above. The Script Property is the fallback that
+  // survives a redeployment wiping client storage.
+  var nrKey = getNaraKey();
+  if (nrKey && (!result['naraApiKey'] || result['naraApiKey'].length < 10)) {
+    result['naraApiKey'] = nrKey;
   }
 
   return { ok: true, data: result, updatedAt: updatedAt };
@@ -2552,6 +2578,10 @@ function testKeys() {
     + (getGoogleKey()     ? 'PRESENT, len=' + getGoogleKey().length     : 'MISSING'));
   Logger.log('OPENROUTER_API_KEY: '
     + (getOpenRouterKey() ? 'PRESENT, len=' + getOpenRouterKey().length : 'MISSING'));
+  Logger.log('GROQ_API_KEY:      '
+    + (getGroqKey()       ? 'PRESENT, len=' + getGroqKey().length       : 'MISSING'));
+  Logger.log('NARA_API_KEY:      '
+    + (getNaraKey()       ? 'PRESENT, len=' + getNaraKey().length       : 'MISSING'));
   Logger.log('AI_PRIMARY_PROVIDER: ' + getAiPrimary());
 }
 

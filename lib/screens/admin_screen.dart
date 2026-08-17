@@ -42,6 +42,7 @@ import '../services/knowledge_service.dart';
 import '../services/groq_service.dart';
 import '../services/gemini_vision.dart';
 import '../services/gemini_direct_vision.dart';
+import '../services/nara_vision.dart';
 import '../services/pdf_kb_extractor.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
@@ -269,7 +270,7 @@ class _AdminScreenState extends State<AdminScreen>
   void dispose() {
     AdminMasterData.lastPushError.removeListener(_onPushError);
     _unameCtrl.dispose(); _pwCtrl.dispose();
-    _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose();
+    _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose(); _naraKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -2117,6 +2118,11 @@ class _AdminScreenState extends State<AdminScreen>
       _geminiVisionConfigCard(sl),
 
       const SizedBox(height: 16),
+      _sectionHeader('NaraRouter (Extra Scan Allowance)', sl),
+      const SizedBox(height: 8),
+      _naraConfigCard(sl),
+
+      const SizedBox(height: 16),
       _sectionHeader('Integrations', sl),
       const SizedBox(height: 8),
       Container(
@@ -2133,6 +2139,13 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(height: 8),
           _intRow('Gemini Vision (Hazard AI)', _geminiVisionConfigured ? 'active (direct API)' : 'not configured',
               _geminiVisionConfigured ? AppColors.green : AppColors.amber, Icons.remove_red_eye_rounded, sl),
+          const SizedBox(height: 8),
+          _intRow('NaraRouter (Extra scan allowance)',
+              _naraConfigured ? 'active — $_naraSelectedModel' : 'not configured',
+              // Amber, not red, when absent: this provider is genuinely
+              // optional, unlike Groq which the near-miss flow depends on.
+              _naraConfigured ? AppColors.green : AppColors.amber,
+              Icons.alt_route_rounded, sl),
           const SizedBox(height: 8),
           _intRow('Groq AI (Near Miss correction)', _groqConfigured ? 'active' : 'not configured',
               _groqConfigured ? AppColors.green : AppColors.red, Icons.auto_fix_high_rounded, sl),
@@ -2546,12 +2559,32 @@ class _AdminScreenState extends State<AdminScreen>
   final _geminiVisionKeyCtrl = TextEditingController();
   String _geminiVisionSelectedModel = GeminiDirectVision.defaultModel;
 
+  // NaraRouter (Tier 1b vision provider) — separate account, separate allowance.
+  bool _naraConfigured = false;
+  final _naraKeyCtrl = TextEditingController();
+  String _naraSelectedModel = NaraVision.defaultModel;
+
+  /// Guards [_loadGroqConfig] against re-entry.
+  ///
+  /// The three AI cards each call the loader from inside `build` when their
+  /// controller is still empty — so on a deployment with NO keys set, the
+  /// condition stays true forever and every rebuild fires three more async
+  /// loads, each ending in `setState`, which schedules another rebuild. That was
+  /// already true of the Groq and Gemini cards; adding a third made it worth
+  /// stopping rather than copying. The flag is per-State, and nothing else calls
+  /// the loader (saves update the fields directly), so one load is enough.
+  bool _aiKeysLoadStarted = false;
+
   Future<void> _loadGroqConfig() async {
+    if (_aiKeysLoadStarted) return;
+    _aiKeysLoadStarted = true;
     final key = await GroqService.getApiKey();
     final model = await GroqService.getModel();
     final visionModel = await GeminiVision.getGroqVisionModel();
     final gemKey = await GeminiDirectVision.getApiKey();
     final gemModel = await GeminiDirectVision.getModel();
+    final naraKey = await NaraVision.getApiKey();
+    final naraModel = await NaraVision.getModel();
     if (mounted) {
       setState(() {
         _groqConfigured = key.isNotEmpty && key.startsWith('gsk_');
@@ -2571,6 +2604,18 @@ class _AdminScreenState extends State<AdminScreen>
                 .any((m) => m['id'] == gemModel)
             ? gemModel
             : GeminiDirectVision.defaultModel;
+        // Same prefix test the runtime chain uses, so this indicator cannot say
+        // "connected" for a key that every scan will silently skip.
+        _naraConfigured =
+            naraKey.startsWith(NaraVision.keyPrefix) && naraKey.length > 20;
+        _naraKeyCtrl.text = naraKey;
+        // Normalised for the same reason as the Gemini field above: this value
+        // is what the Update button writes back, so displaying a fallback while
+        // holding an unknown slug would let an admin save a dead model.
+        _naraSelectedModel = NaraVision.availableModels
+                .any((m) => m['id'] == naraModel)
+            ? naraModel
+            : NaraVision.defaultModel;
       });
     }
   }
@@ -2731,6 +2776,133 @@ class _AdminScreenState extends State<AdminScreen>
                 side: BorderSide(color: sl.border),
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            ),
+          ),
+      ]),
+    );
+  }
+
+  /// NaraRouter key + model. Tier 1b of the vision chain.
+  ///
+  /// Kept as its own card rather than folded into the Gemini one because the two
+  /// are different accounts with different billing: an admin needs to see at a
+  /// glance which allowances this deployment actually has, since a site with only
+  /// an OpenRouter key stops scanning entirely once its ~50 free daily requests
+  /// are gone.
+  Widget _naraConfigCard(SL sl) {
+    if (_naraKeyCtrl.text.isEmpty && !_naraConfigured) {
+      _loadGroqConfig(); // loads Groq, Gemini and Nara config together
+    }
+    const naraAccent = Color(0xFF7C4DFF);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: sl.card, borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _naraConfigured ? AppColors.green.withOpacity(0.5) : sl.border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(_naraConfigured ? Icons.check_circle : Icons.warning_amber_rounded,
+            color: _naraConfigured ? AppColors.green : AppColors.amber, size: 16),
+          const SizedBox(width: 8),
+          Text(_naraConfigured ? 'NaraRouter Connected' : 'NaraRouter Key (optional)',
+            style: TextStyle(color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700)),
+        ]),
+        const SizedBox(height: 4),
+        Text('Extra image-scan allowance on a separate account. '
+             'Get a key at router.bynara.id (starts with ${NaraVision.keyPrefix})',
+          style: TextStyle(color: sl.text4, fontSize: 10)),
+        const SizedBox(height: 12),
+        _apiKeyInputField(
+          _naraKeyCtrl, 'NaraRouter API Key (${NaraVision.keyPrefix}...)', sl,
+          accent: naraAccent,
+          // Provider-specific save path. The prefix check happens here rather
+          // than only inside NaraVision so the admin is told immediately that
+          // the paste was wrong, instead of finding out later through scans that
+          // silently skip this tier.
+          onSave: (key) async {
+            // BOTH tests, matching NaraVision.isConfigured exactly. Checking
+            // only the prefix here would show a green "NaraRouter Connected"
+            // for a truncated paste that the runtime gate rejects — the card
+            // would claim success while every scan silently skipped the tier,
+            // then flip back to amber on the next panel load with no
+            // explanation. An admin indicator that disagrees with the code it
+            // reports on is worse than no indicator.
+            if (!key.startsWith(NaraVision.keyPrefix) || key.length <= 20) {
+              _toast(
+                  key.startsWith(NaraVision.keyPrefix)
+                      ? 'Key looks truncated — paste the whole thing'
+                      : 'Invalid key — must start with ${NaraVision.keyPrefix}',
+                  AppColors.red);
+              return;
+            }
+            await NaraVision.setApiKey(key);
+            await NaraVision.setModel(_naraSelectedModel);
+            _pushNaraKeyToBackend(key, _naraSelectedModel);
+            setState(() => _naraConfigured = true);
+            _toast('✓ NaraRouter key saved on this device', AppColors.green);
+          },
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<String>(
+          isExpanded: true,
+          // Falls back rather than asserting, like the Gemini dropdown: a value
+          // absent from items red-screens the whole System Health tab.
+          value: NaraVision.availableModels
+                  .any((m) => m['id'] == _naraSelectedModel)
+              ? _naraSelectedModel
+              : NaraVision.defaultModel,
+          items: NaraVision.availableModels.map((m) => DropdownMenuItem(
+            value: m['id'],
+            child: Text(m['name']!, overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: sl.text1)),
+          )).toList(),
+          onChanged: (v) { if (v != null) setState(() => _naraSelectedModel = v); },
+          dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
+          style: TextStyle(color: sl.text1, fontSize: 11),
+          decoration: InputDecoration(
+            labelText: 'Vision Model (NaraRouter)',
+            labelStyle: TextStyle(color: sl.text3, fontSize: 10),
+            filled: true,
+            fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: sl.border)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        // Says where in the chain this sits, because an admin who pastes a key
+        // here and sees no change in scan behaviour has not made a mistake —
+        // this tier only runs when OpenRouter has already failed.
+        Text('Tried only AFTER the OpenRouter models fail or run out of quota, '
+             'and before Gemini. Nara meters TOKENS per day, not requests, so a '
+             'flash-tier model stretches the allowance much further than '
+             'Mistral Medium. Compare real speed in AI Performance before '
+             'relying on it.',
+          style: TextStyle(color: sl.text4, fontSize: 9)),
+        const SizedBox(height: 12),
+        if (_naraConfigured)
+          SizedBox(width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await NaraVision.setModel(_naraSelectedModel);
+                // Push too, not just save locally. Changing the model AFTER the
+                // key was saved is the normal way an admin reacts to a slow or
+                // expensive model, and it is exactly the change other devices
+                // most need to hear about.
+                _pushNaraKeyToBackend(
+                    _naraKeyCtrl.text.trim(), _naraSelectedModel);
+                _toast('✓ NaraRouter model set to $_naraSelectedModel',
+                    AppColors.green);
+              },
+              icon: Icon(Icons.tune, size: 14, color: sl.text2),
+              label: Text('Update Model Selection',
+                  style: TextStyle(color: sl.text2, fontSize: 11)),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: sl.border),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8))),
             ),
           ),
       ]),
@@ -4815,7 +4987,19 @@ class _AdminScreenState extends State<AdminScreen>
 
   // ★ v25: API Key input field — uses dialog on web for reliable paste
   // isGemini = true for Gemini key, false for Groq key
-  Widget _apiKeyInputField(TextEditingController ctrl, String label, SL sl, {bool isGemini = false}) {
+  /// Tap-to-paste API key field. Saves immediately on dialog confirm.
+  ///
+  /// [onSave] is the extension point for any provider beyond the original two.
+  /// The `isGemini` flag below is a two-way switch — Gemini or Groq — which was
+  /// fine while those were the only keys, but a third provider cannot be
+  /// expressed as a boolean. When [onSave] is supplied it takes over validation,
+  /// persistence and the toast entirely, so the existing two call sites keep
+  /// their exact behaviour and are not put at risk by the addition.
+  /// [accent] colours the Save button; defaults to the old behaviour.
+  Widget _apiKeyInputField(TextEditingController ctrl, String label, SL sl,
+      {bool isGemini = false,
+      Future<void> Function(String key)? onSave,
+      Color? accent}) {
     return GestureDetector(
       onTap: () async {
         final result = await showDialog<String>(
@@ -4859,7 +5043,8 @@ class _AdminScreenState extends State<AdminScreen>
                   icon: const Icon(Icons.save_rounded, size: 14),
                   label: const Text('Save & Sync'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: isGemini ? const Color(0xFF1A73E8) : AppColors.accent,
+                    backgroundColor: accent ??
+                        (isGemini ? const Color(0xFF1A73E8) : AppColors.accent),
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)))),
               ],
@@ -4869,7 +5054,9 @@ class _AdminScreenState extends State<AdminScreen>
         if (result != null && result.isNotEmpty) {
           setState(() => ctrl.text = result);
           // ★ Auto-save immediately after dialog — no extra button needed
-          if (isGemini) {
+          if (onSave != null) {
+            await onSave(result);
+          } else if (isGemini) {
             if (result.length < 20) {
               _toast('Invalid key — too short', AppColors.red);
               return;
@@ -4929,6 +5116,36 @@ class _AdminScreenState extends State<AdminScreen>
         'action': 'saveMasterData',
         'geminiApiKey': geminiKey,
         'geminiModel': model,
+        'updatedBy': _currentActor,
+      };
+      await http.post(Uri.parse(url),
+        body: jsonEncode(body),
+        headers: {'Content-Type': 'text/plain;charset=utf-8'},
+      ).timeout(const Duration(seconds: 15));
+    } catch (_) {}
+  }
+
+  /// Push the Nara key for cross-device sync.
+  ///
+  /// ⚠ THIS ONLY WORKS ONCE THE APPS SCRIPT IS REDEPLOYED. The backend accepts
+  /// a fixed whitelist of master-data fields (MASTERDATA_KEYS in
+  /// apps_script_v14.js); 'naraApiKey' and 'naraModel' have been added there,
+  /// but a deployment
+  /// still running the old script will accept this POST and silently drop the
+  /// field. Until then the key set above is DEVICE-LOCAL — which is harmless,
+  /// just not shared, and the failure mode is "other phones skip Tier 1b",
+  /// not an error anyone will see. Fire-and-forget for the same reason the two
+  /// calls beside it are: a key must not fail to save locally because the
+  /// network was down.
+  Future<void> _pushNaraKeyToBackend(String naraKey, String model) async {
+    try {
+      final url = await SyncService.getBackendUrl();
+      final body = {
+        'action': 'saveMasterData',
+        'naraApiKey': naraKey,
+        // Sent together with the key. A device that received one without the
+        // other would fall back to the costliest model on the list.
+        'naraModel': model,
         'updatedBy': _currentActor,
       };
       await http.post(Uri.parse(url),
@@ -7926,6 +8143,9 @@ class _AdminScreenState extends State<AdminScreen>
     final hitLimit  = loaded && (_aiQuota['limitReached'] as bool? ?? false);
     final keyCount  = loaded ? (_aiQuota['keysConfigured'] as int? ?? 0) : 0;
     final geminiKey  = loaded && (_aiQuota['geminiConfigured'] as bool? ?? false);
+    // Tier 1b. Like the Gemini key, this one is invisible to the OpenRouter
+    // ledger, so it must be consulted before this card claims AI is unavailable.
+    final naraKey    = loaded && (_aiQuota['naraConfigured'] as bool? ?? false);
 
     // Exhausted is authoritative (429 seen), so it outranks the estimate.
     // sl.amberText, NOT AppColors.amber: `tone` is used as a TEXT colour below,
@@ -7935,7 +8155,13 @@ class _AdminScreenState extends State<AdminScreen>
     final Color tone = !loaded || keyCount == 0
         ? sl.text3
         : hitLimit || remaining == 0
-            ? const Color(0xFFD32F2F)
+            // Red means "scanning has stopped". With another provider configured
+            // it has not, so this de-escalates to amber: the free allowance is
+            // gone (worth knowing, someone is now spending a different quota)
+            // but nobody needs to act tonight.
+            ? ((naraKey || geminiKey)
+                ? sl.amberText
+                : const Color(0xFFD32F2F))
             : remaining <= (limit * 0.2).ceil()
                 ? sl.amberText
                 : const Color(0xFF43A047);
@@ -7945,14 +8171,22 @@ class _AdminScreenState extends State<AdminScreen>
       headline = 'Reading today\'s AI budget…';
     } else if (keyCount == 0) {
       // This budget tracks the OpenRouter free tier only. A site running on a
-      // Gemini Direct key has working AI with no free-tier ledger at all, so
-      // saying "no AI key configured" would send an admin off to change
-      // settings that are already correct.
-      headline = geminiKey
-          ? 'Gemini key in use — no free-tier limit to track'
+      // Gemini Direct or NaraRouter key has working AI with no free-tier ledger
+      // at all, so saying "no AI key configured" would send an admin off to
+      // change settings that are already correct.
+      headline = (geminiKey || naraKey)
+          ? '${geminiKey ? 'Gemini' : 'NaraRouter'} key in use — no free-tier '
+              'limit to track'
           : 'No AI key configured';
     } else if (hitLimit) {
-      headline = 'Free limit reached — AI scans are offline until reset';
+      // "offline" would be a lie where another provider is configured: the chain
+      // continues past OpenRouter to Tier 1b and Tier 2, both metered elsewhere.
+      // An admin told scanning had stopped when it had not would go hunting for
+      // a fault that does not exist — or worse, tell the plant to stop scanning.
+      headline = (naraKey || geminiKey)
+          ? 'Free OpenRouter limit reached — scans continue on the '
+              '${naraKey ? 'NaraRouter' : 'Gemini'} key'
+          : 'Free limit reached — AI scans are offline until reset';
     } else {
       // "about" is load-bearing: this is a device-local estimate (see the
       // caveat text below), and a bare number would be read as a fact.
@@ -8053,8 +8287,14 @@ class _AdminScreenState extends State<AdminScreen>
                     'allowance — so there is no per-day figure to show here. '
                     'Add an OpenRouter key only if you want the free tier as a '
                     'fallback.'
-                  : 'Set an OpenRouter or Gemini key in Admin → System Health. '
-                    'Until then every scan returns the offline checklist.',
+                  : naraKey
+                    ? 'Scans run on the NaraRouter key, whose allowance is '
+                      'metered in tokens per day by Nara and is not reported '
+                      'back to the app — so there is no per-day figure to show '
+                      'here. Add an OpenRouter or Gemini key as a fallback.'
+                    : 'Set an OpenRouter, NaraRouter or Gemini key in '
+                      'Admin → System Health. Until then every scan returns '
+                      'the offline checklist.',
               style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4)),
         ],
         const SizedBox(height: 10),

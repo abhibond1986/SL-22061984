@@ -4,7 +4,7 @@
 // PRIORITY CHAIN (stops at first success) — FASTEST FIRST, see _kTier1Budget:
 //   TIER 1 — OpenRouter free vision models, in order:
 //     1. Nemotron Nano 12B VL   — fastest free image model
-//     2. Nemotron 30B Omni      — highest capacity, but a ':reasoning' model
+//     2. Nemotron 30B Omni      — highest capacity, but a REASONING model
 //                                 and by far the slowest; demoted from first
 //                                 place on 2026-08-17 after it cost a measured
 //                                 45s timeout on a live scan
@@ -12,11 +12,15 @@
 //      on 2026-08-17 — still pinnable from the admin dropdown, see
 //      groqVisionModels. They are valid image models; they were simply
 //      unreachable inside the 40s Tier 1 budget.)
+//   TIER 1b — NaraRouter (NaraVision), if a key is configured. A separate
+//            account with its own daily token allowance, so it survives an
+//            OpenRouter 429. Model is admin-selectable; default
+//            mistral-medium-3-5. Added 2026-08-17.
 //   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
 //            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
 //   TIER 3 — Offline fallback: reports the failure, returns NO hazards
 //
-// LATENCY: each attempt is capped at _kAttemptTimeout and the whole Tier 1
+// LATENCY: each attempt is capped at kAttemptTimeout and the whole Tier 1
 // chain at _kTier1Budget. Both were sized from real measurements — read their
 // comments before changing either.
 //
@@ -52,6 +56,12 @@ import 'ai_run_log.dart';
 // a configured Gemini key is the only thing that can still analyse the image.
 // It was admin-configurable but never called — see the chain below.
 import 'gemini_direct_vision.dart';
+// Tier 1b. NaraRouter is a THIRD account with a THIRD allowance — see the tier
+// comment in analyseImageBytes for why it sits between OpenRouter and Gemini
+// rather than at the front. It imports this file back (for the shared prompt
+// builder and response parser); the cycle is fine in Dart and is preferable to
+// a third copy of both, which is how gemini_direct_vision.dart drifted.
+import 'nara_vision.dart';
 
 class GeminiVision {
   // OpenRouter vision models (free tier), tried in order.
@@ -59,7 +69,8 @@ class GeminiVision {
   // Transformer-Mamba, built for low latency); the 30B Omni is a
   // higher-capacity fallback if Nano is unavailable or too slow.
   static const String _orNanoVlModel   = 'nvidia/nemotron-nano-12b-v2-vl:free';
-  // NOTE the ':reasoning' suffix — this model emits a chain of thinking tokens
+  // NOTE the '-reasoning' in the name (the suffix is ':free' like every other
+  // model here) — this model emits a chain of thinking tokens
   // BEFORE the JSON, inside the same 4096 max_tokens. That is why it is no
   // longer first: see the ordering comment in the chain below.
   static const String _orNemotronModel = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
@@ -67,6 +78,19 @@ class GeminiVision {
   // Mixture-of-experts, 512k context, accepts image input. Confirmed against
   // OpenRouter's /api/v1/models listing rather than assumed from the name.
   static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
+
+  /// Models whose request body should carry `reasoning: {enabled: false}`.
+  ///
+  /// AN EXPLICIT SET, NOT A SUBSTRING TEST. The first version of this checked
+  /// `model.contains(':reasoning')`, which never matched anything: the slug is
+  /// `…-a3b-reasoning:free` — the word is part of the model NAME and the suffix
+  /// is `:free`. The opt-out was silently dead code and the 45s stall it was
+  /// meant to cure would have continued unfixed. A loose `contains('reasoning')`
+  /// would work today but would also fire on any future model with "reasoning"
+  /// in its name whose provider rejects the field with a 400, taking the whole
+  /// tier down. Membership must be earned per model by checking `reasoning
+  /// .mandatory == false` in https://openrouter.ai/api/v1/models first.
+  static const Set<String> _kReasoningOptOutModels = {_orNemotronModel};
 
   // Rate-limiting between analyses (kept small — only affects back-to-back scans)
   static DateTime? _lastCallTime;
@@ -79,13 +103,15 @@ class GeminiVision {
   // ~11,000ms was the model that actually answered. Four fifths of the wait
   // bought nothing. Both constants below exist to stop that recurring.
   //
-  // _kAttemptTimeout — per HTTP call. Was a hardcoded 45s. A free-tier vision
+  // kAttemptTimeout — per HTTP call. PUBLIC because Tier 1b (NaraVision) shares
+  // this exact ceiling; a provider added later must not be able to stall a scan
+  // for longer than a measured one. Was a hardcoded 45s. A free-tier vision
   // model that has not answered in 20s is queued or stalled, not thinking: the
   // model that succeeded in that measurement returned in ~11s, so 20s leaves
   // ~2x headroom over a known-good response while cutting the cost of a dead
   // model by more than half. Do not raise this without re-measuring a SUCCESS;
   // the whole point is that the ceiling tracks real response times.
-  static const Duration _kAttemptTimeout = Duration(seconds: 20);
+  static const Duration kAttemptTimeout = Duration(seconds: 20);
 
   // _kTier1Budget — ceiling on time spent INSIDE the OpenRouter chain, checked
   // before each attempt.
@@ -394,7 +420,7 @@ class GeminiVision {
             // that put Nemotron 30B Omni first, on measured evidence: a live
             // scan on 2026-08-17 spent 45,000ms timing out on the 30B before
             // Nano answered in ~11,000ms. Every such scan paid a 45s tax for a
-            // model that never replied. The 30B is a ':reasoning' model — it
+            // model that never replied. The 30B is a REASONING model — it
             // generates thinking tokens before the JSON, competing for the same
             // 4096 max_tokens — so on a queued free tier it is the SLOWEST of
             // the chain by design, which makes it the worst possible first pick
@@ -416,7 +442,7 @@ class GeminiVision {
             // /api/v1/models on 2026-08-17), so this is not a correctness fix.
             //
             // The reason is that they were mostly unreachable anyway: with
-            // _kAttemptTimeout at 20s and _kTier1Budget at 40s, two stalled
+            // kAttemptTimeout at 20s and _kTier1Budget at 40s, two stalled
             // attempts exhaust the budget before a third ever starts. Positions
             // 3 and 4 were paying maintenance cost — stale labels, slug
             // verification, quota accounting — for slots that almost never ran.
@@ -525,6 +551,67 @@ class GeminiVision {
       }
 
       // ══════════════════════════════════════════════════════════════════════
+      // TIER 1b — NARAROUTER (separate account, separate daily allowance)
+      //
+      // Placed AFTER the OpenRouter chain and BEFORE Gemini, deliberately:
+      //   • Not first. Its model is unmeasured for latency, and a top-of-chain
+      //     model's slowness is paid on EVERY scan. That is exactly the mistake
+      //     that cost 45s per scan when the 30B reasoning model led the chain.
+      //     Sitting here, it costs nothing while Nano 12B VL keeps answering in
+      //     ~11s, and only earns its place when Tier 1 genuinely cannot.
+      //   • Before Gemini because Gemini is the last resort that bills against
+      //     Google; a free Nara allowance should be spent before that.
+      // Promote it only on evidence — the AI Performance dashboard records this
+      // provider's latency under _source 'nara_router', so compare there first.
+      //
+      // NOTE this tier is reached when Tier 1 returned nothing, INCLUDING when
+      // the Tier 1 budget ran out. It has its own attempt timeout on top of
+      // that budget, so the worst-case wait grows by up to
+      // the shared [kAttemptTimeout] (20s). That is the accepted
+      // price of a second free allowance; it is only paid on scans that were
+      // already failing.
+      // ══════════════════════════════════════════════════════════════════════
+      final bool naraConfigured = await NaraVision.isConfigured;
+      bool naraRefused = false; // 429 — rate limit or daily token quota
+      bool naraKeyRejected = false; // 401/402/403
+      if (naraConfigured) {
+        final naraModel = await NaraVision.getModel();
+        print('GeminiVision: ▶ NaraRouter $naraModel (separate allowance)...');
+        try {
+          final naraResult =
+              await NaraVision.analyzeImage(bytes, kbContext: kbContext);
+          if (_isValidResult(naraResult)) {
+            print('GeminiVision: ✓ NaraRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
+            naraResult!['_source'] = 'nara_router';
+            naraResult['_model'] = naraModel;
+            naraResult['_isOnline'] = true;
+            _lastCallTime = DateTime.now();
+            _isAnalyzing = false;
+            await _writeCachedResult(imgHash, naraResult);
+            return logged(naraResult,
+                outcome: AiRunLog.outcomeSuccess,
+                model: naraModel,
+                imageHash: imgHash);
+          }
+          // Remembered rather than read back after the fact, for the same reason
+          // the OpenRouter flags above are: by the time the offline message is
+          // built, Gemini has been tried too and NaraVision.lastStatus may have
+          // been overwritten by nothing at all.
+          if (NaraVision.lastWasRateLimited) naraRefused = true;
+          if (NaraVision.lastStatus == 401 ||
+              NaraVision.lastStatus == 402 ||
+              NaraVision.lastStatus == 403) {
+            naraKeyRejected = true;
+          }
+          print('GeminiVision: ✗ NaraRouter returned no usable result');
+        } catch (e) {
+          print('GeminiVision: ✗ NaraRouter exception: $e');
+        }
+      } else {
+        print('GeminiVision: ⏭ NaraRouter skipped (no key configured)');
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
       // TIER 2 — DIRECT GEMINI (separate quota from OpenRouter)
       //
       // Why this exists: every OpenRouter ':free' model draws on ONE
@@ -588,7 +675,10 @@ class GeminiVision {
       final bool geminiAvailable = await GeminiDirectVision.isConfigured;
       String reason;
       String hint;
-      if (orKeys.isEmpty && !geminiAvailable) {
+      if (orKeys.isEmpty && !naraConfigured && !geminiAvailable) {
+        // naraConfigured is part of this test because otherwise a site running
+        // ONLY on a Nara key would be told "no AI key is configured" whenever a
+        // scan failed — sending the admin to add a key they already added.
         reason = 'no AI key is configured';
         hint = 'Ask your administrator to set an AI key in '
             'Admin → System Health. Nothing is wrong with your phone.';
@@ -626,10 +716,19 @@ class GeminiVision {
         hint = 'It did not say whether this is a short cool-off or today\'s '
             'free limit. Try once more in a minute; if it still declines, '
             'record the observation manually.';
-      } else if (orKeyRejected) {
+      } else if (orKeyRejected || naraKeyRejected) {
         reason = 'the AI service rejected the key';
         hint = 'Please report this to your administrator — the AI key needs '
             'renewing. Recording the observation manually still works.';
+      } else if (naraRefused) {
+        // Checked after every OpenRouter branch because those name a specific,
+        // actionable limit, whereas Nara's 429 covers both its per-minute rate
+        // and its daily token quota without saying which. Vague-but-true beats a
+        // confident guess that sends someone away for the wrong length of time.
+        reason = 'the AI service declined more scans just now';
+        hint = 'This may be a short cool-off or the day\'s AI allowance. Try '
+            'once more in a minute; if it still declines, record the '
+            'observation manually and tell your administrator.';
       } else {
         reason = 'the AI service did not respond';
         hint = 'This is usually temporary. Try the scan again in a minute, '
@@ -888,9 +987,12 @@ class GeminiVision {
       'resetsInMinutes': resetsAt.difference(now).inMinutes,
       'keysConfigured': _configuredOpenRouterKeys(prefs).length,
       // Reported alongside so a caller can tell "AI is not set up at all" from
-      // "AI runs on a Gemini key, which this free-tier ledger does not track".
-      // Without it, zero OpenRouter keys looks identical to zero AI.
+      // "AI runs on a key this free-tier ledger does not track".
+      // Without them, zero OpenRouter keys looks identical to zero AI — and the
+      // admin card would announce "No AI key configured" to a site that is
+      // scanning perfectly well on a different provider.
       'geminiConfigured': await GeminiDirectVision.isConfigured,
+      'naraConfigured': await NaraVision.isConfigured,
     };
   }
 
@@ -927,6 +1029,23 @@ class GeminiVision {
       'temperature': 0,
       'top_p': 1,
       'seed': 42,
+      // ── TURN REASONING OFF WHERE IT IS OPTIONAL ──────────────────────────
+      // This is the fix for the measured 45s stall, not just a mitigation of
+      // it. OpenRouter's /api/v1/models listing reports the Nemotron 30B Omni
+      // as `reasoning: {mandatory: false, default_enabled: true}` — thinking
+      // tokens are ON unless the request says otherwise, and they are emitted
+      // BEFORE the JSON out of the same 4096 max_tokens budget. So the model
+      // spent its time (and its token budget) narrating an internal monologue
+      // nobody reads, which is why it timed out while a 12B model answered the
+      // same image in ~11s.
+      //
+      // Sent ONLY for the slugs in [_kReasoningOptOutModels]. Providers reject
+      // or ignore unknown body fields inconsistently, so this must not be
+      // attached to every request — a 400 here would take out the whole tier.
+      // `mandatory: false` in OpenRouter's listing is what makes it safe to
+      // switch off for that specific model.
+      if (_kReasoningOptOutModels.contains(model))
+        'reasoning': {'enabled': false},
     };
 
     _lastOrStatus = null;
@@ -941,8 +1060,8 @@ class GeminiVision {
           'X-Title': 'SAIL Safety Lens',
         },
         body: jsonEncode(requestBody),
-        // See [_kAttemptTimeout] for why this is 20s and not the 45s it was.
-      ).timeout(_kAttemptTimeout);
+        // See [kAttemptTimeout] for why this is 20s and not the 45s it was.
+      ).timeout(kAttemptTimeout);
 
       _lastOrStatus = response.statusCode;
       // Ledger before parsing. A malformed 200 body still spent the request, so
@@ -1053,6 +1172,19 @@ class GeminiVision {
   // ══════════════════════════════════════════════════════════════════════════
   //  PARSE AI RESPONSE — extract JSON from model output
   // ══════════════════════════════════════════════════════════════════════════
+
+  /// Public entry point to the shared response parser, for provider services in
+  /// other files (currently [NaraVision]).
+  ///
+  /// Exists so a new provider does NOT get its own copy of the fence-stripping,
+  /// truncation repair and schema validation below. gemini_direct_vision.dart
+  /// took the copy-paste route and its duplicate has since drifted from this
+  /// one, which means the same malformed model output can be salvaged on one
+  /// tier and discarded on another — a difference the user experiences as the
+  /// app randomly failing to read a photo.
+  static Map<String, dynamic>? parseVisionResponse(String text) =>
+      _parseAIResponse(text);
+
   static Map<String, dynamic>? _parseAIResponse(String text) {
     if (text.isEmpty) return null;
 

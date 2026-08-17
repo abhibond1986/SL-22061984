@@ -407,6 +407,18 @@ class SyncService {
             'geminiApiKey',
             'groqApiKey',
             'geminiModel',
+            // Tier 1b (NaraRouter). Added 2026-08-17 — and added HERE at the
+            // same time as everywhere else precisely because omitting this line
+            // is the bug that stopped 'openRouterApiKey2' from ever reaching a
+            // device: the key existed on the backend, the handler existed on the
+            // device, and this whitelist silently dropped it in between.
+            'naraApiKey',
+            // The model too, not just the key. Syncing the key alone would let
+            // every OTHER device fall back to NaraVision.defaultModel — the
+            // costliest option on the list — however carefully the admin picked
+            // a cheap one. 'geminiModel' already syncs; this keeps the pair
+            // symmetrical.
+            'naraModel',
           ]) {
             if (keys[k] != null && keys[k].toString().isNotEmpty) {
               out[k] = keys[k];

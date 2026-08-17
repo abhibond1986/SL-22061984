@@ -18,6 +18,9 @@ import 'gemini_direct_vision.dart';
 // permits the cycle and it is preferable to duplicating string literals that
 // must match for key sync to work at all.
 import 'gemini_vision.dart';
+// For the NaraVision pref-key names, key prefix and model list — the Tier 1b
+// key and model are synced here.
+import 'nara_vision.dart';
 
 class AdminMasterData {
   // ── LIVE CHANGE NOTIFICATION ─────────────────────────────────────
@@ -502,6 +505,34 @@ class AdminMasterData {
         await prefs.setString(GeminiVision.kOpenRouterKey2, remote['openRouterApiKey2'] as String);
         print('AdminMasterData: ✓ OpenRouter key #2 synced');
         updated = true;
+      }
+      // NaraRouter (Tier 1b). Prefix-checked, not just length-checked: this
+      // sync runs on EVERY launch, so a wrong-provider key sitting in the
+      // backend record would be re-written to every device forever and add a
+      // dead 20s attempt to failing scans. A missing field deliberately has no
+      // `else` branch — see the second OpenRouter key above for why.
+      if (remote['naraApiKey'] is String &&
+          (remote['naraApiKey'] as String).startsWith(NaraVision.keyPrefix)) {
+        await prefs.setString(
+            NaraVision.kPrefsApiKey, remote['naraApiKey'] as String);
+        print('AdminMasterData: ✓ NaraRouter key synced');
+        updated = true;
+      }
+      // The admin's MODEL choice, validated the same way geminiModel is below.
+      // This matters more here than it looks: NaraVision.defaultModel is
+      // mistral-medium-3-5, the most expensive model on Nara's list, so a device
+      // that receives the key but not the model would quietly spend the shared
+      // token allowance several times faster than the one the admin chose.
+      if (remote['naraModel'] is String &&
+          (remote['naraModel'] as String).isNotEmpty) {
+        final remoteNaraModel = remote['naraModel'] as String;
+        if (NaraVision.availableModels.any((m) => m['id'] == remoteNaraModel)) {
+          await prefs.setString(NaraVision.kPrefsModel, remoteNaraModel);
+          updated = true;
+        } else {
+          print('AdminMasterData: ⏭ Ignoring unknown NaraRouter model from '
+              'backend: "$remoteNaraModel"');
+        }
       }
       if (remote['geminiModel'] is String && (remote['geminiModel'] as String).isNotEmpty) {
         // Validate before writing. This sync runs on every launch, so an old
