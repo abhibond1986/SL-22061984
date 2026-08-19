@@ -74,6 +74,15 @@ class _AIScanTabState extends State<AIScanTab> {
   final Map<int, bool> _hazardClosed = {};
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _locationController = TextEditingController();
+  /// Optional free-text/dictated note about what the photo shows.
+  ///
+  /// A vision model cannot always tell a rooftop from a floor slab, or an
+  /// oxygen cylinder from a nitrogen one, and those distinctions change the
+  /// hazard entirely — work at height versus housekeeping, oxygen enrichment
+  /// versus asphyxiation. This lets the observer say so in one line. Optional by
+  /// design: making it mandatory would train users to type a full stop to get
+  /// past it, which is worse than an empty note because it looks like content.
+  final TextEditingController _contextController = TextEditingController();
   final List<GlobalKey>  _hazardRowKeys    = [];
   int? _highlightedRow;
 
@@ -111,6 +120,7 @@ class _AIScanTabState extends State<AIScanTab> {
     AdminMasterData.revision.removeListener(_loadMasterData);
     _scrollController.dispose();
     _locationController.dispose();
+    _contextController.dispose();
     for (final c in _mitigationControllers.values) { c.dispose(); }
     super.dispose();
   }
@@ -306,17 +316,27 @@ class _AIScanTabState extends State<AIScanTab> {
       final tPlant = widget.user?['plant']?.toString() ?? '';
       final tDept = widget.user?['department']?.toString() ?? '';
 
+      // The observer's optional note about the scene. Read fresh at call time,
+      // not captured when the photo was taken, so a note typed or dictated
+      // before capture and any correction made before "Re-analyse" are both
+      // picked up. Empty is the normal case and costs nothing — the prompt block
+      // disappears entirely rather than saying "no context supplied", which
+      // would invite the model to comment on the absence.
+      final sceneNote = _contextController.text;
+
       try {
         result = kIsWeb
             ? await GeminiVision.analyseImageBytes(bytes,
                 runType: AiRunLog.typeHazardScan,
                 plant: tPlant,
                 dept: tDept,
+                sceneContext: sceneNote,
                 forceRefresh: forceRefresh)
             : await GeminiVision.analyseImage(File(_pickedFile!.path),
                 runType: AiRunLog.typeHazardScan,
                 plant: tPlant,
                 dept: tDept,
+                sceneContext: sceneNote,
                 forceRefresh: forceRefresh);
       } catch (e, stackTrace) {
         // ✅ FIX: Check if it's a network/connectivity error
@@ -2200,6 +2220,22 @@ class _AIScanTabState extends State<AIScanTab> {
         maxLines: 1,
       ),
       const SizedBox(height: 12),
+      // Scene context. Deliberately placed BEFORE the capture buttons so it is
+      // filled while the observer is still looking at the area, not afterwards
+      // from memory — and so it is already available on the very first analysis
+      // rather than only on a re-analyse.
+      VoiceTextField(
+        controller: _contextController,
+        label: 'What is in the picture? (optional)',
+        hint: 'e.g. rooftop sheet replacement at 12 m — no edge protection',
+        // 3 lines: enough for a sentence of context without turning into an
+        // incident-description box. Dictation fills it fastest with gloves on,
+        // which is why this is a VoiceTextField and not a bare TextField.
+        maxLines: 3,
+      ),
+      const SizedBox(height: 6),
+      _contextHelp(sl),
+      const SizedBox(height: 12),
       Row(children: [
         Expanded(child: ElevatedButton.icon(
           onPressed: () => _pickImage(ImageSource.camera),
@@ -2232,6 +2268,32 @@ class _AIScanTabState extends State<AIScanTab> {
       _infoBox(sl),
     ]);
   }
+
+  /// Explains what the context box is for, with the two examples that matter.
+  ///
+  /// Worth the space: an empty optional box gets left empty because nobody can
+  /// tell what it would change. Naming the failure it prevents — a rooftop read
+  /// as a floor, a gas cylinder read as generic — is what makes people fill it.
+  ///
+  /// 11px on `sl.text4`, the exact pairing already used by the capture card's
+  /// subtitle above. Not 10px: that is the warn floor in tools/audit_contrast.py
+  /// and there is no reason to spend a warning on a hint line.
+  Widget _contextHelp(SL sl) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Icon(Icons.lightbulb_outline_rounded, size: 13, color: sl.text4),
+      const SizedBox(width: 6),
+      Expanded(
+        child: Text(
+          'Helps the AI read the scene correctly — a roof read as a floor, or '
+          'an oxygen cylinder read as an ordinary one, changes the hazard '
+          'completely. Say where you are standing, what the job is, or what is '
+          'stored there. Leave it blank and the AI judges from the photo alone.',
+          style: TextStyle(color: sl.text4, fontSize: 11, height: 1.35),
+        ),
+      ),
+    ],
+  );
 
   Widget _featureTag(String label, SL sl) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
