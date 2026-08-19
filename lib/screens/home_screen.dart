@@ -10,6 +10,8 @@ import '../main.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
+import '../services/admin_master_data.dart';
+import '../services/plant_scope.dart';
 import 'login_screen.dart';
 import 'home_tab.dart';
 import 'ai_scan_tab.dart';
@@ -39,13 +41,74 @@ class _HomeScreenState extends State<HomeScreen>
     _tabAnim = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 200));
     _loadUser();
+    // This screen had no revision listener, because nothing it drew depended on
+    // admin master data. The SOP Scan release flag does, and an admin who flips
+    // the toggle should not have to restart the app to see the effect.
+    AdminMasterData.revision.addListener(_onMasterDataChanged);
   }
 
   @override
   void dispose() {
+    AdminMasterData.revision.removeListener(_onMasterDataChanged);
     _tabAnim.dispose();
     super.dispose();
   }
+
+  /// Rebuild when admin settings change, and step off a tab that just vanished.
+  ///
+  /// The clamp matters: if the flag is switched off while a normal user is
+  /// standing on the SOP tab, the tab stops being reachable but `_tabIndex` still
+  /// points at it. Leaving that alone would show a body with no matching entry in
+  /// the nav bar — a screen the user cannot navigate away from by tapping the tab
+  /// they are already on, since _changeTab ignores `i == _tabIndex`.
+  void _onMasterDataChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (!_visibleTabs.contains(_tabIndex)) _tabIndex = AppTabs.home;
+    });
+  }
+
+  /// True when this user may see the SOP/SMP Scan tab.
+  ///
+  /// Two ways in, and the admin one is deliberately independent of the flag: the
+  /// admin has to be able to exercise the feature in production, against real
+  /// plant documents, BEFORE releasing it — which is the whole reason the flag
+  /// exists. If the flag hid it from admins too, the only way to test would be to
+  /// release it to everyone first.
+  ///
+  /// Synchronous on purpose. Both halves must be readable inside build(): the nav
+  /// bar is rebuilt every frame, and an awaited check would render the tab and
+  /// then remove it, which for a normal user means a tab they can tap.
+  ///
+  /// `_user` is null on the first frame (loaded async in [_loadUser]), so an admin
+  /// sees the tab appear a frame late rather than a normal user seeing it appear
+  /// and then vanish. That is the safe direction of the two.
+  bool get _canSeeSopScan {
+    if (AdminMasterData.sopScanTabVisibleSync) return true;
+    final u = _user;
+    // PlantScope.isAdminUser, not a fourth hand-rolled copy: `isAdmin` is stored
+    // as a real bool when seeded and as the STRING 'true'/'false' at registration
+    // and when toggled, so `u['isAdmin'] == true` silently fails for most users.
+    return u != null && PlantScope.isAdminUser(u);
+  }
+
+  /// Canonical [AppTabs] indices that are currently on the nav bar, in order.
+  ///
+  /// The indices stay canonical — this list filters which are DRAWN, it does not
+  /// renumber them. `AppTabs.askAi` is 4 and `AppTabs.reports` is 5 whether or not
+  /// SOP Scan is showing, so the nine `onTabChange(AppTabs.x)` call sites in
+  /// home_tab.dart and dashboard_tab.dart keep working untouched. Renumbering
+  /// instead would make `tabs[5]` a RangeError with five visible tabs, and would
+  /// also break `KeyedSubtree(key: ValueKey(...))` below: AnimatedSwitcher would
+  /// see an unchanged key for a changed meaning and refuse to swap the child.
+  List<int> get _visibleTabs => [
+        AppTabs.home,
+        AppTabs.aiScan,
+        AppTabs.nearMiss,
+        if (_canSeeSopScan) AppTabs.sopScan,
+        AppTabs.askAi,
+        AppTabs.reports,
+      ];
 
   Future<void> _loadUser() async {
     final u = await LocalDB.getCurrentUser();
@@ -75,6 +138,12 @@ class _HomeScreenState extends State<HomeScreen>
     // AppTabs.count, not a literal: the bounds check used to hard-code 5, which
     // would have silently rejected any tab added at the end.
     if (i < 0 || i >= AppTabs.count || i == _tabIndex) return;
+    // Refuse a hidden tab. Filtering the nav bar is not enough on its own —
+    // _changeTab is also the target of the quick-action buttons in home_tab.dart
+    // and dashboard_tab.dart, and of UniversalAppBar.onHome. Gating only the
+    // visible bar would leave a deep link into a feature that has not been
+    // released, which is precisely what the flag is for.
+    if (!_visibleTabs.contains(i)) return;
     _guardedSwitch(i);
   }
 
@@ -131,6 +200,12 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  /// The tab actually rendered: [_tabIndex] unless it is currently hidden, in
+  /// which case Home. Read-only, so it is safe to use during build — correcting
+  /// `_tabIndex` itself needs a setState, which the listener does.
+  int get _shownTab =>
+      _visibleTabs.contains(_tabIndex) ? _tabIndex : AppTabs.home;
+
   @override
   Widget build(BuildContext context) {
     final sl     = SL.of(context);
@@ -176,6 +251,12 @@ class _HomeScreenState extends State<HomeScreen>
       // Index 3 — between Near Miss and Ask AI. Adding it here shifted Ask AI to
       // 4 and Reports to 5; the onTabChange(n) call sites in home_tab.dart and
       // dashboard_tab.dart were updated to match.
+      //
+      // STAYS IN THE LIST even when the tab is hidden, so every index below it
+      // keeps its value. Visibility is decided by _visibleTabs, which filters the
+      // nav bar; this list is indexed by canonical AppTabs constants and must
+      // remain AppTabs.count long. Removing this entry conditionally is the
+      // tempting version and it makes tabs[AppTabs.reports] throw.
       SopScanScreen(
         user: _user,
         toggleTheme: widget.toggleTheme,
@@ -210,8 +291,15 @@ class _HomeScreenState extends State<HomeScreen>
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 250),
           child: KeyedSubtree(
-            key: ValueKey(_tabIndex),
-            child: tabs[_tabIndex],
+            // _shownTab, not _tabIndex. The listener clamps on the events it can
+            // see, but the flag can also change underneath this build: the
+            // backend pull in AdminMasterData.syncFromBackend writes the snapshot
+            // directly, and `_user` arrives a frame after the first paint. This
+            // makes the body agree with the nav bar unconditionally, so there is
+            // no ordering of those events that renders a tab the user has no
+            // button for.
+            key: ValueKey(_shownTab),
+            child: tabs[_shownTab],
           ),
         ),
       ),
@@ -220,6 +308,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _bottomNav(SL sl) {
+    // Indexed by canonical AppTabs value, exactly like `tabs` in build(). The
+    // rendered Row below walks _visibleTabs and looks each one up here, so a
+    // hidden tab costs a list entry and nothing else.
     final items = [
       _NavItem(Icons.home_outlined,             Icons.home_rounded,             'Home'),
       _NavItem(Icons.document_scanner_outlined, Icons.document_scanner_rounded, 'AI Scan'),
@@ -267,8 +358,14 @@ class _HomeScreenState extends State<HomeScreen>
             child: SizedBox(
               height: 60,
               child: Row(
-                children: List.generate(items.length, (i) {
-                  final sel  = _tabIndex == i;
+                // Walks the VISIBLE tabs, not 0..items.length. `slot` is the
+                // position in the bar and `i` is the canonical AppTabs index —
+                // they are equal only until a tab is hidden, and every use below
+                // wants `i`. Using the loop variable directly is the bug this
+                // shape exists to prevent: it would highlight and open the tab
+                // sitting one place to the left of the one tapped.
+                children: _visibleTabs.map((i) {
+                  final sel  = _shownTab == i;
                   final item = items[i];
                   return Expanded(
                     child: GestureDetector(
@@ -334,7 +431,10 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ),
                   );
-                }),
+                  // .toList() is required: Row.children is List<Widget> and
+                  // Iterable.map returns an Iterable. List.generate returned a
+                  // List, so this was not needed before.
+                }).toList(),
               ),
             ),
           ),

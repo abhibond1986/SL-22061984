@@ -433,6 +433,7 @@ class SyncService {
     List<String>? obsTypes,
     Map<String, int>? spiParams,
     bool? spiCardVisible,
+    bool? sopScanTabVisible,
     Map<String, int>? severityScores,
     String? updatedBy,
   }) async {
@@ -446,6 +447,11 @@ class SyncService {
       if (obsTypes != null)    any |= await SupabaseService.setMasterData('obs_types', obsTypes);
       if (spiParams != null)   any |= await SupabaseService.setMasterData('spi_params', spiParams);
       if (spiCardVisible != null) any |= await SupabaseService.setMasterData('spi_card_visible', {'visible': spiCardVisible});
+      // Wrapped in {'visible': …} to match spi_card_visible. master_data.value is
+      // jsonb, and a bare boolean is legal jsonb, but the pull below has to know
+      // which shape to unwrap — so both flags use the same one rather than each
+      // needing its own special case.
+      if (sopScanTabVisible != null) any |= await SupabaseService.setMasterData('sop_scan_tab_visible', {'visible': sopScanTabVisible});
       if (severityScores != null) any |= await SupabaseService.setMasterData('severity_scores', severityScores);
       return any;
     }
@@ -461,6 +467,13 @@ class SyncService {
       if (obsTypes != null)    body['obsTypes'] = obsTypes;
       if (spiParams != null)   body['spiParams'] = spiParams;
       if (spiCardVisible != null) body['spiCardVisible'] = spiCardVisible;
+      // NOTE: the Apps Script MASTERDATA_KEYS whitelist must contain
+      // 'sopScanTabVisible' for this to persist on the legacy backend. It has
+      // been added to apps_script_v14.js, but that file needs a redeploy to take
+      // effect. Supabase is the live path (SupabaseConfig.enabled), so this
+      // branch is not currently reached; if it ever is, an unreleased flag fails
+      // to persist as FALSE, which is the safe direction.
+      if (sopScanTabVisible != null) body['sopScanTabVisible'] = sopScanTabVisible;
       if (severityScores != null) body['severityScores'] = severityScores;
       if (updatedBy != null)   body['updatedBy'] = updatedBy;
 
@@ -490,6 +503,12 @@ class SyncService {
         // ★ FIX: Pull SPI params, visibility, and severity scores
         if (raw['spi_params'] != null)  'spiParams':   raw['spi_params'],
         if (raw['spi_card_visible'] != null) 'spiCardVisible': (raw['spi_card_visible'] is Map) ? (raw['spi_card_visible'] as Map)['visible'] : raw['spi_card_visible'],
+        // Same is-it-wrapped tolerance as spi_card_visible above: a row written
+        // by an older client (or by hand in the SQL editor) may hold a bare
+        // boolean rather than {'visible': …}, and this flag decides whether every
+        // user sees a feature — reading it as null and defaulting to hidden is
+        // recoverable, but only if the unwrap does not throw first.
+        if (raw['sop_scan_tab_visible'] != null) 'sopScanTabVisible': (raw['sop_scan_tab_visible'] is Map) ? (raw['sop_scan_tab_visible'] as Map)['visible'] : raw['sop_scan_tab_visible'],
         if (raw['severity_scores'] != null) 'severityScores': raw['severity_scores'],
       };
 
@@ -883,6 +902,7 @@ class SyncService {
                   MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0))
               : null,
           spiCardVisible: payload['spiCardVisible'],
+          sopScanTabVisible: payload['sopScanTabVisible'],
           severityScores: payload['severityScores'] != null
               ? (payload['severityScores'] as Map).map((k, v) =>
                   MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0))

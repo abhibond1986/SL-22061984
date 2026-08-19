@@ -815,21 +815,31 @@ class _HomeTabState extends State<HomeTab> {
               color: const Color(0xFF10B981),
               onTap: () => widget.onTabChange(AppTabs.askAi))),
         ]),
-        const SizedBox(height: 8),
-        // Switches to the SOP Scan tab rather than pushing the screen. It was a
-        // pushed route until the tab was added, to stop one nav tap discarding
-        // pages the user walked the shop floor to photograph; HomeScreen now
-        // guards that with a confirm dialog instead. Pushing as well would give
-        // the same flow two entry points and two live copies of its State.
-        // Full width because there is no fifth action to pair it with, and
-        // stretching one card reads better than a hanging gap.
-        Row(children: [
-          Expanded(child: _actionCard(sl,
-              icon: Icons.document_scanner_rounded,
-              label: I18n.t('home.scanSop'),
-              color: const Color(0xFF6366F1),
-              onTap: () => widget.onTabChange(AppTabs.sopScan))),
-        ]),
+        // Hidden unless the SOP Scan tab is released, or this user is an admin —
+        // the same test HomeScreen._canSeeSopScan applies to the nav bar.
+        //
+        // Both halves are needed. HomeScreen._changeTab now refuses a hidden tab,
+        // so leaving this card visible would give a normal user a quick action
+        // that does nothing at all when tapped, which reads as a broken app
+        // rather than an unreleased feature. The spacer is inside the condition
+        // too, otherwise hiding the card leaves an 8px gap below the grid.
+        if (AdminMasterData.sopScanTabVisibleSync || _isAdmin()) ...[
+          const SizedBox(height: 8),
+          // Switches to the SOP Scan tab rather than pushing the screen. It was a
+          // pushed route until the tab was added, to stop one nav tap discarding
+          // pages the user walked the shop floor to photograph; HomeScreen now
+          // guards that with a confirm dialog instead. Pushing as well would give
+          // the same flow two entry points and two live copies of its State.
+          // Full width because there is no fifth action to pair it with, and
+          // stretching one card reads better than a hanging gap.
+          Row(children: [
+            Expanded(child: _actionCard(sl,
+                icon: Icons.document_scanner_rounded,
+                label: I18n.t('home.scanSop'),
+                color: const Color(0xFF6366F1),
+                onTap: () => widget.onTabChange(AppTabs.sopScan))),
+          ]),
+        ],
       ]),
     );
   }

@@ -76,6 +76,46 @@ signal itself. `tools/audit_contrast.py --strict` is unchanged at **245
 failures**; warnings moved 235 → 238, all three being the new 10px badges, which
 the audit treats as warn-level (there are already 128 such in `admin_screen.dart`).
 
+**The SOP Scan tab is behind an admin release flag — added 2026-08-19, also
+uncompiled.** The feature still has rough edges, so it is not on general release;
+the admin panel now has a **System Health → Feature Release** card holding a
+`SOP Scan Tab Visibility` switch.
+
+* **Admins always see the tab, whichever way the flag is set.** This is not an
+  oversight. The flag exists so the feature can be exercised against real plant
+  documents in production before release; if the flag hid the tab from admins as
+  well, the only way to test would be to release it to everyone first. Everyone
+  else sees the tab only when the flag is on.
+* **The flag is `admin_show_sop_scan_tab`, defaulting to OFF** — note that this
+  is the opposite default from `spiCardVisible`, which is on. It syncs through
+  the generic `master_data` key/value table as `sop_scan_tab_visible`, so it
+  needs **no schema migration**. Other devices pick a change up on their next
+  sync, not instantly.
+* **`AdminMasterData.sopScanTabVisibleSync` is a write-through snapshot**, and
+  unlike `_wsaSnapshot` it is deliberately *not* cleared by `_bump()`. Clearing
+  it would read false — hiding the tab — for the whole async gap until
+  `primeSnapshots()` finished, so editing any unrelated admin setting would blink
+  the tab off for every user entitled to see it.
+* **`tabs` and `items` in `home_screen.dart` stay `AppTabs.count` long.** Only
+  the rendered nav `Row` is filtered, via `_visibleTabs`. The indices remain
+  canonical, so the nine `onTabChange(AppTabs.x)` call sites keep working
+  untouched. Removing the `SopScanScreen` entry conditionally is the tempting
+  version and it makes `tabs[AppTabs.reports]` throw a RangeError.
+* `_changeTab` also refuses a hidden index, because it is the target of the quick
+  actions and of `UniversalAppBar.onHome` — gating only the visible bar would
+  leave a deep link into an unreleased feature. The home-tab quick action is
+  hidden by the same test, so nobody gets a button that silently does nothing.
+* Admin membership is tested with `PlantScope.isAdminUser`, never
+  `u['isAdmin'] == true`: `isAdmin` is stored as a real bool when seeded and as
+  the *string* `'true'`/`'false'` at registration and when toggled.
+* `apps_script_v14.js`'s `MASTERDATA_KEYS` whitelist gained `sopScanTabVisible`
+  — and also `spiCardVisible`, `spiParams` and `severityScores`, which were
+  already being sent and **silently dropped**. Unlisted keys are discarded by
+  both `saveMasterData` and `getMasterData`. Needs a redeploy to take effect, and
+  only matters if the legacy backend is ever used again.
+* Contrast audit after this change: **245 failures, unchanged**; warnings moved
+  238 → 242, all four being the new card's 10px labels.
+
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
 describe what was true *that day*, not what is true now. Superseded notes have

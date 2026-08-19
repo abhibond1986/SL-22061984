@@ -260,6 +260,14 @@ class _AdminScreenState extends State<AdminScreen>
   String _compliancePlantFilter = 'ALL';
   bool _spiCardExpanded = false;
 
+  // ── Feature release state ───────────────────────────────────────
+  // Defaults to FALSE, unlike _spiCardVisible above, which defaults true and is
+  // corrected by _loadAll. The difference is deliberate: a wrong first frame on
+  // the SPI toggle shows the admin a switch in the wrong position for a moment,
+  // whereas this one gates an unreleased feature, and "on" is the answer that
+  // must never be guessed.
+  bool _sopScanTabVisible = false;
+
   // ── SPI Settings state ──────────────────────────────────────────
   bool _spiCardVisible = true;
   Map<String, int> _spiParams = Map<String, int>.from(AdminMasterData.defaultSpiParams);
@@ -448,6 +456,7 @@ class _AdminScreenState extends State<AdminScreen>
       final openSts = await AdminMasterData.getOpenStatuses();
       final spiVisible = await AdminMasterData.getSpiCardVisible();
       final spiParams = await AdminMasterData.getSpiParams();
+      final sopTabVisible = await AdminMasterData.getSopScanTabVisible();
 
       if (!mounted) return;
       setState(() {
@@ -468,6 +477,7 @@ class _AdminScreenState extends State<AdminScreen>
         _severityScores = scores;
         _spiCardVisible = spiVisible;
         _spiParams      = spiParams;
+        _sopScanTabVisible = sopTabVisible;
         _scoresLoaded   = true;
         _mastersLoaded  = true;
         _alertsLoaded   = true;
@@ -2165,6 +2175,11 @@ class _AdminScreenState extends State<AdminScreen>
         ])),
 
       const SizedBox(height: 16),
+      _sectionHeader('Feature Release', sl),
+      const SizedBox(height: 8),
+      _sopScanReleaseCard(sl),
+
+      const SizedBox(height: 16),
       _sectionHeader('SPI Scorecard Settings', sl),
       const SizedBox(height: 8),
       _spiSettingsCard(sl),
@@ -2912,6 +2927,153 @@ class _AdminScreenState extends State<AdminScreen>
                     borderRadius: BorderRadius.circular(8))),
             ),
           ),
+      ]),
+    );
+  }
+
+  /// Release switch for the SOP/SMP Scan tab.
+  ///
+  /// Matches the house style of [_spiSettingsCard] — a bare [Switch] inside a
+  /// hand-rolled container with a VISIBLE/HIDDEN badge. There are no
+  /// SwitchListTiles anywhere in this file and adding the first one here would
+  /// look like a different app.
+  ///
+  /// The "you can still see it" line is not decoration. Without it the natural
+  /// reading of a hidden feature is that the switch hides it from everyone, so an
+  /// admin who wanted to test would flip it on — releasing it to the plant — and
+  /// only then discover the tab had been available to them all along.
+  Widget _sopScanReleaseCard(SL sl) {
+    final on = _sopScanTabVisible;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF6366F1).withOpacity(0.3))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF6366F1), Color(0xFF4338CA)]),
+              borderRadius: BorderRadius.circular(8)),
+            child: const Icon(Icons.menu_book_rounded,
+                color: Colors.white, size: 18)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('SOP / SMP Scan',
+                  style: TextStyle(color: Color(0xFF6366F1),
+                      fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text('Control who sees the SOP Scan tab',
+                  style: TextStyle(color: sl.text4, fontSize: 10)),
+            ])),
+        ]),
+
+        const SizedBox(height: 16),
+        const Divider(height: 1),
+        const SizedBox(height: 16),
+
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: on
+                ? const Color(0xFF6366F1).withOpacity(0.08)
+                : sl.text4.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+                color: on
+                    ? const Color(0xFF6366F1).withOpacity(0.3)
+                    : sl.border)),
+          child: Row(children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: on
+                    ? const Color(0xFF6366F1).withOpacity(0.15)
+                    : sl.text4.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6)),
+              child: Icon(
+                  on ? Icons.groups_rounded : Icons.lock_outline_rounded,
+                  color: on ? const Color(0xFF6366F1) : sl.text4,
+                  size: 18)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Expanded(
+                    child: Text('Release SOP Scan to all users',
+                        style: TextStyle(color: sl.text1, fontSize: 12,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: on
+                          ? AppColors.green.withOpacity(0.15)
+                          : AppColors.amber.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                          color: on ? AppColors.green : AppColors.amber)),
+                    // 10px, not the 9px used elsewhere for badges: this one
+                    // states who can currently reach an unproven feature.
+                    child: Text(on ? 'ALL USERS' : 'ADMINS ONLY',
+                        style: TextStyle(
+                            color: on ? sl.greenText : sl.amberText,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800))),
+                ]),
+                const SizedBox(height: 3),
+                Text(
+                    on
+                        ? 'Everyone sees the SOP Scan tab. Turn this off to '
+                            'withdraw it without a new build.'
+                        : 'Only admins see the SOP Scan tab. You can test it '
+                            'now; turn this on when you are satisfied.',
+                    style: TextStyle(color: sl.text3, fontSize: 10)),
+              ])),
+            Switch(
+              value: on,
+              onChanged: (v) async {
+                await AdminMasterData.setSopScanTabVisible(v);
+                if (!mounted) return;
+                setState(() => _sopScanTabVisible = v);
+                await AdminAudit.log(
+                    action: AdminAudit.actSettingsChange,
+                    actor: _currentActor,
+                    targetName: 'SOP Scan Tab Visibility',
+                    meta: {'visible': v});
+                _toast(
+                    v
+                        ? '✓ SOP Scan released to all users'
+                        : '✓ SOP Scan hidden — admins only',
+                    v ? AppColors.green : AppColors.amber);
+              },
+              activeColor: const Color(0xFF6366F1)),
+          ])),
+
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppColors.amber.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.amber.withOpacity(0.3))),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(Icons.info_outline_rounded, color: sl.amberText, size: 14),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                  'Admins always see the SOP Scan tab, whichever way this is '
+                  'set. Other devices pick the change up on their next sync, '
+                  'not instantly.',
+                  style: TextStyle(color: sl.text3, fontSize: 10)),
+            ),
+          ])),
       ]),
     );
   }

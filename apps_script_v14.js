@@ -2091,7 +2091,13 @@ function getSheet(name) {
 //  Stored in a 'masterdata' sheet as key-value JSON rows.
 // ════════════════════════════════════════════════════════════════════════
 const SHEET_MASTERDATA = 'masterdata';
-const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'openRouterApiKey2', 'geminiModel', 'naraApiKey', 'naraModel'];
+// Anything absent from this whitelist is silently DROPPED by both saveMasterData
+// and getMasterData — no error, the setting just never persists. 'spiCardVisible',
+// 'spiParams' and 'severityScores' were missing for exactly that reason and only
+// work because Supabase is the live backend. Added 'sopScanTabVisible' (the SOP
+// Scan release flag) and the three that were already being sent, so this path is
+// correct if it is ever the live one again. Needs a redeploy to take effect.
+const MASTERDATA_KEYS = ['plants', 'departments', 'wsaCauses', 'severities', 'statuses', 'obsTypes', 'geminiApiKey', 'groqApiKey', 'openRouterApiKey', 'openRouterApiKey2', 'geminiModel', 'naraApiKey', 'naraModel', 'sopScanTabVisible', 'spiCardVisible', 'spiParams', 'severityScores'];
 
 function saveMasterData(params) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();

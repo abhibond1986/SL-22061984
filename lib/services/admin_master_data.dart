@@ -52,11 +52,45 @@ class AdminMasterData {
   static List<String> get wsaCausesSync =>
       _wsaSnapshot ?? List<String>.from(defaultWsaCauses);
 
+  // ── SYNCHRONOUS SOP-SCAN-TAB SNAPSHOT ────────────────────────────
+  // The bottom navigation bar in home_screen.dart is rebuilt synchronously on
+  // every frame and cannot await getSopScanTabVisible(). Without a synchronous
+  // view, the tab renders on the first frame and disappears on the second — a
+  // visible flicker, and worse, it means a normal user sees a tab they are not
+  // supposed to have for long enough to tap it.
+  //
+  // NOTE this cache behaves DIFFERENTLY from [_wsaSnapshot] on purpose:
+  // _bump() does NOT clear it. It is write-through — every one of the three
+  // places that writes the pref also sets this field (setSopScanTabVisible, the
+  // syncFromBackend pull, and resetToDefaults). Clearing it on _bump would make
+  // the flag read false — hiding the tab — for the whole async gap until
+  // primeSnapshots() finished, so an unrelated master-data edit would blink the
+  // tab off for every user who is allowed to see it. A bool has a known new
+  // value at write time; a list does not, which is why the list invalidates and
+  // this does not.
+  static bool? _sopScanTabSnapshot;
+
+  /// Best-effort synchronous view of "is the SOP Scan tab released to normal
+  /// users". Defaults to FALSE — hidden — until primed, which is the fail-safe
+  /// direction: an unreleased feature staying hidden one frame too long is
+  /// harmless, showing it one frame too early is the thing being prevented.
+  ///
+  /// Admins are shown the tab regardless of this flag; that decision lives at
+  /// the call site in home_screen.dart, not here, because this getter answers
+  /// only "has it been released" and must not be confused with "may I see it".
+  static bool get sopScanTabVisibleSync => _sopScanTabSnapshot ?? false;
+
   /// Warm the synchronous caches. Call once during app startup, and again
   /// whenever master data changes (the revision listener in main does this).
   static Future<void> primeSnapshots() async {
     try {
       _wsaSnapshot = await getWsaCauses();
+    } catch (_) {}
+    // Separate try: a failure reading the WSA list must not leave the SOP flag
+    // unprimed, and vice versa. One shared try block would couple two unrelated
+    // settings through a single catch.
+    try {
+      _sopScanTabSnapshot = await getSopScanTabVisible();
     } catch (_) {}
   }
 
@@ -550,6 +584,23 @@ class AdminMasterData {
         updated = true;
       }
 
+      // Pull SOP-scan-tab release state from backend.
+      //
+      // This is how a non-admin device learns the feature was released: the
+      // admin toggles on their device, it lands in master_data, and every other
+      // device picks it up on its next pull. So the snapshot MUST be written
+      // here too — this is the one path that changes the flag on a device that
+      // never called setSopScanTabVisible, and without it the pref would be
+      // right while the nav bar kept reading a stale snapshot until restart.
+      if (remote['sopScanTabVisible'] != null) {
+        final visible = remote['sopScanTabVisible'] == true ||
+            remote['sopScanTabVisible'] == 'true';
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kShowSopScanTab, visible);
+        _sopScanTabSnapshot = visible;
+        updated = true;
+      }
+
       // ★ FIX: Pull severity scores from backend
       if (remote['severityScores'] is Map) {
         final scores = (remote['severityScores'] as Map)
@@ -630,6 +681,7 @@ class AdminMasterData {
   // ── APP SETTINGS (admin-configurable) ──────────────────────────────
   static const String _kShowSpiCard = 'admin_show_spi_card';
   static const String _kSpiParams = 'admin_spi_params';
+  static const String _kShowSopScanTab = 'admin_show_sop_scan_tab';
 
   /// Default SPI calculation parameters
   static const Map<String, int> defaultSpiParams = {
@@ -671,6 +723,57 @@ class AdminMasterData {
       }
     } catch (e) {
       print('Error saving SPI visibility: $e');
+    }
+  }
+
+  /// Whether the SOP/SMP Scan tab has been released to normal users.
+  ///
+  /// Defaults to FALSE, and the default is the point of the setting: the feature
+  /// went in unproven, and shipping the client with it visible would put an
+  /// untested reader in front of every user on the next deploy. Admins see the
+  /// tab whether this is true or false, so the admin can exercise it in
+  /// production against real documents before anyone else gets it.
+  ///
+  /// Read this async form when you can await. The bottom nav cannot, and uses
+  /// [sopScanTabVisibleSync].
+  static Future<bool> getSopScanTabVisible() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(_kShowSopScanTab) ?? false;
+    } catch (e) {
+      print('Error reading SOP scan tab visibility: $e');
+      return false; // Fail-safe: hidden by default.
+    }
+  }
+
+  /// Release (or withdraw) the SOP/SMP Scan tab for normal users.
+  ///
+  /// Withdrawing works as well as releasing: if the feature misbehaves in the
+  /// field this is the way back, and it takes effect on other devices at their
+  /// next pull without a new build.
+  static Future<void> setSopScanTabVisible(bool visible) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kShowSopScanTab, visible);
+      await prefs.reload();
+      // Write through to the synchronous snapshot BEFORE bumping, so the
+      // listeners that _bump() wakes read the new value rather than the old one.
+      // The reverse order is a real bug, not a style point: home_screen rebuilds
+      // from the revision listener and would paint the previous state.
+      _sopScanTabSnapshot = visible;
+      _bump();
+      _pushWithRetry(
+          () => SyncService.pushMasterData(sopScanTabVisible: visible),
+          'SOP scan tab visibility',
+          'pushMasterData',
+          {'sopScanTabVisible': visible});
+      final saved = prefs.getBool(_kShowSopScanTab);
+      if (saved != visible) {
+        print('WARNING: SOP scan tab visibility not saved! '
+            'Expected $visible, got $saved');
+      }
+    } catch (e) {
+      print('Error saving SOP scan tab visibility: $e');
     }
   }
 
@@ -760,6 +863,11 @@ class AdminMasterData {
     await prefs.remove(_kSeverityScores);
     await prefs.remove(_kSpiParams);
     await prefs.setBool(_kShowSpiCard, false);
+    // Reset withdraws the SOP tab as well. "Reset to defaults" that left an
+    // unreleased feature switched on would be the one direction of this button
+    // that is not safe.
+    await prefs.setBool(_kShowSopScanTab, false);
+    _sopScanTabSnapshot = false;
     _bump();
     if (syncToBackend) {
       final resetPayload = <String, dynamic>{
@@ -771,6 +879,7 @@ class AdminMasterData {
         'obsTypes': List<String>.from(defaultObservationTypes),
         'spiParams': Map<String, int>.from(defaultSpiParams),
         'spiCardVisible': false,
+        'sopScanTabVisible': false,
         'severityScores': Map<String, int>.from(defaultSeverityScores),
       };
       _pushWithRetry(
@@ -783,6 +892,7 @@ class AdminMasterData {
           obsTypes: List<String>.from(defaultObservationTypes),
           spiParams: Map<String, int>.from(defaultSpiParams),
           spiCardVisible: false,
+          sopScanTabVisible: false,
           severityScores: Map<String, int>.from(defaultSeverityScores),
         ),
         'reset to defaults',
