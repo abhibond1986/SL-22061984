@@ -56,8 +56,36 @@ class _Page {
 }
 
 class SopScanScreen extends StatefulWidget {
+  final Map<String, dynamic>? user;
   final VoidCallback? toggleTheme;
-  const SopScanScreen({super.key, this.toggleTheme});
+  final VoidCallback? onSignOut;
+  final bool isDark;
+
+  /// True when this is a bottom-nav tab rather than a pushed route.
+  ///
+  /// Changes two things: saving resets the flow instead of calling
+  /// Navigator.pop (there is nothing to pop), and [hasUnsavedWork] is kept
+  /// current so HomeScreen can warn before a tab tap throws the pages away.
+  final bool isTab;
+
+  const SopScanScreen({
+    super.key,
+    this.user,
+    this.toggleTheme,
+    this.onSignOut,
+    this.isDark = true,
+    this.isTab = false,
+  });
+
+  /// Whether a scan in progress holds pages that are not in the KB yet.
+  ///
+  /// Static because the tab's State is DESTROYED on every bottom-nav switch —
+  /// HomeScreen rebuilds the selected tab through an AnimatedSwitcher keyed by
+  /// index, so by the time anything could ask the State whether it had unsaved
+  /// work, the State is gone and the photographs with it. The flag has to live
+  /// above the widget that owns the pages. Reset in dispose() so a stale `true`
+  /// cannot block navigation forever.
+  static final ValueNotifier<bool> hasUnsavedWork = ValueNotifier<bool>(false);
 
   @override
   State<SopScanScreen> createState() => _SopScanScreenState();
@@ -104,7 +132,21 @@ class _SopScanScreenState extends State<SopScanScreen> {
     // Release the native ML Kit recogniser. Harmless on web (no-op stub) and
     // harmless if it was never created.
     SopOcrDevice.dispose();
+    // Clear the guard unconditionally. If we are being disposed the pages are
+    // already gone, so leaving it true would block every future tab switch on a
+    // dialog about work that no longer exists.
+    SopScanScreen.hasUnsavedWork.value = false;
     super.dispose();
+  }
+
+  /// Keeps [SopScanScreen.hasUnsavedWork] in step with the page list.
+  ///
+  /// Call after ANY mutation of _pages or after a save. Unsaved means "pages
+  /// exist that are not in the KB yet" — which includes read pages sitting on
+  /// the review screen, not just un-read captures, because those cost the same
+  /// walk across the plant to replace.
+  void _syncUnsavedFlag() {
+    SopScanScreen.hasUnsavedWork.value = _pages.isNotEmpty;
   }
 
   Future<void> _loadScope() async {
@@ -168,6 +210,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
         final prepared = await _prepare(raw);
         if (!mounted) return;
         setState(() => _pages.add(prepared));
+        _syncUnsavedFlag();
       }
     } catch (e) {
       print('SopScan: capture failed — $e');
@@ -213,7 +256,10 @@ class _SopScanScreenState extends State<SopScanScreen> {
     }
   }
 
-  void _removePage(int index) => setState(() => _pages.removeAt(index));
+  void _removePage(int index) {
+    setState(() => _pages.removeAt(index));
+    _syncUnsavedFlag();
+  }
 
   void _movePage(int index, int delta) {
     final to = index + delta;
@@ -447,17 +493,46 @@ class _SopScanScreenState extends State<SopScanScreen> {
       final cloudNote = pushed == ids.length
           ? 'synced'
           : 'saved on this device — will sync later';
-      // Grab the messenger BEFORE popping. Reading it from `context` afterwards
-      // looks up a deactivated element and the confirmation is silently lost —
-      // exactly the case where the user needs to be told the work was saved.
-      final messenger = ScaffoldMessenger.of(context);
-      Navigator.of(context).pop(true);
-      messenger.showSnackBar(SnackBar(
+      final note = SnackBar(
         content: Text('Added "$title" to the Knowledge Base '
             '(${extract.clauses.length} clause(s), $cloudNote). '
             'An admin should verify it.'),
         duration: const Duration(seconds: 5),
-      ));
+      );
+
+      // The document is in the KB now, so nothing is at risk any more — release
+      // the navigation guard BEFORE anything else, or a save followed by a tab
+      // tap prompts about work that is already filed.
+      SopScanScreen.hasUnsavedWork.value = false;
+
+      // Grab the messenger BEFORE popping. Reading it from `context` afterwards
+      // looks up a deactivated element and the confirmation is silently lost —
+      // exactly the case where the user needs to be told the work was saved.
+      final messenger = ScaffoldMessenger.of(context);
+
+      if (widget.isTab) {
+        // As a tab there is no route to pop — popping would tear down the whole
+        // HomeScreen. Reset to a clean capture stage instead, which is also the
+        // right end state: an admin scanning a stack of SOPs starts the next one
+        // immediately rather than re-entering the tab.
+        setState(() {
+          _pages.clear();
+          _extract = null;
+          _stage = _Stage.capture;
+          _readDone = 0;
+          _progressNote = '';
+          _saving = false;
+          _error = null;
+          _titleCtl.clear();
+          _sopNoCtl.clear();
+          _deptCtl.clear();
+          // _plant deliberately kept — the next document is almost always from
+          // the same plant, and for a locked user it is not editable anyway.
+        });
+      } else {
+        Navigator.of(context).pop(true);
+      }
+      messenger.showSnackBar(note);
     } catch (e) {
       print('SopScan: save failed — $e');
       if (!mounted) return;
@@ -482,25 +557,41 @@ class _SopScanScreenState extends State<SopScanScreen> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     return Scaffold(
-      backgroundColor: sl.bg,
+      // Transparent as a tab, matching AIScanTab and NearMissTab: HomeScreen
+      // paints the gradient behind the whole body, and an opaque colour here
+      // would cover it and make this one tab look flat next to the other five.
+      backgroundColor: widget.isTab ? Colors.transparent : sl.bg,
       appBar: UniversalAppBar(
         title: 'Scan SOP / SMP',
         subtitle: _stageLabel,
+        user: widget.user,
         toggleTheme: widget.toggleTheme,
+        onSignOut: widget.onSignOut,
+        isDark: widget.isDark,
         showExport: false,
       ),
       body: SafeArea(
+        // As a tab, SafeArea must NOT reserve the bottom inset: HomeScreen sets
+        // extendBody: true so the blurred nav bar sits over the content, and
+        // taking the inset here would stack that gap on top of the scroll
+        // padding below and leave a visible dead band above the bar.
+        bottom: !widget.isTab,
         child: Container(
+          // Only paint a gradient in pushed mode. As a tab, HomeScreen has
+          // already painted this exact gradient behind the body, so a second one
+          // is wasted raster work on every rebuild.
           // sl.bgGradient is a List<Color>, not a Gradient — it feeds the
           // `colors:` slot. Same begin/end as every other screen so this one
           // doesn't run its gradient at a different angle.
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: sl.bgGradient,
-            ),
-          ),
+          decoration: widget.isTab
+              ? null
+              : BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: sl.bgGradient,
+                  ),
+                ),
           // Written as an if-chain, not a `switch` expression: STATUS.md records
           // that the CI toolchain (Flutter 3.19.6) has tripped on Dart 3
           // record/pattern switch expressions, and a build failure is a poor
@@ -533,9 +624,19 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   // ── Stage 1: capture ──────────────────────────────────────────────────
 
+  /// Scroll padding for the two list views.
+  ///
+  /// The extra bottom space is not cosmetic: as a tab, the translucent nav bar
+  /// is drawn OVER the body (extendBody), so without it the "Read N page(s)" and
+  /// "Save to Knowledge Base" buttons — the only way forward in each stage — sit
+  /// underneath the bar and cannot be tapped at all. 100 matches the value the
+  /// other tabs use for the same reason.
+  EdgeInsets get _listPadding =>
+      EdgeInsets.fromLTRB(16, 16, 16, widget.isTab ? 100 : 16);
+
   Widget _captureView(SL sl) {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: _listPadding,
       children: [
         if (_error != null) _errorBanner(sl, _error!),
         GlassCard(
@@ -751,7 +852,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
     final readOk = _pages.length - failed;
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: _listPadding,
       children: [
         if (_error != null) _errorBanner(sl, _error!),
 

@@ -12,6 +12,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart' show AppColors, SL;
+import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
@@ -20,7 +21,6 @@ import '../services/i18n.dart';
 import '../services/realtime_sync.dart';
 import 'reports_tab.dart';
 import 'admin_screen.dart';
-import 'sop_scan_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 
@@ -516,7 +516,7 @@ class _HomeTabState extends State<HomeTab> {
                       ReportsTab.pendingTypeFilter = 'AI_SCAN';
                       ReportsTab.pendingMyReportsOnly = true;
                       ReportsTab.pendingGoToLog = true;
-                      widget.onTabChange(4); // go to Reports → Log tab
+                      widget.onTabChange(AppTabs.reports); // go to Reports → Log tab
                     },
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -553,7 +553,7 @@ class _HomeTabState extends State<HomeTab> {
                       ReportsTab.pendingTypeFilter = 'NEAR_MISS';
                       ReportsTab.pendingMyReportsOnly = true;
                       ReportsTab.pendingGoToLog = true;
-                      widget.onTabChange(4); // go to Reports → Log tab
+                      widget.onTabChange(AppTabs.reports); // go to Reports → Log tab
                     },
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -634,7 +634,7 @@ class _HomeTabState extends State<HomeTab> {
   void _goReports(String? severityFilter, String? statusFilter) {
     ReportsTab.pendingSeverityFilter = severityFilter;
     ReportsTab.pendingStatusFilter   = statusFilter;
-    widget.onTabChange(4);
+    widget.onTabChange(AppTabs.reports);
   }
 
   Widget _statTile(SL sl, String label, String value, IconData icon, Color color,
@@ -793,13 +793,13 @@ class _HomeTabState extends State<HomeTab> {
               icon: Icons.camera_alt_rounded,
               label: I18n.t('home.startScan'),
               color: const Color(0xFF8B5CF6),
-              onTap: () => widget.onTabChange(1))),
+              onTap: () => widget.onTabChange(AppTabs.aiScan))),
           const SizedBox(width: 8),
           Expanded(child: _actionCard(sl,
               icon: Icons.warning_amber_rounded,
               label: I18n.t('home.reportNearMiss'),
               color: const Color(0xFFF59E0B),
-              onTap: () => widget.onTabChange(2))),
+              onTap: () => widget.onTabChange(AppTabs.nearMiss))),
         ]),
         const SizedBox(height: 8),
         Row(children: [
@@ -807,34 +807,31 @@ class _HomeTabState extends State<HomeTab> {
               icon: Icons.assessment_rounded,
               label: I18n.t('home.viewReports'),
               color: const Color(0xFF06B6D4),
-              onTap: () => widget.onTabChange(4))),
+              onTap: () => widget.onTabChange(AppTabs.reports))),
           const SizedBox(width: 8),
           Expanded(child: _actionCard(sl,
               icon: Icons.support_agent_rounded,
               label: I18n.t('home.askExpert'),
               color: const Color(0xFF10B981),
-              onTap: () => widget.onTabChange(3))),
+              onTap: () => widget.onTabChange(AppTabs.askAi))),
         ]),
         const SizedBox(height: 8),
-        // SOP/SMP scan is a pushed screen, not a tab — it owns a multi-stage
-        // flow with unsaved captured pages in it, and a tab bar underneath
-        // would let one tap discard a document the user walked the shop floor
-        // to photograph. Full width because there is no fifth action to pair
-        // it with, and stretching one card reads better than a hanging gap.
+        // Switches to the SOP Scan tab rather than pushing the screen. It was a
+        // pushed route until the tab was added, to stop one nav tap discarding
+        // pages the user walked the shop floor to photograph; HomeScreen now
+        // guards that with a confirm dialog instead. Pushing as well would give
+        // the same flow two entry points and two live copies of its State.
+        // Full width because there is no fifth action to pair it with, and
+        // stretching one card reads better than a hanging gap.
         Row(children: [
           Expanded(child: _actionCard(sl,
               icon: Icons.document_scanner_rounded,
               label: I18n.t('home.scanSop'),
               color: const Color(0xFF6366F1),
-              onTap: _openSopScan)),
+              onTap: () => widget.onTabChange(AppTabs.sopScan))),
         ]),
       ]),
     );
-  }
-
-  void _openSopScan() {
-    Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => SopScanScreen(toggleTheme: widget.toggleTheme)));
   }
 
   Widget _actionCard(SL sl, {required IconData icon, required String label,
@@ -1035,7 +1032,7 @@ class _HomeTabState extends State<HomeTab> {
               Icons.history_rounded),
           const Spacer(),
           GestureDetector(
-            onTap: () => widget.onTabChange(4),
+            onTap: () => widget.onTabChange(AppTabs.reports),
             child: Row(children: [
               Text(I18n.t('home.viewAll'),
                   style: const TextStyle(color: AppColors.accent,

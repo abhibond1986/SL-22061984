@@ -8,6 +8,7 @@
 
 import 'package:flutter/material.dart';
 import '../main.dart';
+import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
@@ -645,13 +646,13 @@ class _DashboardTabState extends State<DashboardTab> {
       _sectionHeader('⚡  Quick Actions', sl),
       const SizedBox(height: 10),
       Row(children: [
-        _actionBtn(Icons.document_scanner_rounded, 'AI Hazard\nScan',   AppColors.accent, sl, () => widget.onTabChange(1)),
+        _actionBtn(Icons.document_scanner_rounded, 'AI Hazard\nScan',   AppColors.accent, sl, () => widget.onTabChange(AppTabs.aiScan)),
         const SizedBox(width: 8),
-        _actionBtn(Icons.warning_amber_rounded,    'Report\nNear Miss', AppColors.amber,  sl, () => widget.onTabChange(2)),
+        _actionBtn(Icons.warning_amber_rounded,    'Report\nNear Miss', AppColors.amber,  sl, () => widget.onTabChange(AppTabs.nearMiss)),
         const SizedBox(width: 8),
-        _actionBtn(Icons.chat_bubble_rounded,      'Ask\nSuraksha AI',  AppColors.cyan,   sl, () => widget.onTabChange(3)),
+        _actionBtn(Icons.chat_bubble_rounded,      'Ask\nSuraksha AI',  AppColors.cyan,   sl, () => widget.onTabChange(AppTabs.askAi)),
         const SizedBox(width: 8),
-        _actionBtn(Icons.bar_chart_rounded,        'View\nReports',     AppColors.purple, sl, () => widget.onTabChange(4)),
+        _actionBtn(Icons.bar_chart_rounded,        'View\nReports',     AppColors.purple, sl, () => widget.onTabChange(AppTabs.reports)),
       ]),
     ],
   );

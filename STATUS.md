@@ -1,7 +1,11 @@
 # Safety Lens — current status
 
 **Last verified: 2026-08-14** against the live repo and the Supabase REST API.
-The SOP/SMP scan feature was added on 2026-08-19 and has **not been compiled** —
+The SOP/SMP scan feature was added on 2026-08-19 — as a **bottom-nav tab at
+index 3**, between Near Miss and Ask AI, taking the bar from five tabs to six.
+Tab indices now live in `lib/utils/app_tabs.dart`; there must be no bare tab
+integers anywhere, because a wrong one opens the wrong tab without failing to
+compile. The feature has **not been compiled** —
 there is no Dart/Flutter SDK in the environment it was written in. It passed
 static checks only (see *Verification limits*). Treat the deploy step below as
 untested until `flutter analyze` runs clean on a machine that has the SDK.
@@ -215,6 +219,14 @@ Audit total as of 2026-08-14: **230 failures** (84 token + 146 type floor) and
 
 The bare `AppColors` status tokens are left deliberately failing as text so the
 audit keeps flagging any reintroduction. They are correct as **fills**.
+
+Also deliberate, added 2026-08-19: the bottom-nav label in `home_screen.dart` is
+**9px**, below the 10px floor, so the audit reports it as a failure (one line,
+covering all six labels). Six tabs give each ~53px on a 320px screen and
+"SOP Scan" does not fit at 10px. If it reads too small on the shop floor the fix
+is to shorten that one label to "SOP" and put all six back to 10px — not to
+shrink further. This moved the audit from 244 failures / 236 warnings to
+**245 / 235**: the same line, reclassified from warning to failure.
 
 ## Verification limits
 
