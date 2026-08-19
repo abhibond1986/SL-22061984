@@ -81,6 +81,11 @@ class _SopScanScreenState extends State<SopScanScreen> {
   final _deptCtl = TextEditingController();
 
   PlantScope? _scope;
+  // Resolved once in _loadScope, NOT in build(): selectablePlants() reads admin
+  // master data, and a FutureBuilder whose `future:` is created inside build
+  // re-runs that read on every rebuild — and this screen rebuilds on every page
+  // captured, every OCR result and every keystroke in the title field.
+  List<String> _plantOptions = const [];
   String _plant = '';
   bool _saving = false;
   String? _error;
@@ -104,9 +109,21 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   Future<void> _loadScope() async {
     final scope = await PlantScope.forUser();
+    // Only org-level users get a choice, so only they need the list.
+    List<String> options = const [];
+    if (!scope.isLocked) {
+      try {
+        options = await scope.selectablePlants();
+      } catch (_) {
+        // Master data unavailable — fall through with an empty list, which hides
+        // the field rather than blocking the scan. Plant is metadata here; the
+        // document is still worth saving without it.
+      }
+    }
     if (!mounted) return;
     setState(() {
       _scope = scope;
+      _plantOptions = options;
       _plant = scope.plant;
     });
   }
@@ -474,7 +491,16 @@ class _SopScanScreenState extends State<SopScanScreen> {
       ),
       body: SafeArea(
         child: Container(
-          decoration: BoxDecoration(gradient: sl.bgGradient),
+          // sl.bgGradient is a List<Color>, not a Gradient — it feeds the
+          // `colors:` slot. Same begin/end as every other screen so this one
+          // doesn't run its gradient at a different angle.
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: sl.bgGradient,
+            ),
+          ),
           // Written as an if-chain, not a `switch` expression: STATUS.md records
           // that the CI toolchain (Flutter 3.19.6) has tripped on Dart 3
           // record/pattern switch expressions, and a build failure is a poor
@@ -928,32 +954,25 @@ class _SopScanScreenState extends State<SopScanScreen> {
         Text('Plant: ${scope.plant}', style: SLText.bodySmall(sl)),
       ]);
     }
-    // Org-level users pick. Loaded lazily because selectablePlants() reads the
-    // admin master data.
-    return FutureBuilder<List<String>>(
-      future: scope.selectablePlants(),
-      builder: (context, snap) {
-        final options = snap.data ?? const <String>[];
-        if (options.isEmpty) return const SizedBox.shrink();
-        return DropdownButtonFormField<String>(
-          value: options.contains(_plant) ? _plant : null,
-          isExpanded: true,
-          dropdownColor: sl.card2,
-          decoration: InputDecoration(
-            labelText: 'Plant',
-            labelStyle: SLText.label(sl),
-            border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: sl.border)),
-          ),
-          style: TextStyle(color: sl.text1, fontSize: 13),
-          items: [
-            for (final p in options)
-              DropdownMenuItem(value: p, child: Text(p))
-          ],
-          onChanged: (v) => setState(() => _plant = v ?? ''),
-        );
-      },
+    // Org-level users pick, from the list _loadScope already resolved.
+    final options = _plantOptions;
+    if (options.isEmpty) return const SizedBox.shrink();
+    return DropdownButtonFormField<String>(
+      value: options.contains(_plant) ? _plant : null,
+      isExpanded: true,
+      dropdownColor: sl.card2,
+      decoration: InputDecoration(
+        labelText: 'Plant',
+        labelStyle: SLText.label(sl),
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide(color: sl.border)),
+      ),
+      style: TextStyle(color: sl.text1, fontSize: 13),
+      items: [
+        for (final p in options) DropdownMenuItem(value: p, child: Text(p))
+      ],
+      onChanged: (v) => setState(() => _plant = v ?? ''),
     );
   }
 
