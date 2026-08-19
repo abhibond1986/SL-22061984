@@ -121,10 +121,11 @@ class NaraVision {
   /// purpose (it is the strongest model on the account's free plan), so 10.4s in
   /// step 3 is the expected case, not the bad case.
   ///
-  /// Note that Tier 1b is NOT inside `_kTier1Budget` (that clock is checked only
-  /// inside the OpenRouter loop), so a stall here delays Tier 2 by the full
-  /// amount. That is the accepted tradeoff: this tier only runs at all once
-  /// OpenRouter has 429'd, which it does immediately.
+  /// Note that this tier is NOT inside `_kTier1Budget` (that clock is checked
+  /// only inside the OpenRouter loop), so a stall here is paid in full. Since the
+  /// 2026-08-19 reorder it runs LAST of the online providers, so the only thing
+  /// it now delays is the offline fallback — the cost of a stall is much lower
+  /// than when it sat in front of Gemini as Tier 1b.
   static const Duration kProxyTimeout = Duration(seconds: 45);
 
   /// Chat-completions URL. Base is `https://router.bynara.id/v1`.
@@ -501,7 +502,9 @@ class NaraVision {
           case 429:
             lastWasRateLimited = true;
             print('NaraVision: ✗ HTTP 429 — daily TOKEN allowance spent (Nara '
-                'meters tokens, not requests). A cheaper model buys more scans.');
+                'meters tokens, not requests: 10M/day on the free plan). Every '
+                'free-plan model draws on the SAME allowance, so switching '
+                'models will not restore it — it resets on its own.');
             break;
         }
 

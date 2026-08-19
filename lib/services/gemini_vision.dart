@@ -61,9 +61,10 @@ import 'ai_run_log.dart';
 // a configured Gemini key is the only thing that can still analyse the image.
 // It was admin-configurable but never called — see the chain below.
 import 'gemini_direct_vision.dart';
-// Tier 1b. NaraRouter is a THIRD account with a THIRD allowance — see the tier
-// comment in analyseImageBytes for why it sits between OpenRouter and Gemini
-// rather than at the front. It imports this file back (for the shared prompt
+// Tier 3. NaraRouter is a THIRD account with a THIRD allowance — see the tier
+// comment in analyseImageBytes for why it runs LAST of the online providers
+// (added as Tier 1b on 2026-08-17, moved behind Gemini on 2026-08-19 because it
+// is the slowest measured path). It imports this file back (for the shared prompt
 // builder and response parser); the cycle is fine in Dart and is preferable to
 // a third copy of both, which is how gemini_direct_vision.dart drifted.
 import 'nara_vision.dart';
@@ -108,9 +109,13 @@ class GeminiVision {
   // ~11,000ms was the model that actually answered. Four fifths of the wait
   // bought nothing. Both constants below exist to stop that recurring.
   //
-  // kAttemptTimeout — per HTTP call. PUBLIC because Tier 1b (NaraVision) shares
-  // this exact ceiling; a provider added later must not be able to stall a scan
-  // for longer than a measured one. Was a hardcoded 45s. A free-tier vision
+  // kAttemptTimeout — per HTTP call. PUBLIC because NaraVision's DIRECT (mobile)
+  // path shares this exact ceiling; a provider added later must not be able to
+  // stall a scan for longer than a measured one. The one deliberate exception is
+  // NaraVision.kProxyTimeout (45s), which covers the web-only Apps Script proxy
+  // path: that route has four hops and its Nara leg alone measured 10.4s, so 20s
+  // killed healthy requests. Any new exception needs the same kind of
+  // measurement, not an estimate. Was a hardcoded 45s. A free-tier vision
   // model that has not answered in 20s is queued or stalled, not thinking: the
   // model that succeeded in that measurement returned in ~11s, so 20s leaves
   // ~2x headroom over a known-good response while cutting the cost of a dead
