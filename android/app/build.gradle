@@ -78,3 +78,29 @@ android {
 flutter {
     source '../..'
 }
+
+dependencies {
+    // Hindi (Devanagari) on-device text recognition for the SOP/SMP scan.
+    //
+    // WHY THIS LINE EXISTS: google_mlkit_text_recognition declares the four
+    // non-Latin scripts as `compileOnly` (verified in the plugin's own
+    // android/build.gradle), so they are on its compile classpath and on
+    // NOBODY's runtime classpath. Latin ships as a real `implementation`
+    // dependency; asking the plugin for TextRecognitionScript.devanagiri without
+    // this line throws at runtime on the first Hindi page, and R8 reports the
+    // class as missing at build time.
+    //
+    // WHY THE `com.google.mlkit` FAMILY AND NOT `com.google.android.gms`: both
+    // publish a Devanagari artifact, and the gms one is smaller because the model
+    // lives in Play services. The plugin uses `com.google.mlkit:text-recognition`
+    // for Latin, and matching the family keeps one copy of the shared
+    // text-recognition-common code and one model-loading path. It also means
+    // Hindi still works on a shop-floor phone with no Play services update and
+    // no network, which is the environment this app is actually used in. The cost
+    // is a few MB of bundled model in the APK.
+    //
+    // Version tracks the plugin's own 16.0.1 pin. If the plugin is ever moved off
+    // the 0.13.x line, re-check this against its android/build.gradle rather than
+    // assuming.
+    implementation 'com.google.mlkit:text-recognition-devanagari:16.0.1'
+}

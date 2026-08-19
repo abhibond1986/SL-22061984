@@ -32,6 +32,7 @@ import '../services/plant_scope.dart';
 import '../services/sop_doc_import.dart';
 import '../services/sop_ocr_device.dart';
 import '../services/sop_ocr_service.dart';
+import '../services/sop_safety_analysis.dart';
 import '../services/sync_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/universal_app_bar.dart';
@@ -130,6 +131,23 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   final List<_Page> _pages = [];
   SopExtract? _extract;
+
+  /// The safety read of the document: hazards, critical requirements, checklist.
+  ///
+  /// SEPARATE from [_extract] and nullable on purpose. The clause extract is what
+  /// gets SAVED to the Knowledge Base; this is a reading aid shown on this screen
+  /// only. Keeping them apart means a failed safety pass cannot block the save,
+  /// and the save path in _save() needs no knowledge of this field at all — the
+  /// user still files a perfectly good document when the analysis model is down.
+  SopSafetyAnalysis? _safety;
+
+  /// Whether the raw transcription is expanded in the review list.
+  ///
+  /// Collapsed by default: it is 20 pages of unformatted OCR text and would bury
+  /// the requirements the screen exists to surface. It has to be REACHABLE
+  /// though — it is the only way for the user to see what the AI actually read,
+  /// and so the only way to tell a wrong requirement from a misread page.
+  bool _showOcr = false;
 
   /// True when these pages came from an uploaded file rather than the camera.
   ///
@@ -611,9 +629,39 @@ class _SopScanScreenState extends State<SopScanScreen> {
     _sopNoCtl.text = extract.sopNumber;
     if (extract.department.isNotEmpty) _deptCtl.text = extract.department;
 
+    // ── The safety pass ─────────────────────────────────────────────────────
+    //
+    // A SECOND model call, deliberately not folded into structure(). Two reasons:
+    // the clause split and the safety read want different prompts and different
+    // failure handling, and merging them would mean one bad JSON response loses
+    // both. This one is also allowed to fail without consequence — analyse()
+    // returns ok:false rather than throwing, the review screen simply shows no
+    // safety section, and the document still saves.
+    setState(() => _progressNote = 'Checking safety requirements…');
+    final pageTexts = <int, String>{};
+    for (final p in good) {
+      final r = p.result!;
+      // Later pages win a key collision, but pageNo is assigned per page by the
+      // reader so a collision would be a bug upstream, not something to paper
+      // over here.
+      pageTexts[r.pageNo] = r.text;
+    }
+    final safety = await SopSafetyService.analyse(
+      pageTexts,
+      title: _titleCtl.text.trim(),
+    );
+    if (!mounted) return;
+
     setState(() {
       _extract = extract;
+      _safety = safety.ok ? safety : null;
       _stage = _Stage.review;
+      // Clear the reading note on the way out of this stage. The Save button
+      // falls back to _progressNote while _saving is true, so a note left over
+      // from the read shows up as the button's label for the moment before the
+      // upload sets its own — "Checking safety requirements…" on a button the
+      // user just pressed to save.
+      _progressNote = '';
     });
   }
 
@@ -791,6 +839,8 @@ class _SopScanScreenState extends State<SopScanScreen> {
           _pages.clear();
           _imported = false;
           _extract = null;
+          _safety = null;
+          _showOcr = false;
           _stage = _Stage.capture;
           _readDone = 0;
           _progressNote = '';
@@ -1276,6 +1326,13 @@ class _SopScanScreenState extends State<SopScanScreen> {
         if (extract.keyLimits.isNotEmpty)
           _chipsCard(sl, 'Key limits', extract.keyLimits, Icons.speed_outlined),
 
+        // ── The safety read ──────────────────────────────────────────────────
+        //
+        // Placed ABOVE the clause list. The clauses are the archival record; these
+        // are the things that decide whether the job is safe to start, and a user
+        // who reads only the first screenful should get those.
+        ..._safetySections(sl),
+
         // Clauses.
         GlassCard(
           padding: const EdgeInsets.all(14),
@@ -1295,6 +1352,12 @@ class _SopScanScreenState extends State<SopScanScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 14),
+
+        // Raw OCR text. OUTSIDE _safetySections on purpose: when the safety pass
+        // fails this is the one thing still worth showing, because it is how the
+        // user checks whether the reader saw the page at all.
+        _ocrTextCard(sl),
         const SizedBox(height: 14),
 
         // The trust statement. This screen is open to any user by design, so the
@@ -1329,6 +1392,8 @@ class _SopScanScreenState extends State<SopScanScreen> {
                   : () => setState(() {
                         _stage = _Stage.capture;
                         _extract = null;
+                        _safety = null;
+                        _showOcr = false;
                         _error = null;
                       }),
               style: OutlinedButton.styleFrom(
@@ -1492,6 +1557,738 @@ class _SopScanScreenState extends State<SopScanScreen> {
             text.length > 400 ? '${text.substring(0, 400)}…' : text,
             style: TextStyle(color: sl.text2, fontSize: 12, height: 1.4),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  SAFETY READ — critical requirements, checklist, issues, disclaimer
+  //
+  //  Returns a LIST so the whole block can be absent. An empty list is the
+  //  correct rendering when the analysis model could not be reached: no empty
+  //  card, no "0 requirements found" heading, nothing that could be mistaken for
+  //  "this document places no safety requirements on the job".
+  // ═══════════════════════════════════════════════════════════════════════
+
+  List<Widget> _safetySections(SL sl) {
+    final s = _safety;
+    if (s == null) {
+      // Say so, once, quietly. Silence here would leave a user who scanned a
+      // permit-to-work wondering whether the AI found nothing or never ran.
+      return [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: Row(children: [
+            Icon(Icons.cloud_off_outlined, size: 15, color: sl.text3),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'The safety analysis could not be produced for this document. '
+                'The scan and the clauses above are unaffected and can still be '
+                'saved.',
+                style: SLText.hint(sl),
+              ),
+            ),
+          ]),
+        ),
+      ];
+    }
+
+    return [
+      _safetyHeaderCard(sl, s),
+      const SizedBox(height: 14),
+      if (s.criticalRequirements.isNotEmpty) ...[
+        _criticalCard(sl, s),
+        const SizedBox(height: 14),
+      ],
+      if (s.hazards.isNotEmpty) ...[
+        _hazardsCard(sl, s),
+        const SizedBox(height: 14),
+      ],
+      if (s.checklist.isNotEmpty) ...[
+        _checklistCard(sl, s),
+        const SizedBox(height: 14),
+      ],
+      if (s.populatedCategories.isNotEmpty) ...[
+        _categoriesCard(sl, s),
+        const SizedBox(height: 14),
+      ],
+      if (s.issues.isNotEmpty) ...[
+        _issuesCard(sl, s),
+        const SizedBox(height: 14),
+      ],
+      // The AI disclaimer sits at the END of the safety block, immediately after
+      // the last AI-generated claim and before the archival clause list. Putting
+      // it at the top would have it scrolled away by the time the user reaches
+      // the requirements it qualifies.
+      _disclaimerCard(sl, s),
+      const SizedBox(height: 14),
+    ];
+  }
+
+  /// Document type, activity, equipment and the overall risk level.
+  Widget _safetyHeaderCard(SL sl, SopSafetyAnalysis s) {
+    final facts = <String>[
+      if (s.docType.isNotEmpty) s.docType,
+      if (s.activity.isNotEmpty) s.activity,
+      if (s.equipment.isNotEmpty) s.equipment,
+    ];
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.shield_outlined, size: 16, color: sl.accentText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Safety analysis',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+            if (s.riskLevel.isNotEmpty) _riskPill(sl, s.riskLevel),
+          ]),
+          if (facts.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(facts.join(' · '), style: SLText.bodySmall(sl)),
+          ],
+          if (s.truncated) ...[
+            const SizedBox(height: 8),
+            Text(
+              'This document was too long to analyse in full — only the earlier '
+              'pages were assessed. Requirements printed later in the document '
+              'may be missing from the lists below.',
+              style: SLText.bodySmall(sl).copyWith(color: sl.amberText),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// HIGH / MEDIUM / LOW badge.
+  ///
+  /// Uses the plant signage convention already in AppColors, and the *Text/
+  /// *Beacon getters via SL rather than the raw hex, because red at 4.40:1 on a
+  /// dark card misses AA — the same reason every other status label in this app
+  /// goes through sl.
+  Widget _riskPill(SL sl, String level) {
+    final up = level.toUpperCase();
+    final Color fg = up == 'HIGH'
+        ? sl.redText
+        : up == 'MEDIUM'
+            ? sl.amberText
+            : sl.greenText;
+    final Color base =
+        up == 'HIGH' ? AppColors.red : up == 'MEDIUM' ? AppColors.amber : AppColors.green;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: base.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: base.withOpacity(0.40)),
+      ),
+      child: Text('$up RISK',
+          style:
+              TextStyle(color: fg, fontSize: 10, fontWeight: FontWeight.w800)),
+    );
+  }
+
+  Widget _criticalCard(SL sl, SopSafetyAnalysis s) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.report_problem_outlined, size: 16, color: sl.redText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                  'Critical safety requirements '
+                  '(${s.criticalRequirements.length})',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text(
+            s.unverifiedCount == 0
+                ? 'Every requirement below was matched to text found in the '
+                    'document. Tap one to see the page and the exact wording.'
+                : '${s.unverifiedCount} of ${s.criticalRequirements.length} '
+                    'could NOT be matched to the scanned text and are marked '
+                    'unverified — check those against the paper document.',
+            style: SLText.hint(sl),
+          ),
+          const SizedBox(height: 10),
+          for (final r in s.criticalRequirements) _requirementRow(sl, r),
+        ],
+      ),
+    );
+  }
+
+  Widget _hazardsCard(SL sl, SopSafetyAnalysis s) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.dangerous_outlined, size: 16, color: sl.amberText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Hazards identified (${s.hazards.length})',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          for (final h in s.hazards) _requirementRow(sl, h),
+        ],
+      ),
+    );
+  }
+
+  /// One requirement or hazard, colour-led by criticality and tappable.
+  ///
+  /// The colour is on a left BAR rather than on the text: criticality is a
+  /// property of the requirement, not of its legibility, and colouring 60
+  /// characters of body copy amber costs contrast on the thing the user has to
+  /// actually read. The bar carries the signal, the text stays at full contrast,
+  /// and the word HIGH/MEDIUM/LOW is printed as well so the meaning does not
+  /// depend on colour vision.
+  Widget _requirementRow(SL sl, SopRequirement r) {
+    final label = criticalityLabel(r.criticality);
+    final Color base = r.criticality == SopCriticality.high
+        ? AppColors.red
+        : r.criticality == SopCriticality.medium
+            ? AppColors.amber
+            : AppColors.green;
+    final Color fg = r.criticality == SopCriticality.high
+        ? sl.redText
+        : r.criticality == SopCriticality.medium
+            ? sl.amberText
+            : sl.greenText;
+
+    final hasSource = r.sourceText.trim().isNotEmpty || r.sourcePage != 0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: sl.card2,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: sl.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(width: 3, color: base),
+          Expanded(
+            child: InkWell(
+              // Not tappable when there is nothing to show. A tap that opens an
+              // empty sheet reads as a broken screen.
+              onTap: hasSource ? () => _showSource(sl, r) : null,
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: base.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        // 10px, not 9. The 9px waiver granted for the bottom-nav
+                        // labels does not extend here: a nav label is a fixed,
+                        // learned word next to an icon, whereas HIGH/MEDIUM/LOW
+                        // is the safety signal itself and is read on a phone at
+                        // arm's length on a shop floor.
+                        child: Text(label,
+                            style: TextStyle(
+                                color: fg,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800)),
+                      ),
+                      const SizedBox(width: 6),
+                      if (!r.verified)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: sl.card3,
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: sl.border),
+                          ),
+                          child: Text('UNVERIFIED',
+                              style: TextStyle(
+                                  color: sl.text3,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                      const Spacer(),
+                      if (r.sourcePage != 0)
+                        Text('p.${r.sourcePage}', style: SLText.hint(sl)),
+                      if (hasSource) ...[
+                        const SizedBox(width: 4),
+                        Icon(Icons.chevron_right, size: 14, color: sl.text3),
+                      ],
+                    ]),
+                    const SizedBox(height: 6),
+                    Text(r.requirement,
+                        style: TextStyle(
+                            color: sl.text1, fontSize: 12, height: 1.4)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The source sheet: where this came from, verbatim.
+  ///
+  /// This is the whole traceability story in one screen. The user is standing in
+  /// front of the paper document, so the useful thing is the page number plus the
+  /// exact printed wording to find with their eye — not a paraphrase.
+  void _showSource(SL sl, SopRequirement r) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: sl.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      isScrollControlled: true,
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Where this came from',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(height: 10),
+              Text(r.requirement,
+                  style:
+                      TextStyle(color: sl.text1, fontSize: 13, height: 1.45)),
+              const SizedBox(height: 14),
+              Text(
+                  r.sourcePage != 0
+                      ? 'Quoted from page ${r.sourcePage}'
+                      : 'Page not identified',
+                  style: SLText.label(sl)),
+              const SizedBox(height: 6),
+              if (r.sourceText.trim().isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: sl.card2,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: sl.border),
+                  ),
+                  // Monospace: this is a quotation from a document, and the
+                  // change of face is what tells the user they are looking at
+                  // the document's words rather than the app's.
+                  child: Text(r.sourceText,
+                      style: TextStyle(
+                          color: sl.text2,
+                          fontSize: 12,
+                          height: 1.5,
+                          fontFamily: 'monospace')),
+                )
+              else
+                Text(
+                  'The AI did not quote a source line for this one. Treat it as '
+                  'unconfirmed and check the document.',
+                  style: SLText.bodySmall(sl).copyWith(color: sl.amberText),
+                ),
+              if (!r.verified) ...[
+                const SizedBox(height: 12),
+                Row(children: [
+                  Icon(Icons.help_outline, size: 15, color: sl.amberText),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'This quotation could not be found in the scanned text. '
+                      'Either the page was misread, or the requirement was not '
+                      'taken from the document.',
+                      style: SLText.bodySmall(sl),
+                    ),
+                  ),
+                ]),
+              ],
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The checklist, in two structurally separate groups.
+  ///
+  /// THE SPLIT IS THE POINT. "In the document" and "the AI thinks you should
+  /// also" carry completely different authority on a shop floor, and a single
+  /// merged list of ticks silently promotes the second to the first. The
+  /// fromDocument flag is set once, in the service, from which JSON array the
+  /// item arrived in — it is never re-derived here.
+  Widget _checklistCard(SL sl, SopSafetyAnalysis s) {
+    final fromDoc = s.documentChecks;
+    final suggested = s.suggestedChecks;
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.checklist_rtl_outlined, size: 16, color: sl.accentText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Pre-job safety checklist',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text(
+            'A reading aid, not a permit. Ticks are not saved and this does not '
+            'replace the signed checklist for the job.',
+            style: SLText.hint(sl),
+          ),
+          if (fromDoc.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _checkGroupHeader(
+                sl, 'From the document', '${fromDoc.length}', sl.greenText),
+            const SizedBox(height: 8),
+            for (final c in fromDoc) _checkRow(sl, c),
+          ],
+          if (suggested.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _checkGroupHeader(sl, 'AI suggested additional checks',
+                '${suggested.length}', sl.amberText),
+            const SizedBox(height: 4),
+            Text(
+              'NOT found in this document. Generally good practice for this kind '
+              'of job — confirm with your area before relying on any of them.',
+              style: SLText.hint(sl),
+            ),
+            const SizedBox(height: 8),
+            for (final c in suggested) _checkRow(sl, c),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _checkGroupHeader(SL sl, String title, String count, Color tint) {
+    return Row(children: [
+      Container(width: 6, height: 6,
+          decoration: BoxDecoration(color: tint, shape: BoxShape.circle)),
+      const SizedBox(width: 7),
+      Text(title,
+          style: TextStyle(
+              color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700)),
+      const SizedBox(width: 6),
+      Text('($count)', style: SLText.hint(sl)),
+    ]);
+  }
+
+  /// A single check line.
+  ///
+  /// Rendered as a static square, NOT a Checkbox. Nothing on this screen persists
+  /// a tick, and an interactive checkbox on a safety checklist implies a record
+  /// that someone could later be asked to produce. If ticking is ever wanted it
+  /// needs a saved, attributed, timestamped row behind it — not local state.
+  Widget _checkRow(SL sl, SopCheckItem c) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(
+                c.fromDocument
+                    ? Icons.check_box_outline_blank
+                    : Icons.add_box_outlined,
+                size: 15,
+                color: c.fromDocument ? sl.text3 : sl.amberText),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(c.text,
+                style:
+                    TextStyle(color: sl.text2, fontSize: 12, height: 1.45)),
+          ),
+          if (c.sourcePage != 0)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Text('p.${c.sourcePage}', style: SLText.hint(sl)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Requirements grouped by the fixed 15 categories, for the ones that are
+  /// populated. Collapsed presentation — chips, not paragraphs — because this is
+  /// the "what kind of controls does this job need" overview, and the detail is
+  /// in the critical list above.
+  Widget _categoriesCard(SL sl, SopSafetyAnalysis s) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.rule_outlined, size: 16, color: sl.accentText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Requirements by type',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          for (final cat in s.populatedCategories) ...[
+            const SizedBox(height: 8),
+            Text(SopSafetyAnalysis.categoryLabels[cat] ?? cat,
+                style: TextStyle(
+                    color: sl.accentText,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            for (final item in s.of(cat))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4, left: 2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5, right: 7),
+                      child: Container(width: 4, height: 4,
+                          decoration: BoxDecoration(
+                              color: sl.text3, shape: BoxShape.circle)),
+                    ),
+                    Expanded(
+                      child: Text(item,
+                          style: TextStyle(
+                              color: sl.text2, fontSize: 12, height: 1.4)),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Gaps and contradictions the AI thinks it found in the document.
+  ///
+  /// Worded throughout as a QUESTION about the document, never as a finding
+  /// against it. This screen has no authority to declare a plant SOP deficient,
+  /// and a scan that confidently reports a real, approved procedure as unsafe
+  /// would be the fastest way to get the whole feature switched off.
+  Widget _issuesCard(SL sl, SopSafetyAnalysis s) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.help_outline, size: 16, color: sl.amberText),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Points to check (${s.issues.length})',
+                  style: TextStyle(
+                      color: sl.text1,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text(
+            'Possible gaps the AI noticed. It may simply have misread the page, '
+            'or the requirement may live in a different document — these are '
+            'questions to raise, not defects.',
+            style: SLText.hint(sl),
+          ),
+          const SizedBox(height: 10),
+          for (final i in s.issues)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: sl.card2,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: sl.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Expanded(
+                      child: Text(i.issue,
+                          style: TextStyle(
+                              color: sl.text1,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              height: 1.4)),
+                    ),
+                    if (i.sourcePage != 0)
+                      Text('p.${i.sourcePage}', style: SLText.hint(sl)),
+                  ]),
+                  if (i.reason.isNotEmpty) ...[
+                    const SizedBox(height: 5),
+                    Text(i.reason,
+                        style: TextStyle(
+                            color: sl.text2, fontSize: 12, height: 1.4)),
+                  ],
+                  if (i.sourceText.trim().isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text('“${i.sourceText}”',
+                        style: TextStyle(
+                            color: sl.text3,
+                            fontSize: 11,
+                            height: 1.4,
+                            fontStyle: FontStyle.italic)),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _disclaimerCard(SL sl, SopSafetyAnalysis s) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.red.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.red.withOpacity(0.30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.warning_amber_rounded, size: 18, color: sl.redText),
+            const SizedBox(width: 10),
+            Expanded(
+              // The single source of this wording is the service constant, so the
+              // disclaimer shown on screen cannot drift from the one the rest of
+              // the feature refers to.
+              child: Text(SopSafetyService.disclaimer,
+                  style: SLText.bodySmall(sl)),
+            ),
+          ]),
+          if (s.aiRecommendations.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text('AI notes',
+                style: TextStyle(
+                    color: sl.text1,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            for (final rec in s.aiRecommendations)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text('• $rec', style: SLText.bodySmall(sl)),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The raw transcription, collapsed.
+  ///
+  /// Read-only. Editing it was in the original spec and is deliberately NOT here:
+  /// the text has already been used to produce the clauses and the analysis above,
+  /// so an edit at this point would leave the two disagreeing with no indication
+  /// which the user was shown. Correcting OCR properly means re-running both
+  /// passes, which is a bigger change than this screen.
+  Widget _ocrTextCard(SL sl) {
+    final read = _pages.where((p) => p.result?.ok == true).toList();
+    if (read.isEmpty) return const SizedBox.shrink();
+
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _showOcr = !_showOcr),
+            child: Row(children: [
+              Icon(Icons.text_snippet_outlined, size: 16, color: sl.text3),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Text the reader saw (${read.length} page(s))',
+                    style: TextStyle(
+                        color: sl.text1,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700)),
+              ),
+              Icon(_showOcr ? Icons.expand_less : Icons.expand_more,
+                  size: 18, color: sl.text3),
+            ]),
+          ),
+          if (!_showOcr) ...[
+            const SizedBox(height: 4),
+            Text(
+                'Open this to check a requirement that looks wrong — it is '
+                'usually a misread page rather than a mistaken conclusion.',
+                style: SLText.hint(sl)),
+          ],
+          if (_showOcr)
+            for (final p in read) ...[
+              const SizedBox(height: 12),
+              Text(
+                  'Page ${p.result!.pageNo} · read by ${p.result!.engine}',
+                  style: SLText.label(sl)),
+              const SizedBox(height: 4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: sl.card2,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: sl.border),
+                ),
+                child: SelectableText(
+                  p.result!.text.trim(),
+                  style: TextStyle(
+                      color: sl.text2,
+                      fontSize: 11,
+                      height: 1.5,
+                      fontFamily: 'monospace'),
+                ),
+              ),
+            ],
         ],
       ),
     );

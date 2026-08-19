@@ -65,6 +65,13 @@ class AiRunLog {
   static const String typeSopOcr         = 'SOP_OCR';
   /// The single structuring pass over a whole scanned document's text.
   static const String typeSopSummary     = 'SOP_SUMMARY';
+  /// The safety-analysis pass: hazards, permits, isolation, checklist.
+  ///
+  /// Separate from [typeSopSummary] because they fail for different reasons and
+  /// are worth watching separately — structuring fails on OCR quality, analysis
+  /// fails on schema validity — and because one scan can succeed at one and fail
+  /// at the other.
+  static const String typeSopSafety      = 'SOP_SAFETY';
 
   // ── Outcomes ──────────────────────────────────────────────────────────────
   static const String outcomeSuccess = 'SUCCESS';

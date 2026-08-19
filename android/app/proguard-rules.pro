@@ -43,15 +43,18 @@
 # `flutter build apk --release` fails at :app:minifyReleaseWithR8 even though the
 # code paths are unreachable.
 #
-# WHY -dontwarn AND NOT THE REAL DEPENDENCIES: SOP scan calls
-# TextRecognitionScript.latin only (sop_ocr_device_mlkit.dart:29), so the
-# four classes are never loaded and R8 strips the branches. Adding the real
-# artifacts would grow the APK by several MB per script for code nothing asks
-# for. If Hindi SOPs ever need to be read on-device that is a deliberate feature
-# decision: add
-# `implementation 'com.google.android.gms:play-services-mlkit-text-recognition-devanagari'`
-# to android/app/build.gradle AND pass the Devanagari script from Dart. Removing
-# a line here without doing both just brings the build failure back.
+# WHY -dontwarn AND NOT THE REAL DEPENDENCIES: SOP scan asks for Latin and
+# Devanagari only, so Chinese, Japanese and Korean are never loaded and R8 strips
+# those branches. Their artifacts would add several MB of bundled model each for
+# scripts nothing requests.
+#
+# UPDATED 2026-08-19 — Devanagari IS now a real dependency
+# (`com.google.mlkit:text-recognition-devanagari:16.0.1` in
+# android/app/build.gradle) because Hindi SOP/SMP pages are read on-device. Its
+# -dontwarn line is KEPT ON PURPOSE even though the class is now present: the rule
+# is a no-op while the dependency is there, and it means removing that dependency
+# later degrades Hindi OCR instead of breaking the release build with an error
+# whose cause is three files away.
 -dontwarn com.google.mlkit.vision.text.chinese.**
 -dontwarn com.google.mlkit.vision.text.devanagari.**
 -dontwarn com.google.mlkit.vision.text.japanese.**
@@ -63,6 +66,7 @@
 # runtime, as a ClassNotFoundException on the first scan — in a release build
 # that would ship.
 -keep class com.google.mlkit.vision.text.latin.** { *; }
+-keep class com.google.mlkit.vision.text.devanagari.** { *; }
 -keep class com.google.mlkit.vision.text.TextRecognition { *; }
 -keep class com.google.mlkit.vision.text.TextRecognizerOptionsInterface { *; }
 -keep class com.google_mlkit_text_recognition.** { *; }

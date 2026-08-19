@@ -22,6 +22,15 @@ class SopOcrDevice {
   /// move to the next tier.
   static Future<String> recognise(Uint8List jpegBytes) async => '';
 
+  /// Always empty on web.
+  ///
+  /// Must exist even though it can never do anything: the conditional export in
+  /// sop_ocr_device.dart means the two files are ONE type as far as callers are
+  /// concerned, so a method added to the ML Kit side and not to this one breaks
+  /// the web build only — and the web build is the one that ships to
+  /// safetylens.in. Keep the two APIs identical.
+  static Future<String> recogniseMultiScript(Uint8List jpegBytes) async => '';
+
   /// No-op. Kept so the caller can release resources unconditionally.
   static Future<void> dispose() async {}
 }

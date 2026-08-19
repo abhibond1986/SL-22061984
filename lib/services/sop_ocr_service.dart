@@ -229,7 +229,13 @@ RULES:
     String deviceText = '';
     String gate = '';
     if (SopOcrDevice.isAvailable) {
-      deviceText = await SopOcrDevice.recognise(jpegBytes);
+      // Multi-script: Latin first, Devanagari only if the Latin pass came back
+      // too thin to be a page of text. Hindi safety instructions are common on
+      // plant notice boards and in bilingual SMPs, and the Latin model does not
+      // fail on them — it returns a handful of stray marks, which would have
+      // gone to the AI tier and spent a request on something the device can read
+      // for free.
+      deviceText = await SopOcrDevice.recogniseMultiScript(jpegBytes);
       gate = _failedGate(deviceText);
       if (gate.isEmpty) {
         _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
@@ -594,6 +600,24 @@ RULES:
       aiStructured: false,
     );
   }
+
+  /// Public text-only model call, for other SOP passes to reuse.
+  ///
+  /// Exists so [SopSafetyAnalysis] does not stand up a second LLM integration
+  /// for the same job: this already carries the provider order, the key ledger,
+  /// the 45s timeout, the 4096-token ceiling that OpenRouter rejects above, and
+  /// the non-200 logging that took a live console session to find. A parallel
+  /// copy would drift from all five.
+  ///
+  /// Deliberately a thin wrapper rather than making [_callTextModel] public:
+  /// keeping the private method as the single implementation means the OCR and
+  /// analysis paths cannot diverge, and the doc comment above is the contract
+  /// callers actually need.
+  ///
+  /// Returns null when every provider failed. Callers must treat that as
+  /// "no analysis available" and must NOT substitute generated content — a
+  /// fabricated safety requirement is worse than a missing one.
+  static Future<String?> askTextModel(String prompt) => _callTextModel(prompt);
 
   /// Text-only model call for the structuring pass. Same provider order as OCR.
   static Future<String?> _callTextModel(String prompt) async {

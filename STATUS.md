@@ -5,10 +5,40 @@ The SOP/SMP scan feature was added on 2026-08-19 — as a **bottom-nav tab at
 index 3**, between Near Miss and Ask AI, taking the bar from five tabs to six.
 Tab indices now live in `lib/utils/app_tabs.dart`; there must be no bare tab
 integers anywhere, because a wrong one opens the wrong tab without failing to
-compile. The feature has **not been compiled** —
-there is no Dart/Flutter SDK in the environment it was written in. It passed
-static checks only (see *Verification limits*). Treat the deploy step below as
-untested until `flutter analyze` runs clean on a machine that has the SDK.
+compile. The feature now **compiles for both targets**: CI run #642 (web) and
+#581 (release APK) both went green on commit `89967ac`, 2026-08-19 09:12Z, after
+the R8 keep rules below. That covers compilation and shrinking only — no part of
+the scan flow has been exercised on a device, and the Supabase migration in step 3
+has not been run, so cloud sync of scanned clauses is still untested.
+
+**Added after that green run, and therefore NOT yet compiled by anything:** the
+safety-analysis pass (`lib/services/sop_safety_analysis.dart`, new) and its review
+UI in `sop_scan_screen.dart`, plus Hindi/Devanagari on-device OCR. The next CI run
+is the first compile of any of it. What it adds to the review screen: critical
+requirements with a criticality bar and a tap-through to the quoted source line,
+hazards, a pre-job checklist **split into "from the document" and "AI suggested"**,
+requirements grouped by the 15 fixed categories, points-to-check, the AI
+disclaimer, and a collapsed read-only view of the raw OCR text.
+
+Three properties of that feature are load-bearing and should not be "tidied":
+
+* **`_safety` is nullable and separate from `_extract`.** The safety read is a
+  screen-only aid; the extract is what gets saved. A failed analysis must never
+  block filing the document, and `_save()` deliberately knows nothing about it.
+* **`SopCheckItem.fromDocument` is set once, in the service, from which JSON
+  array the item arrived in.** It is never re-derived at display time. Merging
+  the two checklist groups silently promotes an AI guess to a document
+  requirement, which on a shop floor is the whole risk this feature carries.
+* **Requirements carry `verified`**, set by matching the model's quoted
+  `source_text` back against the OCR text. Unmatched ones are labelled
+  UNVERIFIED in the UI rather than dropped, because a dropped requirement is
+  invisible and a labelled one is checkable.
+
+The badges in that UI are 10px, not the 9px used by the nav labels. The 9px
+waiver was granted for nav labels specifically; HIGH/MEDIUM/LOW is the safety
+signal itself. `tools/audit_contrast.py --strict` is unchanged at **245
+failures**; warnings moved 235 → 238, all three being the new 10px badges, which
+the audit treats as warn-level (there are already 128 such in `admin_screen.dart`).
 
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
