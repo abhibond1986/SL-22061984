@@ -100,6 +100,17 @@ worth doing in one pass.
 Word (.docx) and .txt import have no such dependency — pure Dart via `archive`,
 and their text is used exactly as stored rather than being sent through OCR.
 
+**Release APK keep rules — added 2026-08-19, and do not delete them.**
+`flutter build apk --release` failed at `:app:minifyReleaseWithR8` with missing
+classes for the Chinese, Devanagari, Japanese and Korean text recognizers. The
+plugin's `TextRecognizer.initialize` references all five scripts, but only the
+Latin bundle is a transitive dependency, and R8 treats the dangling references as
+errors in a release build. Fixed with `-dontwarn` for those four packages in
+`android/app/proguard-rules.pro`, plus `-keep` on the Latin recognizer and both
+plugin packages (ML Kit resolves options reflectively, so a renamed class only
+fails at runtime, on the first scan, in a build that has already shipped). Debug
+builds do not minify, so this failure appears only in release.
+
 Also needs `flutter pub get` once, for the new
 `google_mlkit_text_recognition: ^0.13.0` dependency. Pinned to 0.13.x
 deliberately: 0.14 wants a newer Kotlin/AGP than the CI Flutter 3.19.6 toolchain
