@@ -510,9 +510,15 @@ RULES:
 
   static Future<String?> _callNaraOcr(Uint8List bytes) async {
     try {
-      // isUsableHere, not isConfigured: on web this provider is CORS-blocked and
-      // the attempt can only spend attemptTimeout to arrive at the same failure.
-      if (!await NaraVision.isUsableHere) return null;
+      // isDirectCallUsableHere, not isConfigured and NOT isUsableHere: this posts
+      // to NaraVision.endpoint itself, and on web that is CORS-blocked, so the
+      // attempt can only spend attemptTimeout to arrive at the same failure.
+      //
+      // isUsableHere would be WRONG here as of 2026-08-19. It now returns true on
+      // web, because the HAZARD path reaches Nara through the Apps Script proxy —
+      // this OCR call does not, so it must ask the narrower question. Switch to
+      // isUsableHere only if this call is moved onto the proxy too.
+      if (!await NaraVision.isDirectCallUsableHere) return null;
       final apiKey = (await NaraVision.getApiKey()).trim();
       final model = await NaraVision.getModel();
       final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
@@ -873,7 +879,10 @@ RULES:
   /// the two are equivalent to the caller, which has another tier either way.
   static Future<String?> _callNaraText(Map<String, dynamic> body) async {
     try {
-      if (!await NaraVision.isUsableHere) return null;
+      // Direct-call test, for the same reason as _callNaraOcr above: this posts
+      // to NaraVision.endpoint, which no browser can reach. See
+      // NaraVision.isDirectCallUsableHere.
+      if (!await NaraVision.isDirectCallUsableHere) return null;
       final apiKey = (await NaraVision.getApiKey()).trim();
       final model = await NaraVision.getModel();
       final r = await http

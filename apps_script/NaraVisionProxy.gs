@@ -45,6 +45,17 @@ function getNaraConfig_() {
   const props = PropertiesService.getScriptProperties();
   return {
     apiKey: props.getProperty('NARA_API_KEY') || '',
+    // Used when the client sends no model of its own — which is the normal case
+    // for a web device that has never synced its prefs.
+    //
+    // FALLING BACK TO mimo-v2.5-free IS DELIBERATE. The obvious fallback,
+    // NaraVision.defaultModel = 'mistral-medium-3-5', is the MOST expensive
+    // model on Nara's list ($0.30 in / $1.51 out per 1M, no discount), while
+    // mimo carries a 0.1x multiplier. Nara meters a shared daily TOKEN quota,
+    // not requests, so an unconfigured default that happens to be the costly
+    // one drains everyone's allowance ~30x faster and fails silently — the
+    // scans keep working right up until the quota is gone.
+    model: props.getProperty('NARA_MODEL') || 'mimo-v2.5-free',
   };
 }
 
@@ -80,7 +91,7 @@ function handleAnalyzeImageNara_(data) {
     }
 
     // Extract request parameters
-    const model = data.model || 'mistral-medium-3-5';
+    const model = data.model || config.model;
     const imageBase64 = data.imageBase64 || '';
     const prompt = data.prompt || '';
     const maxTokens = data.maxTokens || 4096;
@@ -131,7 +142,8 @@ function handleAnalyzeImageNara_(data) {
       muteHttpExceptions: true, // We want to see error responses
     };
 
-    Logger.log('NaraVisionProxy: Calling NaraRouter with model: ' + model);
+    Logger.log('NaraVisionProxy: Calling NaraRouter with model: ' + model
+        + (data.model ? ' (client-specified)' : ' (server default)'));
     const startTime = Date.now();
 
     const response = UrlFetchApp.fetch(naraUrl, options);

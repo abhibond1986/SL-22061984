@@ -764,15 +764,19 @@ HOW TO USE IT:
       // price of a second free allowance; it is only paid on scans that were
       // already failing.
       // ══════════════════════════════════════════════════════════════════════
+      // Two separate questions, deliberately not merged. "Is a key stored on this
+      // device" drives the failure MESSAGE further down (a site running only on a
+      // Nara key must not be told "no AI key is configured"); "can this tier
+      // actually be attempted here" drives whether the call is made.
+      //
+      // ⚠ THEY ARE NOT THE SAME TEST ANY MORE, and conflating them is what broke
+      // this tier twice. Web now reaches Nara through the Apps Script proxy,
+      // which holds the key in its own Script Properties and signs the request
+      // server-side — so a browser needs NO local key and asking for one would
+      // skip a provider that works perfectly. [NaraVision.isUsableHere] answers
+      // per platform: proxy URL on web, stored key on mobile.
       final bool naraConfigured = await NaraVision.isConfigured;
-      // Two separate questions, deliberately not merged. "Is a key stored" drives
-      // the failure MESSAGE further down (a site running only on a Nara key must
-      // not be told "no AI key is configured"); "can this platform reach Nara at
-      // all" drives whether the attempt is made. On web the answers differ:
-      // router.bynara.id sends no CORS headers, so the browser blocks the reply
-      // and the tier can only spend its full kAttemptTimeout to fail — and it is
-      // reached precisely when a scan is already slow, having lost Tier 1.
-      final bool naraUsable = naraConfigured && NaraVision.isReachableHere;
+      final bool naraUsable = await NaraVision.isUsableHere;
       bool naraRefused = false; // 429 — rate limit or daily token quota
       bool naraKeyRejected = false; // 401/402/403
       if (naraUsable) {
@@ -783,16 +787,23 @@ HOW TO USE IT:
               await NaraVision.analyzeImage(bytes,
                   kbContext: kbContext, sceneContext: sceneContext);
           if (_isValidResult(naraResult)) {
-            print('GeminiVision: ✓ NaraRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
+            // Prefer the slug NaraRouter reported over the one requested. On web
+            // the proxy may have substituted its own NARA_MODEL, and the AI
+            // Performance dashboard is the evidence used to decide this
+            // provider's future — attributing a proxy-chosen model's latency to
+            // the local guess would poison exactly that comparison.
+            final servedModel = NaraVision.lastModelUsed ?? naraModel;
+            print('GeminiVision: ✓ NaraRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms'
+                ' on $servedModel');
             naraResult!['_source'] = 'nara_router';
-            naraResult['_model'] = naraModel;
+            naraResult['_model'] = servedModel;
             naraResult['_isOnline'] = true;
             _lastCallTime = DateTime.now();
             _isAnalyzing = false;
             await _writeCachedResult(imgHash, naraResult);
             return logged(naraResult,
                 outcome: AiRunLog.outcomeSuccess,
-                model: naraModel,
+                model: servedModel,
                 imageHash: imgHash);
           }
           // Remembered rather than read back after the fact, for the same reason
@@ -810,7 +821,13 @@ HOW TO USE IT:
           print('GeminiVision: ✗ NaraRouter exception: $e');
         }
       } else {
-        print('GeminiVision: ⏭ NaraRouter skipped (no key configured)');
+        // The reason comes from NaraVision, which is the only place that knows
+        // which precondition failed on this platform. The old hardcoded
+        // "(no key configured)" was actively misleading: it was printed while a
+        // valid key WAS stored and the real cause was CORS, which cost a long
+        // diagnosis. Never state a cause here that this layer cannot verify.
+        print('GeminiVision: ⏭ NaraRouter skipped '
+            '(${await NaraVision.unusableReason})');
       }
 
       // ══════════════════════════════════════════════════════════════════════
@@ -877,10 +894,16 @@ HOW TO USE IT:
       final bool geminiAvailable = await GeminiDirectVision.isConfigured;
       String reason;
       String hint;
-      if (orKeys.isEmpty && !naraConfigured && !geminiAvailable) {
+      if (orKeys.isEmpty && !naraConfigured && !naraUsable && !geminiAvailable) {
         // naraConfigured is part of this test because otherwise a site running
         // ONLY on a Nara key would be told "no AI key is configured" whenever a
         // scan failed — sending the admin to add a key they already added.
+        //
+        // naraUsable is here for the mirror-image case on web: the key lives in
+        // the proxy's Script Properties, so naraConfigured is false on a device
+        // that is nonetheless fully provisioned. Telling that user "no AI key is
+        // configured" would send an admin to re-enter a key that is already set,
+        // in a place where it was never needed.
         reason = 'no AI key is configured';
         hint = 'Ask your administrator to set an AI key in '
             'Admin → System Health. Nothing is wrong with your phone.';
@@ -1218,6 +1241,11 @@ HOW TO USE IT:
       // scanning perfectly well on a different provider.
       'geminiConfigured': await GeminiDirectVision.isConfigured,
       'naraConfigured': await NaraVision.isConfigured,
+      // Both reported, because on web they differ and only the second one
+      // predicts whether a scan can use this tier: the key sits in the Apps
+      // Script proxy, so 'naraConfigured' is false on a browser that scans fine.
+      // A card that showed only the first would call a working site unconfigured.
+      'naraUsable': await NaraVision.isUsableHere,
     };
   }
 

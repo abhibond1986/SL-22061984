@@ -59,6 +59,37 @@ class NaraVision {
   static const String kPrefsModel = 'nara_vision_model';
   static const String _kModel = kPrefsModel;
 
+  /// SharedPreferences key holding the URL of the Apps Script AI proxy.
+  ///
+  /// ⚠ THIS IS NOT THE SYNC BACKEND URL, and the distinction is the whole
+  /// reason this pref exists. There are TWO separate Apps Script deployments:
+  ///
+  ///   • the MAIN backend (SyncService._defaultBackendUrl) — incidents, users,
+  ///     getMasterData. Handles no vision actions.
+  ///   • the "Nara Router" project ([defaultProxyUrl] below) — Main.gs +
+  ///     NaraVisionProxy.gs only. Handles `analyzeImageNara`.
+  ///
+  /// An earlier version of this file read `apps_script_url`/`sync_backend_url`
+  /// here, which resolve to the MAIN backend — so every web scan POSTed
+  /// `analyzeImageNara` to a project with no such handler and came back
+  /// `Unknown action`, which the proxy path reported as a generic failure.
+  /// Keep these two URLs in separate prefs so that a mistake in one cannot
+  /// silently disable the other.
+  static const String kPrefsProxyUrl = 'nara_proxy_url';
+  static const String _kProxyUrl = kPrefsProxyUrl;
+
+  /// Compile-time default for the AI proxy, so web works with ZERO
+  /// configuration on a device that has never seen the admin panel.
+  ///
+  /// Same pattern and same reason as `SyncService._defaultBackendUrl`: the proxy
+  /// URL is not a secret (the KEY is, and that stays in the proxy's Script
+  /// Properties and never reaches a browser), so shipping it costs nothing and
+  /// spares every user a setup step they have no way of knowing about. An admin
+  /// can still override it via [setProxyUrl] when the deployment is rotated —
+  /// a stored value always wins over this constant.
+  static const String defaultProxyUrl =
+      'https://script.google.com/macros/s/AKfycbz7rcn6yIr_-turaxrXwlGt8n5ukvtuXv7Rcbu66Na10Sfv5a2TUD-MiBHWRw0gqZcv/exec';
+
   /// Chat-completions URL. Base is `https://router.bynara.id/v1`.
   ///
   /// Public because SopOcrService posts its own OCR/structuring bodies here
@@ -133,9 +164,57 @@ class NaraVision {
   /// answer is platform-independent.
   static bool get isReachableHere => true;
 
-  /// [isConfigured] AND [isReachableHere] — what a provider call should test.
-  static Future<bool> get isUsableHere async =>
-      isReachableHere && await isConfigured;
+  /// What a provider call should actually test before spending latency here.
+  ///
+  /// THE ANSWER DIFFERS BY PLATFORM, because the key lives somewhere different
+  /// on each:
+  ///
+  ///  • WEB — the request goes through the Apps Script proxy, which holds the key
+  ///    in its own Script Properties and attaches the Authorization header
+  ///    server-side. The browser never sees the key and does not need one, so
+  ///    requiring [isConfigured] here would gate the provider on a value that is
+  ///    irrelevant to whether the call can succeed. That would also defeat the
+  ///    zero-configuration goal: a user who has never opened the admin panel has
+  ///    no local key, yet their scans work fine. So web only asks "is there a
+  ///    proxy to post to".
+  ///  • MOBILE / DESKTOP — the call is direct, the device supplies the header
+  ///    itself, so a locally stored key is genuinely required.
+  ///
+  /// A local key on web is still honoured if present (see [analyzeImage]); it is
+  /// simply not a precondition.
+  static Future<bool> get isUsableHere async {
+    if (!isReachableHere) return false;
+    if (kIsWeb) return (await getProxyUrl()).isNotEmpty;
+    return isConfigured;
+  }
+
+  /// Whether a DIRECT call to [endpoint] can work from here — i.e. no proxy.
+  ///
+  /// ⚠ USE THIS, NOT [isUsableHere], IN ANY CALLER THAT POSTS TO [endpoint]
+  /// ITSELF. [isUsableHere] became true on web when the Apps Script proxy landed,
+  /// because the hazard path goes through it. A caller that still calls Nara
+  /// directly — SopOcrService does, for both OCR and text summaries — would read
+  /// that as permission, then spend a full [GeminiVision.kAttemptTimeout] on a
+  /// request the browser blocks before it leaves, delaying its own fallback tier
+  /// for a call that cannot succeed. Those callers want this test.
+  ///
+  /// The fix for such a caller is to route it through the proxy as well (the
+  /// proxy takes an arbitrary prompt, so it is not hazard-specific), at which
+  /// point it should switch to [isUsableHere].
+  static Future<bool> get isDirectCallUsableHere async =>
+      !kIsWeb && await isConfigured;
+
+  /// Why [isUsableHere] said no, for logging. Empty string when it said yes.
+  ///
+  /// Exists so the chain can print an accurate reason instead of the old
+  /// hardcoded "(no key configured)", which was wrong on web in both directions:
+  /// it blamed a missing key when the real cause was CORS, and it would now blame
+  /// a missing key on a device that correctly has none.
+  static Future<String> get unusableReason async {
+    if (await isUsableHere) return '';
+    if (kIsWeb) return 'AI proxy URL is blank — see Admin → NaraRouter';
+    return 'no $keyPrefix key stored on this device';
+  }
 
   static Future<String> getApiKey() async {
     await _ensurePrefs();
@@ -159,6 +238,20 @@ class NaraVision {
     return saved.isEmpty ? defaultModel : saved;
   }
 
+  /// The saved slug with NO fallback — empty string when the admin has never
+  /// chosen one.
+  ///
+  /// Needed because [getModel]'s fallback is [defaultModel] = mistral-medium-3-5,
+  /// the most expensive model on Nara's list. On web that fallback is applied on
+  /// the WRONG side of the wire: a zero-config browser would name the costly
+  /// model explicitly, overriding the cheap NARA_MODEL the admin set in the
+  /// proxy's Script Properties, and quietly bill the shared token quota at
+  /// ~30x. Sending empty instead lets the server pick. See [analyzeImage].
+  static Future<String> savedModelOrEmpty() async {
+    await _ensurePrefs();
+    return (_prefs!.getString(_kModel) ?? '').trim();
+  }
+
   static Future<void> setModel(String model) async {
     await _ensurePrefs();
     await _prefs!.setString(_kModel, model.trim());
@@ -177,15 +270,47 @@ class NaraVision {
   /// sixty seconds.
   static bool lastWasRateLimited = false;
 
-  /// Get the Apps Script URL for proxying requests on web.
+  /// The model NaraRouter says it actually served, read off the response body,
+  /// or null if the last call did not get that far.
   ///
-  /// Returns the URL from SharedPreferences, or empty string if not configured.
-  /// This is the same URL used for sync and alerts.
-  static Future<String> _getAppsScriptUrl() async {
+  /// Exists because on web the CLIENT no longer decides the model — an unsynced
+  /// browser omits it and the proxy substitutes its own NARA_MODEL. Labelling the
+  /// AI Performance dashboard with the locally-guessed slug would attribute every
+  /// zero-config scan's latency and cost to the wrong model, which is exactly the
+  /// data that decides whether to keep this provider.
+  static String? lastModelUsed;
+
+  /// URL of the Apps Script AI proxy: the admin override if one is stored,
+  /// otherwise the shipped [defaultProxyUrl].
+  ///
+  /// ⚠ DOES NOT FALL BACK TO `sync_backend_url`. It used to, and that was a bug:
+  /// that pref names the MAIN backend, which has no `analyzeImageNara` handler,
+  /// so every web scan got `Unknown action` back. See [kPrefsProxyUrl].
+  ///
+  /// Never returns empty unless an admin has explicitly stored a blank value, so
+  /// "proxy not configured" is a deliberate state rather than the default one.
+  static Future<String> getProxyUrl() async {
     await _ensurePrefs();
-    return _prefs!.getString('apps_script_url') ??
-        _prefs!.getString('sync_backend_url') ??
-        '';
+    final saved = (_prefs!.getString(_kProxyUrl) ?? '').trim();
+    return saved.isEmpty ? defaultProxyUrl : saved;
+  }
+
+  /// Override the proxy URL. Pass an empty string to clear the override and
+  /// fall back to [defaultProxyUrl].
+  static Future<void> setProxyUrl(String url) async {
+    await _ensurePrefs();
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) {
+      await _prefs!.remove(_kProxyUrl);
+    } else {
+      await _prefs!.setString(_kProxyUrl, trimmed);
+    }
+  }
+
+  /// True when an admin has overridden the shipped default.
+  static Future<bool> get hasProxyUrlOverride async {
+    await _ensurePrefs();
+    return (_prefs!.getString(_kProxyUrl) ?? '').trim().isNotEmpty;
   }
 
   /// Call NaraRouter through Apps Script proxy (web only).
@@ -201,10 +326,13 @@ class NaraVision {
   ) async {
     lastStatus = null;
     lastWasRateLimited = false;
+    lastModelUsed = null;
 
-    final scriptUrl = await _getAppsScriptUrl();
+    final scriptUrl = await getProxyUrl();
     if (scriptUrl.isEmpty) {
-      print('NaraVision: ⏭ Apps Script URL not configured (needed for web)');
+      print('NaraVision: ⏭ AI proxy URL blank — an admin cleared it. Restore it '
+          'in Admin → System Health → NaraRouter, or clear the override to fall '
+          'back to the shipped default.');
       return null;
     }
 
@@ -213,7 +341,10 @@ class NaraVision {
       'action': 'analyzeImageNara',
       'imageBase64': imageBase64,
       'prompt': prompt,
-      'model': model,
+      // OMITTED WHEN UNCHOSEN, not sent empty. The proxy resolves an absent
+      // model from its own NARA_MODEL property; sending '' would work too, but
+      // omission makes "the client has no opinion" unambiguous in the log.
+      if (model.isNotEmpty) 'model': model,
       'maxTokens': 4096,
       'temperature': 0,
       'topP': 1,
@@ -238,6 +369,17 @@ class NaraVision {
         final error = data['error']?.toString() ?? 'Unknown error';
         print('NaraVision: ⚠ Apps Script proxy error: $error (HTTP $statusCode)');
 
+        // "Unknown action" means the POST reached an Apps Script deployment that
+        // has no analyzeImageNara handler — almost always the MAIN sync backend
+        // rather than the Nara Router project. Called out explicitly because the
+        // generic message above sends you looking at NaraRouter, which is fine.
+        if (error.contains('Unknown action')) {
+          print('NaraVision: ✗ WRONG DEPLOYMENT. $scriptUrl answered but does '
+              'not handle analyzeImageNara. This is the main sync backend, not '
+              'the Nara Router proxy project. Fix the proxy URL, or add '
+              'NaraVisionProxy.gs to that project and route the action.');
+        }
+
         // Check for specific error types
         if (statusCode == 429) {
           lastWasRateLimited = true;
@@ -254,6 +396,14 @@ class NaraVision {
       }
 
       final naraData = jsonDecode(naraBody) as Map<String, dynamic>;
+      final servedModel = naraData['model']?.toString();
+      if (servedModel != null && servedModel.isNotEmpty) {
+        lastModelUsed = servedModel;
+        if (model.isEmpty) {
+          print('NaraVision: proxy chose $servedModel (this device has no '
+              'model preference — the server default applies)');
+        }
+      }
       final choices = naraData['choices'] as List?;
       if (choices != null && choices.isNotEmpty) {
         final content = choices[0]['message']?['content']?.toString() ?? '';
@@ -291,10 +441,14 @@ class NaraVision {
       {String? kbContext, String sceneContext = ''}) async {
     lastStatus = null;
     lastWasRateLimited = false;
+    lastModelUsed = null;
 
+    // KEY CHECK IS PLATFORM-SPECIFIC — deliberately not hoisted above the web
+    // branch. On web the proxy holds the key; demanding one here would reject
+    // exactly the zero-config devices this path was built to serve.
     final apiKey = (await getApiKey()).trim();
-    if (!apiKey.startsWith(keyPrefix)) {
-      print('NaraVision: ⏭ skipped (no valid $keyPrefix key)');
+    if (!kIsWeb && !apiKey.startsWith(keyPrefix)) {
+      print('NaraVision: ⏭ skipped (no valid $keyPrefix key on this device)');
       return null;
     }
     final model = await getModel();
@@ -307,9 +461,12 @@ class NaraVision {
     final prompt = await GeminiVision.resolvedHazardPrompt(
         kbContext: kbContext ?? '', sceneContext: sceneContext);
 
-    // ON WEB: Route through Apps Script proxy to bypass CORS
+    // ON WEB: Route through Apps Script proxy to bypass CORS.
+    //
+    // The model is passed RAW (empty when unchosen) so the proxy's NARA_MODEL
+    // wins on a device that has never synced — see [savedModelOrEmpty].
     if (kIsWeb) {
-      return _analyzeViaProxy(bytes, prompt, model);
+      return _analyzeViaProxy(bytes, prompt, await savedModelOrEmpty());
     }
 
     // ON MOBILE/DESKTOP: Call NaraRouter directly
@@ -354,6 +511,7 @@ class NaraVision {
       if (response.statusCode == 200) {
         final data =
             jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+        lastModelUsed = data['model']?.toString();
         final choices = data['choices'] as List?;
         if (choices != null && choices.isNotEmpty) {
           final content = choices[0]['message']?['content']?.toString() ?? '';

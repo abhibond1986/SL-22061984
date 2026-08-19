@@ -286,6 +286,7 @@ class _AdminScreenState extends State<AdminScreen>
     AdminMasterData.lastPushError.removeListener(_onPushError);
     _unameCtrl.dispose(); _pwCtrl.dispose();
     _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose(); _naraKeyCtrl.dispose();
+    _naraProxyCtrl.dispose();
     super.dispose();
   }
 
@@ -2157,11 +2158,25 @@ class _AdminScreenState extends State<AdminScreen>
           _intRow('Gemini Vision (Hazard AI)', _geminiVisionConfigured ? 'active (direct API)' : 'not configured',
               _geminiVisionConfigured ? AppColors.green : AppColors.amber, Icons.remove_red_eye_rounded, sl),
           const SizedBox(height: 8),
+          // ON WEB, A LOCAL KEY IS NOT WHAT MAKES THIS WORK. The browser goes
+          // through the Apps Script proxy, which signs the request with the key
+          // held in its own Script Properties — so _naraConfigured is routinely
+          // false on a browser that scans perfectly. Reporting "not configured"
+          // there would send an admin to fix something that is not broken, which
+          // is how this provider came to look dead for days. Mobile still needs
+          // the local key, so the test stays platform-specific.
           _intRow('NaraRouter (Extra scan allowance)',
-              _naraConfigured ? 'active — $_naraSelectedModel' : 'not configured',
+              _naraConfigured
+                  ? 'active — $_naraSelectedModel'
+                  : (kIsWeb && _naraProxyCtrl.text.trim().isNotEmpty
+                      ? 'active via Apps Script proxy'
+                      : 'not configured'),
               // Amber, not red, when absent: this provider is genuinely
               // optional, unlike Groq which the near-miss flow depends on.
-              _naraConfigured ? AppColors.green : AppColors.amber,
+              (_naraConfigured ||
+                      (kIsWeb && _naraProxyCtrl.text.trim().isNotEmpty))
+                  ? AppColors.green
+                  : AppColors.amber,
               Icons.alt_route_rounded, sl),
           const SizedBox(height: 8),
           _intRow('Groq AI (Near Miss correction)', _groqConfigured ? 'active' : 'not configured',
@@ -2586,6 +2601,21 @@ class _AdminScreenState extends State<AdminScreen>
   final _naraKeyCtrl = TextEditingController();
   String _naraSelectedModel = NaraVision.defaultModel;
 
+  /// URL of the Apps Script AI proxy that fronts NaraRouter on web.
+  ///
+  /// ⚠ NOT THE SYNC BACKEND URL. Two different Apps Script deployments: the main
+  /// backend serves incidents/users/master data, and a second "Nara Router"
+  /// project handles `analyzeImageNara`. Pasting one into the other's field is
+  /// the single most damaging mistake available on this screen — pointing sync at
+  /// the proxy project breaks every incident upload, because that project has no
+  /// Incidents sheet. Hence a clearly labelled, separate field.
+  final _naraProxyCtrl = TextEditingController();
+
+  /// True when the stored proxy URL differs from the shipped default, i.e. an
+  /// admin has overridden it. Shown so the field can say whether what is on
+  /// screen came from this deployment or from the build.
+  bool _naraProxyOverridden = false;
+
   /// Guards [_loadGroqConfig] against re-entry.
   ///
   /// The three AI cards each call the loader from inside `build` when their
@@ -2607,6 +2637,8 @@ class _AdminScreenState extends State<AdminScreen>
     final gemModel = await GeminiDirectVision.getModel();
     final naraKey = await NaraVision.getApiKey();
     final naraModel = await NaraVision.getModel();
+    final naraProxy = await NaraVision.getProxyUrl();
+    final naraProxyOverridden = await NaraVision.hasProxyUrlOverride;
     if (mounted) {
       setState(() {
         _groqConfigured = key.isNotEmpty && key.startsWith('gsk_');
@@ -2638,6 +2670,8 @@ class _AdminScreenState extends State<AdminScreen>
                 .any((m) => m['id'] == naraModel)
             ? naraModel
             : NaraVision.defaultModel;
+        _naraProxyCtrl.text = naraProxy;
+        _naraProxyOverridden = naraProxyOverridden;
       });
     }
   }
@@ -2902,6 +2936,152 @@ class _AdminScreenState extends State<AdminScreen>
              'Mistral Medium. Compare real speed in AI Performance before '
              'relying on it.',
           style: TextStyle(color: sl.text4, fontSize: 9)),
+
+        // ══════════════════════════════════════════════════════════════════
+        // AI PROXY URL — the web-only half of this provider
+        //
+        // Why it is here and not in the sync/backend section: on web,
+        // router.bynara.id sends no CORS headers, so the browser blocks every
+        // reply and this tier cannot work at all. Requests therefore go through
+        // a SECOND Apps Script deployment ("Nara Router") that calls Nara
+        // server-side. That project holds the key in its own Script Properties,
+        // which is why web devices need no key above.
+        //
+        // Shown on every platform, not just web, on purpose: an admin
+        // configuring the deployment from a phone is usually doing it FOR the
+        // web users, and hiding the field on mobile would make it findable only
+        // from the platform least likely to be used for administration.
+        // ══════════════════════════════════════════════════════════════════
+        const SizedBox(height: 14),
+        Divider(color: sl.border, height: 1),
+        const SizedBox(height: 12),
+        Row(children: [
+          Icon(Icons.swap_horiz, size: 14, color: naraAccent),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('AI Proxy (required for web)',
+                style: TextStyle(
+                    color: sl.text1, fontSize: 11, fontWeight: FontWeight.w700)),
+          ),
+          if (!_naraProxyOverridden)
+            Text('using built-in default',
+                style: TextStyle(color: sl.text4, fontSize: 9)),
+        ]),
+        const SizedBox(height: 4),
+        Text(kIsWeb
+                ? 'This browser reaches NaraRouter through the Apps Script URL '
+                  'below, because router.bynara.id blocks direct browser calls '
+                  '(no CORS headers). The key lives in that script, so web '
+                  'users need no key entered above.'
+                : 'This device calls NaraRouter directly and ignores the URL '
+                  'below — it is used by web users only. Set it here to '
+                  'configure them.',
+            style: TextStyle(color: sl.text4, fontSize: 10)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _naraProxyCtrl,
+          style: TextStyle(color: sl.text1, fontSize: 10),
+          maxLines: 2,
+          minLines: 1,
+          decoration: InputDecoration(
+            labelText: 'Apps Script AI proxy URL (.../exec)',
+            labelStyle: TextStyle(color: sl.text3, fontSize: 10),
+            filled: true,
+            fillColor:
+                sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: sl.border)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        // Stated as a warning rather than a note. Pasting the main backend URL
+        // here only breaks AI scans, which is recoverable; the reverse mistake —
+        // pasting THIS url into the sync backend field — points the whole app at
+        // a project with no Incidents sheet and no user records, and every sync
+        // fails until someone remembers why.
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: AppColors.amber.withOpacity(0.10),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: AppColors.amber.withOpacity(0.35)),
+          ),
+          child: Text(
+              'This is a SEPARATE Apps Script project from the sync backend. It '
+              'must contain NaraVisionProxy.gs and have NARA_API_KEY set in its '
+              'Script Properties. Never paste this URL into the sync/backend '
+              'URL setting — incidents and users live in the other deployment.',
+              style: TextStyle(color: sl.text3, fontSize: 9)),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                final url = _naraProxyCtrl.text.trim();
+                // Validated before saving, because a wrong URL here fails at
+                // scan time on a DIFFERENT device (a web user), where nobody can
+                // see this screen to correct it. Both tests catch real mistakes:
+                // a /dev URL is only reachable while signed in as the script
+                // owner, so it works for the admin and fails for everyone else —
+                // the worst possible failure mode to ship.
+                if (url.isNotEmpty && !url.startsWith('https://script.google.com/')) {
+                  _toast('Not an Apps Script URL — expected '
+                      'https://script.google.com/macros/s/.../exec', AppColors.red);
+                  return;
+                }
+                if (url.endsWith('/dev')) {
+                  _toast('Use the /exec URL, not /dev — /dev only works for '
+                      'the script owner', AppColors.red);
+                  return;
+                }
+                await NaraVision.setProxyUrl(url);
+                final resolved = await NaraVision.getProxyUrl();
+                final overridden = await NaraVision.hasProxyUrlOverride;
+                if (!mounted) return;
+                setState(() {
+                  _naraProxyCtrl.text = resolved;
+                  _naraProxyOverridden = overridden;
+                });
+                _toast(
+                    overridden
+                        ? '✓ AI proxy URL saved on this device'
+                        : '✓ Cleared — using the built-in default',
+                    AppColors.green);
+              },
+              icon: Icon(Icons.save_outlined, size: 14, color: sl.text2),
+              label: Text('Save Proxy URL',
+                  style: TextStyle(color: sl.text2, fontSize: 11)),
+              style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: sl.border),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8))),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              // Reachability only — deliberately NOT a full scan. A real image
+              // would spend Nara tokens from the shared daily quota just to
+              // answer "is the URL right", and the failure this button exists to
+              // catch (wrong deployment) is visible from the error text alone.
+              onPressed: () => _testNaraProxy(),
+              icon: Icon(Icons.network_check, size: 14, color: naraAccent),
+              label: Text('Test',
+                  style: TextStyle(color: naraAccent, fontSize: 11)),
+              style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: naraAccent.withOpacity(0.5)),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8))),
+            ),
+          ),
+        ]),
+
         const SizedBox(height: 12),
         if (_naraConfigured)
           SizedBox(width: double.infinity,
@@ -5292,6 +5472,74 @@ class _AdminScreenState extends State<AdminScreen>
         headers: {'Content-Type': 'text/plain;charset=utf-8'},
       ).timeout(const Duration(seconds: 15));
     } catch (_) {}
+  }
+
+  /// Probe the AI proxy URL without spending any NaraRouter tokens.
+  ///
+  /// HOW IT COSTS NOTHING: it posts `analyzeImageNara` with no image and no
+  /// prompt. The proxy validates in a fixed order — key first, then required
+  /// fields — and returns before it ever calls router.bynara.id. So each distinct
+  /// reply identifies a different misconfiguration exactly:
+  ///
+  ///   "Missing required fields"  → right project, key present. All good.
+  ///   "API key not configured"   → right project, NARA_API_KEY missing/wrong
+  ///                                prefix in Script Properties.
+  ///   "Unknown action"           → WRONG deployment. This is almost always the
+  ///                                main sync backend, which has no proxy file.
+  ///
+  /// A test that sent a real image would instead burn tokens from the shared
+  /// daily quota every time an admin pressed it, and would report a 429 as a
+  /// configuration failure once the quota ran out.
+  Future<void> _testNaraProxy() async {
+    final url = _naraProxyCtrl.text.trim();
+    if (url.isEmpty) {
+      _toast('No proxy URL to test', AppColors.amber);
+      return;
+    }
+    // AppColors has no 'blue'; accent is the neutral in-progress colour used
+    // elsewhere on this screen.
+    _toast('Testing proxy…', AppColors.accent);
+    try {
+      final res = await http
+          .post(Uri.parse(url),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'action': 'analyzeImageNara'}))
+          .timeout(const Duration(seconds: 20));
+
+      // Apps Script answers an HTML error page (not JSON) when the deployment is
+      // archived or set to "only myself", so a decode failure is itself
+      // diagnostic and must not be reported as "proxy unreachable".
+      Map<String, dynamic> body;
+      try {
+        body = jsonDecode(res.body) as Map<String, dynamic>;
+      } catch (_) {
+        _toast(
+            'Proxy did not return JSON (HTTP ${res.statusCode}). Check the '
+            'deployment is active and "Who has access" is Anyone.',
+            AppColors.red);
+        return;
+      }
+
+      final err = (body['error'] ?? '').toString();
+      if (err.contains('Missing required fields')) {
+        _toast('✓ Proxy reachable and NARA_API_KEY is set', AppColors.green);
+      } else if (err.contains('API key not configured')) {
+        _toast(
+            'Proxy reachable, but NARA_API_KEY is missing in its Script '
+            'Properties — add it there, then redeploy',
+            AppColors.amber);
+      } else if (err.contains('Unknown action')) {
+        _toast(
+            'WRONG deployment — this project has no analyzeImageNara handler. '
+            'It looks like the sync backend, not the Nara Router project.',
+            AppColors.red);
+      } else {
+        _toast('Unexpected reply: ${err.isEmpty ? res.body : err}',
+            AppColors.amber);
+      }
+    } catch (e) {
+      _toast('Proxy unreachable: $e', AppColors.red);
+    }
   }
 
   /// Push the Nara key for cross-device sync.
