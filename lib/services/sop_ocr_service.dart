@@ -5,8 +5,20 @@
 //
 // TIERS, in order:
 //   1. On-device ML Kit  — free, offline, ~50ms/page. Mobile only.
-//   2. OpenRouter vision — network, spends the free daily allowance.
-//   3. Nara (Mistral)    — separate quota, last resort.
+//   2. OpenRouter        — network, spends the free daily allowance. A CHAIN of
+//                          models, not one: a single free model that is queued
+//                          takes the whole tier down with it.
+//   3. Nara (Mistral)    — separate quota. Never reachable on web (no CORS).
+//   4. Gemini direct     — a paid-ish key the admin supplies. LAST, and not
+//                          optional: it is the only tier left standing when the
+//                          OpenRouter free allowance is spent, because that
+//                          failure returns 429 (or a stall) on every free model
+//                          at once. Both paths here omitted it until 2026-08-19,
+//                          which is why a live web scan on safetylens.in showed
+//                          four consecutive timeouts and then silently degraded
+//                          to _mechanicalExtract. gemini_vision.dart had already
+//                          learned this for the hazard chain; the SOP paths had
+//                          not inherited it.
 //
 // This deliberately does NOT go through GeminiVision.analyseImageBytes. That
 // method carries the hazard prompt, hazard-shaped JSON validation
@@ -27,6 +39,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import 'ai_run_log.dart';
+import 'gemini_direct_vision.dart';
 import 'gemini_vision.dart';
 import 'nara_vision.dart';
 import 'sop_ocr_device.dart';
@@ -36,7 +49,8 @@ class PageOcr {
   final int pageNo;
   final String text;
 
-  /// Which tier produced [text]: 'device', 'openrouter', 'nara', or '' if none.
+  /// Which tier produced [text]: 'device', 'openrouter', 'nara', 'gemini', or ''
+  /// if none.
   final String engine;
 
   /// Empty when the page was read. Otherwise why it was not.
@@ -132,15 +146,58 @@ class SopOcrService {
   /// Per-page AI attempt timeout. Same budget as a hazard scan attempt.
   static Duration get attemptTimeout => GeminiVision.kAttemptTimeout;
 
-  /// The structuring pass reads a whole document, so it gets longer than a
-  /// single page attempt — but still bounded, because a stalled request here
-  /// leaves the user watching a spinner after all the scanning work is done.
+  /// Per-attempt ceiling for a text-only call. Same 20s as everything else.
+  ///
+  /// This was 45s, on the reasoning that "the structuring pass reads a whole
+  /// document, so it gets longer than a single page attempt". That reasoning
+  /// confuses output size with queue time. gemini_vision.dart measured the real
+  /// distribution on a live scan — 45,000ms spent on a model that never answered
+  /// versus ~11,000ms for the one that did — and concluded that a free-tier model
+  /// which has not answered in 20s is queued or stalled, not thinking. 45s here
+  /// bought nothing and cost 25 extra seconds per dead key, twice over, because
+  /// the safety pass is a second call through this same method.
+  static Duration get textAttemptTimeout => GeminiVision.kAttemptTimeout;
+
+  /// Whole-of-OpenRouter budget for one text call, mirroring `_kTier1Budget` in
+  /// gemini_vision.dart. Without it, `models × keys` attempts multiply: three
+  /// models against two keys at 20s each is two minutes of spinner before Gemini
+  /// is even tried, and the tier that can actually answer is the one that gets
+  /// starved.
+  static const Duration textTierBudget = Duration(seconds: 40);
+
+  /// Ceiling for the Gemini call. Longer than an OpenRouter attempt because this
+  /// tier is not queue-limited and is the last one — there is nothing to save
+  /// time for.
+  static const Duration geminiTimeout = Duration(seconds: 30);
+
+  /// Retained name, unchanged value, for any caller outside this file that reads
+  /// it. Prefer [textAttemptTimeout]; this is now only an outer sanity bound.
   static const Duration summaryTimeout = Duration(seconds: 45);
 
   /// Vision model for OCR. The fast small model is the right pick: transcription
   /// needs no reasoning, and a reasoning model would emit thinking tokens out of
   /// the same output budget the page text has to fit into.
   static const String _ocrModel = 'nvidia/nemotron-nano-12b-v2-vl:free';
+
+  /// Model chain for the TEXT-only passes (structuring, safety analysis).
+  ///
+  /// Three deliberate choices:
+  ///
+  /// * An instruct model leads, not [_ocrModel]. The text passes were pinned to
+  ///   the vision model purely because it was the constant already in the file.
+  ///   Both prompts ask for JSON over plain text, which is an instruct job.
+  /// * It is a chain. One free model is a single point of failure, and the
+  ///   observed failure mode is a stall rather than an error, so there is nothing
+  ///   for the caller to react to.
+  /// * `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` is deliberately
+  ///   ABSENT. It is not a spare — it emits thinking tokens from the same 4096
+  ///   `max_tokens` the JSON has to fit inside, so it returns truncated JSON, and
+  ///   gemini_vision.dart demoted it for exactly that.
+  static const List<String> _textModels = [
+    'google/gemma-4-26b-a4b-it:free',
+    'nvidia/nemotron-nano-12b-v2-vl:free',
+    'dots-studio/dots-3-note-preview:free',
+  ];
 
   static const String _orEndpoint =
       'https://openrouter.ai/api/v1/chat/completions';
@@ -289,6 +346,22 @@ RULES:
       _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
           provider: 'nara', ms: sw.elapsedMilliseconds);
       return PageOcr(pageNo: pageNo, text: naraText, engine: 'nara', gate: gate);
+    }
+
+    // ── Tier 4: Gemini direct ──────────────────────────────────────────
+    //
+    // The tier this path was missing. On web tiers 1 and 3 are both structurally
+    // unavailable — no ML Kit in a browser, and Nara is CORS-blocked — which left
+    // OpenRouter as the sole reader, so one queued free model meant no reader at
+    // all. Same conclusion gemini_vision.dart reached for hazard scans, where the
+    // comment reads that a configured Gemini key "is the only path that still
+    // analyses the image" once the free cap is hit.
+    final geminiText = await _callGeminiOcr(jpegBytes);
+    if (geminiText != null && _failedGate(geminiText).isEmpty) {
+      _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+          provider: 'gemini', ms: sw.elapsedMilliseconds);
+      return PageOcr(
+          pageNo: pageNo, text: geminiText, engine: 'gemini', gate: gate);
     }
 
     // ── Everything failed ──────────────────────────────────────────────
@@ -490,6 +563,74 @@ RULES:
     }
   }
 
+  /// Gemini direct, used as a transcriber.
+  ///
+  /// Sends [ocrPrompt] with the page image and returns plain text. Note there is
+  /// no `responseMimeType` here, unlike the text call: a transcription is not
+  /// JSON, and asking Gemini for JSON would make it wrap the page in a structure
+  /// this caller would then have to unwrap — an extra parse that can fail on a
+  /// document containing quotes or braces, which printed SOPs do.
+  ///
+  /// Uses only the public surface of [GeminiDirectVision] and deliberately does
+  /// NOT call its `analyzeImage`, which carries the hazard prompt and hazard JSON
+  /// validation; see this file's header.
+  static Future<String?> _callGeminiOcr(Uint8List bytes) async {
+    try {
+      if (!await GeminiDirectVision.isConfigured) return null;
+      final apiKey = (await GeminiDirectVision.getApiKey()).trim();
+      if (apiKey.isEmpty) return null;
+      final model = await GeminiDirectVision.getModel();
+
+      final r = await http
+          .post(
+            Uri.parse('https://generativelanguage.googleapis.com/v1beta/'
+                'models/$model:generateContent?key=$apiKey'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'contents': [
+                {
+                  'parts': [
+                    {'text': ocrPrompt},
+                    {
+                      'inline_data': {
+                        'mime_type': 'image/jpeg',
+                        'data': base64Encode(bytes),
+                      }
+                    },
+                  ]
+                }
+              ],
+              'generationConfig': {
+                'temperature': 0,
+                'topP': 1,
+                'maxOutputTokens': 8192,
+              },
+            }),
+          )
+          .timeout(geminiTimeout);
+      if (r.statusCode != 200) {
+        print('SopOcr: Gemini OCR HTTP ${r.statusCode} — '
+            '${_briefBody(r.body)}');
+        return null;
+      }
+      final data = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      final candidates = data['candidates'] as List?;
+      if (candidates == null || candidates.isEmpty) return null;
+      final parts = candidates[0]['content']?['parts'] as List?;
+      if (parts == null || parts.isEmpty) return null;
+      final text = parts[0]['text']?.toString();
+      if (text == null || text.trim().isEmpty) return null;
+      print('SopOcr: page read by Gemini ($model)');
+      return text;
+    } on TimeoutException {
+      print('SopOcr: Gemini OCR timed out after ${geminiTimeout.inSeconds}s');
+      return null;
+    } catch (e) {
+      print('SopOcr: Gemini OCR failed — $e');
+      return null;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   //  STRUCTURING PASS
   // ═══════════════════════════════════════════════════════════════════════
@@ -604,10 +745,15 @@ RULES:
   /// Public text-only model call, for other SOP passes to reuse.
   ///
   /// Exists so [SopSafetyAnalysis] does not stand up a second LLM integration
-  /// for the same job: this already carries the provider order, the key ledger,
-  /// the 45s timeout, the 4096-token ceiling that OpenRouter rejects above, and
-  /// the non-200 logging that took a live console session to find. A parallel
-  /// copy would drift from all five.
+  /// for the same job: this already carries the four-tier provider order, the key
+  /// ledger, the per-attempt and tier budgets, the 4096-token ceiling that
+  /// OpenRouter rejects above, and the non-200 logging that took a live console
+  /// session to find. A parallel copy would drift from all five.
+  ///
+  /// Worth knowing when calling this twice in one flow, as the scan screen does
+  /// (structuring, then safety): the tiers are sequential, so two calls against a
+  /// dead OpenRouter cost two budgets end to end. That is survivable at 40s each
+  /// and was not at 45s per key per call, which is what the live console showed.
   ///
   /// Deliberately a thin wrapper rather than making [_callTextModel] public:
   /// keeping the private method as the single implementation means the OCR and
@@ -620,9 +766,14 @@ RULES:
   static Future<String?> askTextModel(String prompt) => _callTextModel(prompt);
 
   /// Text-only model call for the structuring pass. Same provider order as OCR.
+  ///
+  /// Returns null only when all four tiers are exhausted. Every tier logs why it
+  /// declined, because the caller's fallback ([_mechanicalExtract]) produces a
+  /// plausible-looking result and so cannot be told apart from success on screen.
   static Future<String?> _callTextModel(String prompt) async {
+    final sw = Stopwatch()..start();
     final body = {
-      'model': _ocrModel,
+      'model': _textModels.first,
       'messages': [
         {'role': 'user', 'content': prompt}
       ],
@@ -638,42 +789,89 @@ RULES:
       'seed': 42,
     };
 
-    for (final key in await GeminiVision.openRouterKeys()) {
-      try {
-        final r = await http
-            .post(
-              Uri.parse(_orEndpoint),
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer $key',
-                'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
-                'X-Title': 'SAIL Safety Lens',
-              },
-              body: jsonEncode(body),
-            )
-            .timeout(summaryTimeout);
-        if (r.statusCode == 200) {
-          await GeminiVision.noteExternalFreeVisionRequest(served: true);
-          final data =
-              jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-          final choices = data['choices'] as List?;
-          if (choices != null && choices.isNotEmpty) {
-            return choices[0]['message']?['content']?.toString();
-          }
-        } else if (r.statusCode == 429) {
-          await GeminiVision.noteExternalFreeVisionRequest(served: false);
-        } else {
-          // Was silent. A failed structuring pass degrades to _mechanicalExtract,
-          // which produces a plausible-looking result, so without this line the
-          // only symptom is "the AI stopped finding clause numbers".
-          print('SopOcr: summary OpenRouter HTTP ${r.statusCode} — '
-              '${_briefBody(r.body)}');
+    // ── Tier 1: OpenRouter, every model against every key ───────────────
+    //
+    // Model outer, key inner: a stalled model stalls for all keys, whereas a
+    // rate-limited key still has other models available to it. Trying key-outer
+    // would spend the whole budget re-confirming that model one is stuck.
+    final keys = await GeminiVision.openRouterKeys();
+    for (final model in _textModels) {
+      for (final key in keys) {
+        if (sw.elapsed >= textTierBudget) {
+          print('SopOcr: summary OpenRouter budget spent after '
+              '${sw.elapsedMilliseconds}ms → next tier');
+          break;
         }
-      } catch (e) {
-        print('SopOcr: summary via OpenRouter failed — $e');
+        try {
+          final r = await http
+              .post(
+                Uri.parse(_orEndpoint),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': 'Bearer $key',
+                  'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
+                  'X-Title': 'SAIL Safety Lens',
+                },
+                body: jsonEncode({...body, 'model': model}),
+              )
+              .timeout(textAttemptTimeout);
+          if (r.statusCode == 200) {
+            await GeminiVision.noteExternalFreeVisionRequest(served: true);
+            final data =
+                jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+            final choices = data['choices'] as List?;
+            if (choices != null && choices.isNotEmpty) {
+              final content = choices[0]['message']?['content']?.toString();
+              // An empty 200 is a real outcome, not a success: it is what a
+              // model returns when the whole token budget went on thinking.
+              // Returning it would hand the caller "" to parse as JSON.
+              if (content != null && content.trim().isNotEmpty) return content;
+              print('SopOcr: summary $model returned an empty 200 → next model');
+            }
+          } else if (r.statusCode == 429) {
+            await GeminiVision.noteExternalFreeVisionRequest(served: false);
+            // Name the model. "429" alone reads as "we are out of allowance",
+            // when it can equally be this one model being throttled.
+            print('SopOcr: summary $model 429 — throttled or allowance spent');
+          } else {
+            // Was silent. A failed structuring pass degrades to
+            // _mechanicalExtract, which produces a plausible-looking result, so
+            // without this line the only symptom is "the AI stopped finding
+            // clause numbers".
+            print('SopOcr: summary OpenRouter HTTP ${r.statusCode} on $model — '
+                '${_briefBody(r.body)}');
+          }
+        } on TimeoutException {
+          print('SopOcr: summary $model timed out after '
+              '${textAttemptTimeout.inSeconds}s → next');
+        } catch (e) {
+          print('SopOcr: summary via OpenRouter ($model) failed — $e');
+        }
       }
     }
 
+    // ── Tier 2: Nara ────────────────────────────────────────────────────
+    //
+    // Wrapped so an unusable Nara falls THROUGH to Gemini. This used to
+    // `return null` on `!isUsableHere`, which on web — where Nara is always
+    // unusable, being CORS-blocked — meant the branch below could never run at
+    // all. That single `return` is most of the reason a web scan had no working
+    // provider.
+    final naraText = await _callNaraText(body);
+    if (naraText != null) return naraText;
+
+    // ── Tier 3: Gemini direct ───────────────────────────────────────────
+    final geminiText = await _callGeminiText(prompt);
+    if (geminiText != null) return geminiText;
+
+    print('SopOcr: summary — all providers exhausted after '
+        '${sw.elapsedMilliseconds}ms');
+    return null;
+  }
+
+  /// Nara text call. Returns null for "not available here" and for any failure;
+  /// the two are equivalent to the caller, which has another tier either way.
+  static Future<String?> _callNaraText(Map<String, dynamic> body) async {
     try {
       if (!await NaraVision.isUsableHere) return null;
       final apiKey = (await NaraVision.getApiKey()).trim();
@@ -687,17 +885,119 @@ RULES:
             },
             body: jsonEncode({...body, 'model': model}),
           )
-          .timeout(summaryTimeout);
+          .timeout(textAttemptTimeout);
       if (r.statusCode == 200) {
         final data =
             jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
         final choices = data['choices'] as List?;
         if (choices != null && choices.isNotEmpty) {
-          return choices[0]['message']?['content']?.toString();
+          final content = choices[0]['message']?['content']?.toString();
+          if (content != null && content.trim().isNotEmpty) return content;
+        }
+      } else {
+        print('SopOcr: summary Nara HTTP ${r.statusCode} — '
+            '${_briefBody(r.body)}');
+      }
+    } on TimeoutException {
+      print('SopOcr: summary Nara timed out');
+    } catch (e) {
+      print('SopOcr: summary via Nara failed — $e');
+    }
+    return null;
+  }
+
+  /// Last tier: Gemini direct, text only.
+  ///
+  /// Built here rather than added to [GeminiDirectVision] on purpose. That class
+  /// belongs to the hazard/near-miss path — its `analyzeImage` carries the hazard
+  /// prompt and hazard-shaped response parsing, and this file's own header
+  /// explains why an OCR job must not be pushed through hazard machinery. So only
+  /// the three pieces that are genuinely shared are reused, all already public:
+  /// `isConfigured`, `getApiKey()` and `getModel()` — the last of which
+  /// transparently rewrites retired model IDs, which is precisely the logic worth
+  /// not copying.
+  ///
+  /// `responseMimeType: application/json` suits both callers: the structuring
+  /// prompt and the safety prompt each demand a JSON object. If a future caller
+  /// wants prose, that is the moment to add a parameter — not before.
+  static Future<String?> _callGeminiText(String prompt) async {
+    try {
+      if (!await GeminiDirectVision.isConfigured) {
+        print('SopOcr: summary — no Gemini key configured, nothing left to try');
+        return null;
+      }
+      final apiKey = (await GeminiDirectVision.getApiKey()).trim();
+      if (apiKey.isEmpty) return null;
+
+      // The admin's selected model first, then the package default, deduped. Two
+      // attempts, not the whole fallback chain: this tier runs after the budget
+      // above is already spent, and the user has been watching a spinner for
+      // most of a minute by the time it starts.
+      final selected = await GeminiDirectVision.getModel();
+      final models = <String>[selected];
+      if (selected != GeminiDirectVision.defaultModel) {
+        models.add(GeminiDirectVision.defaultModel);
+      }
+
+      for (final model in models) {
+        try {
+          final r = await http
+              .post(
+                Uri.parse('https://generativelanguage.googleapis.com/v1beta/'
+                    'models/$model:generateContent?key=$apiKey'),
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode({
+                  'contents': [
+                    {
+                      'parts': [
+                        {'text': prompt}
+                      ]
+                    }
+                  ],
+                  'generationConfig': {
+                    'temperature': 0,
+                    'topP': 1,
+                    // Gemini's own ceiling, and it is NOT the 4096 that
+                    // OpenRouter enforces per model. Different provider, so do
+                    // not "make it consistent" — the 4096 above exists because
+                    // OpenRouter rejects rather than clamps.
+                    'maxOutputTokens': 8192,
+                    'responseMimeType': 'application/json',
+                  },
+                }),
+              )
+              .timeout(geminiTimeout);
+          if (r.statusCode != 200) {
+            print('SopOcr: summary Gemini HTTP ${r.statusCode} on $model — '
+                '${_briefBody(r.body)}');
+            continue;
+          }
+          final data =
+              jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+          final candidates = data['candidates'] as List?;
+          if (candidates == null || candidates.isEmpty) {
+            // A 200 with no candidates is a safety block, and the reason is in
+            // promptFeedback. Worth printing: an SOP about gas lines or lifting
+            // can trip a content filter, and that looks identical to a stall.
+            print('SopOcr: summary Gemini returned no candidates — '
+                '${_briefBody(jsonEncode(data['promptFeedback'] ?? {}))}');
+            continue;
+          }
+          final parts =
+              candidates[0]['content']?['parts'] as List?;
+          if (parts == null || parts.isEmpty) continue;
+          final text = parts[0]['text']?.toString();
+          if (text != null && text.trim().isNotEmpty) {
+            print('SopOcr: summary served by Gemini ($model)');
+            return text;
+          }
+        } on TimeoutException {
+          print('SopOcr: summary Gemini timed out on $model after '
+              '${geminiTimeout.inSeconds}s');
         }
       }
     } catch (e) {
-      print('SopOcr: summary via Nara failed — $e');
+      print('SopOcr: summary via Gemini failed — $e');
     }
     return null;
   }

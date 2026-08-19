@@ -34,6 +34,42 @@ Three properties of that feature are load-bearing and should not be "tidied":
   UNVERIFIED in the UI rather than dropped, because a dropped requirement is
   invisible and a labelled one is checkable.
 
+**Provider tiers in the SOP path — fixed 2026-08-19 after a live failure, also
+uncompiled.** A web scan on safetylens.in timed out four times and then silently
+produced a mechanical page-per-clause extract. Cause: both SOP paths (page OCR
+and the text passes) stopped at OpenRouter → Nara, and **on web those are the
+only two tiers that exist** — there is no ML Kit in a browser and Nara is
+CORS-blocked, so one queued free model left no reader at all. The text path was
+worse still: one model, a 45s timeout per key, and a `return null` on
+`!NaraVision.isUsableHere` that made the code after it unreachable on web.
+
+Four changes, all inside `lib/services/sop_ocr_service.dart`:
+
+* **Gemini direct is now the last tier on both paths.** This is the same
+  conclusion `gemini_vision.dart` already records for hazard scans — when the
+  free allowance goes, every free model 429s together, so a configured Gemini
+  key is the only thing left. Built locally from `GeminiDirectVision`'s existing
+  public `isConfigured` / `getApiKey()` / `getModel()`; it deliberately does not
+  call `analyzeImage`, which carries the hazard prompt and hazard-shaped JSON
+  validation.
+* **The text passes use a model chain, not `_ocrModel`.** Instruct model first
+  (`google/gemma-4-26b-a4b-it:free`); both prompts want JSON, which is an
+  instruct job, and the vision model was only there because it was the constant
+  already in the file. The 30B reasoning model is **excluded on purpose** — it
+  spends the 4096 `max_tokens` on thinking and returns truncated JSON.
+* **45s → 20s per attempt, with a 40s tier budget** mirroring `_kTier1Budget`.
+  The 45s was justified as "a whole document needs longer", which confuses output
+  size with queue time; the measured evidence is in `gemini_vision.dart`.
+* An empty HTTP 200 is now treated as a failure and moves to the next model,
+  rather than being returned as `""` for the caller to parse as JSON.
+
+Worth knowing before optimising: the scan screen calls the chain **twice in
+sequence** (structuring, then safety), so a total outage costs two budgets end to
+end. Parallelising them was considered and not done — two concurrent free-tier
+requests risk throttling each other, which would trade a slow success for a fast
+failure. The safety pass's one JSON-repair retry cannot compound this: it only
+fires when a model actually replied.
+
 The badges in that UI are 10px, not the 9px used by the nav labels. The 9px
 waiver was granted for nav labels specifically; HIGH/MEDIUM/LOW is the safety
 signal itself. `tools/audit_contrast.py --strict` is unchanged at **245
