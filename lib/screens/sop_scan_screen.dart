@@ -20,6 +20,7 @@
 
 import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -28,6 +29,7 @@ import '../main.dart' show AppColors, SL, SLText;
 import '../services/local_db.dart';
 import '../services/network_checker.dart';
 import '../services/plant_scope.dart';
+import '../services/sop_doc_import.dart';
 import '../services/sop_ocr_device.dart';
 import '../services/sop_ocr_service.dart';
 import '../services/sync_service.dart';
@@ -38,19 +40,51 @@ import '../utils/image_prep.dart';
 
 enum _Stage { capture, reading, review }
 
-/// One captured page and whatever we know about it so far.
+/// One page of the document and whatever we know about it so far.
+///
+/// Two kinds, which is why the byte fields can be empty. An IMAGE page came from
+/// the camera, the gallery or a rasterised PDF, and has to be read by an OCR
+/// tier. A TEXT page came from a Word or .txt file, where the text is already
+/// exact — reading it again through OCR would be strictly worse: it would spend
+/// an AI request to turn perfect text into an approximation of itself.
 class _Page {
   /// OCR-prepared bytes (grayscale, contrast-lifted, long edge 1800).
+  /// EMPTY for a text page — check [isText] before handing this to anything.
   Uint8List ocrBytes;
 
   /// Small preview. Kept separately so the grid is not decoding a 1800px image
   /// per thumbnail on every rebuild — with 30 pages that is what makes the
-  /// review list stutter.
+  /// review list stutter. Empty for a text page, which has nothing to show.
   Uint8List thumb;
+
+  /// Text lifted straight out of an uploaded document. Empty for an image page.
+  final String importedText;
+
+  /// What to call this page in the list. Empty falls back to "Page N", which is
+  /// right for photographs; an imported file says where it came from instead,
+  /// because "Page 1" next to no thumbnail looks like a page that failed.
+  final String label;
 
   PageOcr? result;
 
-  _Page({required this.ocrBytes, required this.thumb});
+  _Page({
+    required this.ocrBytes,
+    required this.thumb,
+    this.importedText = '',
+    this.label = '',
+  });
+
+  _Page.fromText({required String text, required this.label})
+      : ocrBytes = Uint8List(0),
+        thumb = Uint8List(0),
+        importedText = text;
+
+  /// True when the text is already known and no reader is needed.
+  ///
+  /// Tested on the text rather than on a separate bool flag so the two can never
+  /// disagree: a "text page" carrying no text would otherwise reach _readAll,
+  /// skip OCR because the flag said so, and be filed as an empty page.
+  bool get isText => importedText.trim().isNotEmpty;
 
   bool get failed => result != null && !result!.ok;
 }
@@ -96,6 +130,14 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   final List<_Page> _pages = [];
   SopExtract? _extract;
+
+  /// True when these pages came from an uploaded file rather than the camera.
+  ///
+  /// Kept as a flag rather than inferred from the pages, because a rasterised
+  /// PDF page is byte-for-byte the same kind of thing as a photograph — the
+  /// difference is only in what advice to give when it cannot be read, and
+  /// "retake the photo" is the wrong thing to say about a file.
+  bool _imported = false;
 
   // Reading progress.
   int _readDone = 0;
@@ -175,6 +217,12 @@ class _SopScanScreenState extends State<SopScanScreen> {
   // ═══════════════════════════════════════════════════════════════════════
 
   Future<void> _addPages(ImageSource source) async {
+    if (_imported) {
+      // Same reasoning as the guard in _addDocument, from the other direction.
+      _snack('Start over first — photographs cannot be added to an '
+          'imported document.');
+      return;
+    }
     if (_pages.length >= SopOcrService.maxPages) {
       _snack('Maximum ${SopOcrService.maxPages} pages per document.');
       return;
@@ -212,9 +260,197 @@ class _SopScanScreenState extends State<SopScanScreen> {
         setState(() => _pages.add(prepared));
         _syncUnsavedFlag();
       }
+
+      // Picking from the gallery is ONE action that delivers a whole document,
+      // so reading starts by itself. The camera path deliberately does not:
+      // there, pages arrive one at a time, and auto-reading after the first shot
+      // would move the screen off capture before page 2 could be taken — and
+      // spend an AI request per press of the shutter.
+      if (source == ImageSource.gallery) await _autoRead();
     } catch (e) {
       print('SopScan: capture failed — $e');
       _snack('Could not open the camera or gallery.');
+    }
+  }
+
+  /// Starts reading without being asked, after an upload delivered a document.
+  ///
+  /// Separate from calling [_readAll] directly so the one condition that must
+  /// hold — that we are still sitting on the capture stage with pages — is
+  /// stated once. Without it a slow rasterise finishing after the user pressed
+  /// "Read" or "Start over" would restart the read underneath them.
+  Future<void> _autoRead() async {
+    if (!mounted || _stage != _Stage.capture || _pages.isEmpty) return;
+    await _readAll();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  DOCUMENT IMPORT (PDF / Word / text)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Import a PDF, .docx or .txt as pages, then read it.
+  ///
+  /// PDF and Word take opposite routes on purpose. A Word file's text is exact,
+  /// so it is used as-is. A PDF is rasterised and sent through OCR even when it
+  /// has a perfectly good text layer, because most plant SOPs in circulation are
+  /// scans of a signed paper copy — where there IS no text layer — and one path
+  /// that always works beats two paths where the good one silently produces
+  /// nothing. See SopDocImport.pdfTextFastPath for the other half of that trade.
+  Future<void> _addDocument() async {
+    if (_pages.isNotEmpty) {
+      // Mixing an imported document into photographed pages produces one KB
+      // entry claiming to be a single document, with two different page
+      // numberings inside it. Refuse rather than quietly interleave.
+      _snack('Start over first — a document is imported on its own.');
+      return;
+    }
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: SopDocImport.pickerExtensions,
+        withData: true, // Required on web, where there is no file path.
+      );
+    } catch (e) {
+      print('SopScan: file picker failed — $e');
+      _snack('Could not open the file picker.');
+      return;
+    }
+    if (result == null || result.files.isEmpty) return;
+    // The picker is a long async gap during which the user can tap another
+    // bottom-nav tab, and HomeScreen's AnimatedSwitcher DISPOSES this State when
+    // they do. Every setState below would then throw. Checked once here rather
+    // than before each one, since nothing between here and the end can remount.
+    if (!mounted) return;
+
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      _snack('Could not read that file.');
+      return;
+    }
+
+    final kind = SopDocImport.kindOf(file.name);
+    if (kind == SopDocKind.legacyWord) {
+      // Named explicitly. ".doc" is a binary OLE container with no pure-Dart
+      // reader, and a generic "unsupported file" leaves the user retrying the
+      // same file instead of doing the one thing that fixes it.
+      setState(() => _error =
+          'Old Word format (.doc) cannot be read. Open it in Word and use '
+          'Save As → Word Document (.docx), or print it to PDF.');
+      return;
+    }
+    if (kind == SopDocKind.unsupported) {
+      setState(() => _error = 'Pick a PDF, a Word .docx, or a .txt file.');
+      return;
+    }
+
+    // Pre-fill the title from the filename now, before the read. The AI usually
+    // overwrites it from the document's own header, but if the structuring pass
+    // cannot be reached the filename is a far better fallback than blank — and
+    // an empty title is the one thing that blocks saving.
+    if (_titleCtl.text.trim().isEmpty) {
+      _titleCtl.text = SopDocImport.titleFromFileName(file.name);
+    }
+
+    if (kind == SopDocKind.pdf) {
+      await _importPdf(bytes);
+    } else {
+      final text = kind == SopDocKind.word
+          ? SopDocImport.docxText(bytes)
+          : SopDocImport.plainText(bytes);
+      if (text.trim().isEmpty) {
+        setState(() => _error =
+            'That file has no text in it. If it is a scan saved as a Word '
+            'file, export it as a PDF and import that instead.');
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _error = null;
+        _imported = true;
+        _pages.add(_Page.fromText(text: text, label: file.name));
+      });
+      _syncUnsavedFlag();
+    }
+
+    await _autoRead();
+  }
+
+  Future<void> _importPdf(Uint8List bytes) async {
+    // Enter the reading stage BEFORE the probe, not after. The probe itself can
+    // take seconds on the browser — it fetches pdf.js on first use — and
+    // _progressNote is only rendered by the reading view, so setting the note
+    // while still on the capture stage would show the user nothing at all and
+    // leave a dead-looking button, which is the exact failure this guards.
+    setState(() {
+      _error = null;
+      _stage = _Stage.reading;
+      _readDone = 0;
+      _progressNote = 'Checking PDF support…';
+    });
+    if (!await SopDocImport.canReadPdf()) {
+      if (!mounted) return;
+      setState(() {
+        _stage = _Stage.capture;
+        _progressNote = '';
+        // Names the actual cause on web. The browser build fetches its PDF
+        // engine from a public CDN on first use, and a plant network that blocks
+        // it produces exactly this — a network problem, not a broken file, and
+        // the user needs to know which.
+        _error = kIsWeb
+            ? 'This browser could not load its PDF engine — it is fetched from '
+                'the internet on first use and may be blocked on this network. '
+                'Use the phone app for PDFs, or import a Word .docx.'
+            : 'PDFs cannot be opened on this device. Import a Word .docx, or '
+                'photograph the pages.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    // Already on the reading stage from the probe above — this only advances the
+    // note. It matters that this is a stage and not a snackbar: rasterising 20
+    // pages takes real seconds on the UI thread (on mobile PdfRaster.toPng
+    // encodes through dart:ui and cannot be moved to an isolate), and a screen
+    // that looks idle while frozen reads as a crash.
+    setState(() => _progressNote = 'Opening the PDF…');
+    try {
+      final pages = await SopDocImport.pdfPages(
+        bytes,
+        maxPages: SopOcrService.maxPages,
+        onPage: (n) {
+          if (!mounted) return;
+          setState(() => _progressNote = 'Opening page $n…');
+        },
+      );
+      if (!mounted) return;
+      if (pages.isEmpty) {
+        setState(() {
+          _stage = _Stage.capture;
+          _error = 'No pages could be opened from that PDF. It may be '
+              'password-protected or damaged.';
+        });
+        return;
+      }
+      setState(() {
+        _stage = _Stage.capture;
+        _progressNote = '';
+        _imported = true;
+        for (final p in pages) {
+          _pages.add(_Page(
+              ocrBytes: p.ocrBytes,
+              thumb: p.thumb,
+              label: 'PDF page ${p.pageNo}'));
+        }
+      });
+      _syncUnsavedFlag();
+    } catch (e) {
+      print('SopScan: PDF import failed — $e');
+      if (!mounted) return;
+      setState(() {
+        _stage = _Stage.capture;
+        _error = 'Could not open that PDF.';
+      });
     }
   }
 
@@ -257,7 +493,12 @@ class _SopScanScreenState extends State<SopScanScreen> {
   }
 
   void _removePage(int index) {
-    setState(() => _pages.removeAt(index));
+    setState(() {
+      _pages.removeAt(index);
+      // Emptying the list ends the import, so the next pick is not refused by
+      // the "start over first" guard in _addDocument.
+      if (_pages.isEmpty) _imported = false;
+    });
     _syncUnsavedFlag();
   }
 
@@ -287,7 +528,12 @@ class _SopScanScreenState extends State<SopScanScreen> {
     });
 
     final online = await NetworkChecker.hasInternet();
-    if (!online && !SopOcrDevice.isAvailable) {
+    // Only IMAGE pages need a reader. Guarded on that rather than on
+    // _pages.isNotEmpty because an imported Word document already holds its
+    // text, and the old test would have refused to file it offline — telling the
+    // user to connect in order to read a file that needs no reading.
+    final needsReader = _pages.any((p) => !p.isText);
+    if (needsReader && !online && !SopOcrDevice.isAvailable) {
       if (!mounted) return;
       setState(() {
         _stage = _Stage.capture;
@@ -303,13 +549,27 @@ class _SopScanScreenState extends State<SopScanScreen> {
     // latency budgets.
     for (int i = 0; i < _pages.length; i++) {
       if (!mounted) return;
-      setState(() =>
-          _progressNote = 'Reading page ${i + 1} of ${_pages.length}…');
-      final r = await SopOcrService.readPage(
-        _pages[i].ocrBytes,
-        pageNo: i + 1,
-        allowAi: online,
-      );
+      final page = _pages[i];
+      final PageOcr r;
+      if (page.isText) {
+        // No OCR call at all. engine 'document' rather than 'device' so the raw
+        // KB row records honestly where this text came from — an exact copy out
+        // of the file, which is the most trustworthy tier there is and should
+        // not be filed under the name of a recogniser that never ran.
+        r = PageOcr(
+          pageNo: i + 1,
+          text: page.importedText,
+          engine: 'document',
+        );
+      } else {
+        setState(() =>
+            _progressNote = 'Reading page ${i + 1} of ${_pages.length}…');
+        r = await SopOcrService.readPage(
+          page.ocrBytes,
+          pageNo: i + 1,
+          allowAi: online,
+        );
+      }
       if (!mounted) return;
       setState(() {
         _pages[i].result = r;
@@ -322,8 +582,20 @@ class _SopScanScreenState extends State<SopScanScreen> {
       if (!mounted) return;
       setState(() {
         _stage = _Stage.capture;
-        _error = 'None of the pages could be read. Retake them in better light, '
-            'square to the page, with the text filling the frame.';
+        // Two different messages, because the advice that fits a photograph is
+        // useless for a PDF. Telling someone to hold the phone squarer when the
+        // pages came out of a file they uploaded sent the last person hunting
+        // for a photography problem while the real fault was at the provider.
+        _error = _pages.any((p) => p.result?.error.isNotEmpty == true &&
+                p.result!.error.contains('connection'))
+            ? 'None of the pages could be read — the AI reader could not be '
+                'reached. Check the connection and try again.'
+            : _imported
+                ? 'None of the pages could be read. If this PDF is a scan, the '
+                    'pages may be too faint or too small; try a higher-quality '
+                    'scan, or photograph the printed copy.'
+                : 'None of the pages could be read. Retake them in better '
+                    'light, square to the page, with the text filling the frame.';
       });
       return;
     }
@@ -517,6 +789,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
         // immediately rather than re-entering the tab.
         setState(() {
           _pages.clear();
+          _imported = false;
           _extract = null;
           _stage = _Stage.capture;
           _readDone = 0;
@@ -617,6 +890,9 @@ class _SopScanScreenState extends State<SopScanScreen> {
           : '${_pages.length} page(s) ready';
     }
     if (_stage == _Stage.reading) {
+      // _pages is still empty while a PDF is being opened — this stage is
+      // entered before the pages exist — and "Reading 0 of 0" reads as a bug.
+      if (_pages.isEmpty) return 'Opening the document';
       return 'Reading $_readDone of ${_pages.length}';
     }
     return 'Check before saving';
@@ -660,7 +936,9 @@ class _SopScanScreenState extends State<SopScanScreen> {
               Text(
                 'One photo per page, in order. Hold the phone square to the '
                 'page, fill the frame with the text, and avoid shadow across '
-                'the middle. Up to ${SopOcrService.maxPages} pages.',
+                'the middle. Up to ${SopOcrService.maxPages} pages.\n\n'
+                'Already have the file? Import a PDF, a Word .docx or a .txt '
+                'instead — it starts reading on its own.',
                 style: SLText.bodySmall(sl),
               ),
               const SizedBox(height: 14),
@@ -688,11 +966,30 @@ class _SopScanScreenState extends State<SopScanScreen> {
                       side: BorderSide(color: sl.border),
                       padding: const EdgeInsets.symmetric(vertical: 13),
                     ),
-                    label: Text('Files',
+                    label: Text('Photos',
                         style: SLText.button(sl).copyWith(color: sl.accentText)),
                   ),
                 ),
               ]),
+              const SizedBox(height: 10),
+              // Full width and on its own row. Three buttons across cannot hold
+              // readable labels on a 320px screen, and this is the fastest route
+              // for anyone who already has the SOP as a file — which, for a
+              // document that was issued electronically, is most people.
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _addDocument,
+                  icon: Icon(Icons.upload_file_outlined,
+                      size: 18, color: sl.accentText),
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: sl.border),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                  ),
+                  label: Text('Import PDF or Word',
+                      style: SLText.button(sl).copyWith(color: sl.accentText)),
+                ),
+              ),
               if (!SopOcrDevice.isAvailable) ...[
                 const SizedBox(height: 12),
                 Text(
@@ -752,24 +1049,42 @@ class _SopScanScreenState extends State<SopScanScreen> {
         border: Border.all(color: sl.border),
       ),
       child: Row(children: [
+        // A text page has no thumbnail to show. Image.memory on an empty list
+        // throws inside the paint phase, which is the worst place for it: the
+        // error is a red box every frame rather than a message anyone can act on.
         ClipRRect(
           borderRadius: BorderRadius.circular(6),
-          child: Image.memory(p.thumb,
-              width: 46, height: 60, fit: BoxFit.cover,
-              gaplessPlayback: true),
+          child: p.isText
+              ? Container(
+                  width: 46,
+                  height: 60,
+                  color: sl.card3,
+                  child: Icon(Icons.article_outlined,
+                      size: 20, color: sl.accentText),
+                )
+              : Image.memory(p.thumb,
+                  width: 46, height: 60, fit: BoxFit.cover,
+                  gaplessPlayback: true),
         ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Page ${i + 1}',
+              Text(p.label.isEmpty ? 'Page ${i + 1}' : p.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                       color: sl.text1,
                       fontSize: 13,
                       fontWeight: FontWeight.w600)),
               const SizedBox(height: 2),
-              Text(_sizeLabel(p.ocrBytes.length), style: SLText.hint(sl)),
+              Text(
+                  p.isText
+                      ? 'Text read from the file · '
+                          '${p.importedText.length} characters'
+                      : _sizeLabel(p.ocrBytes.length),
+                  style: SLText.hint(sl)),
             ],
           ),
         ),
@@ -783,11 +1098,15 @@ class _SopScanScreenState extends State<SopScanScreen> {
           onPressed: i == _pages.length - 1 ? null : () => _movePage(i, 1),
           icon: Icon(Icons.arrow_downward, size: 18, color: sl.text3),
         ),
-        IconButton(
-          tooltip: 'Retake',
-          onPressed: () => _retake(i),
-          icon: Icon(Icons.refresh, size: 18, color: sl.accentText),
-        ),
+        // No Retake for an imported page: there is no photograph to retake, and
+        // the camera shot it would substitute would sit in the middle of a
+        // rasterised PDF at a different scale and page numbering.
+        if (!_imported)
+          IconButton(
+            tooltip: 'Retake',
+            onPressed: () => _retake(i),
+            icon: Icon(Icons.refresh, size: 18, color: sl.accentText),
+          ),
         IconButton(
           tooltip: 'Remove',
           onPressed: () => _removePage(i),
@@ -830,11 +1149,18 @@ class _SopScanScreenState extends State<SopScanScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              SopOcrDevice.isAvailable
-                  ? 'Reading on the phone first, and asking the AI only for '
-                      'pages it cannot handle.'
-                  : 'Each page is being read by the AI. This takes a few '
-                      'seconds per page.',
+              _pages.isEmpty
+                  ? 'Turning each page of the PDF into an image to read. Long '
+                      'documents take a few seconds per page.'
+                  : _pages.every((p) => p.isText)
+                      ? 'The text came straight out of the file, so there is '
+                          'nothing to recognise — only the clause structure to '
+                          'work out.'
+                      : SopOcrDevice.isAvailable
+                          ? 'Reading on the phone first, and asking the AI only '
+                              'for pages it cannot handle.'
+                          : 'Each page is being read by the AI. This takes a '
+                              'few seconds per page.',
               textAlign: TextAlign.center,
               style: SLText.hint(sl),
             ),

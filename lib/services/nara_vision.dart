@@ -38,7 +38,7 @@
 // If a scan comes back HTTP 404 here, the slug is the first thing to check.
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show Uint8List;
+import 'package:flutter/foundation.dart' show Uint8List, kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'gemini_vision.dart';
@@ -118,6 +118,30 @@ class NaraVision {
     final key = (_prefs!.getString(_kApiKey) ?? '').trim();
     return key.startsWith(keyPrefix) && key.length > 20;
   }
+
+  /// Whether Nara can be *reached* from this platform at all.
+  ///
+  /// FALSE ON WEB, and not because of a policy choice: `router.bynara.id`
+  /// returns no `Access-Control-Allow-Origin` header, so a browser blocks the
+  /// response before this app ever sees it. Confirmed 2026-08-19 from the live
+  /// console at https://safetylens.in — every Nara call there was a CORS error,
+  /// which means the only thing the attempt bought was a full
+  /// [GeminiVision.kAttemptTimeout] of dead waiting on the *slowest* path, the
+  /// one taken after another provider has already failed.
+  ///
+  /// Deliberately separate from [isConfigured] rather than folded into it: the
+  /// admin panel asks "is a key stored" to draw its status chip, and on web that
+  /// answer is still yes. Collapsing the two would make a correctly-saved key
+  /// report "not configured" and send an admin off pasting it again.
+  ///
+  /// If Nara ever adds CORS headers (or a proxy is put in front of it — the
+  /// Apps Script AI proxy already fronts the other providers for exactly this
+  /// reason), delete this getter rather than special-casing call sites.
+  static bool get isReachableHere => !kIsWeb;
+
+  /// [isConfigured] AND [isReachableHere] — what a provider call should test.
+  static Future<bool> get isUsableHere async =>
+      isReachableHere && await isConfigured;
 
   static Future<String> getApiKey() async {
     await _ensurePrefs();

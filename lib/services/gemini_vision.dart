@@ -618,9 +618,17 @@ class GeminiVision {
       // already failing.
       // ══════════════════════════════════════════════════════════════════════
       final bool naraConfigured = await NaraVision.isConfigured;
+      // Two separate questions, deliberately not merged. "Is a key stored" drives
+      // the failure MESSAGE further down (a site running only on a Nara key must
+      // not be told "no AI key is configured"); "can this platform reach Nara at
+      // all" drives whether the attempt is made. On web the answers differ:
+      // router.bynara.id sends no CORS headers, so the browser blocks the reply
+      // and the tier can only spend its full kAttemptTimeout to fail — and it is
+      // reached precisely when a scan is already slow, having lost Tier 1.
+      final bool naraUsable = naraConfigured && NaraVision.isReachableHere;
       bool naraRefused = false; // 429 — rate limit or daily token quota
       bool naraKeyRejected = false; // 401/402/403
-      if (naraConfigured) {
+      if (naraUsable) {
         final naraModel = await NaraVision.getModel();
         print('GeminiVision: ▶ NaraRouter $naraModel (separate allowance)...');
         try {

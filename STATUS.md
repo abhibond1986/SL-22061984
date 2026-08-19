@@ -78,6 +78,28 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 `200` = applied. `42703` in the body = not yet.
 
+### 5. Self-host pdf.js if PDF import is to work on the web
+
+**Open, and it will bite on a plant network.** PDF import (added 2026-08-19) uses
+`Printing.raster` from the `printing` package. On Android and iOS that is native
+and self-contained. On **web** the plugin injects a `<script>` for
+`https://unpkg.com/pdfjs-dist@3.2.146/build/pdf.min.js` plus its worker on first
+use — verified against `printing-5.12.0/printing/lib/printing_web.dart`, not
+assumed. If that CDN is blocked, web PDF import cannot work.
+
+It fails *visibly*: `SopDocImport.canReadPdf()` probes with a 12s timeout and the
+screen names the cause. The timeout is load-bearing — a script tag that fails to
+load fires `error` and never `load`, and the plugin awaits `load`, so without it
+`Printing.info()` never returns and the Import button hangs forever.
+
+The fix is to vendor `pdf.min.js` and `pdf.worker.min.js` into `web/` and set
+`window.dartPdfJsBaseUrl` in `index.html` before Flutter boots; the plugin reads
+that global in preference to unpkg. Same job as the font self-hosting below, and
+worth doing in one pass.
+
+Word (.docx) and .txt import have no such dependency — pure Dart via `archive`,
+and their text is used exactly as stored rather than being sent through OCR.
+
 Also needs `flutter pub get` once, for the new
 `google_mlkit_text_recognition: ^0.13.0` dependency. Pinned to 0.13.x
 deliberately: 0.14 wants a newer Kotlin/AGP than the CI Flutter 3.19.6 toolchain

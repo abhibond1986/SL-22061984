@@ -336,6 +336,23 @@ RULES:
   //  PROVIDER CALLS
   // ═══════════════════════════════════════════════════════════════════════
 
+  /// A short, single-line excerpt of an error response body, for logging.
+  ///
+  /// Exists because a bare `HTTP 400` cost real debugging time: it looks the
+  /// same whether the model slug is wrong, `max_tokens` is over the model's
+  /// ceiling, or a content part is malformed — three problems with three
+  /// different fixes, and the provider names the actual one in the body.
+  ///
+  /// Capped and newline-collapsed on purpose. An error body can echo the whole
+  /// request back, and this request carries a base64 page image; unfiltered,
+  /// one failed scan would push megabytes of data URL through the console and
+  /// bury every other line in the log.
+  static String _briefBody(String body) {
+    final flat = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (flat.isEmpty) return '(empty body)';
+    return flat.length <= 300 ? flat : '${flat.substring(0, 300)}…';
+  }
+
   static Future<String?> _callOpenRouterOcr(
       Uint8List bytes, String apiKey) async {
     final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
@@ -360,10 +377,19 @@ RULES:
                   ]
                 }
               ],
-              // Higher than a hazard scan's budget: a dense A4 page of body text
-              // can exceed 2000 tokens, and a truncated transcription silently
-              // loses the bottom of the page.
-              'max_tokens': 8192,
+              // 4096, matching the hazard-scan call in gemini_vision.dart.
+              //
+              // This was 8192 — "a dense A4 page can exceed 2000 tokens, and a
+              // truncated transcription silently loses the bottom of the page" —
+              // and every request came back HTTP 400. The reasoning was fine and
+              // the number was still wrong: 8192 is above this model's
+              // max_completion_tokens, and OpenRouter rejects the request rather
+              // than clamping it. The hazard path has been sending 4096 to the
+              // same model for months, which is the evidence that matters.
+              //
+              // If a long page really is being truncated, the fix is to split
+              // the page, not to raise this: the ceiling is the provider's.
+              'max_tokens': 4096,
               // Transcription must not vary run to run.
               'temperature': 0,
               'top_p': 1,
@@ -386,7 +412,13 @@ RULES:
         print('SopOcr: OpenRouter 429 — free allowance or throttle');
         return null;
       }
-      print('SopOcr: OpenRouter HTTP ${response.statusCode}');
+      // Log the BODY, not just the status. A bare 'HTTP 400' is what this
+      // printed before, and it is indistinguishable between a bad model slug, an
+      // over-limit max_tokens and a malformed content part — all of which need
+      // different fixes. OpenRouter puts the actual reason in the body. Capped
+      // because an error body can carry the echoed request back.
+      print('SopOcr: OpenRouter HTTP ${response.statusCode} — '
+          '${_briefBody(response.body)}');
       return null;
     } on TimeoutException {
       print('SopOcr: OpenRouter timed out after ${attemptTimeout.inSeconds}s');
@@ -399,7 +431,9 @@ RULES:
 
   static Future<String?> _callNaraOcr(Uint8List bytes) async {
     try {
-      if (!await NaraVision.isConfigured) return null;
+      // isUsableHere, not isConfigured: on web this provider is CORS-blocked and
+      // the attempt can only spend attemptTimeout to arrive at the same failure.
+      if (!await NaraVision.isUsableHere) return null;
       final apiKey = (await NaraVision.getApiKey()).trim();
       final model = await NaraVision.getModel();
       final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
@@ -421,7 +455,10 @@ RULES:
                   ]
                 }
               ],
-              'max_tokens': 8192,
+              // 4096 for the same reason as the OpenRouter call above: this is a
+              // per-model ceiling, not a per-provider one, and asking above it
+              // gets the request rejected rather than clamped.
+              'max_tokens': 4096,
               'temperature': 0,
               'top_p': 1,
               'seed': 42,
@@ -429,7 +466,8 @@ RULES:
           )
           .timeout(attemptTimeout);
       if (response.statusCode != 200) {
-        print('SopOcr: Nara HTTP ${response.statusCode}');
+        print('SopOcr: Nara HTTP ${response.statusCode} — '
+            '${_briefBody(response.body)}');
         return null;
       }
       final data =
@@ -564,7 +602,13 @@ RULES:
       'messages': [
         {'role': 'user', 'content': prompt}
       ],
-      'max_tokens': 8192,
+      // 4096. This map is shared by the OpenRouter and Nara requests below, so
+      // the 8192 that was here failed the structuring pass on BOTH providers —
+      // the same HTTP 400 the OCR call was getting, one step later in the flow.
+      // It would have shown up as "AI could not structure this document" with a
+      // mechanical page-per-clause fallback, i.e. as a quality problem rather
+      // than as the provider error it is.
+      'max_tokens': 4096,
       'temperature': 0,
       'top_p': 1,
       'seed': 42,
@@ -594,6 +638,12 @@ RULES:
           }
         } else if (r.statusCode == 429) {
           await GeminiVision.noteExternalFreeVisionRequest(served: false);
+        } else {
+          // Was silent. A failed structuring pass degrades to _mechanicalExtract,
+          // which produces a plausible-looking result, so without this line the
+          // only symptom is "the AI stopped finding clause numbers".
+          print('SopOcr: summary OpenRouter HTTP ${r.statusCode} — '
+              '${_briefBody(r.body)}');
         }
       } catch (e) {
         print('SopOcr: summary via OpenRouter failed — $e');
@@ -601,7 +651,7 @@ RULES:
     }
 
     try {
-      if (!await NaraVision.isConfigured) return null;
+      if (!await NaraVision.isUsableHere) return null;
       final apiKey = (await NaraVision.getApiKey()).trim();
       final model = await NaraVision.getModel();
       final r = await http
