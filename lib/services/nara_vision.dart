@@ -95,6 +95,37 @@ class NaraVision {
   static const String defaultProxyUrl =
       'https://script.google.com/macros/s/AKfycbx0CUXs6VZg-nIzTV039ThJL6ywa2rzK3xyIdHEmeC5-LAMjE6LsmMKG63oTg-TyIJt/exec';
 
+  /// Ceiling for ONE call through the Apps Script proxy — deliberately NOT
+  /// [GeminiVision.kAttemptTimeout].
+  ///
+  /// That constant is 20s and its comment forbids raising it without measuring a
+  /// success, which is right: it bounds a DIRECT call to a vision provider. The
+  /// proxy path is a different shape with strictly more hops, and 20s was proven
+  /// too tight in the field on 2026-08-19 — the console showed
+  /// `TimeoutException after 0:00:20.000000` on a request that was genuinely in
+  /// flight (the earlier CORS failure had been instant, so a full-duration
+  /// timeout is the signature of a slow round trip, not a blocked one).
+  ///
+  /// The hops, and where the time goes:
+  ///   1. browser → script.google.com, uploading the base64 image
+  ///   2. Apps Script cold start (a few seconds on a project that has been idle)
+  ///   3. UrlFetchApp → router.bynara.id — MEASURED at 10447ms server-side
+  ///      against mistral-medium-3-5, from the proxy's own execution log
+  ///   4. a 302 to googleusercontent.com that the browser then follows
+  ///
+  /// So the provider leg alone consumes over half of the direct-call budget
+  /// before the proxy overhead is counted. 45s covers the measured 10.4s with
+  /// room for the other three hops, and is the same figure the direct path used
+  /// before it was tightened. Expect it to be needed less once the proxy serves
+  /// `mimo-v2.5-free` instead of mistral-medium-3-5 — the big model is the bulk
+  /// of step 3, so fixing the cost bug shortens this path too.
+  ///
+  /// Note that Tier 1b is NOT inside `_kTier1Budget` (that clock is checked only
+  /// inside the OpenRouter loop), so a stall here delays Tier 2 by the full
+  /// amount. That is the accepted tradeoff: this tier only runs at all once
+  /// OpenRouter has 429'd, which it does immediately.
+  static const Duration kProxyTimeout = Duration(seconds: 45);
+
   /// Chat-completions URL. Base is `https://router.bynara.id/v1`.
   ///
   /// Public because SopOcrService posts its own OCR/structuring bodies here
@@ -384,7 +415,7 @@ class NaraVision {
             headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: jsonEncode(requestBody),
           )
-          .timeout(GeminiVision.kAttemptTimeout);
+          .timeout(kProxyTimeout);
 
       // An Apps Script error page is HTML, not JSON — and the commonest causes
       // are operational, not code: the deployment is archived, or "Who has

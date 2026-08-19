@@ -5509,7 +5509,7 @@ class _AdminScreenState extends State<AdminScreen>
           .post(Uri.parse(url),
               headers: {'Content-Type': 'text/plain;charset=utf-8'},
               body: jsonEncode({'action': 'analyzeImageNara'}))
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 30));
 
       // On mobile/desktop http.Client does not follow the 302 that Apps Script
       // always answers a POST with; the browser does. Same asymmetry SyncService
@@ -5517,7 +5517,7 @@ class _AdminScreenState extends State<AdminScreen>
       if ((res.statusCode == 302 || res.statusCode == 301) && !kIsWeb) {
         final loc = res.headers['location'] ?? '';
         if (loc.isNotEmpty) {
-          res = await http.get(Uri.parse(loc)).timeout(const Duration(seconds: 20));
+          res = await http.get(Uri.parse(loc)).timeout(const Duration(seconds: 30));
         }
       }
 
