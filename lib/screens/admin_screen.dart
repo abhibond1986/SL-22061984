@@ -7004,10 +7004,19 @@ class _AdminScreenState extends State<AdminScreen>
       ),
       const SizedBox(height: 16),
 
-      // KB entries list
-      _sectionHeader('Knowledge Entries (${_kbDocs.length})', sl),
+      // ── Scanned SOP/SMP documents, grouped ──────────────────────────
+      //
+      // Shown as documents, not as rows. One scan produces a raw blob, a summary
+      // and one entry per clause — twenty-odd rows — so in the flat list below a
+      // single scanned SOP would bury every other entry and could only be
+      // deleted row by row. Verification is a decision about the DOCUMENT, so
+      // the docGroup is the unit the admin acts on.
+      ..._scannedGroupsSection(sl),
+
+      // KB entries list — scans excluded, they have their own section above.
+      _sectionHeader('Knowledge Entries (${_nonScanDocs.length})', sl),
       const SizedBox(height: 8),
-      if (_kbDocs.isEmpty)
+      if (_nonScanDocs.isEmpty)
         Container(
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
@@ -7017,7 +7026,7 @@ class _AdminScreenState extends State<AdminScreen>
             style: TextStyle(color: sl.text4, fontSize: 11))),
         )
       else
-        ...(_kbDocs.take(50).toList().asMap().entries.map((entry) {
+        ...(_nonScanDocs.take(50).toList().asMap().entries.map((entry) {
           final doc = entry.value;
           final title = doc['title']?.toString() ?? 'Untitled';
           final source = doc['source']?.toString() ?? '';
@@ -7050,13 +7059,240 @@ class _AdminScreenState extends State<AdminScreen>
             ]),
           );
         })),
-      if (_kbDocs.length > 50)
+      if (_nonScanDocs.length > 50)
         Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text('+ ${_kbDocs.length - 50} more entries...',
+          child: Text('+ ${_nonScanDocs.length - 50} more entries...',
             style: TextStyle(color: sl.text4, fontSize: 10))),
       const SizedBox(height: 20),
     ]);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  SCANNED SOP / SMP DOCUMENTS
+  // ═══════════════════════════════════════════════════════════════
+
+  List<Map<String, dynamic>> get _nonScanDocs => _kbDocs
+      .where((d) =>
+          !KnowledgeService.scanSources.contains(d['source']?.toString()))
+      .toList();
+
+  /// Scanned rows collapsed into one entry per docGroup.
+  ///
+  /// Rows with no docGroup are grouped under their own id, so a scan saved
+  /// before the migration still appears rather than vanishing into a null key.
+  List<_ScanGroup> get _scanGroups {
+    final byGroup = <String, _ScanGroup>{};
+    for (final d in _kbDocs) {
+      if (!KnowledgeService.scanSources.contains(d['source']?.toString())) {
+        continue;
+      }
+      final key = (d['docGroup']?.toString().isNotEmpty ?? false)
+          ? d['docGroup'].toString()
+          : 'single:${d['id']}';
+      final g = byGroup.putIfAbsent(key, () => _ScanGroup(key));
+      g.rows.add(d);
+      if (d['verified'] == true) g.verified = true;
+      final sop = d['sopNumber']?.toString() ?? '';
+      if (sop.isNotEmpty) g.sopNumber = sop;
+      final plant = d['plant']?.toString() ?? '';
+      if (plant.isNotEmpty) g.plant = plant;
+      final by = d['uploadedBy']?.toString() ?? '';
+      if (by.isNotEmpty) g.by = by;
+      final at = d['uploadedAt']?.toString() ?? '';
+      if (at.isNotEmpty && (g.at.isEmpty || at.compareTo(g.at) < 0)) g.at = at;
+      // The summary row carries the cleanest human title; prefer it, and strip
+      // the suffix this screen added when saving.
+      if (d['source'] == 'sop_scan' && (d['clauseNo']?.toString() ?? '').isEmpty) {
+        final t = d['title']?.toString() ?? '';
+        if (t.endsWith(' — summary')) {
+          g.title = t.substring(0, t.length - ' — summary'.length);
+        } else if (g.title.isEmpty) {
+          g.title = t;
+        }
+      }
+      if (g.title.isEmpty) g.title = d['title']?.toString() ?? 'Scanned document';
+    }
+    final list = byGroup.values.toList();
+    // Unverified first — they are the ones needing action.
+    list.sort((a, b) {
+      if (a.verified != b.verified) return a.verified ? 1 : -1;
+      return b.at.compareTo(a.at);
+    });
+    return list;
+  }
+
+  List<Widget> _scannedGroupsSection(SL sl) {
+    final groups = _scanGroups;
+    if (groups.isEmpty) return const [];
+    final pending = groups.where((g) => !g.verified).length;
+    return [
+      _sectionHeader(
+          'Scanned SOP / SMP (${groups.length})'
+          '${pending > 0 ? ' · $pending awaiting check' : ''}',
+          sl),
+      const SizedBox(height: 8),
+      Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: AppColors.amber.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.amber.withOpacity(0.3))),
+        child: Row(children: [
+          Icon(Icons.info_outline_rounded, size: 14, color: sl.amberText),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            'Photographed from printed copies by users and read by OCR. Until '
+            'you mark one as checked, the AI cites it but warns that it is '
+            'unverified and defers to your uploads.',
+            style: TextStyle(color: sl.text3, fontSize: 10.5, height: 1.35))),
+        ]),
+      ),
+      ...groups.map((g) => _scanGroupCard(sl, g)),
+      const SizedBox(height: 18),
+    ];
+  }
+
+  Widget _scanGroupCard(SL sl, _ScanGroup g) {
+    final clauses = g.rows
+        .where((d) => (d['clauseNo']?.toString() ?? '').isNotEmpty)
+        .length;
+    final meta = [
+      if (g.sopNumber.isNotEmpty) g.sopNumber,
+      '${g.rows.length} entries',
+      if (clauses > 0) '$clauses clauses',
+      if (g.plant.isNotEmpty) g.plant,
+      if (g.by.isNotEmpty) 'by ${g.by}',
+      if (g.at.isNotEmpty) g.at.split('T').first,
+    ].join(' • ');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: g.verified
+                ? sl.border.withOpacity(0.5)
+                : AppColors.amber.withOpacity(0.35))),
+      child: Row(children: [
+        Icon(Icons.document_scanner_rounded, size: 16,
+            color: g.verified ? sl.greenText : sl.amberText),
+        const SizedBox(width: 10),
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(child: Text(g.title, maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: sl.text1, fontSize: 11.5,
+                    fontWeight: FontWeight.w600))),
+              if (!g.verified)
+                Container(
+                  margin: const EdgeInsets.only(left: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: AppColors.amber.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(4)),
+                  child: Text('UNVERIFIED',
+                    style: TextStyle(color: sl.amberText, fontSize: 10,
+                        fontWeight: FontWeight.w800)),
+                ),
+            ]),
+            const SizedBox(height: 2),
+            Text(meta, style: TextStyle(color: sl.text4, fontSize: 10)),
+          ])),
+        GestureDetector(
+          onTap: () => _setScanGroupVerified(g, !g.verified),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Icon(
+              g.verified
+                  ? Icons.verified_rounded
+                  : Icons.check_circle_outline_rounded,
+              size: 18,
+              color: g.verified ? sl.greenText : sl.text3),
+          )),
+        GestureDetector(
+          onTap: () => _deleteScanGroup(g),
+          child: Icon(Icons.delete_outline_rounded, size: 16,
+              color: AppColors.red.withOpacity(0.6))),
+      ]),
+    );
+  }
+
+  Future<void> _setScanGroupVerified(_ScanGroup g, bool verified) async {
+    // Local first so the list reflects the tap immediately; the cloud call is
+    // best-effort because a verification that only lands on this device is
+    // still better than one that is lost while the admin waits on a spinner.
+    if (g.hasRealGroup) {
+      await LocalDB.setKnowledgeGroupVerified(g.key, verified);
+      try {
+        await SupabaseService.setKnowledgeGroupVerified(g.key, verified);
+      } catch (e) {
+        debugPrint('Admin: cloud verify failed — $e');
+      }
+    } else {
+      // Pre-migration row with no docGroup: the group key is synthetic, so
+      // matching on it would update nothing at all. Act on the row itself.
+      for (final r in g.rows) {
+        await LocalDB.setKnowledgeDocVerified(r['id']?.toString() ?? '', verified);
+      }
+    }
+    final docs = await LocalDB.getKnowledgeDocs();
+    if (!mounted) return;
+    setState(() => _kbDocs = docs);
+    _toast(verified ? 'Marked as checked' : 'Marked unverified',
+        verified ? const Color(0xFF43A047) : const Color(0xFFF59E0B));
+  }
+
+  Future<void> _deleteScanGroup(_ScanGroup g) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final sl = SL.of(ctx);
+        return AlertDialog(
+          backgroundColor: sl.card,
+          title: Text('Delete scanned document?',
+              style: TextStyle(color: sl.text1, fontSize: 14,
+                  fontWeight: FontWeight.w700)),
+          content: Text(
+              'Removes all ${g.rows.length} knowledge entries for '
+              '"${g.title}", including the full scanned text. The photographs '
+              'were never stored, so this cannot be undone — the document '
+              'would have to be re-scanned.',
+              style: TextStyle(color: sl.text3, fontSize: 12, height: 1.4)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false),
+                child: Text('Cancel',
+                    style: TextStyle(color: sl.text3, fontSize: 12))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true),
+                child: Text('Delete',
+                    style: TextStyle(color: sl.redText, fontSize: 12,
+                        fontWeight: FontWeight.w700))),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+
+    if (g.hasRealGroup) {
+      await LocalDB.deleteKnowledgeGroup(g.key);
+      try {
+        await SupabaseService.deleteKnowledgeGroup(g.key);
+      } catch (e) {
+        debugPrint('Admin: cloud group delete failed — $e');
+      }
+    } else {
+      for (final r in g.rows) {
+        await _deleteKbEntry(r['id']?.toString() ?? '');
+      }
+    }
+    final docs = await LocalDB.getKnowledgeDocs();
+    if (!mounted) return;
+    setState(() => _kbDocs = docs);
+    _toast('Scanned document deleted', const Color(0xFFE53935));
   }
 
   Widget _kbStatChip(String label, String value, SL sl) {
@@ -7145,21 +7381,26 @@ class _AdminScreenState extends State<AdminScreen>
 
       setState(() => _kbUploadStatus = 'Processing ${extractedText.length} chars...');
 
-      // Split into manageable chunks and save as KB entries
+      // Split into manageable chunks and save as KB entries.
+      // One bulk write, not one write per chunk: each addKnowledgeDoc call
+      // re-encodes and rewrites the WHOLE knowledge base and bumps the KB
+      // revision, so a 60-section document used to make every KB consumer drop
+      // its cache 60 times.
       final chunks = _chunkTextForKb(extractedText, fileName);
-      setState(() { _kbUploadTotal = chunks.length; });
+      setState(() {
+        _kbUploadTotal    = chunks.length;
+        _kbUploadProgress = 0;
+        _kbUploadStatus   = 'Saving ${chunks.length} sections...';
+      });
 
-      for (int i = 0; i < chunks.length; i++) {
-        setState(() {
-          _kbUploadProgress = i + 1;
-          _kbUploadStatus = 'Saving section ${i + 1} of ${chunks.length}...';
-        });
-        await LocalDB.addKnowledgeDoc(
-          title: '$fileName — Section ${i + 1}',
-          content: chunks[i],
-          source: '${type}_upload',
-        );
-      }
+      final newIds = await LocalDB.addKnowledgeDocs([
+        for (int i = 0; i < chunks.length; i++)
+          {
+            'title':   '$fileName — Section ${i + 1}',
+            'content': chunks[i],
+            'source':  '${type}_upload',
+          }
+      ]);
 
       // Refresh KB docs
       final updatedDocs = await LocalDB.getKnowledgeDocs();
@@ -7171,9 +7412,13 @@ class _AdminScreenState extends State<AdminScreen>
       _toast('Uploaded: $fileName (${chunks.length} sections, ${extractedText.length} chars)', const Color(0xFF43A047));
       AdminAudit.log(action: 'kb_upload', actor: _currentActor,
           meta: {'file': fileName, 'type': type, 'sections': chunks.length, 'chars': extractedText.length});
-      // ★ v25: Push KB to cloud so all devices get it
-      SyncService.pushKbDocs(updatedDocs).then((ok) {
-        if (ok && mounted) _toast('KB synced to cloud ✓', const Color(0xFF1565C0));
+      // Push ONLY the new sections. This used to push `updatedDocs` — the whole
+      // KB — against a plain insert, so every upload duplicated every existing
+      // row on the server.
+      SyncService.pushNewKbDocs(newIds).then((n) {
+        if (n > 0 && mounted) {
+          _toast('KB synced to cloud ✓ ($n sections)', const Color(0xFF1565C0));
+        }
       });
     } catch (e) {
       setState(() { _kbUploading = false; });
@@ -7276,18 +7521,20 @@ class _AdminScreenState extends State<AdminScreen>
         ],
       ));
     if (result == true && titleCtrl.text.trim().isNotEmpty && contentCtrl.text.trim().isNotEmpty) {
-      await LocalDB.addKnowledgeDoc(
-        title: titleCtrl.text.trim(),
-        content: contentCtrl.text.trim(),
-        source: 'manual_entry',
-      );
+      final newIds = await LocalDB.addKnowledgeDocs([
+        {
+          'title':   titleCtrl.text.trim(),
+          'content': contentCtrl.text.trim(),
+          'source':  'manual_entry',
+        }
+      ]);
       final updatedDocs = await LocalDB.getKnowledgeDocs();
       setState(() => _kbDocs = updatedDocs);
       _toast('Knowledge entry added', const Color(0xFF43A047));
       AdminAudit.log(action: 'kb_add_manual', actor: _currentActor,
           meta: {'title': titleCtrl.text.trim()});
-      // ★ v25: Push to cloud
-      SyncService.pushKbDocs(updatedDocs);
+      // Push only the new entry, not the whole KB.
+      SyncService.pushNewKbDocs(newIds);
     }
   }
 
@@ -8998,6 +9245,33 @@ class _AdminScreenState extends State<AdminScreen>
 }
 
 // ── Helper data class for compliance dashboard ──────────────────────
+/// One scanned SOP/SMP, rolled up from its many knowledge_docs rows.
+///
+/// Mutable and built by accumulation rather than constructed once, because the
+/// facts about the document are spread across its rows: the sopNumber sits on
+/// the clause rows, the clean title on the summary row, and `verified` is true
+/// for the group if it is true anywhere in it.
+class _ScanGroup {
+  /// docGroup value, or 'single:<id>' for a pre-migration row with no group.
+  final String key;
+  final List<Map<String, dynamic>> rows = [];
+  String title = '';
+  String sopNumber = '';
+  String plant = '';
+  String by = '';
+
+  /// Earliest uploadedAt in the group — when the document was scanned.
+  String at = '';
+  bool verified = false;
+
+  _ScanGroup(this.key);
+
+  /// False when [key] is the synthetic 'single:<id>' form. Callers must not pass
+  /// a synthetic key to the group-level LocalDB/Supabase helpers: those match on
+  /// the docGroup column, so the call would succeed and change nothing.
+  bool get hasRealGroup => !key.startsWith('single:');
+}
+
 class _PlantCompliance {
   final String plant;
   int total = 0;

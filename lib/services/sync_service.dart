@@ -254,9 +254,23 @@ class SyncService {
   //  Push KB docs from admin → backend, pull on all devices
   // ═══════════════════════════════════════════════════════════════
 
-  /// Push all KB documents to backend (called after admin uploads).
-  /// Uses existing 'addKnowledge' action — sends each doc individually.
-  /// For bulk: clears server KB sheet first, then re-adds all.
+  /// Push the given KB documents to the backend.
+  ///
+  /// **Pass only the docs that changed.** Callers used to hand this the entire
+  /// knowledge base after every upload while `SupabaseService.addKnowledgeDoc`
+  /// did a plain `insert` with no key — so each upload re-inserted every row
+  /// already on the server. With scanned SOPs adding tens of entries at a time
+  /// the growth was quadratic, and the duplicate chunks then competed with each
+  /// other for the handful of retrieval slots, crowding out other documents with
+  /// copies of one passage.
+  ///
+  /// The write is now an upsert keyed on `client_id`, so a repeat push of the
+  /// same doc updates instead of duplicating. That makes this safe to call with
+  /// a full list, but it is still N round trips — prefer [pushNewKbDocs].
+  /// Note: an EMPTY list must not short-circuit to success —
+  /// [clearKnowledgeBaseCloud] calls `pushKbDocs([])` on the Apps Script path
+  /// meaning "replace the sheet with nothing", and the caller distinguishes the
+  /// outcomes.
   static Future<bool> pushKbDocs(List<Map<String, dynamic>> docs) async {
     if (SupabaseConfig.enabled) {
       int ok = 0;
@@ -286,6 +300,28 @@ class SyncService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Push just the docs with these ids — the delta from a single upload or
+  /// scan. Resolves them from [LocalDB] so the caller does not have to hold the
+  /// rows, and reports progress so a 60-clause SOP can show a real bar instead
+  /// of an indefinite spinner.
+  ///
+  /// Returns the number pushed successfully. A partial result is normal offline;
+  /// the docs are already saved locally and a later push will upsert them.
+  static Future<int> pushNewKbDocs(
+    List<String> ids, {
+    void Function(int done, int total)? onProgress,
+  }) async {
+    if (ids.isEmpty) return 0;
+    final docs = await LocalDB.knowledgeDocsByIds(ids);
+    if (docs.isEmpty) return 0;
+    int ok = 0;
+    for (int i = 0; i < docs.length; i++) {
+      if (await pushKbDocs([docs[i]])) ok++;
+      onProgress?.call(i + 1, docs.length);
+    }
+    return ok;
   }
 
   /// ★ FIX: Delete a single KB doc from the cloud.

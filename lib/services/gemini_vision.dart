@@ -889,6 +889,29 @@ class GeminiVision {
     return keys;
   }
 
+  /// Public read of every usable OpenRouter key on this device.
+  ///
+  /// Exists so other features that legitimately call OpenRouter — currently the
+  /// SOP text recogniser in `sop_ocr_service.dart` — resolve keys through the
+  /// SAME rules as hazard scanning (prefix validation, dedupe, primary first)
+  /// instead of re-reading SharedPreferences with their own slightly different
+  /// checks. Key handling is the part of this file most likely to change; there
+  /// must be one implementation of it.
+  static Future<List<String>> openRouterKeys() async =>
+      _configuredOpenRouterKeys(await SharedPreferences.getInstance());
+
+  /// Record one OpenRouter free-tier request made by a feature outside this
+  /// class, so the admin quota display stays truthful.
+  ///
+  /// This matters more than it looks: the free allowance is metered per ACCOUNT
+  /// per DAY across every ':free' model, and one SOP scan can spend twenty
+  /// requests in a minute. Without this the admin panel would show a nearly
+  /// untouched quota while hazard scanning started returning 429, and the
+  /// obvious conclusion — "OpenRouter is broken" — would be wrong.
+  static Future<void> noteExternalFreeVisionRequest(
+          {required bool served}) async =>
+      _recordFreeUsage(served: served);
+
   /// HTTP status of the most recent OpenRouter call, or null if the request
   /// never completed (timeout / socket error).
   ///

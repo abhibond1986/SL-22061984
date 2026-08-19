@@ -47,7 +47,24 @@ class LocalDB {
   /// this and drop any derived cache.
   static final ValueNotifier<int> kbRevision = ValueNotifier<int>(0);
 
-  static void _bumpKb() => kbRevision.value++;
+  /// Parsed-KB memo. [getKnowledgeDocs] used to `jsonDecode` the ENTIRE
+  /// knowledge base on every call, and `searchKnowledge` calls it once per
+  /// query — per chat message, per AI scan, per hazard analysis. That was
+  /// tolerable with only the seeded entries; a single scanned SOP adds tens of
+  /// entries and hundreds of KB of text, at which point the repeated full parse
+  /// is the most expensive thing the app does on a keystroke.
+  ///
+  /// Invalidated in [_bumpKb] rather than at each write site on purpose: every
+  /// mutation of `_kKbDocs` already calls `_bumpKb()` (verified across all eight
+  /// write sites, including `remove` in `seedKnowledgeBase` and `resetAllData`),
+  /// so hooking the bump cannot be forgotten by a future writer the way a
+  /// per-site invalidation would be.
+  static List<Map<String, dynamic>>? _kbCache;
+
+  static void _bumpKb() {
+    _kbCache = null;
+    kbRevision.value++;
+  }
 
   // ═══════════════════════════════════════════════════════════════
   //  TOMBSTONES — keep deletes from being resurrected by sheet merges
@@ -990,26 +1007,194 @@ class LocalDB {
     required String title,
     required String content,
     String? source,
+    // ── SOP/SMP scan metadata (all optional; absent for ordinary uploads) ──
+    String? docGroup,
+    String? sopNumber,
+    String? clauseNo,
+    int? pageFrom,
+    int? pageTo,
+    String? plant,
+    bool verified = false,
+    bool indexed = true,
   }) async {
-    final all = await getKnowledgeDocs();
-    all.add({
-      'id':         '${DateTime.now().millisecondsSinceEpoch}-${all.length}',
-      'title':      title,
-      'content':    content,
-      'source':     source ?? 'uploaded',
-      'uploadedAt': DateTime.now().toIso8601String(),
-      'uploadedBy': (await getCurrentUser())?['name'] ?? 'admin',
-    });
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
-    _bumpKb();
+    await addKnowledgeDocs([
+      {
+        'title':     title,
+        'content':   content,
+        'source':    source ?? 'uploaded',
+        'docGroup':  docGroup,
+        'sopNumber': sopNumber,
+        'clauseNo':  clauseNo,
+        'pageFrom':  pageFrom,
+        'pageTo':    pageTo,
+        'plant':     plant,
+        'verified':  verified,
+        'indexed':   indexed,
+      }
+    ]);
   }
 
-  static Future<List<Map<String, dynamic>>> getKnowledgeDocs() async {
-    final raw = _prefs.getString(_kKbDocs);
-    if (raw == null) return [];
-    return (jsonDecode(raw) as List)
+  /// Bulk insert. Use this for anything that produces more than one entry —
+  /// a scanned SOP is routinely 30–60 clause entries, and calling
+  /// [addKnowledgeDoc] in a loop re-encodes and rewrites the WHOLE knowledge
+  /// base once per entry (and bumps the revision each time, so every KB
+  /// consumer drops its cache 60 times over). One encode, one write, one bump.
+  ///
+  /// Returns the ids assigned, in the order given, so the caller can push
+  /// exactly these docs to the cloud instead of the entire KB.
+  static Future<List<String>> addKnowledgeDocs(
+      List<Map<String, dynamic>> docs) async {
+    if (docs.isEmpty) return const [];
+    final all      = await getKnowledgeDocs();
+    final userName = (await getCurrentUser())?['name'] ?? 'admin';
+    final stamp    = DateTime.now();
+    final ids      = <String>[];
+
+    for (int i = 0; i < docs.length; i++) {
+      final d = docs[i];
+      // Id must be unique across a single bulk call as well as across calls.
+      // `millisecondsSinceEpoch` alone is not enough: a 60-entry loop can run
+      // inside one millisecond, which is how the old `-${all.length}` suffix
+      // was doing the real work. Keep an explicit index.
+      final id = (d['id']?.toString().isNotEmpty ?? false)
+          ? d['id'].toString()
+          : '${stamp.millisecondsSinceEpoch}-${all.length + i}';
+      ids.add(id);
+      final row = <String, dynamic>{
+        'id':         id,
+        'title':      d['title']?.toString() ?? 'Untitled',
+        'content':    d['content']?.toString() ?? '',
+        'source':     d['source']?.toString() ?? 'uploaded',
+        'uploadedAt': d['uploadedAt']?.toString() ?? stamp.toIso8601String(),
+        'uploadedBy': d['uploadedBy']?.toString() ?? userName,
+      };
+      // Only carry optional keys when actually set, so ordinary uploads keep
+      // producing the same compact rows they always did.
+      for (final k in const [
+        'docGroup', 'sopNumber', 'clauseNo', 'pageFrom', 'pageTo', 'plant'
+      ]) {
+        final v = d[k];
+        if (v != null && v.toString().isNotEmpty) row[k] = v;
+      }
+      if (d['verified'] == true) row['verified'] = true;
+      // `indexed` is written only when FALSE. Absent means indexed, which keeps
+      // every pre-existing doc searchable without a data migration.
+      if (d['indexed'] == false) row['indexed'] = false;
+      all.add(row);
+    }
+
+    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
+    return ids;
+  }
+
+  /// The docs matching [ids], in KB order. Used to push just-added docs to the
+  /// cloud without shipping the entire knowledge base (which duplicated every
+  /// existing row — see `SyncService.pushKbDocs`).
+  static Future<List<Map<String, dynamic>>> knowledgeDocsByIds(
+      List<String> ids) async {
+    if (ids.isEmpty) return const [];
+    final want = ids.toSet();
+    return _kbDocsParsed()
+        .where((d) => want.contains(d['id']?.toString()))
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
+  }
+
+  /// All docs belonging to one scanned document, in page/clause order.
+  static Future<List<Map<String, dynamic>>> knowledgeDocsByGroup(
+      String docGroup) async {
+    if (docGroup.isEmpty) return const [];
+    final rows = _kbDocsParsed()
+        .where((d) => d['docGroup']?.toString() == docGroup)
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    rows.sort((a, b) =>
+        ((a['pageFrom'] as num?) ?? 0).compareTo((b['pageFrom'] as num?) ?? 0));
+    return rows;
+  }
+
+  /// Deletes every entry of one scanned document (raw + all clause entries).
+  /// Returns how many were removed.
+  static Future<int> deleteKnowledgeGroup(String docGroup) async {
+    if (docGroup.isEmpty) return 0;
+    final all    = await getKnowledgeDocs();
+    final before = all.length;
+    all.removeWhere((d) => d['docGroup']?.toString() == docGroup);
+    if (all.length == before) return 0;
+    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
+    return before - all.length;
+  }
+
+  /// Flips a whole scanned document to verified, promoting it into the
+  /// authoritative block of the AI prompt. See
+  /// `KnowledgeService.getContextForPrompt`.
+  static Future<int> setKnowledgeGroupVerified(
+      String docGroup, bool verified) async {
+    if (docGroup.isEmpty) return 0;
+    final all = await getKnowledgeDocs();
+    int n = 0;
+    for (final d in all) {
+      if (d['docGroup']?.toString() == docGroup) {
+        d['verified'] = verified;
+        n++;
+      }
+    }
+    if (n == 0) return 0;
+    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
+    return n;
+  }
+
+  /// Verify a SINGLE KB row by id.
+  ///
+  /// Exists for scans saved before `docGroup` did, where there is no group to
+  /// match on. Prefer [setKnowledgeGroupVerified] for anything scanned since —
+  /// verification is a decision about a document, not about one of its clauses.
+  static Future<bool> setKnowledgeDocVerified(String id, bool verified) async {
+    if (id.isEmpty) return false;
+    final all = await getKnowledgeDocs();
+    bool hit = false;
+    for (final d in all) {
+      if (d['id']?.toString() == id) {
+        d['verified'] = verified;
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) return false;
+    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    _bumpKb();
+    return true;
+  }
+
+  /// Every KB doc. Callers may safely mutate what they get back — the maps are
+  /// fresh copies, exactly as they were when this did a `jsonDecode` per call.
+  /// The parse itself is now memoised; see [_kbCache].
+  static Future<List<Map<String, dynamic>>> getKnowledgeDocs() async {
+    final cached = _kbDocsParsed();
+    return cached.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  /// Read-only view of the parsed KB — no per-call copying. Only for code that
+  /// exclusively READS (retrieval, stats, counting). Mutating anything returned
+  /// here corrupts [_kbCache] without bumping the revision.
+  static List<Map<String, dynamic>> _kbDocsParsed() {
+    final cached = _kbCache;
+    if (cached != null) return cached;
+    final raw = _prefs.getString(_kKbDocs);
+    if (raw == null || raw.isEmpty) return _kbCache = <Map<String, dynamic>>[];
+    try {
+      return _kbCache = (jsonDecode(raw) as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      // Corrupt blob — behave like the old code did and report an empty KB
+      // rather than throwing out of every AI call. Not cached, so a later
+      // successful write can recover.
+      return <Map<String, dynamic>>[];
+    }
   }
 
   static Future<void> updateKnowledgeDoc({
@@ -1041,12 +1226,22 @@ class LocalDB {
   ///
   /// [limit] caps how many documents come back.
   /// [snippetChars] caps each snippet.
+  ///
+  /// Entries carrying `indexed: false` are skipped. That flag exists for the
+  /// raw full-text copy of a scanned SOP: scoring is by raw keyword hit COUNT,
+  /// so one long unstructured OCR dump always outscores the tidy clause entries
+  /// derived from it — same words, far more of them. Without this filter every
+  /// SOP question would answer with a mid-sentence slice of raw OCR instead of
+  /// the clause. The filter lives HERE, not at the call sites, because there
+  /// are already five callers (chat_tab, KnowledgeService ×2, near_miss_tab,
+  /// gemini_vision) and a sixth would forget.
   static Future<List<Map<String, dynamic>>> searchKnowledge(
       String query, {
       int limit = 3,
       int snippetChars = 400,
       }) async {
-    final all = await getKnowledgeDocs();
+    final all =
+        _kbDocsParsed().where((d) => d['indexed'] != false).toList();
     if (all.isEmpty) return [];
     // ★ lowered from 3 to 1 for short terms like "PPE", "LOTO"
     final q = query
@@ -1125,6 +1320,15 @@ class LocalDB {
               ? '${bestSnippet.substring(0, snippetChars)}...'
               : bestSnippet,
           'score': score,
+          // Provenance — lets callers cite a clause and mark unverified scans.
+          // Kept nullable: ordinary uploaded/seeded docs have none of these.
+          'id':        doc['id'],
+          'source':    doc['source'],
+          'sopNumber': doc['sopNumber'],
+          'clauseNo':  doc['clauseNo'],
+          'docGroup':  doc['docGroup'],
+          'pageFrom':  doc['pageFrom'],
+          'verified':  doc['verified'] == true,
         });
       }
     }

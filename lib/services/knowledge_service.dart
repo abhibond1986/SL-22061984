@@ -115,15 +115,7 @@ COMMON STEEL PLANT HAZARDS:
           snippetChars: snippetChars,
         );
         if (kbResults.isNotEmpty) {
-          buffer.writeln(
-              '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS (uploaded by the safety '
-              'admin — these are authoritative for this plant and OVERRIDE '
-              'any general knowledge that conflicts with them):');
-          for (int i = 0; i < kbResults.length; i++) {
-            final doc = kbResults[i];
-            buffer.writeln('--- KB Doc ${i + 1}: ${doc['title'] ?? 'Untitled'} ---');
-            buffer.writeln(doc['snippet'] ?? '');
-          }
+          buffer.write(_kbBlocks(kbResults));
         }
       } catch (_) {
         // KB search failed — continue without it
@@ -131,6 +123,130 @@ COMMON STEEL PLANT HAZARDS:
     }
 
     return buffer.toString();
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  TRUST TIERS
+  //
+  //  The KB now holds two different kinds of document, and the prompt must not
+  //  describe them in the same words.
+  //
+  //  Tier A — an admin uploaded a PDF/Word file, or an admin has verified a
+  //           scan. Authoritative for this plant; overrides general knowledge.
+  //  Tier B — any user photographed a printed SOP with their phone and it has
+  //           not been verified yet. Useful, and usually correct, but it went
+  //           through OCR and an AI structuring pass, so a digit or a unit may
+  //           be wrong, and nobody has confirmed the document is current.
+  //
+  //  Before this split there was ONE header that told the model everything in
+  //  the KB was "authoritative for this plant and OVERRIDES any general
+  //  knowledge". Applied to an unverified phone photo, that instruction makes
+  //  the model state a misread pressure limit with the same confidence as the
+  //  Factories Act — and, worse, prefer it over the correct built-in value.
+  // ═══════════════════════════════════════════════════════════════
+
+  /// Whether an unverified scan may outrank an admin upload.
+  ///
+  /// Deliberately false. Scanning is open to every user (a product decision),
+  /// so this is the only thing standing between "anyone can add a reference"
+  /// and "anyone can silently replace plant policy". Flip it only if the
+  /// verification workflow in the admin panel is being retired.
+  static const bool kScansAreAuthoritative = false;
+
+  /// Sources produced by the SOP/SMP camera scan.
+  static const Set<String> scanSources = {'sop_scan', 'sop_scan_raw'};
+
+  static bool _isUnverifiedScan(Map<String, dynamic> doc) {
+    if (kScansAreAuthoritative) return false;
+    if (!scanSources.contains(doc['source']?.toString())) return false;
+    return doc['verified'] != true;
+  }
+
+  /// Human-readable citation for a KB hit: "SOP-BF-014 clause 6.2, p.4".
+  /// Returns '' when the document carries no identifiers.
+  static String citationFor(Map<String, dynamic> doc) {
+    final parts = <String>[];
+    final sop = doc['sopNumber']?.toString() ?? '';
+    final clause = doc['clauseNo']?.toString() ?? '';
+    final page = doc['pageFrom'];
+    if (sop.isNotEmpty) parts.add(sop);
+    if (clause.isNotEmpty) parts.add('clause $clause');
+    if (page != null && page != 0) parts.add('p.$page');
+    return parts.join(' ');
+  }
+
+  /// True if this retrieved doc will be presented to the model as unverified.
+  /// Public so the chat can put the same warning on screen that it puts in the
+  /// prompt — a caveat the model was told to give but the UI hides is worse
+  /// than no caveat, because the user learns to skim past it.
+  static bool isUnverifiedScan(Map<String, dynamic> doc) =>
+      _isUnverifiedScan(doc);
+
+  /// Renders retrieved docs as one or two labelled prompt blocks.
+  ///
+  /// Public entry point for callers that do their own KB search and cannot go
+  /// through [getContextForPrompt] — currently the chat tab, which searches once
+  /// and reuses the results for both the prompt and the on-screen citations.
+  /// Every path that puts KB text in front of a model MUST come through here,
+  /// or it will reintroduce the single "everything is authoritative" header this
+  /// split exists to remove.
+  ///
+  /// [sanitize] is applied to each snippet, for callers that strip control
+  /// characters or clip length.
+  static String renderKbBlocks(
+    List<Map<String, dynamic>> docs, {
+    String Function(String)? sanitize,
+  }) =>
+      _kbBlocks(docs, sanitize: sanitize);
+
+  static String _kbBlocks(
+    List<Map<String, dynamic>> docs, {
+    String Function(String)? sanitize,
+  }) {
+    final trusted = <Map<String, dynamic>>[];
+    final scanned = <Map<String, dynamic>>[];
+    for (final d in docs) {
+      (_isUnverifiedScan(d) ? scanned : trusted).add(d);
+    }
+
+    final out = StringBuffer();
+
+    if (trusted.isNotEmpty) {
+      out.writeln(
+          '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS (uploaded or verified by the '
+          'safety admin — these are authoritative for this plant and OVERRIDE '
+          'any general knowledge that conflicts with them):');
+      _writeDocs(out, trusted, sanitize);
+    }
+
+    if (scanned.isNotEmpty) {
+      out.writeln(
+          '\n\nUNVERIFIED SCANNED DOCUMENTS (photographed from a printed copy '
+          'by a user and read by OCR — NOT yet checked by the safety admin). '
+          'Use these for guidance and cite them by name, but:\n'
+          '• Say clearly that the reference is from an unverified scan.\n'
+          '• If one of these conflicts with a statutory rule or with a verified '
+          'document above, follow the verified source and point out the '
+          'conflict.\n'
+          '• Treat any number, unit or standard reference in these as possibly '
+          'misread. Advise the reader to confirm it against the printed '
+          'document before acting on it.');
+      _writeDocs(out, scanned, sanitize);
+    }
+
+    return out.toString();
+  }
+
+  static void _writeDocs(StringBuffer out, List<Map<String, dynamic>> docs,
+      String Function(String)? sanitize) {
+    for (int i = 0; i < docs.length; i++) {
+      final doc = docs[i];
+      final cite = citationFor(doc);
+      out.writeln('--- KB Doc ${i + 1}: ${doc['title'] ?? 'Untitled'}'
+          '${cite.isEmpty ? '' : ' [$cite]'} ---');
+      final snippet = doc['snippet']?.toString() ?? '';
+      out.writeln(sanitize == null ? snippet : sanitize(snippet));
+    }
   }
 
   /// Builds a retrieval query for a case where there is no user question —
@@ -220,10 +336,18 @@ COMMON STEEL PLANT HAZARDS:
     int totalChars = 0;
     int uploadedCount = 0;
     int seededCount = 0;
+    int scannedCount = 0;
+    int unverifiedScans = 0;
     for (final doc in docs) {
       final content = doc['content']?.toString() ?? '';
       totalChars += content.length;
-      if (doc['source'] == 'uploaded' || doc['source'] == 'pdf_upload' || doc['source'] == 'docx_upload') {
+      final source = doc['source']?.toString() ?? '';
+      if (scanSources.contains(source)) {
+        scannedCount++;
+        if (doc['verified'] != true) unverifiedScans++;
+      } else if (source == 'uploaded' ||
+          source == 'pdf_upload' ||
+          source == 'docx_upload') {
         uploadedCount++;
       } else {
         seededCount++;
@@ -233,6 +357,9 @@ COMMON STEEL PLANT HAZARDS:
       'totalDocs': docs.length,
       'uploadedDocs': uploadedCount,
       'seededDocs': seededCount,
+      'scannedDocs': scannedCount,
+      // What the admin actually needs to act on.
+      'unverifiedScans': unverifiedScans,
       'totalChars': totalChars,
       'estimatedTokens': (totalChars / 4).round(), // ~4 chars per token
     };

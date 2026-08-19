@@ -23,6 +23,7 @@ import '../services/image_storage.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/geo_service.dart';
+import '../utils/image_prep.dart';
 import '../widgets/hazard_annotated_image.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/voice_text_field.dart';
@@ -264,23 +265,13 @@ class _AIScanTabState extends State<AIScanTab> {
   /// Downscale for FASTER analysis: a smaller JPEG uploads quicker and the
   /// vision model processes it faster, with negligible impact on hazard
   /// detection at 900px. Re-encode even already-small images to compress them.
-  Uint8List _downscaleForAnalysis(Uint8List original, {int maxEdge = 900}) {
-    try {
-      final decoded = img.decodeImage(original);
-      if (decoded == null) return original;
-      final img.Image resized =
-          (decoded.width <= maxEdge && decoded.height <= maxEdge)
-              ? decoded
-              : (decoded.width >= decoded.height
-                  ? img.copyResize(decoded, width: maxEdge)
-                  : img.copyResize(decoded, height: maxEdge));
-      final out = Uint8List.fromList(img.encodeJpg(resized, quality: 72));
-      // Only use the re-encoded copy if it's actually smaller.
-      return out.length < original.length ? out : original;
-    } catch (_) {
-      return original;
-    }
-  }
+  /// Delegates to [ImagePrep.downscale] — the implementation moved to
+  /// lib/utils/image_prep.dart so the SOP scanner shares it instead of holding a
+  /// divergent copy. Behaviour is unchanged: 900px long edge, JPEG quality 72,
+  /// original returned if the re-encode is not smaller.
+  Uint8List _downscaleForAnalysis(Uint8List original,
+          {int maxEdge = ImagePrep.hazardMaxEdge}) =>
+      ImagePrep.downscale(original, maxEdge: maxEdge, quality: 72);
 
   /// Runs the AI on the current photo.
   ///

@@ -20,6 +20,7 @@ import '../services/i18n.dart';
 import '../services/realtime_sync.dart';
 import 'reports_tab.dart';
 import 'admin_screen.dart';
+import 'sop_scan_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 
@@ -814,8 +815,26 @@ class _HomeTabState extends State<HomeTab> {
               color: const Color(0xFF10B981),
               onTap: () => widget.onTabChange(3))),
         ]),
+        const SizedBox(height: 8),
+        // SOP/SMP scan is a pushed screen, not a tab — it owns a multi-stage
+        // flow with unsaved captured pages in it, and a tab bar underneath
+        // would let one tap discard a document the user walked the shop floor
+        // to photograph. Full width because there is no fifth action to pair
+        // it with, and stretching one card reads better than a hanging gap.
+        Row(children: [
+          Expanded(child: _actionCard(sl,
+              icon: Icons.document_scanner_rounded,
+              label: I18n.t('home.scanSop'),
+              color: const Color(0xFF6366F1),
+              onTap: _openSopScan)),
+        ]),
       ]),
     );
+  }
+
+  void _openSopScan() {
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => SopScanScreen(toggleTheme: widget.toggleTheme)));
   }
 
   Widget _actionCard(SL sl, {required IconData icon, required String label,

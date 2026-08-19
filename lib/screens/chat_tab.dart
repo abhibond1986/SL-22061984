@@ -18,6 +18,7 @@ import '../main.dart';
 import '../services/local_ai.dart';
 import '../services/groq_service.dart';
 import '../services/local_db.dart';
+import '../services/knowledge_service.dart';
 import '../services/sync_service.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/error_log_service.dart';
@@ -359,14 +360,14 @@ class _ChatTabState extends State<ChatTab> {
           return _isReadableText(s) && s.length > 30;
         }).take(5).toList();
         if (cleanKb.isNotEmpty) {
-          kbBlock = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS '
-              '(uploaded by the plant safety admin — AUTHORITATIVE. '
-              'Where they conflict with your general knowledge, follow them '
-              'and cite the document title exactly):\n' +
-              cleanKb.map((r) =>
-                  '--- ${r['title']} ---\n'
-                  '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
-                  .join('\n\n');
+          // Built by KnowledgeService so admin uploads and unverified user
+          // scans get different headers. This used to be one hand-rolled
+          // "AUTHORITATIVE" block, which told the model to prefer a phone
+          // photo of an SOP over its own correct statutory knowledge.
+          kbBlock = KnowledgeService.renderKbBlocks(
+            cleanKb.map((r) => Map<String, dynamic>.from(r as Map)).toList(),
+            sanitize: (s) => _sanitizeSnippet(s, maxChars: 700),
+          );
         }
       }
 
@@ -405,11 +406,14 @@ class _ChatTabState extends State<ChatTab> {
           return _isReadableText(s) && s.length > 30;
         }).take(5).toList();
         if (cleanKb.isNotEmpty) {
-          kbBlock = '\n\nRELEVANT KNOWLEDGE BASE DOCUMENTS:\n' +
-              cleanKb.map((r) =>
-                  '- ${r['title']}: '
-                  '${_sanitizeSnippet(r['snippet']?.toString() ?? '', maxChars: 700)}')
-                  .join('\n');
+          // Same trust-tiered block as the Groq path. The two providers must not
+          // disagree about how much authority a scanned document carries — a
+          // question answered twice, once by each, would otherwise caveat
+          // differently depending on which one happened to be reachable.
+          kbBlock = KnowledgeService.renderKbBlocks(
+            cleanKb.map((r) => Map<String, dynamic>.from(r as Map)).toList(),
+            sanitize: (s) => _sanitizeSnippet(s, maxChars: 700),
+          );
         }
       }
 
@@ -626,16 +630,20 @@ class _ChatTabState extends State<ChatTab> {
       if (!_isReadableText(extractedText) || extractedText.trim().length < 50) {
         if (mounted) _showPdfHelpDialog(filename); return;
       }
-      await LocalDB.addKnowledgeDoc(
-        title: filename.replaceAll(RegExp(r'\.(pdf|txt|doc|docx)$', caseSensitive: false), '')
-            .replaceAll('_', ' ').trim(),
-        content: extractedText,
-        source: filename,
-      );
-      // ★ Push to cloud so other devices see this doc too
+      final newIds = await LocalDB.addKnowledgeDocs([
+        {
+          'title': filename
+              .replaceAll(RegExp(r'\.(pdf|txt|doc|docx)$', caseSensitive: false), '')
+              .replaceAll('_', ' ')
+              .trim(),
+          'content': extractedText,
+          'source':  filename,
+        }
+      ]);
+      // Push only the new doc. This used to push the ENTIRE knowledge base,
+      // which duplicated every existing row on the server.
       try {
-        final allDocs = await LocalDB.getKnowledgeDocs();
-        await SyncService.pushKbDocs(allDocs);
+        await SyncService.pushNewKbDocs(newIds);
       } catch (_) {}
       final docs = await LocalDB.getKnowledgeDocs();
       if (mounted) {
@@ -949,16 +957,7 @@ class _ChatTabState extends State<ChatTab> {
                       color: Colors.white, fontSize: 12.5, height: 1.55)),
                 if (sources != null && sources.isNotEmpty) ...[
                   const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: AppColors.amber.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: AppColors.amber.withOpacity(0.4))),
-                    child: Text(
-                      '📎 ${sources.length} source${sources.length > 1 ? "s" : ""} from knowledge base',
-                      style: const TextStyle(color: AppColors.amber,
-                          fontSize: 9, fontWeight: FontWeight.w600))),
+                  _sourcesChip(sources, sl),
                 ],
                 // ★ Timestamp
                 if (timeStr.isNotEmpty) ...[
@@ -970,6 +969,93 @@ class _ChatTabState extends State<ChatTab> {
             )),
           if (isUser) const SizedBox(width: 30),
         ]));
+  }
+
+  /// Citations under an AI answer.
+  ///
+  /// Names the documents rather than just counting them ("2 sources from
+  /// knowledge base" told the user nothing they could check), and marks any
+  /// unverified scan explicitly. The prompt asks the model to caveat those, but
+  /// a model instruction is not a guarantee — this label is, because it is
+  /// derived from the row's own `verified` flag.
+  Widget _sourcesChip(List sources, SL sl) {
+    final docs = sources
+        .map((s) => Map<String, dynamic>.from(s as Map))
+        .toList(growable: false);
+    final unverified =
+        docs.where(KnowledgeService.isUnverifiedScan).length;
+    final anyUnverified = unverified > 0;
+
+    // Amber already means "AI response" in this screen's avatar and input
+    // accent, so an amber citation chip cannot also mean "caution". Verified
+    // sources get the neutral card treatment; only an unverified scan gets a
+    // warning colour, so the colour carries information.
+    final accentFill = anyUnverified
+        ? AppColors.amber.withOpacity(0.12)
+        : sl.card2;
+    final accentLine = anyUnverified
+        ? AppColors.amber.withOpacity(0.45)
+        : sl.border;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: accentFill,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: accentLine)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(anyUnverified
+                  ? Icons.warning_amber_rounded
+                  : Icons.menu_book_outlined,
+              size: 12,
+              color: anyUnverified ? sl.amberText : sl.text3),
+          const SizedBox(width: 5),
+          Expanded(child: Text(
+            anyUnverified
+                ? 'Based on ${docs.length} knowledge base source'
+                    '${docs.length > 1 ? 's' : ''} — '
+                    '$unverified unverified scan'
+                    '${unverified > 1 ? 's' : ''}'
+                : 'Based on ${docs.length} knowledge base source'
+                    '${docs.length > 1 ? 's' : ''}',
+            style: TextStyle(
+                color: anyUnverified ? sl.amberText : sl.text3,
+                fontSize: 11, fontWeight: FontWeight.w700))),
+        ]),
+        const SizedBox(height: 4),
+        // Cap the list: a query can retrieve five clauses of the same SOP and
+        // five lines of citation would be taller than the answer.
+        ...docs.take(3).map((d) {
+          final cite = KnowledgeService.citationFor(d);
+          final scan = KnowledgeService.isUnverifiedScan(d);
+          return Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              '• ${d['title'] ?? 'Untitled'}'
+              '${cite.isEmpty ? '' : '  ($cite)'}'
+              '${scan ? '  — unverified scan' : ''}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: sl.text3, fontSize: 11, height: 1.3)),
+          );
+        }),
+        if (docs.length > 3)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text('• + ${docs.length - 3} more',
+                style: TextStyle(color: sl.text4, fontSize: 11))),
+        if (anyUnverified)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Unverified scans were photographed from printed copies and read '
+              'by OCR. Check numbers against the printed document.',
+              style: TextStyle(color: sl.text4, fontSize: 11, height: 1.3)),
+          ),
+      ]),
+    );
   }
 
   /// ★ Render AI response with colored sections for visual appeal

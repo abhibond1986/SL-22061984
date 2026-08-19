@@ -60,8 +60,14 @@ class NaraVision {
   static const String _kModel = kPrefsModel;
 
   /// Chat-completions URL. Base is `https://router.bynara.id/v1`.
-  static const String _endpoint =
+  ///
+  /// Public because SopOcrService posts its own OCR/structuring bodies here
+  /// rather than going through [analyseImageBytes] — that method carries the
+  /// hazard prompt and hazard-shaped parsing, which a transcription request must
+  /// not inherit. One const so the URL is never typed twice.
+  static const String endpoint =
       'https://router.bynara.id/v1/chat/completions';
+  static const String _endpoint = endpoint;
 
   /// Every Nara key starts with this prefix (documented). Used to reject a
   /// half-pasted or wrong-provider key BEFORE it costs a scan its latency —

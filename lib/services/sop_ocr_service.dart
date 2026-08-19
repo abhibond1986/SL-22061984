@@ -1,0 +1,649 @@
+// lib/services/sop_ocr_service.dart
+//
+// Reads printed SOP / SMP pages photographed with the camera, and turns them
+// into knowledge-base entries the AI chat can cite.
+//
+// TIERS, in order:
+//   1. On-device ML Kit  — free, offline, ~50ms/page. Mobile only.
+//   2. OpenRouter vision — network, spends the free daily allowance.
+//   3. Nara (Mistral)    — separate quota, last resort.
+//
+// This deliberately does NOT go through GeminiVision.analyseImageBytes. That
+// method carries the hazard prompt, hazard-shaped JSON validation
+// (`_isValidResult` would reject plain text outright), a result cache keyed for
+// hazard analysis, and its own offline-fallback semantics. Pushing an OCR job
+// through it would corrupt all four. What IS reused, on purpose, is the parts
+// worth having exactly one copy of: key resolution
+// (GeminiVision.openRouterKeys), the free-quota ledger
+// (noteExternalFreeVisionRequest), the per-attempt timeout (kAttemptTimeout),
+// and the tolerant JSON extractor (parseVisionResponse).
+//
+// ignore_for_file: avoid_print
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:http/http.dart' as http;
+
+import 'ai_run_log.dart';
+import 'gemini_vision.dart';
+import 'nara_vision.dart';
+import 'sop_ocr_device.dart';
+
+/// One page's recognition result.
+class PageOcr {
+  final int pageNo;
+  final String text;
+
+  /// Which tier produced [text]: 'device', 'openrouter', 'nara', or '' if none.
+  final String engine;
+
+  /// Empty when the page was read. Otherwise why it was not.
+  final String error;
+
+  /// Which quality gate sent this page to the AI tier, for tuning. Empty if the
+  /// device tier was accepted or never ran.
+  final String gate;
+
+  const PageOcr({
+    required this.pageNo,
+    this.text = '',
+    this.engine = '',
+    this.error = '',
+    this.gate = '',
+  });
+
+  bool get ok => error.isEmpty && text.trim().isNotEmpty;
+
+  int get charCount => text.trim().length;
+}
+
+/// The structured form of a whole scanned document.
+class SopExtract {
+  final String sopNumber;
+  final String title;
+  final String revision;
+  final String issueDate;
+  final String department;
+  final String scope;
+  final List<String> ppe;
+  final List<String> keyLimits;
+
+  /// Each entry: {clauseNo, heading, text, page}.
+  final List<Map<String, dynamic>> clauses;
+
+  /// True when an AI structuring pass produced this. False means it was built
+  /// mechanically from raw text because no provider was reachable — the caller
+  /// must say so on screen rather than presenting it as a parsed document.
+  final bool aiStructured;
+
+  const SopExtract({
+    this.sopNumber = '',
+    this.title = '',
+    this.revision = '',
+    this.issueDate = '',
+    this.department = '',
+    this.scope = '',
+    this.ppe = const [],
+    this.keyLimits = const [],
+    this.clauses = const [],
+    this.aiStructured = false,
+  });
+
+  bool get isEmpty => clauses.isEmpty && scope.trim().isEmpty;
+
+  /// Best available human label for the document.
+  String get displayTitle {
+    if (sopNumber.isNotEmpty && title.isNotEmpty) return '$sopNumber — $title';
+    if (title.isNotEmpty) return title;
+    if (sopNumber.isNotEmpty) return sopNumber;
+    return 'Scanned document';
+  }
+}
+
+class SopOcrService {
+  // ═══════════════════════════════════════════════════════════════════════
+  //  QUALITY GATES — when to escalate from the device tier to the AI tier
+  //
+  //  These are numbers, not a judgement call, because "the device OCR looked
+  //  a bit thin" fires at random and cannot be tuned. Every escalation is
+  //  attributed to exactly one gate and recorded on the PageOcr, so the
+  //  thresholds can be adjusted against real plant documents instead of
+  //  guessed at a second time.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// A photographed A4 SOP page carries far more than this. Below it, the
+  /// recogniser found a heading and gave up, or the page is blank.
+  static const int minChars = 200;
+
+  /// Recognisers fail into symbol soup rather than into silence, so a page that
+  /// is mostly punctuation is a failure even when it is long.
+  static const double minAlphaRatio = 0.5;
+
+  /// Guards the case of many short fragments — table gridlines and stamps
+  /// recognised as isolated characters.
+  static const int minWords = 20;
+
+  /// Cap on pages per scan. Each page is an OCR pass and, on the fallback path,
+  /// one AI request out of a daily allowance of about fifty.
+  static const int maxPages = 30;
+
+  /// Per-page AI attempt timeout. Same budget as a hazard scan attempt.
+  static Duration get attemptTimeout => GeminiVision.kAttemptTimeout;
+
+  /// The structuring pass reads a whole document, so it gets longer than a
+  /// single page attempt — but still bounded, because a stalled request here
+  /// leaves the user watching a spinner after all the scanning work is done.
+  static const Duration summaryTimeout = Duration(seconds: 45);
+
+  /// Vision model for OCR. The fast small model is the right pick: transcription
+  /// needs no reasoning, and a reasoning model would emit thinking tokens out of
+  /// the same output budget the page text has to fit into.
+  static const String _ocrModel = 'nvidia/nemotron-nano-12b-v2-vl:free';
+
+  static const String _orEndpoint =
+      'https://openrouter.ai/api/v1/chat/completions';
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  PROMPTS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Transcription prompt.
+  ///
+  /// The "do not invent" instruction is not boilerplate. A vision model asked to
+  /// "read an SOP" will cheerfully produce plausible SOP language for a blurred
+  /// paragraph, and invented safety text inside the knowledge base — which the
+  /// prompt tells the model is authoritative for this plant — is the worst
+  /// failure this feature can have. It is cheaper to lose a page and retake it.
+  static const String ocrPrompt = '''
+Transcribe ALL text visible in this photograph of a printed document page.
+
+RULES:
+1. Output the text VERBATIM. Do not summarise, correct, translate or rephrase.
+2. Preserve the numbering exactly as printed (clause numbers like 4, 4.1, 6.2.3,
+   and list markers a), b), i), ii)).
+3. Preserve line structure. Keep each heading on its own line.
+4. For a table, output one row per line with cells separated by " | ".
+5. If a word or region is unreadable, write exactly [unreadable] in its place.
+   NEVER guess at what it might say.
+6. Do NOT add commentary, notes, headings or explanation of your own. Output the
+   page's text and nothing else.
+7. If the image contains no readable text at all, output exactly: [no text]
+''';
+
+  /// Structuring prompt. Returns JSON.
+  static const String summaryPrompt = '''
+The text below was read by OCR from a printed Standard Operating Procedure (SOP)
+or Safe Method of Procedure (SMP) at a steel plant.
+
+Return ONE JSON object, and nothing else, with exactly these keys:
+
+{
+  "sop_number": "the document/SOP number as printed, else \\"\\"",
+  "title": "the document title, else \\"\\"",
+  "revision": "revision number/letter as printed, else \\"\\"",
+  "issue_date": "issue or effective date as printed, else \\"\\"",
+  "department": "owning department/shop, else \\"\\"",
+  "scope": "1-3 sentence scope or purpose, in the document's own words",
+  "ppe": ["PPE items the document requires"],
+  "key_limits": ["numeric limits, set points and thresholds, each with its unit"],
+  "clauses": [
+    {"clause_no": "6.2", "heading": "short heading", "text": "the clause text", "page": 4}
+  ]
+}
+
+RULES:
+1. Use ONLY what appears in the text. If a field is not present, use "" or [].
+   Never infer a plausible SOP number, date or department.
+2. Do not merge separate clauses, and do not split one clause into several.
+3. Keep clause text close to the original wording. Light cleanup of obvious OCR
+   damage in ordinary words is fine; NEVER "correct" a number, a unit, a
+   clause number or a standard reference.
+4. Copy every numeric limit into key_limits exactly as printed, with its unit.
+5. Omit [unreadable] markers from the clause text, but do not fill the gap with
+   invented words.
+6. Output raw JSON only — no markdown fence, no preamble.
+''';
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  PAGE OCR
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Read one prepared page image. [jpegBytes] should already have been through
+  /// `ImagePrep.prepareForOcr`.
+  ///
+  /// Never throws. A page that no tier can read comes back with `ok == false`
+  /// and a populated [PageOcr.error], and the caller shows it as failed with a
+  /// retake option. It must NOT be turned into placeholder text — see the
+  /// offline-scan history in gemini_vision.dart for why generated stand-in
+  /// content is never acceptable here.
+  static Future<PageOcr> readPage(
+    Uint8List jpegBytes, {
+    required int pageNo,
+    bool allowAi = true,
+  }) async {
+    final sw = Stopwatch()..start();
+
+    // ── Tier 1: on-device ───────────────────────────────────────────────
+    String deviceText = '';
+    String gate = '';
+    if (SopOcrDevice.isAvailable) {
+      deviceText = await SopOcrDevice.recognise(jpegBytes);
+      gate = _failedGate(deviceText);
+      if (gate.isEmpty) {
+        _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+            provider: 'device', ms: sw.elapsedMilliseconds);
+        return PageOcr(pageNo: pageNo, text: deviceText, engine: 'device');
+      }
+      print('SopOcr: page $pageNo device tier rejected by gate "$gate" '
+          '(${deviceText.trim().length} chars) → AI tier');
+    } else {
+      gate = 'device_unavailable';
+    }
+
+    if (!allowAi) {
+      // Offline / user opted out. Return the device text if there IS any, and
+      // be explicit that it is below the quality bar rather than silently
+      // treating it as a clean read.
+      if (deviceText.trim().isNotEmpty) {
+        return PageOcr(
+          pageNo: pageNo,
+          text: deviceText,
+          engine: 'device',
+          gate: gate,
+        );
+      }
+      _log(AiRunLog.typeSopOcr, AiRunLog.outcomeFailed,
+          reason: AiRunLog.reasonNoInternet, ms: sw.elapsedMilliseconds);
+      return PageOcr(
+        pageNo: pageNo,
+        error: SopOcrDevice.isAvailable
+            ? 'No text found, and the AI reader needs a connection.'
+            : 'Reading this page needs a connection.',
+        gate: gate,
+      );
+    }
+
+    // ── Tier 2: OpenRouter ─────────────────────────────────────────────
+    final keys = await GeminiVision.openRouterKeys();
+    for (final key in keys) {
+      final text = await _callOpenRouterOcr(jpegBytes, key);
+      if (text != null && _failedGate(text).isEmpty) {
+        _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+            provider: 'openrouter', model: _ocrModel, ms: sw.elapsedMilliseconds);
+        return PageOcr(
+            pageNo: pageNo, text: text, engine: 'openrouter', gate: gate);
+      }
+    }
+
+    // ── Tier 3: Nara ───────────────────────────────────────────────────
+    final naraText = await _callNaraOcr(jpegBytes);
+    if (naraText != null && _failedGate(naraText).isEmpty) {
+      _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+          provider: 'nara', ms: sw.elapsedMilliseconds);
+      return PageOcr(pageNo: pageNo, text: naraText, engine: 'nara', gate: gate);
+    }
+
+    // ── Everything failed ──────────────────────────────────────────────
+    // Fall back to the device text ONLY if it exists, flagged by its gate so
+    // the review screen can warn about it. Otherwise report failure honestly.
+    if (deviceText.trim().isNotEmpty) {
+      _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+          provider: 'device', ms: sw.elapsedMilliseconds);
+      return PageOcr(
+          pageNo: pageNo, text: deviceText, engine: 'device', gate: gate);
+    }
+    _log(AiRunLog.typeSopOcr, AiRunLog.outcomeFailed,
+        reason: AiRunLog.reasonExhausted, ms: sw.elapsedMilliseconds);
+    return PageOcr(
+      pageNo: pageNo,
+      error: keys.isEmpty && !SopOcrDevice.isAvailable
+          ? 'No text reader available. Ask the admin to add an AI key.'
+          : 'Could not read this page. Retake it with more light, straight on, '
+              'and filling the frame.',
+      gate: gate,
+    );
+  }
+
+  /// Which quality gate this text fails, or '' if it passes.
+  static String _failedGate(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return 'empty';
+    // The transcription prompt's own "nothing here" answer.
+    if (t.toLowerCase() == '[no text]') return 'empty';
+    if (t.length < minChars) return 'too_short';
+
+    int alpha = 0;
+    int nonSpace = 0;
+    for (final c in t.codeUnits) {
+      final isSpace = c == 32 || c == 10 || c == 13 || c == 9;
+      if (isSpace) continue;
+      nonSpace++;
+      final isAz = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+      final isDigit = c >= 48 && c <= 57;
+      if (isAz || isDigit) alpha++;
+    }
+    if (nonSpace == 0) return 'empty';
+    if (alpha / nonSpace < minAlphaRatio) return 'symbol_soup';
+
+    final words = t.split(RegExp(r'\s+')).where((w) => w.length > 1).length;
+    if (words < minWords) return 'too_few_words';
+    return '';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  PROVIDER CALLS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  static Future<String?> _callOpenRouterOcr(
+      Uint8List bytes, String apiKey) async {
+    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    try {
+      final response = await http
+          .post(
+            Uri.parse(_orEndpoint),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $apiKey',
+              'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
+              'X-Title': 'SAIL Safety Lens',
+            },
+            body: jsonEncode({
+              'model': _ocrModel,
+              'messages': [
+                {
+                  'role': 'user',
+                  'content': [
+                    {'type': 'text', 'text': ocrPrompt},
+                    {'type': 'image_url', 'image_url': {'url': dataUrl}},
+                  ]
+                }
+              ],
+              // Higher than a hazard scan's budget: a dense A4 page of body text
+              // can exceed 2000 tokens, and a truncated transcription silently
+              // loses the bottom of the page.
+              'max_tokens': 8192,
+              // Transcription must not vary run to run.
+              'temperature': 0,
+              'top_p': 1,
+              'seed': 42,
+            }),
+          )
+          .timeout(attemptTimeout);
+
+      // Ledger before parsing — a malformed 200 still spent the request.
+      if (response.statusCode == 200) {
+        await GeminiVision.noteExternalFreeVisionRequest(served: true);
+        final data =
+            jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices == null || choices.isEmpty) return null;
+        return choices[0]['message']?['content']?.toString();
+      }
+      if (response.statusCode == 429) {
+        await GeminiVision.noteExternalFreeVisionRequest(served: false);
+        print('SopOcr: OpenRouter 429 — free allowance or throttle');
+        return null;
+      }
+      print('SopOcr: OpenRouter HTTP ${response.statusCode}');
+      return null;
+    } on TimeoutException {
+      print('SopOcr: OpenRouter timed out after ${attemptTimeout.inSeconds}s');
+      return null;
+    } catch (e) {
+      print('SopOcr: OpenRouter failed — $e');
+      return null;
+    }
+  }
+
+  static Future<String?> _callNaraOcr(Uint8List bytes) async {
+    try {
+      if (!await NaraVision.isConfigured) return null;
+      final apiKey = (await NaraVision.getApiKey()).trim();
+      final model = await NaraVision.getModel();
+      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final response = await http
+          .post(
+            Uri.parse(NaraVision.endpoint),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $apiKey',
+            },
+            body: jsonEncode({
+              'model': model,
+              'messages': [
+                {
+                  'role': 'user',
+                  'content': [
+                    {'type': 'text', 'text': ocrPrompt},
+                    {'type': 'image_url', 'image_url': {'url': dataUrl}},
+                  ]
+                }
+              ],
+              'max_tokens': 8192,
+              'temperature': 0,
+              'top_p': 1,
+              'seed': 42,
+            }),
+          )
+          .timeout(attemptTimeout);
+      if (response.statusCode != 200) {
+        print('SopOcr: Nara HTTP ${response.statusCode}');
+        return null;
+      }
+      final data =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final choices = data['choices'] as List?;
+      if (choices == null || choices.isEmpty) return null;
+      return choices[0]['message']?['content']?.toString();
+    } on TimeoutException {
+      print('SopOcr: Nara timed out');
+      return null;
+    } catch (e) {
+      print('SopOcr: Nara failed — $e');
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  STRUCTURING PASS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Turn the concatenated page text into a [SopExtract].
+  ///
+  /// Returns an extract with `aiStructured == false` when no provider could be
+  /// reached. That case is NOT an error — the raw text is already saved and the
+  /// document can be re-structured later — but the caller must label it, because
+  /// a mechanically split document has no clause numbers and no citations.
+  static Future<SopExtract> structure(
+    List<PageOcr> pages, {
+    String fallbackTitle = '',
+  }) async {
+    final usable = pages.where((p) => p.ok).toList();
+    if (usable.isEmpty) return const SopExtract();
+
+    final sw = Stopwatch()..start();
+    final joined = usable
+        .map((p) => '--- PAGE ${p.pageNo} ---\n${p.text.trim()}')
+        .join('\n\n');
+
+    // A very long document would blow the model's context. Truncate the INPUT
+    // rather than failing: the raw text is stored in full regardless, so a
+    // partial structuring loses citations for the tail, not the content.
+    const maxInputChars = 60000;
+    final input = joined.length > maxInputChars
+        ? '${joined.substring(0, maxInputChars)}\n\n[document truncated]'
+        : joined;
+
+    final raw = await _callTextModel('$summaryPrompt\n\nDOCUMENT TEXT:\n$input');
+    if (raw == null) {
+      _log(AiRunLog.typeSopSummary, AiRunLog.outcomeFailed,
+          reason: AiRunLog.reasonExhausted, ms: sw.elapsedMilliseconds);
+      return _mechanicalExtract(usable, fallbackTitle: fallbackTitle);
+    }
+
+    // Reuse the tolerant extractor — models wrap JSON in fences and prose, and
+    // a bare jsonDecode would reject most real responses.
+    final parsed = GeminiVision.parseVisionResponse(raw);
+    if (parsed == null) {
+      _log(AiRunLog.typeSopSummary, AiRunLog.outcomeFailed,
+          reason: AiRunLog.reasonEmptyResult, ms: sw.elapsedMilliseconds);
+      return _mechanicalExtract(usable, fallbackTitle: fallbackTitle);
+    }
+
+    final clauses = <Map<String, dynamic>>[];
+    final rawClauses = parsed['clauses'];
+    if (rawClauses is List) {
+      for (final c in rawClauses) {
+        if (c is! Map) continue;
+        final text = c['text']?.toString().trim() ?? '';
+        if (text.isEmpty) continue;
+        clauses.add({
+          'clauseNo': c['clause_no']?.toString().trim() ?? '',
+          'heading':  c['heading']?.toString().trim() ?? '',
+          'text':     text,
+          'page':     int.tryParse(c['page']?.toString() ?? '') ?? 0,
+        });
+      }
+    }
+
+    _log(AiRunLog.typeSopSummary, AiRunLog.outcomeSuccess,
+        ms: sw.elapsedMilliseconds);
+
+    return SopExtract(
+      sopNumber:  parsed['sop_number']?.toString().trim() ?? '',
+      title:      parsed['title']?.toString().trim().isNotEmpty == true
+          ? parsed['title'].toString().trim()
+          : fallbackTitle,
+      revision:   parsed['revision']?.toString().trim() ?? '',
+      issueDate:  parsed['issue_date']?.toString().trim() ?? '',
+      department: parsed['department']?.toString().trim() ?? '',
+      scope:      parsed['scope']?.toString().trim() ?? '',
+      ppe:        _stringList(parsed['ppe']),
+      keyLimits:  _stringList(parsed['key_limits']),
+      clauses:    clauses,
+      aiStructured: true,
+    );
+  }
+
+  static List<String> _stringList(dynamic v) {
+    if (v is! List) return const [];
+    return v
+        .map((e) => e?.toString().trim() ?? '')
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+
+  /// No-AI fallback: one "clause" per page, no numbers, nothing invented.
+  ///
+  /// Page-sized units rather than blind character slices, because a page break
+  /// is a real boundary in the document whereas a 2500-character cut lands
+  /// mid-sentence and mid-procedure.
+  static SopExtract _mechanicalExtract(List<PageOcr> pages,
+      {String fallbackTitle = ''}) {
+    return SopExtract(
+      title: fallbackTitle,
+      clauses: [
+        for (final p in pages)
+          {
+            'clauseNo': '',
+            'heading':  'Page ${p.pageNo}',
+            'text':     p.text.trim(),
+            'page':     p.pageNo,
+          }
+      ],
+      aiStructured: false,
+    );
+  }
+
+  /// Text-only model call for the structuring pass. Same provider order as OCR.
+  static Future<String?> _callTextModel(String prompt) async {
+    final body = {
+      'model': _ocrModel,
+      'messages': [
+        {'role': 'user', 'content': prompt}
+      ],
+      'max_tokens': 8192,
+      'temperature': 0,
+      'top_p': 1,
+      'seed': 42,
+    };
+
+    for (final key in await GeminiVision.openRouterKeys()) {
+      try {
+        final r = await http
+            .post(
+              Uri.parse(_orEndpoint),
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer $key',
+                'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/',
+                'X-Title': 'SAIL Safety Lens',
+              },
+              body: jsonEncode(body),
+            )
+            .timeout(summaryTimeout);
+        if (r.statusCode == 200) {
+          await GeminiVision.noteExternalFreeVisionRequest(served: true);
+          final data =
+              jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+          final choices = data['choices'] as List?;
+          if (choices != null && choices.isNotEmpty) {
+            return choices[0]['message']?['content']?.toString();
+          }
+        } else if (r.statusCode == 429) {
+          await GeminiVision.noteExternalFreeVisionRequest(served: false);
+        }
+      } catch (e) {
+        print('SopOcr: summary via OpenRouter failed — $e');
+      }
+    }
+
+    try {
+      if (!await NaraVision.isConfigured) return null;
+      final apiKey = (await NaraVision.getApiKey()).trim();
+      final model = await NaraVision.getModel();
+      final r = await http
+          .post(
+            Uri.parse(NaraVision.endpoint),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $apiKey',
+            },
+            body: jsonEncode({...body, 'model': model}),
+          )
+          .timeout(summaryTimeout);
+      if (r.statusCode == 200) {
+        final data =
+            jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          return choices[0]['message']?['content']?.toString();
+        }
+      }
+    } catch (e) {
+      print('SopOcr: summary via Nara failed — $e');
+    }
+    return null;
+  }
+
+  static void _log(
+    String type,
+    String outcome, {
+    String reason = '',
+    String provider = '',
+    String model = '',
+    int ms = 0,
+  }) {
+    // Fire and forget — telemetry must never delay or break a scan.
+    AiRunLog.record(
+      runType: type,
+      outcome: outcome,
+      failReason: reason,
+      provider: provider,
+      model: model,
+      durationMs: ms,
+    );
+  }
+}

@@ -611,44 +611,221 @@ class SupabaseService {
   //  KNOWLEDGE BASE (knowledge_docs table)
   // ══════════════════════════════════════════════════════════════════════════
 
-  /// Fetch all KB docs (title/content/source). Returns [] on error.
+  /// Columns of `knowledge_docs` the server has rejected as unknown. Non-empty
+  /// means `migration_sop_scan.sql` has not been run.
+  static final Set<String> _kbMissingCols = <String>{};
+
+  static List<String> get knowledgeSchemaGaps =>
+      _kbMissingCols.toList()..sort();
+
+  /// Last KB-write error, for diagnostics. Empty after a clean write.
+  static String knowledgeLastError = '';
+
+  /// App-key → column mapping for the SOP scan metadata. Local docs use
+  /// camelCase keys; Postgres columns are snake_case.
+  ///
+  /// The local `id` maps to `client_id`, NOT to `id`. `knowledge_docs.id` is
+  /// `bigint generated always as identity` (see SUPABASE_MIGRATION_GUIDE.md),
+  /// which rejects an explicit value outright and could not hold a local id like
+  /// `1723456789012-7` in any case. `client_id text unique` is added by
+  /// migration_sop_scan.sql purely to give the upsert a conflict target.
+  static const Map<String, String> _kbAppToDb = {
+    'id':         'client_id',
+    'title':      'title',
+    'content':    'content',
+    'source':     'source',
+    'docGroup':   'doc_group',
+    'sopNumber':  'sop_number',
+    'clauseNo':   'clause_no',
+    'pageFrom':   'page_from',
+    'pageTo':     'page_to',
+    'plant':      'plant',
+    'uploadedBy': 'created_by',
+    'verified':   'verified',
+    'indexed':    'indexed',
+  };
+
+  static const Map<String, String> _kbDbToApp = {
+    'client_id':  'id',
+    'doc_group':  'docGroup',
+    'sop_number': 'sopNumber',
+    'clause_no':  'clauseNo',
+    'page_from':  'pageFrom',
+    'page_to':    'pageTo',
+    'created_by': 'uploadedBy',
+  };
+
+  /// Fetch all KB docs. Returns [] on error.
+  ///
+  /// `client_id` is selected deliberately: identity used to be omitted
+  /// entirely, which meant pulled docs could not be de-duplicated against local
+  /// ones and [deleteKnowledgeDoc] could never be called for a synced doc,
+  /// because there was no id to pass it. The table's own `id` is a bigint
+  /// identity and is intentionally NOT surfaced — it is not the app's id, and
+  /// exposing it would let a server row masquerade as a local one.
   static Future<List<Map<String, dynamic>>> fetchKnowledgeDocs() async {
     if (!isReady) return [];
-    try {
-      final rows = await _db
-          .from('knowledge_docs')
-          .select('title, content, source')
-          .order('created_at', ascending: false);
-      return (rows as List)
-          .map((r) => Map<String, dynamic>.from(r as Map))
-          .toList();
-    } catch (_) {
-      return [];
+    // Widest select first; fall back to the pre-migration column set so an
+    // un-migrated server still syncs its basic docs instead of returning [].
+    const wide = 'client_id, title, content, source, doc_group, sop_number, '
+        'clause_no, page_from, page_to, plant, created_by, verified, indexed';
+    const narrow = 'title, content, source';
+    for (final cols in const [wide, narrow]) {
+      try {
+        final rows = await _db
+            .from('knowledge_docs')
+            .select(cols)
+            .order('created_at', ascending: false);
+        return (rows as List)
+            .map((r) => _kbRowToApp(Map<String, dynamic>.from(r as Map)))
+            .toList();
+      } catch (e) {
+        if (cols == narrow) {
+          knowledgeLastError = _describeError(e);
+          return [];
+        }
+        // Wide select failed — most likely the migration is outstanding.
+        if (_missingColumnFrom(e) == null) {
+          knowledgeLastError = _describeError(e);
+          return [];
+        }
+      }
     }
+    return [];
   }
 
-  /// Insert one KB doc. Returns true on success.
+  static Map<String, dynamic> _kbRowToApp(Map<String, dynamic> row) {
+    final out = <String, dynamic>{};
+    row.forEach((k, v) {
+      if (v == null) return;
+      // Never let the table's bigint `id` become the app's doc id.
+      if (k == 'id') return;
+      out[_kbDbToApp[k] ?? k] = v;
+    });
+    return out;
+  }
+
+  /// Insert or update one KB doc, keyed by `id`.
+  ///
+  /// This was a plain `insert` that did not send `id`, so re-pushing the
+  /// knowledge base duplicated every row it already contained. Callers push
+  /// deltas now, but the upsert matters independently: without a conflict target
+  /// a re-sync of the same doc would still duplicate it.
+  ///
+  /// Carries the same schema-gap tolerance as [upsertIncident] — PostgREST
+  /// rejects the ENTIRE row for one unknown column, so on a server missing
+  /// `migration_sop_scan.sql` an un-guarded write would silently save nothing
+  /// at all rather than saving the doc without its scan metadata.
   static Future<bool> addKnowledgeDoc(Map<String, dynamic> doc) async {
     if (!isReady) return false;
+
+    final row = <String, dynamic>{};
+    _kbAppToDb.forEach((appKey, col) {
+      final v = doc[appKey];
+      if (v == null) return;
+      if (v is String && v.isEmpty && appKey != 'content') return;
+      row[col] = v;
+    });
+    row['title']   ??= 'Untitled';
+    row['content'] ??= '';
+    row['source']  ??= 'uploaded';
+
+    for (final c in _kbMissingCols) {
+      row.remove(c);
+    }
+
+    // No client_id (a doc from before ids were pushed, or an un-migrated
+    // server where the column was dropped) → plain insert; there is nothing to
+    // conflict on, so it behaves exactly like the old code did.
+    final maxAttempts = _kbAppToDb.length + 1;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      final hasKey = (row['client_id']?.toString() ?? '').isNotEmpty;
+      try {
+        if (hasKey) {
+          await _db
+              .from('knowledge_docs')
+              .upsert(row, onConflict: 'client_id');
+        } else {
+          await _db.from('knowledge_docs').insert(row);
+        }
+        knowledgeLastError = '';
+        return true;
+      } catch (e) {
+        final missing = _missingColumnFrom(e);
+        if (missing == null || !row.containsKey(missing)) {
+          knowledgeLastError = _describeError(e);
+          return false;
+        }
+        _kbMissingCols.add(missing);
+        row.remove(missing);
+        knowledgeLastError = 'dropped unknown column "$missing" — '
+            'run migration_sop_scan.sql';
+      }
+    }
+    return false;
+  }
+
+  /// Delete a KB doc by the app's doc id. Returns true on success.
+  ///
+  /// Matches on `client_id`, not `id`. The old version filtered on `id`, which
+  /// is a bigint identity, so passing a local id like `1723456789012-7` matched
+  /// nothing (and on a strict server raised an invalid-input error that was
+  /// swallowed) — cloud deletes never actually happened. Numeric ids are also
+  /// tried against `id` so rows written before `client_id` existed can still be
+  /// removed.
+  static Future<bool> deleteKnowledgeDoc(String id) async {
+    if (!isReady || id.isEmpty) return false;
     try {
-      await _db.from('knowledge_docs').insert({
-        'title':   doc['title']?.toString() ?? 'Untitled',
-        'content': doc['content']?.toString() ?? '',
-        'source':  doc['source']?.toString() ?? 'uploaded',
-      });
+      await _db.from('knowledge_docs').delete().eq('client_id', id);
       return true;
-    } catch (_) {
+    } catch (e) {
+      if (_missingColumnFrom(e) == null) {
+        knowledgeLastError = _describeError(e);
+        return false;
+      }
+    }
+    // Pre-migration server: fall back to the identity column, but only for a
+    // value that can actually BE a bigint.
+    if (int.tryParse(id) == null) {
+      knowledgeLastError =
+          'cannot delete "$id" — run migration_sop_scan.sql to add client_id';
+      return false;
+    }
+    try {
+      await _db.from('knowledge_docs').delete().eq('id', id);
+      return true;
+    } catch (e) {
+      knowledgeLastError = _describeError(e);
       return false;
     }
   }
 
-  /// ★ FIX: Delete a KB doc by id. Returns true on success.
-  static Future<bool> deleteKnowledgeDoc(String id) async {
-    if (!isReady || id.isEmpty) return false;
+  /// Delete every cloud row belonging to one scanned document.
+  static Future<bool> deleteKnowledgeGroup(String docGroup) async {
+    if (!isReady || docGroup.isEmpty) return false;
     try {
-      await _db.from('knowledge_docs').delete().eq('id', id);
+      await _db.from('knowledge_docs').delete().eq('doc_group', docGroup);
+      knowledgeLastError = '';
       return true;
-    } catch (_) {
+    } catch (e) {
+      knowledgeLastError = _describeError(e);
+      return false;
+    }
+  }
+
+  /// Flip `verified` for every cloud row of one scanned document.
+  static Future<bool> setKnowledgeGroupVerified(
+      String docGroup, bool verified) async {
+    if (!isReady || docGroup.isEmpty) return false;
+    try {
+      await _db
+          .from('knowledge_docs')
+          .update({'verified': verified})
+          .eq('doc_group', docGroup);
+      knowledgeLastError = '';
+      return true;
+    } catch (e) {
+      knowledgeLastError = _describeError(e);
       return false;
     }
   }

@@ -1,6 +1,10 @@
 # Safety Lens — current status
 
 **Last verified: 2026-08-14** against the live repo and the Supabase REST API.
+The SOP/SMP scan feature was added on 2026-08-19 and has **not been compiled** —
+there is no Dart/Flutter SDK in the environment it was written in. It passed
+static checks only (see *Verification limits*). Treat the deploy step below as
+untested until `flutter analyze` runs clean on a machine that has the SDK.
 
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
@@ -45,7 +49,38 @@ on with **no anon policies at all**, and all access goes through two
 able to enumerate who visited — it can only record its own visit and read
 aggregate counts.
 
-### 3. Confirm row-level security is enforced on `incidents`
+### 3. Run `migration_sop_scan.sql` (required for the SOP/SMP scan feature)
+
+**Still open — one-time.** Supabase → SQL Editor → New query → paste the whole
+file → Run. Idempotent.
+
+Adds the columns the scan writes to `knowledge_docs`: `doc_group`, `sop_number`,
+`clause_no`, `page_from`, `page_to`, `plant`, `uploaded_by`, `indexed`,
+`verified`, plus indexes on `doc_group` and `verified`.
+
+Until it is run the feature looks like it works and then loses everything:
+PostgREST rejects the **entire row** on an unknown column (`42703`), and
+`knowledge_docs` has no schema-gap guard, so every scanned clause stays on the
+device that scanned it and reaches no other device. The local KB and the AI chat
+work regardless — only the cloud push fails.
+
+Verify with:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "$SUPABASE_URL/rest/v1/knowledge_docs?select=doc_group,sop_number,clause_no,verified&limit=1" \
+  -H "apikey: $ANON_KEY" -H "Authorization: Bearer $ANON_KEY"
+```
+
+`200` = applied. `42703` in the body = not yet.
+
+Also needs `flutter pub get` once, for the new
+`google_mlkit_text_recognition: ^0.13.0` dependency. Pinned to 0.13.x
+deliberately: 0.14 wants a newer Kotlin/AGP than the CI Flutter 3.19.6 toolchain
+ships with. Web builds do not use it — `sop_ocr_device.dart` routes web to a stub
+via conditional export, so no ML Kit or `dart:io` code reaches the web bundle.
+
+### 4. Confirm row-level security is enforced on `incidents`
 
 **Unverified, and worth doing deliberately.** The Supabase URL and anon key are
 committed in plaintext in `lib/services/supabase_config.dart`, in a repo that has

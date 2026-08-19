@@ -61,6 +61,10 @@ class AiRunLog {
   static const String typeNearMissImage  = 'NEAR_MISS_IMAGE';
   static const String typeNearMissText   = 'NEAR_MISS_TEXT';
   static const String typeFieldRefine    = 'FIELD_REFINE';
+  /// One OCR pass over one scanned SOP page.
+  static const String typeSopOcr         = 'SOP_OCR';
+  /// The single structuring pass over a whole scanned document's text.
+  static const String typeSopSummary     = 'SOP_SUMMARY';
 
   // ── Outcomes ──────────────────────────────────────────────────────────────
   static const String outcomeSuccess = 'SUCCESS';
