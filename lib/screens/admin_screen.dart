@@ -5500,11 +5500,26 @@ class _AdminScreenState extends State<AdminScreen>
     // elsewhere on this screen.
     _toast('Testing proxy…', AppColors.accent);
     try {
-      final res = await http
+      // text/plain to avoid the CORS preflight an Apps Script web app cannot
+      // answer — see the long note in NaraVision._analyzeViaProxy. A test that
+      // used application/json would fail on web for a reason unrelated to the
+      // thing being tested, and would report a correctly-configured proxy as
+      // unreachable.
+      var res = await http
           .post(Uri.parse(url),
-              headers: {'Content-Type': 'application/json'},
+              headers: {'Content-Type': 'text/plain;charset=utf-8'},
               body: jsonEncode({'action': 'analyzeImageNara'}))
           .timeout(const Duration(seconds: 20));
+
+      // On mobile/desktop http.Client does not follow the 302 that Apps Script
+      // always answers a POST with; the browser does. Same asymmetry SyncService
+      // handles at sync_service.dart:136.
+      if ((res.statusCode == 302 || res.statusCode == 301) && !kIsWeb) {
+        final loc = res.headers['location'] ?? '';
+        if (loc.isNotEmpty) {
+          res = await http.get(Uri.parse(loc)).timeout(const Duration(seconds: 20));
+        }
+      }
 
       // Apps Script answers an HTML error page (not JSON) when the deployment is
       // archived or set to "only myself", so a decode failure is itself

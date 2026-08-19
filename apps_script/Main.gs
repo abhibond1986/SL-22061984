@@ -6,7 +6,8 @@
  * ⚠ READ THIS FIRST — WHICH PROJECT DOES THIS FILE BELONG TO?
  *
  * This file is written for the STANDALONE "Nara Router" Apps Script project
- * (deployment AKfycbz7rcn6yIr_-turaxrXwlGt8n5ukvtuXv7Rcbu66Na10Sfv5a2TUD-...).
+ * (deployment AKfycbx0CUXs6VZg-nIzTV039ThJL6ywa2rzK3xyIdHEmeC5-... as of
+ * 2026-08-19; it was previously AKfycbz7rcn6yIr_-turaxr...).
  *
  * It is NOT the app's main backend. The Safety Lens app has a DIFFERENT
  * Apps Script deployment hardcoded in lib/services/sync_service.dart:

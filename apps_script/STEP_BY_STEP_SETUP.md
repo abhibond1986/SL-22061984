@@ -196,7 +196,7 @@ This proxy is a **separate project** from the app's sync backend:
 | Project | URL starts | Serves |
 |---|---|---|
 | **Main backend** | `.../AKfycbzDiT4OSvlDUxvcM9DYJ...` | Incidents, users, master data |
-| **Nara Router** (this one) | `.../AKfycbz7rcn6yIr_-turaxr...` | `analyzeImageNara` only |
+| **Nara Router** (this one) | `.../AKfycbx0CUXs6VZg-nIzTV...` | `analyzeImageNara` only |
 
 **Never paste the Nara Router URL into the sync/Backend URL field.** That project
 has no Incidents sheet and no user records, so every incident upload and every

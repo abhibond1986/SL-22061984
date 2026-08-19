@@ -386,7 +386,13 @@ class AdminAlerts {
 
         final response = await http.post(
           Uri.parse(baseUrl),
-          headers: {'Content-Type': 'application/json'},
+          // ⚠ text/plain, NOT application/json. application/json is not a
+          // CORS-simple content type, so the browser sends an OPTIONS
+          // preflight first — and an Apps Script web app cannot answer one
+          // (there is no doOptions hook), so the POST is never sent at all.
+          // Apps Script reads the body from e.postData.contents regardless of
+          // content type. Same rule as sync_service.dart:106.
+          headers: {'Content-Type': 'text/plain;charset=utf-8'},
           body: jsonEncode({
             'action': 'fireAlert',
             'rule': {
@@ -510,7 +516,8 @@ class AdminAlerts {
     try {
       final response = await http.post(
         Uri.parse(baseUrl),
-        headers: {'Content-Type': 'application/json'},
+        // text/plain avoids the CORS preflight Apps Script cannot answer.
+        headers: {'Content-Type': 'text/plain;charset=utf-8'},
         body: jsonEncode({
           'action': 'syncAlertRules',
           'rules': enabledRules,
@@ -544,7 +551,8 @@ class AdminAlerts {
     try {
       final response = await http.post(
         Uri.parse(baseUrl),
-        headers: {'Content-Type': 'application/json'},
+        // text/plain avoids the CORS preflight Apps Script cannot answer.
+        headers: {'Content-Type': 'text/plain;charset=utf-8'},
         body: jsonEncode({
           'action': 'evaluateAndAlert',
           'type': type,

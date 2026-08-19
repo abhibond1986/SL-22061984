@@ -87,8 +87,13 @@ class NaraVision {
   /// spares every user a setup step they have no way of knowing about. An admin
   /// can still override it via [setProxyUrl] when the deployment is rotated —
   /// a stored value always wins over this constant.
+  /// Rotated 2026-08-19 to deployment AKfycbx0CUXs6VZg… (verified by GET: the
+  /// page advertises `analyzeImageNara`, so it is the proxy project, not the
+  /// sync backend). The previous ID was AKfycbz7rcn6yIr…; a NEW deployment ID
+  /// stales this constant for every user, so prefer publishing a new *version*
+  /// of an existing deployment, which keeps the URL fixed.
   static const String defaultProxyUrl =
-      'https://script.google.com/macros/s/AKfycbz7rcn6yIr_-turaxrXwlGt8n5ukvtuXv7Rcbu66Na10Sfv5a2TUD-MiBHWRw0gqZcv/exec';
+      'https://script.google.com/macros/s/AKfycbx0CUXs6VZg-nIzTV039ThJL6ywa2rzK3xyIdHEmeC5-LAMjE6LsmMKG63oTg-TyIJt/exec';
 
   /// Chat-completions URL. Base is `https://router.bynara.id/v1`.
   ///
@@ -355,10 +360,42 @@ class NaraVision {
       final response = await http
           .post(
             Uri.parse(scriptUrl),
-            headers: {'Content-Type': 'application/json'},
+            // ⚠ text/plain, NOT application/json. THIS LINE IS THE WHOLE POINT.
+            //
+            // application/json is not a CORS "simple request" content type, so
+            // the browser sends an OPTIONS preflight first. An Apps Script web
+            // app cannot answer OPTIONS — there is no doOptions hook — so the
+            // preflight comes back without Access-Control-Allow-Origin and the
+            // browser blocks the POST before it is ever sent. The failure text is
+            // "Response to preflight request doesn't pass access control check",
+            // which reads like the proxy is unreachable when in fact it was never
+            // contacted.
+            //
+            // With text/plain there is no preflight. Apps Script still receives
+            // the exact same body via e.postData.contents (it does not parse by
+            // content type), then 302s to googleusercontent.com, which DOES send
+            // Access-Control-Allow-Origin: * — so the browser follows it and the
+            // JSON arrives.
+            //
+            // This is the established pattern everywhere else in the app; see the
+            // comment at sync_service.dart:106. Copying application/json in here
+            // is what made the proxy look broken after it had been verified
+            // working server-side.
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: jsonEncode(requestBody),
           )
           .timeout(GeminiVision.kAttemptTimeout);
+
+      // An Apps Script error page is HTML, not JSON — and the commonest causes
+      // are operational, not code: the deployment is archived, or "Who has
+      // access" is not Anyone. Detected before jsonDecode so the log names that
+      // instead of a FormatException about '<'.
+      if (response.body.trimLeft().startsWith('<')) {
+        print('NaraVision: ✗ proxy returned HTML, not JSON (HTTP '
+            '${response.statusCode}). The deployment is probably archived or '
+            'its access is not set to "Anyone".');
+        return null;
+      }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final ok = data['ok'] as bool? ?? false;
