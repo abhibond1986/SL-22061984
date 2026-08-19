@@ -121,23 +121,17 @@ class NaraVision {
 
   /// Whether Nara can be *reached* from this platform at all.
   ///
-  /// FALSE ON WEB, and not because of a policy choice: `router.bynara.id`
-  /// returns no `Access-Control-Allow-Origin` header, so a browser blocks the
-  /// response before this app ever sees it. Confirmed 2026-08-19 from the live
-  /// console at https://safetylens.in — every Nara call there was a CORS error,
-  /// which means the only thing the attempt bought was a full
-  /// [GeminiVision.kAttemptTimeout] of dead waiting on the *slowest* path, the
-  /// one taken after another provider has already failed.
+  /// TRUE NOW (as of 2026-08-19): `router.bynara.id` does not send CORS headers,
+  /// but on web we now route through Apps Script as a proxy. The proxy runs
+  /// server-side and is not subject to CORS restrictions, so it can call
+  /// NaraRouter and relay the result back to Flutter web.
+  ///
+  /// On mobile/desktop, we call NaraRouter directly (no proxy overhead).
   ///
   /// Deliberately separate from [isConfigured] rather than folded into it: the
-  /// admin panel asks "is a key stored" to draw its status chip, and on web that
-  /// answer is still yes. Collapsing the two would make a correctly-saved key
-  /// report "not configured" and send an admin off pasting it again.
-  ///
-  /// If Nara ever adds CORS headers (or a proxy is put in front of it — the
-  /// Apps Script AI proxy already fronts the other providers for exactly this
-  /// reason), delete this getter rather than special-casing call sites.
-  static bool get isReachableHere => !kIsWeb;
+  /// admin panel asks "is a key stored" to draw its status chip, and that
+  /// answer is platform-independent.
+  static bool get isReachableHere => true;
 
   /// [isConfigured] AND [isReachableHere] — what a provider call should test.
   static Future<bool> get isUsableHere async =>
@@ -183,7 +177,102 @@ class NaraVision {
   /// sixty seconds.
   static bool lastWasRateLimited = false;
 
+  /// Get the Apps Script URL for proxying requests on web.
+  ///
+  /// Returns the URL from SharedPreferences, or empty string if not configured.
+  /// This is the same URL used for sync and alerts.
+  static Future<String> _getAppsScriptUrl() async {
+    await _ensurePrefs();
+    return _prefs!.getString('apps_script_url') ??
+        _prefs!.getString('sync_backend_url') ??
+        '';
+  }
+
+  /// Call NaraRouter through Apps Script proxy (web only).
+  ///
+  /// Apps Script runs server-side and is not subject to CORS restrictions,
+  /// so it can call router.bynara.id and relay the result back. This adds
+  /// ~200-500ms latency for the proxy hop, but that's negligible compared
+  /// to the 10-20 second model inference time.
+  static Future<Map<String, dynamic>?> _analyzeViaProxy(
+    Uint8List bytes,
+    String prompt,
+    String model,
+  ) async {
+    lastStatus = null;
+    lastWasRateLimited = false;
+
+    final scriptUrl = await _getAppsScriptUrl();
+    if (scriptUrl.isEmpty) {
+      print('NaraVision: ⏭ Apps Script URL not configured (needed for web)');
+      return null;
+    }
+
+    final imageBase64 = base64Encode(bytes);
+    final requestBody = {
+      'action': 'analyzeImageNara',
+      'imageBase64': imageBase64,
+      'prompt': prompt,
+      'model': model,
+      'maxTokens': 4096,
+      'temperature': 0,
+      'topP': 1,
+      'seed': 42,
+    };
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(scriptUrl),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(requestBody),
+          )
+          .timeout(GeminiVision.kAttemptTimeout);
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final ok = data['ok'] as bool? ?? false;
+      final statusCode = data['statusCode'] as int? ?? 500;
+      lastStatus = statusCode;
+
+      if (!ok) {
+        final error = data['error']?.toString() ?? 'Unknown error';
+        print('NaraVision: ⚠ Apps Script proxy error: $error (HTTP $statusCode)');
+
+        // Check for specific error types
+        if (statusCode == 429) {
+          lastWasRateLimited = true;
+        }
+
+        return null;
+      }
+
+      // Parse the NaraRouter response body from the proxy
+      final naraBody = data['body']?.toString() ?? '';
+      if (naraBody.isEmpty) {
+        print('NaraVision: ⚠ Apps Script returned empty body');
+        return null;
+      }
+
+      final naraData = jsonDecode(naraBody) as Map<String, dynamic>;
+      final choices = naraData['choices'] as List?;
+      if (choices != null && choices.isNotEmpty) {
+        final content = choices[0]['message']?['content']?.toString() ?? '';
+        // Use shared parser from GeminiVision
+        return GeminiVision.parseVisionResponse(content);
+      }
+
+      print('NaraVision: ⚠ No choices in NaraRouter response via proxy');
+      return null;
+    } catch (e) {
+      print('NaraVision: ✗ Apps Script proxy exception: $e');
+      return null;
+    }
+  }
+
   /// Analyse an image and return the parsed hazard map, or null on any failure.
+  ///
+  /// On WEB: Routes through Apps Script proxy to bypass CORS restrictions.
+  /// On MOBILE/DESKTOP: Calls router.bynara.id directly.
   ///
   /// Deliberately mirrors `GeminiVision._callOpenRouterVision`, with two
   /// intentional differences:
@@ -210,7 +299,6 @@ class NaraVision {
     }
     final model = await getModel();
 
-    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
     // Shared prompt builder — includes the citable-regulation table with the KB
     // context spliced INTO it. Passing kbContext through matters: appending it
     // after the finished prompt would land it after the "never invent
@@ -218,6 +306,14 @@ class NaraVision {
     // to ignore it.
     final prompt = await GeminiVision.resolvedHazardPrompt(
         kbContext: kbContext ?? '', sceneContext: sceneContext);
+
+    // ON WEB: Route through Apps Script proxy to bypass CORS
+    if (kIsWeb) {
+      return _analyzeViaProxy(bytes, prompt, model);
+    }
+
+    // ON MOBILE/DESKTOP: Call NaraRouter directly
+    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
 
     final requestBody = {
       'model': model,
