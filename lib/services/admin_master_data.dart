@@ -645,13 +645,14 @@ class AdminMasterData {
       }
       // The admin's MODEL choice, validated the same way geminiModel is below.
       // Validation matters here because a REJECTED value falls back to
-      // NaraVision.defaultModel rather than failing loudly. That default was
-      // mistral-medium-3-5 — the most expensive model on Nara's list — until
-      // 2026-08-19, so a typo'd slug used to make a device quietly spend the
-      // shared token allowance ~30x faster than the model the admin picked. The
-      // default is now mimo-v2.5-free, which makes the failure mode cheap
-      // instead of costly, but validate anyway: silently running a different
-      // model than the admin chose still breaks cost and latency attribution.
+      // NaraVision.defaultModel rather than failing loudly, so a typo'd slug
+      // silently runs a different model than the admin chose — which breaks
+      // latency attribution in the AI Performance dashboard.
+      //
+      // The list is also the app's only guard against a model that is not on the
+      // account's Nara plan: those return HTTP 402 and take the whole tier down
+      // (this happened on 2026-08-19 with mimo-v2.5-free, since removed). So
+      // keeping availableModels honest is a correctness matter, not cosmetics.
       if (remote['naraModel'] is String &&
           (remote['naraModel'] as String).isNotEmpty) {
         final remoteNaraModel = remote['naraModel'] as String;

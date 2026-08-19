@@ -116,9 +116,10 @@ class NaraVision {
   /// So the provider leg alone consumes over half of the direct-call budget
   /// before the proxy overhead is counted. 45s covers the measured 10.4s with
   /// room for the other three hops, and is the same figure the direct path used
-  /// before it was tightened. Expect it to be needed less once the proxy serves
-  /// `mimo-v2.5-free` instead of mistral-medium-3-5 — the big model is the bulk
-  /// of step 3, so fixing the cost bug shortens this path too.
+  /// before it was tightened. Do not trim it back on the assumption that a
+  /// lighter model will be selected: mistral-medium-3-5 is [defaultModel] on
+  /// purpose (it is the strongest model on the account's free plan), so 10.4s in
+  /// step 3 is the expected case, not the bad case.
   ///
   /// Note that Tier 1b is NOT inside `_kTier1Budget` (that clock is checked only
   /// inside the OpenRouter loop), so a stall here delays Tier 2 by the full
@@ -143,45 +144,53 @@ class NaraVision {
 
   /// Default model when the admin has not chosen one.
   ///
-  /// CHANGED 2026-08-19: was mistral-medium-3-5 (chosen by admin request on
-  /// 2026-08-17), now mimo-v2.5-free. The old value was the worst possible
-  /// default on both axes this provider is judged by:
+  /// mistral-medium-3-5, by admin decision (2026-08-17, reaffirmed 2026-08-19).
   ///
-  ///   COST — it was the MOST EXPENSIVE vision model on the free-models page
-  ///   ($0.30 in / $1.51 out per 1M, the only one with no discount multiplier),
-  ///   while stepfun-3.7-flash ($0.04), agnes-2.0-flash (0.2x, $0.03) and
-  ///   mimo-v2.5-free (0.1x, $0.01) are 8-30x cheaper against the SAME shared
-  ///   daily token allowance. NaraRouter meters tokens per day, not requests,
-  ///   so the default silently decided how many scans a day the whole plant got.
+  /// ⚠ READ THIS BEFORE "OPTIMISING" THE COST. On 2026-08-19 I briefly changed
+  /// this to mimo-v2.5-free on the reasoning that the per-1M prices on Nara's
+  /// models page made mistral ~30x more expensive. That was WRONG for this
+  /// account, in two ways:
   ///
-  ///   LATENCY — measured at 10447ms server-side and 14594ms end-to-end through
-  ///   the proxy on 2026-08-19, i.e. it was the reason Tier 1b kept overrunning
-  ///   its timeout. See [kProxyTimeout].
+  ///   1. This account is on Nara's **Free plan**, whose page says outright
+  ///      "Included in the Free plan — usable at no cost", with a 10M-token
+  ///      daily allowance. The price columns are the PAYG rates that would apply
+  ///      if PAYG were on; it is off. So all of these models cost the same as
+  ///      each other here: nothing.
+  ///   2. mimo-v2.5-free is NOT ON THE FREE PLAN AT ALL, despite the '-free' in
+  ///      its slug. Requesting it is what produced `HTTP 402 Payment Required`
+  ///      and killed the tier outright — a "cheaper" default that could not run.
   ///
-  /// A default is not a preference: it is what every device that has never
-  /// visited the admin panel uses, AND the value a rejected/misspelled synced
-  /// model string falls back to (see admin_master_data.dart ~647). So it must be
-  /// the SAFE option, not the strongest one. An admin who wants Mistral can still
-  /// pick it in the dropdown, and that choice syncs; nobody can accidentally
-  /// choose it by doing nothing.
-  static const String defaultModel = 'mimo-v2.5-free';
+  /// The lesson worth keeping: a slug containing 'free' is not evidence, and a
+  /// price column is not a bill. Check the account's PLAN before ranking models
+  /// by cost, and prefer the model that is confirmed to WORK — a tier that 402s
+  /// costs infinitely more per usable scan than the priciest one that answers.
+  ///
+  /// Latency is the honest tradeoff here: 10447ms server-side, 14594ms
+  /// end-to-end through the proxy. That is why [kProxyTimeout] is 45s and why
+  /// this tier sits late in the chain rather than leading it.
+  static const String defaultModel = 'mistral-medium-3-5';
 
   /// Models offered in the Admin panel dropdown.
   ///
-  /// VISION-CAPABLE ONLY. A text-only model here would not fail loudly — it
-  /// would ignore the image part and confidently describe nothing, producing a
-  /// hazard report with no relation to the photograph. Do not add a slug to
-  /// this list without confirming it is tagged Vision on Nara's models page.
-  /// Ordered CHEAPEST FIRST so the top of the dropdown is also the safe choice
-  /// and matches [defaultModel]. Mistral is last with its cost called out in the
-  /// label, because it is the one selection that can drain the shared daily token
-  /// allowance in a handful of scans.
+  /// VISION-CAPABLE AND ON THE FREE PLAN. Two independent filters, both verified
+  /// against https://router.bynara.id/models on 2026-08-19:
+  ///
+  ///   • Vision — a text-only model here would not fail loudly. It would ignore
+  ///     the image part and confidently describe nothing, producing a hazard
+  ///     report with no relation to the photograph. The free plan lists plenty of
+  ///     Text-only models (deepseek-v4-pro-free, laguna-s-2.1, ling-3.0-flash-free,
+  ///     mistral-large, qwen-3.8-max-free, tencent-hy3-free) — none belong here.
+  ///   • Free plan — anything outside it returns HTTP 402 and takes the whole
+  ///     tier down. mimo-v2.5-free was REMOVED for exactly this reason; its name
+  ///     says free, the plan page does not list it, and it 402'd on every scan.
+  ///
+  /// These four are the complete intersection: every model tagged Vision on the
+  /// Free plan. Do not add a slug without checking BOTH columns.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'mimo-v2.5-free',     'name': 'MiMo v2.5 Free (1M ctx — lowest cost, default)'},
-    {'id': 'agnes-2.0-flash',    'name': 'Agnes 2.0 Flash (0.2x discount — cheapest flash)'},
-    {'id': 'agnes-2.5-flash',    'name': 'Agnes 2.5 Flash (0.3x discount)'},
-    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — cheap, flash tier)'},
-    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — ~30x cost, ~10s slower)'},
+    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — default, strongest)'},
+    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — flash tier)'},
+    {'id': 'agnes-2.0-flash',    'name': 'Agnes 2.0 Flash (512K ctx — fastest tier)'},
+    {'id': 'agnes-2.5-flash',    'name': 'Agnes 2.5 Flash (512K ctx)'},
   ];
 
   static SharedPreferences? _prefs;
@@ -450,9 +459,50 @@ class NaraVision {
               'NaraVisionProxy.gs to that project and route the action.');
         }
 
-        // Check for specific error types
-        if (statusCode == 429) {
-          lastWasRateLimited = true;
+        // RELAY THE PROVIDER'S OWN MESSAGE. On a failure the proxy still returns
+        // NaraRouter's response in `body`, and that is where the actionable text
+        // lives — the `error` field above describes the PROXY's view and is often
+        // just 'Unknown error'. Discarding `body` on !ok is what turned a plain
+        // "insufficient credits" into an opaque "Unknown error (HTTP 402)".
+        final relayed = data['body']?.toString() ?? '';
+        if (relayed.isNotEmpty) {
+          print('NaraVision:   NaraRouter said: '
+              '${relayed.length > 400 ? '${relayed.substring(0, 400)}…' : relayed}');
+        }
+
+        // Status codes are the provider's, forwarded verbatim by the proxy, so
+        // they say what to actually DO about it. Named explicitly because the
+        // generic message sends you debugging the proxy — which at this point has
+        // already done its job correctly.
+        switch (statusCode) {
+          case 402:
+            // Payment Required — and on a Free-plan account the cause is almost
+            // never the balance. It is a model OUTSIDE the free plan, which Nara
+            // will not route without PAYG enabled. Diagnosed 2026-08-19: the
+            // request named mimo-v2.5-free, whose slug says free but which is not
+            // on the plan's model list at all. Check the model before the wallet.
+            print('NaraVision: ✗ HTTP 402 — "$model" is not on this account\'s '
+                'Nara plan (a \'-free\' slug does NOT mean it is included). Pick '
+                'one of ${availableModels.map((m) => m['id']).join(', ')} in '
+                'Admin → NaraRouter, or enable PAYG at router.bynara.id. If the '
+                'model IS on the plan, then the daily allowance or balance is '
+                'the cause — check Billing.');
+            break;
+          case 401:
+          case 403:
+            print('NaraVision: ✗ HTTP $statusCode — NARA_API_KEY in the proxy '
+                'project\'s Script Properties is missing, wrong or revoked. '
+                'This key is the proxy\'s, NOT the one synced to devices.');
+            break;
+          case 404:
+            print('NaraVision: ✗ HTTP 404 — model "$model" is not valid on this '
+                'account\'s plan. Pick another in Admin → NaraRouter.');
+            break;
+          case 429:
+            lastWasRateLimited = true;
+            print('NaraVision: ✗ HTTP 429 — daily TOKEN allowance spent (Nara '
+                'meters tokens, not requests). A cheaper model buys more scans.');
+            break;
         }
 
         return null;

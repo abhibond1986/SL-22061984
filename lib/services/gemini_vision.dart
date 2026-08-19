@@ -12,15 +12,18 @@
 //      on 2026-08-17 — still pinnable from the admin dropdown, see
 //      groqVisionModels. They are valid image models; they were simply
 //      unreachable inside the 40s Tier 1 budget.)
-//   TIER 1b — NaraRouter (NaraVision), if a key is configured. A separate
-//            account with its own daily token allowance, so it survives an
-//            OpenRouter 429. Model is admin-selectable; default
-//            mimo-v2.5-free (was mistral-medium-3-5 until 2026-08-19 — see
-//            NaraVision.defaultModel for why a cheap default is the safe one).
-//            Added 2026-08-17.
 //   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
 //            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
-//   TIER 3 — Offline fallback: reports the failure, returns NO hazards
+//   TIER 3 — NaraRouter (NaraVision). A separate account with its own 10M-token
+//            daily allowance, so it survives an OpenRouter 429 — insurance
+//            rather than throughput. Model is admin-selectable; default
+//            mistral-medium-3-5, the strongest VISION model on the account's
+//            Nara FREE plan (a model off that plan returns HTTP 402 and takes
+//            the tier down — see NaraVision.availableModels). Added as Tier 1b
+//            on 2026-08-17; moved to LAST online provider on 2026-08-19 because
+//            it is the slowest measured and has the most hops. Full reasoning at
+//            its banner in analyseImageBytes.
+//   TIER 4 — Offline fallback: reports the failure, returns NO hazards
 //
 // LATENCY: each attempt is capped at kAttemptTimeout and the whole Tier 1
 // chain at _kTier1Budget. Both were sized from real measurements — read their
@@ -746,25 +749,88 @@ HOW TO USE IT:
       }
 
       // ══════════════════════════════════════════════════════════════════════
-      // TIER 1b — NARAROUTER (separate account, separate daily allowance)
+      // TIER 2 — DIRECT GEMINI (separate quota from OpenRouter)
       //
-      // Placed AFTER the OpenRouter chain and BEFORE Gemini, deliberately:
-      //   • Not first. Its model is unmeasured for latency, and a top-of-chain
-      //     model's slowness is paid on EVERY scan. That is exactly the mistake
-      //     that cost 45s per scan when the 30B reasoning model led the chain.
-      //     Sitting here, it costs nothing while Nano 12B VL keeps answering in
-      //     ~11s, and only earns its place when Tier 1 genuinely cannot.
-      //   • Before Gemini because Gemini is the last resort that bills against
-      //     Google; a free Nara allowance should be spent before that.
-      // Promote it only on evidence — the AI Performance dashboard records this
-      // provider's latency under _source 'nara_router', so compare there first.
+      // Now runs BEFORE NaraRouter (moved 2026-08-19) — see that tier's banner
+      // below for the latency measurements behind the reorder.
       //
-      // NOTE this tier is reached when Tier 1 returned nothing, INCLUDING when
-      // the Tier 1 budget ran out. It has its own attempt timeout on top of
-      // that budget, so the worst-case wait grows by up to
-      // the shared [kAttemptTimeout] (20s). That is the accepted
-      // price of a second free allowance; it is only paid on scans that were
-      // already failing.
+      // Why this exists: every OpenRouter ':free' model draws on ONE
+      // account-wide daily allowance, so once that cap is hit the 429 applies
+      // to all of them and extending the chain above cannot help. A Gemini key
+      // is billed against Google, not OpenRouter, so it is the only tier that
+      // can still analyse the image.
+      //
+      // This service was fully implemented and exposed in Admin → System
+      // Health, but nothing ever invoked it: setting a Gemini key had no
+      // effect whatsoever on scanning. That is fixed here.
+      // ══════════════════════════════════════════════════════════════════════
+      if (await GeminiDirectVision.isConfigured) {
+        print('GeminiVision: ▶ Direct Gemini Vision (separate quota)...');
+        try {
+          final gemResult = await GeminiDirectVision.analyzeImage(bytes,
+              kbContext: kbContext, sceneContext: sceneContext);
+          if (_isValidResult(gemResult)) {
+            print('GeminiVision: ✓ Direct Gemini SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
+            // analyzeImage walks its own chain and stamps the model that
+            // actually answered. Prefer that over the merely *selected* model,
+            // otherwise the AI dashboard attributes latency to the wrong one.
+            final model = (gemResult!['_model'] ?? '').toString().isNotEmpty
+                ? gemResult['_model'].toString()
+                : await GeminiDirectVision.getModel();
+            gemResult['_source'] = 'gemini_direct';
+            gemResult['_model'] = model;
+            gemResult['_isOnline'] = true;
+            _lastCallTime = DateTime.now();
+            _isAnalyzing = false;
+            await _writeCachedResult(imgHash, gemResult);
+            return logged(gemResult,
+                outcome: AiRunLog.outcomeSuccess,
+                model: model,
+                imageHash: imgHash);
+          }
+          print('GeminiVision: ✗ Direct Gemini returned no usable result');
+        } catch (e) {
+          print('GeminiVision: ✗ Direct Gemini exception: $e');
+        }
+      } else {
+        print('GeminiVision: ⏭ Direct Gemini skipped (no key configured — '
+            'set one in Admin → System Health to survive OpenRouter 429s)');
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // TIER 3 — NARAROUTER (separate account, separate daily allowance)
+      //
+      // MOVED HERE 2026-08-19, by admin decision, from between OpenRouter and
+      // Gemini. It is now the LAST online provider: it runs only when both
+      // OpenRouter and Direct Gemini have failed.
+      //
+      // Why last, on the evidence gathered that day:
+      //   • SLOWEST measured provider — 14594ms end-to-end through the Apps
+      //     Script proxy (10447ms of that inside NaraRouter itself), against
+      //     ~11s for OpenRouter's Nano 12B VL and 15-17s for Gemini. A provider
+      //     ahead of others in the chain pays its latency on scans they could
+      //     have served, so the slowest belongs at the back.
+      //   • MOST HOPS, so the most ways to fail — on web the path is browser →
+      //     Apps Script → UrlFetchApp → Nara → 302 → browser, and every fault we
+      //     hit (CORS preflight, stale deployment ID, wrong model default, 402)
+      //     lived somewhere in that chain rather than in the provider.
+      //   • Its value is INSURANCE, not throughput: a separate account with its
+      //     own 10M-token daily allowance that survives an OpenRouter 429 and a
+      //     Gemini outage together. Insurance is worth having and worth paying
+      //     for last.
+      //
+      // The earlier ordering argued the opposite — spend a free Nara allowance
+      // before billing Google. That reasoning was not wrong, it was outranked:
+      // Gemini answers faster and has been answering reliably, and both tiers are
+      // free at current volumes.
+      //
+      // Reconsider only on dashboard evidence, not intuition: latency for this
+      // provider is recorded under _source 'nara_router', Gemini's under
+      // 'gemini_direct'. If Nara's median drops below Gemini's, promote it.
+      //
+      // COST OF SITTING HERE: this tier is reached only when everything else has
+      // already failed, so its [NaraVision.kProxyTimeout] (45s) is added to a
+      // scan that was going to fail anyway. Nothing is paid on a healthy scan.
       // ══════════════════════════════════════════════════════════════════════
       // Two separate questions, deliberately not merged. "Is a key stored on this
       // device" drives the failure MESSAGE further down (a site running only on a
@@ -830,52 +896,6 @@ HOW TO USE IT:
         // diagnosis. Never state a cause here that this layer cannot verify.
         print('GeminiVision: ⏭ NaraRouter skipped '
             '(${await NaraVision.unusableReason})');
-      }
-
-      // ══════════════════════════════════════════════════════════════════════
-      // TIER 2 — DIRECT GEMINI (separate quota from OpenRouter)
-      //
-      // Why this exists: every OpenRouter ':free' model draws on ONE
-      // account-wide daily allowance, so once that cap is hit the 429 applies
-      // to all of them and extending the chain above cannot help. A Gemini key
-      // is billed against Google, not OpenRouter, so it is the only tier that
-      // can still analyse the image.
-      //
-      // This service was fully implemented and exposed in Admin → System
-      // Health, but nothing ever invoked it: setting a Gemini key had no
-      // effect whatsoever on scanning. That is fixed here.
-      // ══════════════════════════════════════════════════════════════════════
-      if (await GeminiDirectVision.isConfigured) {
-        print('GeminiVision: ▶ Direct Gemini Vision (separate quota)...');
-        try {
-          final gemResult = await GeminiDirectVision.analyzeImage(bytes,
-              kbContext: kbContext, sceneContext: sceneContext);
-          if (_isValidResult(gemResult)) {
-            print('GeminiVision: ✓ Direct Gemini SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
-            // analyzeImage walks its own chain and stamps the model that
-            // actually answered. Prefer that over the merely *selected* model,
-            // otherwise the AI dashboard attributes latency to the wrong one.
-            final model = (gemResult!['_model'] ?? '').toString().isNotEmpty
-                ? gemResult['_model'].toString()
-                : await GeminiDirectVision.getModel();
-            gemResult['_source'] = 'gemini_direct';
-            gemResult['_model'] = model;
-            gemResult['_isOnline'] = true;
-            _lastCallTime = DateTime.now();
-            _isAnalyzing = false;
-            await _writeCachedResult(imgHash, gemResult);
-            return logged(gemResult,
-                outcome: AiRunLog.outcomeSuccess,
-                model: model,
-                imageHash: imgHash);
-          }
-          print('GeminiVision: ✗ Direct Gemini returned no usable result');
-        } catch (e) {
-          print('GeminiVision: ✗ Direct Gemini exception: $e');
-        }
-      } else {
-        print('GeminiVision: ⏭ Direct Gemini skipped (no key configured — '
-            'set one in Admin → System Health to survive OpenRouter 429s)');
       }
 
       // ══════════════════════════════════════════════════════════════════════
