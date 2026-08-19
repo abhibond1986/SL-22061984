@@ -20,6 +20,10 @@ import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'admin_master_data.dart';
+// For the shared observer-note prompt block. gemini_vision.dart imports this
+// file in turn; Dart allows mutual imports between libraries and the pair
+// nara_vision.dart / gemini_vision.dart already relies on that.
+import 'gemini_vision.dart';
 
 class GeminiDirectVision {
   static const String _kApiKey = 'gemini_vision_api_key';
@@ -141,8 +145,12 @@ class GeminiDirectVision {
   /// Analyze image for safety hazards
   /// Returns structured hazard data or null on failure
   /// [kbContext] — optional knowledge bank content to inject into prompt for accurate regulations
+  /// [sceneContext] — the observer's optional note about what the photo shows,
+  /// rendered by [GeminiVision.sceneContextBlock]. Context for interpretation
+  /// only; it is explicitly not evidence for a hazard. Defaults to empty.
   /// ★ v25: FAST BAIL on 429 — all models share same key/quota, no point trying others
-  static Future<Map<String, dynamic>?> analyzeImage(Uint8List imageBytes, {String? kbContext}) async {
+  static Future<Map<String, dynamic>?> analyzeImage(Uint8List imageBytes,
+      {String? kbContext, String sceneContext = ''}) async {
     if (!await isConfigured) return null;
 
     // If quota was exhausted recently (within 60s), skip entirely
@@ -168,8 +176,8 @@ class GeminiDirectVision {
     for (int i = 0; i < attempts.length; i++) {
       final model = attempts[i];
       print('GeminiDirectVision: ▶ [${i + 1}/${attempts.length}] $model');
-      final result =
-          await _callModel(model, apiKey, base64Image, kbContext: kbContext);
+      final result = await _callModel(model, apiKey, base64Image,
+          kbContext: kbContext, sceneContext: sceneContext);
 
       // 429/403 is key-wide, not model-specific, so every remaining attempt
       // would fail the same way. This bail is correct — unlike the previous
@@ -197,13 +205,13 @@ class GeminiDirectVision {
   }
 
   /// Call a specific Gemini model for image analysis
-  static Future<Map<String, dynamic>?> _callModel(String model, String apiKey, String base64Image, {String? kbContext}) async {
+  static Future<Map<String, dynamic>?> _callModel(String model, String apiKey, String base64Image, {String? kbContext, String sceneContext = ''}) async {
     final url = 'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey';
 
     // KB context goes INTO the prompt builder so it lands inside the citable
     // reference table, not after the instruction forbidding outside citations.
-    final String prompt =
-        await resolvedComprehensivePrompt(kbContext: kbContext ?? '');
+    final String prompt = await resolvedComprehensivePrompt(
+        kbContext: kbContext ?? '', sceneContext: sceneContext);
 
     final requestBody = {
       'contents': [
@@ -285,7 +293,8 @@ class GeminiDirectVision {
   /// and WSA-cause vocabularies substituted in. Callers must use this, never the
   /// raw template — otherwise renaming a severity or a cause in the admin panel
   /// leaves this model emitting labels the app's dropdowns no longer accept.
-  static Future<String> resolvedComprehensivePrompt({String kbContext = ''}) async {
+  static Future<String> resolvedComprehensivePrompt(
+      {String kbContext = '', String sceneContext = ''}) async {
     List<String> sevs;
     List<String> types;
     List<String> causes;
@@ -330,11 +339,17 @@ class GeminiDirectVision {
             'exactly as written below.\n'
             '$kbContext\n';
 
+    // Built by GeminiVision, not copied here. This file already drifted into a
+    // third divergent copy of the KB block once; the observer-note rules are
+    // safety-critical wording and must have exactly one home.
+    // Substituted LAST so no observer text can be read as a placeholder token.
     return _getComprehensivePrompt()
         .replaceAll('{{SEVERITIES}}', sevEnum)
         .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
         .replaceAll('{{WSA_CAUSES}}', causeBlock)
-        .replaceAll('{{KB_CONTEXT}}', kbBlock);
+        .replaceAll('{{KB_CONTEXT}}', kbBlock)
+        .replaceAll('{{SCENE_CONTEXT}}',
+            GeminiVision.sceneContextBlock(sceneContext));
   }
 
   /// ★ v36: FINE-TUNED Comprehensive hazard analysis prompt
@@ -368,7 +383,7 @@ SELF-CHECK BEFORE OUTPUTTING EACH HAZARD:
   □ Would another inspector looking at this image agree? → If unlikely, delete.
   □ Am I reporting this because I SEE it or because it's "typical"? → If typical, delete.
   □ Is my regulation citation from the VERIFIED table? → If not, fix or delete.
-
+{{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
 METHODOLOGY — EVIDENCE-BASED SYSTEMATIC INSPECTION
 ═══════════════════════════════════════════════════════

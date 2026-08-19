@@ -424,7 +424,7 @@ HOW TO USE IT:
   // model cannot reliably tell a roof from a floor slab or oxygen from
   // nitrogen, and each of those mistakes changes the hazard class outright, so a
   // human hint here is worth more than any prompt tuning. It is advisory only;
-  // see [_sceneContextBlock] for the rules that stop it becoming a hazard
+  // see [sceneContextBlock] for the rules that stop it becoming a hazard
   // report in its own right, and for why it cannot be used to inject prompt
   // instructions. Defaults to empty, so the near-miss entry point is unaffected.
   static Future<Map<String, dynamic>?> analyseImageBytes(Uint8List bytes,
@@ -1515,7 +1515,7 @@ ANTI-HALLUCINATION RULES (CRITICAL — READ FIRST)
   - confidence 50-79: Partial evidence, some interpretation needed
   - confidence below 50: Low-quality image or limited visibility
 ★ If image is blurry, dark, or shows nothing hazardous, return LOW risk with 1-2 hazards max.
-
+{{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
 METHODOLOGY — EVIDENCE-BASED INSPECTION
 ═══════════════════════════════════════════════════════

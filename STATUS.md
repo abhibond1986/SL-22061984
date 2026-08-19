@@ -116,6 +116,50 @@ the admin panel now has a **System Health → Feature Release** card holding a
 * Contrast audit after this change: **245 failures, unchanged**; warnings moved
   238 → 242, all four being the new card's 10px labels.
 
+**Observer's scene note on the AI Hazard Scan — added 2026-08-19, uncompiled.**
+An optional text/dictation box on the capture screen ("What is in the picture?")
+lets the observer describe the backdrop — rooftop vs floor slab, oxygen vs
+nitrogen cylinder, live vs isolated line. Each of those is a distinction a vision
+model routinely gets wrong and each changes the hazard class outright, so the
+human hint is worth more here than any further prompt tuning.
+
+* **It is context, never evidence.** The prompt block states that a hazard
+  mentioned in the note but not VISIBLE must not be reported (it may go in
+  `recommendations` instead), that `visual evidence` must describe pixels and
+  never quote the note, and that the image wins any contradiction. Without those
+  rules the note would satisfy the model's own "cite visible proof" requirement
+  in words, and the report would invent hazards from the sentence. A false hazard
+  in a safety report is not a harmless extra — it gets assigned and argued about.
+* **The note is treated as data, not instructions.** It reaches the model in the
+  same channel as the prompt, so `normaliseSceneContext` collapses all newlines,
+  strips `` ` ``, `═`, `─`, `{` and `}` (the prompt's own fence and placeholder
+  characters), caps at 400 chars, and returns empty for punctuation-only input so
+  that "type a full stop to get past it" behaves like leaving it blank. The block
+  also tells the model to ignore any instruction inside the quoted text, and
+  `{{SCENE_CONTEXT}}` is substituted **last** so nothing typed can be read as a
+  placeholder token.
+* **Placement is load-bearing**, the same lesson the KB block taught: the block
+  sits AFTER the anti-hallucination rules and OUTSIDE the citable regulation
+  table. Inside the table it would read as a regulation; below the "never invent
+  citations" line it would read as non-citable.
+* **The consistency cache is now keyed on image + note** (`_resultCacheKey`).
+  This was the trap: keyed on the image alone, a user who saw the AI call a roof
+  a floor, added "this is a rooftop" and re-scanned would be served the very
+  contextless answer they were correcting, and the note would look broken. With
+  no note the key is byte-identical to before, so the 60 cached analyses survive.
+* One block builder, `GeminiVision.sceneContextBlock`, is shared by both prompt
+  builders. `gemini_direct_vision.dart` now imports `gemini_vision.dart` for it —
+  a mutual import, which Dart allows and which `nara_vision.dart` already relies
+  on. That file previously drifted into a third divergent copy of the KB block;
+  safety-critical wording gets exactly one home.
+* `sceneContext` defaults to `''` at every hop, so `near_miss_tab.dart` compiles
+  untouched and behaves exactly as before. Contrast audit unchanged at **245
+  failures / 242 warnings** — the hint line is 11px, deliberately above the 10px
+  warn floor.
+* Not persisted with the incident record: it shapes the analysis and is not
+  currently saved. Worth revisiting — a reviewer reading the report later cannot
+  see what the observer said the scene was.
+
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
 describe what was true *that day*, not what is true now. Superseded notes have

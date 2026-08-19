@@ -199,7 +199,7 @@ class NaraVision {
   ///  2. No `HTTP-Referer`/`X-Title` headers — those are OpenRouter's
   ///     attribution scheme, not part of the OpenAI-compatible spec.
   static Future<Map<String, dynamic>?> analyzeImage(Uint8List bytes,
-      {String? kbContext}) async {
+      {String? kbContext, String sceneContext = ''}) async {
     lastStatus = null;
     lastWasRateLimited = false;
 
@@ -216,8 +216,8 @@ class NaraVision {
     // after the finished prompt would land it after the "never invent
     // regulation numbers not in this table" instruction, which tells the model
     // to ignore it.
-    final prompt =
-        await GeminiVision.resolvedHazardPrompt(kbContext: kbContext ?? '');
+    final prompt = await GeminiVision.resolvedHazardPrompt(
+        kbContext: kbContext ?? '', sceneContext: sceneContext);
 
     final requestBody = {
       'model': model,
