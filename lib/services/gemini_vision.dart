@@ -15,7 +15,9 @@
 //   TIER 1b — NaraRouter (NaraVision), if a key is configured. A separate
 //            account with its own daily token allowance, so it survives an
 //            OpenRouter 429. Model is admin-selectable; default
-//            mistral-medium-3-5. Added 2026-08-17.
+//            mimo-v2.5-free (was mistral-medium-3-5 until 2026-08-19 — see
+//            NaraVision.defaultModel for why a cheap default is the safe one).
+//            Added 2026-08-17.
 //   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
 //            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
 //   TIER 3 — Offline fallback: reports the failure, returns NO hazards

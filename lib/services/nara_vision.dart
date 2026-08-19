@@ -143,16 +143,28 @@ class NaraVision {
 
   /// Default model when the admin has not chosen one.
   ///
-  /// mistral-medium-3-5 by explicit admin request (2026-08-17). Worth knowing
-  /// what it costs: on the free-models page it was the MOST EXPENSIVE vision
-  /// model listed ($0.30 in / $1.51 out per 1M) and the only one carrying no
-  /// discount multiplier, while stepfun-3.7-flash ($0.04), agnes-2.0-flash
-  /// (0.2x, $0.03) and mimo-v2.5-free (0.1x, $0.01) are 8-30x cheaper against
-  /// the same shared daily token quota. It is also unmeasured for LATENCY,
-  /// which is the whole reason this chain was reordered in the first place.
-  /// If it turns out slow or drains the quota, switch the dropdown to a flash
-  /// model rather than removing the provider.
-  static const String defaultModel = 'mistral-medium-3-5';
+  /// CHANGED 2026-08-19: was mistral-medium-3-5 (chosen by admin request on
+  /// 2026-08-17), now mimo-v2.5-free. The old value was the worst possible
+  /// default on both axes this provider is judged by:
+  ///
+  ///   COST — it was the MOST EXPENSIVE vision model on the free-models page
+  ///   ($0.30 in / $1.51 out per 1M, the only one with no discount multiplier),
+  ///   while stepfun-3.7-flash ($0.04), agnes-2.0-flash (0.2x, $0.03) and
+  ///   mimo-v2.5-free (0.1x, $0.01) are 8-30x cheaper against the SAME shared
+  ///   daily token allowance. NaraRouter meters tokens per day, not requests,
+  ///   so the default silently decided how many scans a day the whole plant got.
+  ///
+  ///   LATENCY — measured at 10447ms server-side and 14594ms end-to-end through
+  ///   the proxy on 2026-08-19, i.e. it was the reason Tier 1b kept overrunning
+  ///   its timeout. See [kProxyTimeout].
+  ///
+  /// A default is not a preference: it is what every device that has never
+  /// visited the admin panel uses, AND the value a rejected/misspelled synced
+  /// model string falls back to (see admin_master_data.dart ~647). So it must be
+  /// the SAFE option, not the strongest one. An admin who wants Mistral can still
+  /// pick it in the dropdown, and that choice syncs; nobody can accidentally
+  /// choose it by doing nothing.
+  static const String defaultModel = 'mimo-v2.5-free';
 
   /// Models offered in the Admin panel dropdown.
   ///
@@ -160,12 +172,16 @@ class NaraVision {
   /// would ignore the image part and confidently describe nothing, producing a
   /// hazard report with no relation to the photograph. Do not add a slug to
   /// this list without confirming it is tagged Vision on Nara's models page.
+  /// Ordered CHEAPEST FIRST so the top of the dropdown is also the safe choice
+  /// and matches [defaultModel]. Mistral is last with its cost called out in the
+  /// label, because it is the one selection that can drain the shared daily token
+  /// allowance in a handful of scans.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — highest cost, unmeasured speed)'},
-    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — cheap, flash tier)'},
+    {'id': 'mimo-v2.5-free',     'name': 'MiMo v2.5 Free (1M ctx — lowest cost, default)'},
     {'id': 'agnes-2.0-flash',    'name': 'Agnes 2.0 Flash (0.2x discount — cheapest flash)'},
     {'id': 'agnes-2.5-flash',    'name': 'Agnes 2.5 Flash (0.3x discount)'},
-    {'id': 'mimo-v2.5-free',     'name': 'MiMo v2.5 Free (1M ctx — lowest cost)'},
+    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — cheap, flash tier)'},
+    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — ~30x cost, ~10s slower)'},
   ];
 
   static SharedPreferences? _prefs;
@@ -274,20 +290,6 @@ class NaraVision {
     return saved.isEmpty ? defaultModel : saved;
   }
 
-  /// The saved slug with NO fallback — empty string when the admin has never
-  /// chosen one.
-  ///
-  /// Needed because [getModel]'s fallback is [defaultModel] = mistral-medium-3-5,
-  /// the most expensive model on Nara's list. On web that fallback is applied on
-  /// the WRONG side of the wire: a zero-config browser would name the costly
-  /// model explicitly, overriding the cheap NARA_MODEL the admin set in the
-  /// proxy's Script Properties, and quietly bill the shared token quota at
-  /// ~30x. Sending empty instead lets the server pick. See [analyzeImage].
-  static Future<String> savedModelOrEmpty() async {
-    await _ensurePrefs();
-    return (_prefs!.getString(_kModel) ?? '').trim();
-  }
-
   static Future<void> setModel(String model) async {
     await _ensurePrefs();
     await _prefs!.setString(_kModel, model.trim());
@@ -377,9 +379,9 @@ class NaraVision {
       'action': 'analyzeImageNara',
       'imageBase64': imageBase64,
       'prompt': prompt,
-      // OMITTED WHEN UNCHOSEN, not sent empty. The proxy resolves an absent
-      // model from its own NARA_MODEL property; sending '' would work too, but
-      // omission makes "the client has no opinion" unambiguous in the log.
+      // In practice always present — [analyzeImage] resolves it through
+      // [getModel]. Kept conditional so an empty string is never sent as a model
+      // name, which the proxy would forward verbatim to Nara as a 404.
       if (model.isNotEmpty) 'model': model,
       'maxTokens': 4096,
       'temperature': 0,
@@ -470,6 +472,15 @@ class NaraVision {
         if (model.isEmpty) {
           print('NaraVision: proxy chose $servedModel (this device has no '
               'model preference — the server default applies)');
+        } else if (servedModel != model) {
+          // Worth shouting about: it means the deployed script is overriding or
+          // ignoring the requested model, which is how a 30x-cost model got used
+          // unnoticed on 2026-08-19. Cost and latency both follow what SERVED,
+          // not what was asked for, so [lastModelUsed] above is the value the AI
+          // Performance dashboard must log.
+          print('NaraVision: ⚠ asked for $model but proxy served $servedModel '
+              '— the deployed NaraVisionProxy.gs is overriding the request '
+              '(check NARA_MODEL and that the script is the current revision)');
         }
       }
       final choices = naraData['choices'] as List?;
@@ -531,10 +542,22 @@ class NaraVision {
 
     // ON WEB: Route through Apps Script proxy to bypass CORS.
     //
-    // The model is passed RAW (empty when unchosen) so the proxy's NARA_MODEL
-    // wins on a device that has never synced — see [savedModelOrEmpty].
+    // THE MODEL IS ALWAYS SENT, resolved through [getModel] so [defaultModel]
+    // applies client-side. An earlier version deliberately sent it EMPTY on a
+    // device with no preference, to let the proxy's NARA_MODEL be the single
+    // central source of truth. That backfired on 2026-08-19: the deployed proxy
+    // was an older revision whose fallback is hardcoded to mistral-medium-3-5,
+    // so "no opinion" was read as "use the 30x model" and every browser scan ran
+    // it (console: 'proxy chose mistral-medium-3-5', 14594ms). Deferring to a
+    // remote default means inheriting whatever revision happens to be deployed —
+    // and script revisions are exactly what the app cannot see or verify.
+    //
+    // Being explicit makes the app authoritative on both platforms, so the Admin
+    // dropdown means the same thing everywhere, and no Apps Script edit is needed
+    // to correct a costly default. NARA_MODEL still applies if a client ever
+    // omits the field.
     if (kIsWeb) {
-      return _analyzeViaProxy(bytes, prompt, await savedModelOrEmpty());
+      return _analyzeViaProxy(bytes, prompt, await getModel());
     }
 
     // ON MOBILE/DESKTOP: Call NaraRouter directly

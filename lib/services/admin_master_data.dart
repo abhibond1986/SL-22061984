@@ -644,10 +644,14 @@ class AdminMasterData {
         updated = true;
       }
       // The admin's MODEL choice, validated the same way geminiModel is below.
-      // This matters more here than it looks: NaraVision.defaultModel is
-      // mistral-medium-3-5, the most expensive model on Nara's list, so a device
-      // that receives the key but not the model would quietly spend the shared
-      // token allowance several times faster than the one the admin chose.
+      // Validation matters here because a REJECTED value falls back to
+      // NaraVision.defaultModel rather than failing loudly. That default was
+      // mistral-medium-3-5 — the most expensive model on Nara's list — until
+      // 2026-08-19, so a typo'd slug used to make a device quietly spend the
+      // shared token allowance ~30x faster than the model the admin picked. The
+      // default is now mimo-v2.5-free, which makes the failure mode cheap
+      // instead of costly, but validate anyway: silently running a different
+      // model than the admin chose still breaks cost and latency attribution.
       if (remote['naraModel'] is String &&
           (remote['naraModel'] as String).isNotEmpty) {
         final remoteNaraModel = remote['naraModel'] as String;
