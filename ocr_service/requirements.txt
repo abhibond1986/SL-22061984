@@ -1,0 +1,51 @@
+# Safety Lens OCR service — pinned for reproducible free-tier builds.
+#
+# Versions are pinned deliberately. PaddleOCR 3.x renamed the inference API
+# (ocr(cls=...) -> predict) and paddlepaddle wheels are sensitive to the exact
+# pairing, so an unpinned build breaks without warning. extractors.py tolerates
+# both result shapes, but 2.7.x on paddlepaddle 2.6.x is the combination
+# actually tested here.
+
+# --- Web framework ---
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9        # required for multipart/form-data uploads
+pydantic==2.6.4
+
+# --- OCR engine ---
+paddlepaddle==2.6.2            # CPU build; the GPU wheel is ~2 GB and pointless on free tiers.
+                               # 2.6.2 is the LOWEST 2.6.x with wheels still on
+                               # PyPI (2.6.1 was yanked) — do not "fix" this
+                               # downwards, the install will fail outright.
+paddleocr==2.7.3
+
+# --- Document readers ---
+pdfplumber==0.11.0             # MIT — PDF text layer extraction
+pypdfium2==4.30.0              # Apache/BSD — PDF rasterising.
+                               #
+                               # ⚠ LICENCE NOTE, STATED HONESTLY. Our own code
+                               # calls pypdfium2 rather than PyMuPDF (AGPL), but
+                               # that does NOT make this image AGPL-free:
+                               # paddleocr 2.7.3 depends on pdf2docx, which
+                               # depends on PyMuPDF, so PyMuPDF IS installed here
+                               # transitively. An earlier version of this comment
+                               # implied otherwise and was wrong.
+                               #
+                               # Why it is still acceptable: the AGPL obligation
+                               # attaches to the code that links PyMuPDF. That is
+                               # this standalone OCR service, which talks to the
+                               # app over plain HTTP — so the Flutter app and the
+                               # rest of Safety Lens are not derived works and
+                               # are unaffected. If you ever need this service
+                               # itself to be non-AGPL, drop paddleocr's pdf2docx
+                               # dependency (`pip uninstall pdf2docx PyMuPDF`
+                               # after install — nothing we call needs it) and
+                               # verify with `pip list | grep -i mupdf`.
+python-docx==1.1.2             # .docx paragraphs + tables
+
+# --- Imaging ---
+pillow==10.3.0
+numpy==1.26.4                  # paddlepaddle 2.6.x is not compatible with numpy 2.x
+
+# --- Transitive pins that otherwise break the build ---
+opencv-python-headless==4.9.0.80   # headless: the GUI build needs libGL, absent from slim images

@@ -21,6 +21,7 @@ import '../services/i18n.dart';
 import '../services/realtime_sync.dart';
 import 'reports_tab.dart';
 import 'admin_screen.dart';
+import 'doc_qa_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 
@@ -823,23 +824,57 @@ class _HomeTabState extends State<HomeTab> {
         // that does nothing at all when tapped, which reads as a broken app
         // rather than an unreleased feature. The spacer is inside the condition
         // too, otherwise hiding the card leaves an 8px gap below the grid.
-        if (AdminMasterData.sopScanTabVisibleSync || _isAdmin()) ...[
-          const SizedBox(height: 8),
-          // Switches to the SOP Scan tab rather than pushing the screen. It was a
-          // pushed route until the tab was added, to stop one nav tap discarding
-          // pages the user walked the shop floor to photograph; HomeScreen now
-          // guards that with a confirm dialog instead. Pushing as well would give
-          // the same flow two entry points and two live copies of its State.
-          // Full width because there is no fifth action to pair it with, and
-          // stretching one card reads better than a hanging gap.
-          Row(children: [
+        const SizedBox(height: 8),
+        // Fifth and sixth actions. The SOP Scan half is conditional; Ask a
+        // Document is not, so this Row is full-width with one card for a normal
+        // user and a pair for an admin. That shape is why the spacer above is
+        // now unconditional — it used to live inside the SOP condition to avoid
+        // a hanging 8px gap, which no longer applies since the row always has
+        // at least one card in it.
+        Row(children: [
+          // Hidden unless the SOP Scan tab is released, or this user is an
+          // admin — the same test HomeScreen._canSeeSopScan applies to the nav
+          // bar. Both halves are needed: HomeScreen._changeTab refuses a hidden
+          // tab, so leaving this card visible would give a normal user a quick
+          // action that does nothing when tapped, which reads as a broken app
+          // rather than an unreleased feature.
+          //
+          // Switches to the SOP Scan tab rather than pushing the screen. It was
+          // a pushed route until the tab was added, to stop one nav tap
+          // discarding pages the user walked the shop floor to photograph;
+          // HomeScreen now guards that with a confirm dialog instead. Pushing as
+          // well would give the same flow two entry points and two live copies
+          // of its State.
+          if (AdminMasterData.sopScanTabVisibleSync || _isAdmin()) ...[
             Expanded(child: _actionCard(sl,
                 icon: Icons.document_scanner_rounded,
                 label: I18n.t('home.scanSop'),
                 color: const Color(0xFF6366F1),
                 onTap: () => widget.onTabChange(AppTabs.sopScan))),
-          ]),
-        ],
+            const SizedBox(width: 8),
+          ],
+          // PUSHED, not a seventh bottom-nav tab. The nav bar is already at six
+          // tabs with 9px labels and roughly 3px of clearance around the
+          // selected pill at 320px (see _bottomNav in home_screen.dart) — a
+          // seventh entry would overflow it. Pushing is also the honest shape
+          // here: unlike SOP Scan this screen holds no unsaved work that a stray
+          // nav tap could destroy, so it needs no tab-switch guard.
+          Expanded(child: _actionCard(sl,
+              icon: Icons.auto_stories_rounded,
+              label: I18n.t('home.askDocument'),
+              color: const Color(0xFF0EA5E9),
+              onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => DocQaScreen(
+                        user: widget.user,
+                        toggleTheme: widget.toggleTheme,
+                        onSignOut: widget.onSignOut,
+                        isDark: sl.isDark,
+                      ),
+                    ),
+                  ))),
+        ]),
       ]),
     );
   }

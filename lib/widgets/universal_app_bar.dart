@@ -28,6 +28,17 @@ class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
   final Future<void> Function()? onExport;
   final bool showExport;
 
+  /// Back arrow, shown only when this is set.
+  ///
+  /// This bar is normally used by nav-bar tabs, which have nowhere to go back
+  /// to — hence no automatic leading button. But it is also used by *pushed*
+  /// screens (DocQaScreen), and those had no way out: unlike a real [AppBar]
+  /// this widget never synthesises a leading button, and the SAIL badge is not
+  /// a substitute because [onHome] no-ops when the shell is already on the Home
+  /// tab. On Flutter Web there is no system back gesture either, so the user
+  /// was stranded. Pushed screens must pass this.
+  final VoidCallback? onBack;
+
   const UniversalAppBar({
     super.key,
     required this.title,
@@ -38,6 +49,7 @@ class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
     this.isDark = true,
     this.onExport,
     this.showExport = true,
+    this.onBack,
   });
 
   @override
@@ -424,6 +436,27 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 6, 8, 8),
               child: Row(children: [
+            // Back arrow — pushed screens only (see [onBack]).
+            if (widget.onBack != null) ...[
+              Semantics(
+                button: true,
+                label: I18n.t('common.back'),
+                child: Tooltip(
+                  message: I18n.t('common.back'),
+                  child: InkWell(
+                    onTap: widget.onBack,
+                    borderRadius: BorderRadius.circular(10),
+                    child: Padding(
+                      padding: const EdgeInsets.all(6),
+                      child: Icon(Icons.arrow_back_rounded,
+                        color: sl.text1, size: 22),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+
             // SAIL Safety Lens badge icon — tap to return to the Home tab
             Semantics(
               button: true,

@@ -127,6 +127,10 @@ class I18n extends ChangeNotifier {
     'home.viewReports'     : 'View Reports',
     'home.askExpert'       : 'Ask Expert',
     'home.scanSop'         : 'Scan SOP / SMP',
+    // Kept to two words. This label sits in a half-width quick-action card
+    // beside "Scan SOP / SMP", and anything longer wraps to three lines and
+    // pushes the card taller than the one next to it.
+    'home.askDocument'     : 'Ask a Document',
     'home.greeting.morning': 'Good morning',
     'home.greeting.afternoon': 'Good afternoon',
     'home.greeting.evening': 'Good evening',
@@ -305,6 +309,7 @@ class I18n extends ChangeNotifier {
     'home.viewReports'     : 'रिपोर्ट देखें',
     'home.askExpert'       : 'विशेषज्ञ से पूछें',
     'home.scanSop'         : 'SOP / SMP स्कैन करें',
+    'home.askDocument'     : 'दस्तावेज़ से पूछें',
     'home.greeting.morning': 'सुप्रभात',
     'home.greeting.afternoon': 'नमस्कार',
     'home.greeting.evening': 'शुभ संध्या',

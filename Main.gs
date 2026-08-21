@@ -95,6 +95,18 @@ function doPost(e) {
     if (action === 'getMasterData') return handleGetMasterData_(data);
 
     // ═══════════════════════════════════════════════════════════════════
+    // DOCUMENT Q&A — requires DocQaProxy.gs in this project.
+    //
+    // Answers a question using ONLY extracts from a document the user
+    // uploaded, which the PaddleOCR service (ocr_service/) has already read.
+    // Kept server-side because the Gemini key must never reach the browser.
+    // If DocQaProxy.gs is missing, this line throws a ReferenceError that the
+    // catch below reports as a generic error — so add the file, or comment
+    // this out, rather than leaving a half-installed feature.
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === 'answerFromDocument') return handleAnswerFromDocument_(data);
+
+    // ═══════════════════════════════════════════════════════════════════
     // ALERT SYSTEM — only available if AlertSystem.gs is ALSO in this project
     //
     // Left commented out on purpose. As of 2026-08-19 this project contains
@@ -117,7 +129,7 @@ function doPost(e) {
       error: 'Unknown action: ' + action,
       hint: 'This is the Nara Router proxy project, not the main Safety Lens '
           + 'backend. Sync actions belong to the other deployment.',
-      availableActions: ['analyzeImageNara', 'getMasterData']
+      availableActions: ['analyzeImageNara', 'getMasterData', 'answerFromDocument']
     })).setMimeType(ContentService.MimeType.JSON);
 
   } catch (err) {
