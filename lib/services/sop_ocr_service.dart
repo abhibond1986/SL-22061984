@@ -5,6 +5,12 @@
 //
 // TIERS, in order:
 //   1. On-device ML Kit  — free, offline, ~50ms/page. Mobile only.
+//   1.5 PaddleOCR service — the self-hosted Python service. Reads a whole
+//                          document in ONE request and, for a PDF that has a
+//                          text layer, does not OCR at all. This is the tier
+//                          that should serve almost every real document; see
+//                          the block comment above readDocumentViaService for
+//                          why it was added and why it is optional.
 //   2. OpenRouter        — network, spends the free daily allowance. A CHAIN of
 //                          models, not one: a single free model that is queued
 //                          takes the whole tier down with it.
@@ -39,6 +45,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import 'ai_run_log.dart';
+import 'doc_ocr_service.dart';
 import 'gemini_direct_vision.dart';
 import 'gemini_vision.dart';
 import 'nara_vision.dart';
@@ -264,6 +271,197 @@ RULES:
 ''';
 
   // ═══════════════════════════════════════════════════════════════════════
+  //  TIER 0 — THE PADDLEOCR SERVICE
+  //
+  //  This is the reader that should handle almost every real document, and it
+  //  exists because the tier chain below is slow by construction, not by
+  //  accident: it sends every page to a vision LLM one at a time, so a 12-page
+  //  SOP is 12 sequential network requests at up to 20s each before the two
+  //  structuring calls even begin. On web, where there is no on-device ML Kit
+  //  and Nara is CORS-blocked, that chain is also the ONLY reader.
+  //
+  //  The service changes the shape of the problem rather than tuning it:
+  //
+  //  * A PDF with a text layer is not OCR'd at all. Its text is read out
+  //    exactly, for the whole document, in one request that usually finishes in
+  //    a couple of seconds. Most SOPs issued in the last decade are of this
+  //    kind, so the common case stops costing AI requests entirely.
+  //  * A scanned PDF or a photograph is OCR'd server-side by PaddleOCR, per
+  //    page, without spending the free vision allowance. Slower than a text
+  //    layer but still far quicker than a queued free LLM, and it does not fail
+  //    at 429.
+  //  * It decides text-layer-vs-OCR PER PAGE, which matters because plant SOPs
+  //    are routinely mixed — a digitally produced procedure with a scanned,
+  //    signed annexure stapled to the end.
+  //
+  //  It is deliberately NOT mandatory. Every method here returns null rather
+  //  than throwing when the service is unconfigured or unreachable, and the
+  //  caller falls through to the original chain. The service is self-hosted on
+  //  a free tier that sleeps, so treating it as required would replace a slow
+  //  feature with a broken one.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Bound on a whole-document read. Generous because a scanned 30-page PDF on
+  /// a free CPU genuinely takes minutes, and the caller shows real progress
+  /// while it works. A digital PDF returns in seconds and never approaches it.
+  static const Duration serviceDocTimeout = Duration(minutes: 5);
+
+  /// Bound on a single page image. Much tighter than [serviceDocTimeout]: one
+  /// page of PaddleOCR is seconds, so anything past this is a sleeping
+  /// container or a dead host, and waiting longer only delays the fallback that
+  /// is going to run anyway.
+  static const Duration servicePageTimeout = Duration(seconds: 75);
+
+  /// True when the service has an address configured. Cheap — no network.
+  static Future<bool> get serviceAvailable async =>
+      !_serviceUnreachable && await DocOcrService.isConfigured;
+
+  /// Circuit breaker. Set the first time the service fails to answer, cleared
+  /// after [_breakerCooldown].
+  ///
+  /// WITHOUT THIS THE TIER IS A TRAP. [readPage] consults the service once per
+  /// page, and a configured-but-sleeping container costs [servicePageTimeout]
+  /// each time — 75s x 30 pages is over half an hour of dead waiting before the
+  /// LLM tiers get a look in, which is far worse than the slowness this whole
+  /// tier exists to fix. One failed probe is enough evidence for the rest of the
+  /// document: they all go to the same host.
+  static DateTime? _breakerTrippedAt;
+
+  /// Long enough to cover a whole document, short enough that the next scan
+  /// re-probes. A Hugging Face Space cold-starts in well under this, so a user
+  /// who waits and tries again gets the fast path.
+  static const Duration _breakerCooldown = Duration(minutes: 3);
+
+  static bool get _serviceUnreachable {
+    final t = _breakerTrippedAt;
+    if (t == null) return false;
+    if (DateTime.now().difference(t) > _breakerCooldown) {
+      _breakerTrippedAt = null;
+      return false;
+    }
+    return true;
+  }
+
+  static void _tripBreaker(String why) {
+    _breakerTrippedAt = DateTime.now();
+    print('SopOcr: OCR service marked unreachable for '
+        '${_breakerCooldown.inMinutes} min — $why');
+  }
+
+  /// Clears the breaker. Called when the user starts a new document, so an
+  /// explicit retry is never refused by a stale verdict from a previous attempt.
+  static void resetServiceBreaker() => _breakerTrippedAt = null;
+
+  /// Read an ENTIRE document (PDF, .docx, or a single image) in one request.
+  ///
+  /// Returns null when the service cannot be used, which the caller must treat
+  /// as "fall back to the per-page chain" and not as an error. Returns an empty
+  /// list only when the service answered but found no text anywhere — a real
+  /// result meaning the document is blank or unreadable.
+  ///
+  /// [onProgress] is called with user-facing strings, not percentages, because
+  /// the service does not stream progress: the honest thing to report is which
+  /// phase we are in and that a scan takes longer than a digital file.
+  static Future<List<PageOcr>?> readDocumentViaService({
+    required String fileName,
+    required Uint8List bytes,
+    void Function(String note)? onProgress,
+  }) async {
+    if (!await serviceAvailable) return null;
+
+    final sw = Stopwatch()..start();
+    onProgress?.call('Sending the document to the reader…');
+
+    final DocExtraction ex;
+    try {
+      ex = await DocOcrService.extract(
+        fileName: fileName,
+        bytes: bytes,
+        // No chunking. This path only needs page text — the clause split is
+        // done by structure() below, against a prompt that knows what an SOP
+        // clause is. Asking for chunks too would compute a second, differently
+        // shaped split that nothing here reads.
+        chunk: false,
+      ).timeout(serviceDocTimeout);
+    } on TimeoutException {
+      _tripBreaker('whole-document read timed out after '
+          '${sw.elapsedMilliseconds}ms');
+      return null;
+    } catch (e) {
+      // Includes DocOcrException for an unconfigured, sleeping, CORS-blocked or
+      // erroring service. All of them mean the same thing to this caller.
+      _tripBreaker('whole-document read failed ($e)');
+      return null;
+    }
+
+    final pages = <PageOcr>[];
+    for (final p in ex.pages) {
+      final text = p.text.trim();
+      if (text.isEmpty) {
+        pages.add(PageOcr(
+          pageNo: p.page,
+          error: 'No text found on this page.',
+          gate: 'empty',
+        ));
+        continue;
+      }
+      // engine records which half of the service produced it, because the two
+      // are not equally trustworthy and the review screen warns about one of
+      // them. 'text-layer' is an exact copy out of the file; 'paddleocr' is a
+      // recognition result that can misread a digit.
+      pages.add(PageOcr(
+        pageNo: p.page,
+        text: text,
+        engine: p.method == 'text-layer' ? 'text-layer' : 'paddleocr',
+      ));
+    }
+
+    if (pages.every((p) => !p.ok)) {
+      // The service worked and genuinely found nothing. Do NOT return this as a
+      // result: the vision LLM chain can still read a faint scan that PaddleOCR
+      // gave up on, so fall through and let it try.
+      print('SopOcr: service read no text in any page — falling back');
+      return null;
+    }
+
+    _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+        provider: ex.ocrDerived ? 'paddleocr' : 'text-layer',
+        ms: sw.elapsedMilliseconds);
+    print('SopOcr: service read ${pages.length} page(s) in '
+        '${sw.elapsedMilliseconds}ms '
+        '(${ex.ocrPageCount} OCR\'d, ocrDerived=${ex.ocrDerived})');
+    return pages;
+  }
+
+  /// Read ONE page image through the service. Null means fall back.
+  static Future<PageOcr?> _readPageViaService(
+    Uint8List jpegBytes, {
+    required int pageNo,
+  }) async {
+    if (!await serviceAvailable) return null;
+    try {
+      final ex = await DocOcrService.extract(
+        // The service dispatches on the extension, so this name is load-bearing
+        // even though no file exists: ImagePrep.prepareForOcr emits JPEG.
+        fileName: 'page-$pageNo.jpg',
+        bytes: jpegBytes,
+        chunk: false,
+      ).timeout(servicePageTimeout);
+      final text = ex.text.trim();
+      // A gate failure is NOT a service failure — the service answered, this
+      // page is just too faint for PaddleOCR. Leave the breaker alone so the
+      // remaining pages still get the fast path.
+      if (_failedGate(text).isNotEmpty) return null;
+      return PageOcr(pageNo: pageNo, text: text, engine: 'paddleocr');
+    } catch (e) {
+      // Reaching the service failed. Trip the breaker so the other 29 pages do
+      // not each pay servicePageTimeout to learn the same thing.
+      _tripBreaker('page $pageNo read failed ($e)');
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   //  PAGE OCR
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -324,6 +522,26 @@ RULES:
         error: SopOcrDevice.isAvailable
             ? 'No text found, and the AI reader needs a connection.'
             : 'Reading this page needs a connection.',
+        gate: gate,
+      );
+    }
+
+    // ── Tier 1.5: the PaddleOCR service ────────────────────────────────
+    //
+    // Ahead of every LLM tier and behind the device tier, which is the correct
+    // order for both platforms without special-casing either. On mobile ML Kit
+    // is ~50ms, free and offline, so nothing should preempt it. On web it is a
+    // stub returning '', so this becomes the FIRST reader — a few seconds of
+    // PaddleOCR instead of a 20–60s queued free vision model, and it does not
+    // consume the daily vision allowance the hazard scanner shares.
+    final viaService = await _readPageViaService(jpegBytes, pageNo: pageNo);
+    if (viaService != null) {
+      _log(AiRunLog.typeSopOcr, AiRunLog.outcomeSuccess,
+          provider: 'paddleocr', ms: sw.elapsedMilliseconds);
+      return PageOcr(
+        pageNo: viaService.pageNo,
+        text: viaService.text,
+        engine: viaService.engine,
         gate: gate,
       );
     }

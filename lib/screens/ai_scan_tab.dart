@@ -24,6 +24,7 @@ import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/geo_service.dart';
 import '../utils/image_prep.dart';
+import '../widgets/analysis_progress.dart';
 import '../widgets/hazard_annotated_image.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/voice_text_field.dart';
@@ -100,6 +101,18 @@ class _AIScanTabState extends State<AIScanTab> {
   List<String> _severities =
       List<String>.from(AdminMasterData.defaultSeverities);
 
+  /// The admin's severity → score scale.
+  ///
+  /// This screen used to display the risk score the language model invented
+  /// ("riskScore": 0-100 in the prompt), which meant the Scoring tab in admin —
+  /// whose own help text promises "these scores are used to calculate the overall
+  /// risk score of each scan" — changed nothing here at all. That was the whole
+  /// of the reported bug. The score is now derived from this map, held in state
+  /// and refreshed on [AdminMasterData.revision], so an admin edit shows up on
+  /// the very next frame instead of after a reinstall.
+  Map<String, int> _severityScores =
+      Map<String, int>.from(AdminMasterData.defaultSeverityScores);
+
   @override
   void initState() {
     super.initState();
@@ -110,9 +123,41 @@ class _AIScanTabState extends State<AIScanTab> {
   Future<void> _loadMasterData() async {
     try {
       final sevs = await AdminMasterData.getSeverities();
+      final scores = await AdminMasterData.getSeverityScores();
       if (!mounted) return;
-      setState(() => _severities = sevs);
+      setState(() {
+        _severities = sevs;
+        _severityScores = scores;
+      });
     } catch (_) {}
+  }
+
+  /// Risk score for the report on screen, out of 100.
+  ///
+  /// Computed, not stored, so it tracks both the admin scale AND any severity the
+  /// user corrected in the review sheet — editing a hazard from HIGH down to LOW
+  /// previously left the headline score untouched, which made the correction look
+  /// as though it had been ignored.
+  ///
+  /// The model's own number survives only as a last resort, for a report with no
+  /// hazards and no overall risk label to score.
+  int get _riskScore {
+    final r = _result;
+    if (r == null) return 0;
+    final labels = <String>[];
+    for (final h in (r['hazards'] as List?) ?? const []) {
+      if (h is Map) {
+        final s = h['severity']?.toString() ?? '';
+        if (s.isNotEmpty) labels.add(s);
+      }
+    }
+    final overall = r['overallRisk']?.toString() ?? '';
+    if (labels.isEmpty && overall.isNotEmpty) labels.add(overall);
+    if (labels.isEmpty) {
+      final raw = r['riskScore'];
+      return raw is int ? raw : int.tryParse(raw?.toString() ?? '') ?? 0;
+    }
+    return AdminMasterData.worstScore(_severityScores, labels);
   }
 
   @override
@@ -668,7 +713,7 @@ class _AIScanTabState extends State<AIScanTab> {
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: riskColor)),
                       child: Text(
-                        '${_result!['overallRisk']} · ${_result!['riskScore']}/100',
+                        '${_result!['overallRisk']} · $_riskScore/100',
                         style: TextStyle(color: riskColor,
                             fontSize: 12,
                             fontWeight: FontWeight.w800))),
@@ -1846,7 +1891,9 @@ class _AIScanTabState extends State<AIScanTab> {
       'reportedByPno':   user['pno']?.toString()  ?? '',
       'people':          '0',
       'hazards':         hazards,
-      'riskScore':       _result!['riskScore']    ?? 0,
+      // The admin-scaled score, not the model's invented one. This is the
+      // number that lands in the incident row, the PDF and the admin KPI.
+      'riskScore':       _riskScore,
       'confidence':      _result!['confidence']   ?? 0,
       'ptw_required':    _result!['ptw_required']?.toString() ?? 'None',
       'section_specific_risks': _result!['section_specific_risks'] ?? [],
@@ -2027,7 +2074,7 @@ class _AIScanTabState extends State<AIScanTab> {
   String _buildResultShareText() {
     final hazards = (_result!['hazards'] as List?) ?? [];
     final risk = _result!['overallRisk']?.toString() ?? 'UNKNOWN';
-    final score = _result!['riskScore'] ?? 0;
+    final score = _riskScore;
     final buffer = StringBuffer();
     buffer.writeln('🔴 SAIL SAFETY LENS — HAZARD REPORT');
     buffer.writeln('━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -2076,7 +2123,7 @@ class _AIScanTabState extends State<AIScanTab> {
     if (pdfUrl != null && pdfUrl.isNotEmpty) {
       final hazards = (_result!['hazards'] as List?) ?? [];
       final risk = _result!['overallRisk']?.toString() ?? 'UNKNOWN';
-      final score = _result!['riskScore'] ?? 0;
+      final score = _riskScore;
       text = '⚠️ *SAIL Safety Lens — AI Hazard Report*\n\n'
           '🔴 *Overall Risk:* $risk (Score: $score/100)\n'
           '📊 *Hazards Found:* ${hazards.length}\n\n'
@@ -2306,7 +2353,10 @@ class _AIScanTabState extends State<AIScanTab> {
         fontWeight: FontWeight.w600)));
 
   Widget _analyzingView() => Container(
-    height: 160,
+    // Taller than the old 160: the bar, the phase caption and the elapsed
+    // counter do not fit under a spinner in 160px, and clipping the caption
+    // would lose the one line that explains a long wait.
+    height: 210,
     decoration: BoxDecoration(
       color: const Color(0xFF252840),
       borderRadius: BorderRadius.circular(12),
@@ -2320,12 +2370,17 @@ class _AIScanTabState extends State<AIScanTab> {
       child: Center(child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-        const CircularProgressIndicator(strokeWidth: 3,
-          valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent)),
-        const SizedBox(height: 10),
-        Text(_step, style: const TextStyle(
-          color: Colors.white, fontSize: 12,
-          fontWeight: FontWeight.w600)),
+        // The spinner stays above the bar. It is the only element that keeps
+        // moving smoothly once the time-based bar has slowed to a crawl on a
+        // long run, and a still screen reads as a crash.
+        const SizedBox(width: 26, height: 26,
+          child: CircularProgressIndicator(strokeWidth: 3,
+            valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent))),
+        const SizedBox(height: 12),
+        AnalysisProgress(
+          accent: AppColors.accent,
+          title: _step.isEmpty ? 'Analysing the photo' : _step,
+        ),
       ]))));
 
   /// Sort rank for hazard severity — 0 = most severe. Derived from the admin's
@@ -2430,7 +2485,7 @@ class _AIScanTabState extends State<AIScanTab> {
 
   Widget _resultView(SL sl) {
     final overallRisk = _result!['overallRisk']?.toString() ?? 'MEDIUM';
-    final score       = _result!['riskScore']    ?? 50;
+    final score       = _riskScore;
     final confidence  = _result!['confidence']   ?? 75;
     final summary     = _result!['summary']?.toString() ?? '';
     final hazards     = List<dynamic>.from((_result!['hazards'] as List?) ?? []);

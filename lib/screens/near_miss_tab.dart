@@ -29,6 +29,7 @@ import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/geo_service.dart';
 import '../services/knowledge_service.dart';
+import '../widgets/analysis_progress.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
@@ -809,7 +810,6 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     setState(() => _aiSuggestion = null);
   }
 
-  /// ★ Generate a tiny thumbnail (60px wide) for the incident log card
   /// ★ v34: Compute risk score from severity for manual entries.
   /// Uses the ADMIN-CONFIGURED severity scores (Admin ▸ Custom Lists ▸
   /// severity scoring) so editing a score in the admin panel changes the
@@ -818,11 +818,14 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
   /// `_severityScores` is loaded by _loadMasterData(); the fallback is the
   /// shared default map, never a locally-invented scale.
   int _computeRiskScore(String severity) {
-    final key = severity.trim().toUpperCase();
     final scores = _severityScores.isNotEmpty
         ? _severityScores
         : AdminMasterData.defaultSeverityScores;
-    return scores[key] ?? scores['MEDIUM'] ?? 0;
+    // Via the shared helper so this screen and the AI scan tab cannot disagree
+    // about an unknown label. The old local fallback ended in 0, which filed a
+    // hazard with a renamed severity as harmless; the helper falls back to the
+    // middle of the scale instead.
+    return AdminMasterData.scoreFromMap(scores, severity);
   }
 
   String? _generateThumbnail(Uint8List imageBytes) {
@@ -1990,7 +1993,11 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   }
 
   Widget _analyzingImage() => Container(
-    height: 140,
+    // 140 → 190 to fit the progress bar, its phase caption and the elapsed
+    // counter. "Please wait..." is gone: it was the least informative line on
+    // the screen and the space is better spent saying what is happening and how
+    // long it has been.
+    height: 190,
     decoration: BoxDecoration(
       color: const Color(0xFF252840),
       borderRadius: BorderRadius.circular(12),
@@ -2000,11 +2007,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
       child: Center(child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(width: 32, height: 32, child: CircularProgressIndicator(strokeWidth: 3, color: AppColors.accent)),
+          const SizedBox(width: 26, height: 26, child: CircularProgressIndicator(strokeWidth: 3, color: AppColors.accent)),
           const SizedBox(height: 10),
-          Text(_step, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text('Please wait...', style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 10)),
+          Text(_step.isEmpty ? 'Analysing the photo' : _step,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          const AnalysisProgress(accent: AppColors.accent, compact: true),
         ]))));
 
   /// Plain-language reason this photo was not analysed.

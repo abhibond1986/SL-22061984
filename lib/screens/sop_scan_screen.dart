@@ -18,7 +18,11 @@
 //
 // ignore_for_file: avoid_print
 
+import 'dart:async';
 import 'dart:typed_data';
+// FontFeature only. Imported explicitly rather than relied on from material's
+// re-export of dart:ui, which is not guaranteed to include it.
+import 'dart:ui' show FontFeature;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
@@ -66,6 +70,13 @@ class _Page {
   /// because "Page 1" next to no thumbnail looks like a page that failed.
   final String label;
 
+  /// Where [importedText] came from, recorded on the resulting PageOcr so the
+  /// raw KB row is honest about its provenance. 'document' is an exact copy out
+  /// of a .docx/.txt; 'text-layer' is an exact copy out of a PDF's text layer;
+  /// 'paddleocr' is a recognition result that can misread a digit and must be
+  /// flagged for checking. Meaningless for an image page.
+  final String sourceEngine;
+
   PageOcr? result;
 
   _Page({
@@ -73,10 +84,14 @@ class _Page {
     required this.thumb,
     this.importedText = '',
     this.label = '',
+    this.sourceEngine = 'document',
   });
 
-  _Page.fromText({required String text, required this.label})
-      : ocrBytes = Uint8List(0),
+  _Page.fromText({
+    required String text,
+    required this.label,
+    this.sourceEngine = 'document',
+  })  : ocrBytes = Uint8List(0),
         thumb = Uint8List(0),
         importedText = text;
 
@@ -157,9 +172,48 @@ class _SopScanScreenState extends State<SopScanScreen> {
   /// "retake the photo" is the wrong thing to say about a file.
   bool _imported = false;
 
-  // Reading progress.
+  // ── Reading progress ────────────────────────────────────────────────────
+  //
+  // Six fields rather than one spinner, because "it feels hung" was the actual
+  // complaint and a spinner cannot answer any of the three questions a waiting
+  // user is asking: how far along is it, how long has it been, and how much
+  // longer. A read here can legitimately take four minutes — thirty pages on a
+  // free vision tier — and four honest minutes is tolerable where forty
+  // unexplained seconds is not.
+  //
+  // Pages are only part of the work. Two model calls follow the last page (the
+  // clause split, then the safety pass) and each takes as long as a page, so a
+  // bar that hit 100% at the last page would sit full and frozen through the
+  // slowest part of the wait. [_phaseDone] counts those two, and the bar is
+  // driven by pages + phases over total + 2.
   int _readDone = 0;
+
+  /// Pages to read, or 0 when not yet known — which is genuinely the case while
+  /// the OCR service is chewing on a whole document in one request. 0 means the
+  /// bar goes indeterminate; it must never mean "no work".
+  int _readTotal = 0;
+
+  /// Completed post-read phases, 0–2: structure, then safety.
+  int _phaseDone = 0;
+
+  /// True when nothing has to be recognised — a .docx, or a PDF whose text layer
+  /// the service read directly. Changes the estimate by two orders of magnitude,
+  /// so it is worth telling the user which kind of wait they are in for.
+  bool _fastRead = false;
+
+  DateTime? _readStartedAt;
+  Duration _elapsed = Duration.zero;
+
+  /// Repaints the elapsed clock once a second. Nothing else in this screen ticks,
+  /// so this is the only thing keeping the view visibly alive during a page that
+  /// takes 40 seconds to come back — which is precisely the moment it looks dead.
+  Timer? _elapsedTicker;
+
   String _progressNote = '';
+
+  /// Warning about pages the OCR service could not read, held until after the
+  /// read finishes. See where it is set in _importViaService.
+  String _skippedPagesNote = '';
 
   // Review fields. Pre-filled from the extract, always editable — the AI's read
   // of a stamped, revised, hand-annotated plant document is a starting point,
@@ -186,6 +240,9 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   @override
   void dispose() {
+    // Before anything else: a live periodic timer calling setState on a disposed
+    // State throws once a second into a console nobody is reading.
+    _stopClock();
     _titleCtl.dispose();
     _sopNoCtl.dispose();
     _deptCtl.dispose();
@@ -371,6 +428,28 @@ class _SopScanScreenState extends State<SopScanScreen> {
       _titleCtl.text = SopDocImport.titleFromFileName(file.name);
     }
 
+    // ── Fast path: hand the whole file to the PaddleOCR service ───────────
+    //
+    // Tried first for every supported type, because it is better than every
+    // route below it on the axis the user complained about. A PDF here skips
+    // three separate costs: the pdf.js probe (fetched from a public CDN on
+    // first use, and blocked on some plant networks), rasterising every page on
+    // the UI thread, and then one vision-LLM request PER PAGE. A digital PDF
+    // comes back in seconds having never touched an LLM.
+    //
+    // Returning null means "not configured or not reachable", and we fall
+    // through to the original routes unchanged — so this is strictly additive.
+    // A new document is an explicit fresh attempt, so clear any "service is
+    // unreachable" verdict left over from a previous file. Otherwise a single
+    // failure would send the next three minutes of imports down the slow path
+    // even after the container has woken up.
+    SopOcrService.resetServiceBreaker();
+    if (await SopOcrService.serviceAvailable) {
+      final handled = await _importViaService(bytes, file.name);
+      if (handled) return; // _importViaService ran the read itself.
+      if (!mounted) return;
+    }
+
     if (kind == SopDocKind.pdf) {
       await _importPdf(bytes);
     } else {
@@ -395,6 +474,105 @@ class _SopScanScreenState extends State<SopScanScreen> {
     await _autoRead();
   }
 
+  /// Read a whole file through the PaddleOCR service.
+  ///
+  /// Returns true when it handled the file — including having run the read — so
+  /// the caller stops. Returns false to mean "not available, use the old route",
+  /// leaving no visible trace behind: the stage is put back and no error is
+  /// shown, because a sleeping free-tier container is not something to report to
+  /// a user who is about to get their document read anyway.
+  Future<bool> _importViaService(Uint8List bytes, String fileName) async {
+    setState(() {
+      _error = null;
+      _stage = _Stage.reading;
+      _readDone = 0;
+      // Genuinely unknown: the service reads the whole file in one request and
+      // only reports a page count when it answers. Left at 0 so the bar shows
+      // indeterminate rather than a made-up fraction.
+      _readTotal = 0;
+      _phaseDone = 0;
+      _fastRead = false;
+      _progressNote = 'Sending the document to the reader…';
+    });
+    _startClock(restart: true);
+
+    final pages = await SopOcrService.readDocumentViaService(
+      fileName: fileName,
+      bytes: bytes,
+      onProgress: (note) {
+        if (mounted) setState(() => _progressNote = note);
+      },
+    );
+
+    if (!mounted) return true; // Disposed — nothing left to do either way.
+    if (pages == null) {
+      // Falling back to the old route, which starts its own clock from zero.
+      _stopClock();
+      setState(() {
+        _stage = _Stage.capture;
+        _progressNote = '';
+      });
+      return false;
+    }
+
+    final readable = pages.where((p) => p.ok).toList();
+    if (readable.isEmpty) {
+      // readDocumentViaService only returns a list when at least one page read,
+      // so this is unreachable today. Handled anyway rather than trusting a
+      // guarantee made in another file.
+      _stopClock();
+      setState(() {
+        _stage = _Stage.capture;
+        _progressNote = '';
+      });
+      return false;
+    }
+
+    final skipped = pages.length - readable.length;
+    setState(() {
+      _imported = true;
+      _pages.clear();
+      for (final p in readable) {
+        _pages.add(_Page.fromText(
+          text: p.text,
+          label: 'Page ${p.pageNo}',
+          sourceEngine: p.engine,
+        ));
+      }
+      // Say which pages were lost. This screen only carries text pages on this
+      // route, so an unreadable one cannot be shown with a Retake button the way
+      // a photograph can — it is simply absent, and the review screen's page
+      // count would otherwise be computed over the survivors and look complete.
+      // A user filing an SOP needs to know that clause 7 never made it in.
+      //
+      // Held in a field rather than written to _error here, because _readAll()
+      // clears _error on entry and runs immediately below — the warning would be
+      // wiped before it was ever painted.
+      if (skipped > 0) {
+        final lost = pages.where((p) => !p.ok).map((p) => p.pageNo).join(', ');
+        _skippedPagesNote =
+            '$skipped of ${pages.length} page(s) had no readable text and were '
+            'left out (page $lost). If those pages matter, photograph them and '
+            'scan them separately.';
+      } else {
+        _skippedPagesNote = '';
+      }
+    });
+    _syncUnsavedFlag();
+
+    // _readAll now has nothing to OCR — every page is a text page — so it goes
+    // straight to structuring. Reused rather than duplicated so the structuring
+    // pass, the safety pass, the failure messages and the stage transitions stay
+    // in exactly one place.
+    await _readAll();
+    // Surface the skipped-pages warning only now, and only if _readAll did not
+    // put a more urgent message of its own on screen.
+    if (mounted && _skippedPagesNote.isNotEmpty && _error == null) {
+      setState(() => _error = _skippedPagesNote);
+    }
+    return true;
+  }
+
   Future<void> _importPdf(Uint8List bytes) async {
     // Enter the reading stage BEFORE the probe, not after. The probe itself can
     // take seconds on the browser — it fetches pdf.js on first use — and
@@ -405,10 +583,15 @@ class _SopScanScreenState extends State<SopScanScreen> {
       _error = null;
       _stage = _Stage.reading;
       _readDone = 0;
+      _readTotal = 0; // Page count unknown until the PDF is opened.
+      _phaseDone = 0;
+      _fastRead = false;
       _progressNote = 'Checking PDF support…';
     });
+    _startClock(restart: true);
     if (!await SopDocImport.canReadPdf()) {
       if (!mounted) return;
+      _stopClock();
       setState(() {
         _stage = _Stage.capture;
         _progressNote = '';
@@ -443,6 +626,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
       );
       if (!mounted) return;
       if (pages.isEmpty) {
+        _stopClock();
         setState(() {
           _stage = _Stage.capture;
           _error = 'No pages could be opened from that PDF. It may be '
@@ -465,6 +649,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
     } catch (e) {
       print('SopScan: PDF import failed — $e');
       if (!mounted) return;
+      _stopClock();
       setState(() {
         _stage = _Stage.capture;
         _error = 'Could not open that PDF.';
@@ -530,6 +715,78 @@ class _SopScanScreenState extends State<SopScanScreen> {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  //  PROGRESS CLOCK
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Starts (or restarts) the elapsed clock. Safe to call twice: an import that
+  /// rasterises pages and then reads them passes through here once per stage, and
+  /// restarting would reset a timer the user has been watching. The second call
+  /// is therefore a no-op while one is already running.
+  void _startClock({bool restart = false}) {
+    if (_elapsedTicker != null && !restart) return;
+    _elapsedTicker?.cancel();
+    _readStartedAt = DateTime.now();
+    _elapsed = Duration.zero;
+    _elapsedTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      final started = _readStartedAt;
+      // Guard on mounted, not just on non-null: a periodic timer outlives a
+      // setState on a disposed State and throws where nobody sees it.
+      if (!mounted || started == null) return;
+      setState(() => _elapsed = DateTime.now().difference(started));
+    });
+  }
+
+  void _stopClock() {
+    _elapsedTicker?.cancel();
+    _elapsedTicker = null;
+  }
+
+  /// Overall fraction of the read, or null for indeterminate.
+  ///
+  /// Null is returned honestly rather than faked with a crawling animation: while
+  /// the OCR service holds a whole document there is no page count to report, and
+  /// a bar that advances on a guess teaches the user not to trust the bar.
+  double? get _readFraction {
+    if (_readTotal <= 0) return null;
+    final done = _readDone + _phaseDone;
+    final total = _readTotal + 2; // + structure + safety
+    return (done / total).clamp(0.0, 1.0);
+  }
+
+  /// Seconds per page — measured once there is something to measure, guessed
+  /// before that. The measured figure is slightly pessimistic because [_elapsed]
+  /// also covers the PDF rasterise that ran before the first page was read; that
+  /// error is in the direction of over-estimating the wait, which is the only
+  /// direction that does not annoy anyone.
+  double get _secondsPerPage {
+    if (_readDone > 0 && _elapsed.inMilliseconds > 0) {
+      return _elapsed.inMilliseconds / 1000 / _readDone;
+    }
+    if (_fastRead) return 0.5;
+    // The on-device recogniser is roughly an order of magnitude quicker than a
+    // queued free vision model, which is the whole reason the phone build feels
+    // different from the browser one.
+    return SopOcrDevice.isAvailable ? 4 : 22;
+  }
+
+  /// "about 2 min left", or '' when there is nothing honest to say.
+  String get _remainingLabel {
+    if (_readTotal <= 0) return '';
+    final unitsLeft = (_readTotal - _readDone) + (2 - _phaseDone);
+    if (unitsLeft <= 0) return 'finishing up';
+    final secs = (unitsLeft * _secondsPerPage).round();
+    if (secs <= 10) return 'a few seconds left';
+    if (secs < 90) return 'about $secs sec left';
+    return 'about ${(secs / 60).round()} min left';
+  }
+
+  static String _clock(Duration d) {
+    final m = d.inMinutes;
+    final s = d.inSeconds % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   //  READING
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -538,12 +795,16 @@ class _SopScanScreenState extends State<SopScanScreen> {
     setState(() {
       _stage = _Stage.reading;
       _readDone = 0;
+      _readTotal = _pages.length;
+      _phaseDone = 0;
+      _fastRead = _pages.every((p) => p.isText);
       _error = null;
       _progressNote = '';
       for (final p in _pages) {
         p.result = null;
       }
     });
+    _startClock();
 
     final online = await NetworkChecker.hasInternet();
     // Only IMAGE pages need a reader. Guarded on that rather than on
@@ -553,6 +814,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
     final needsReader = _pages.any((p) => !p.isText);
     if (needsReader && !online && !SopOcrDevice.isAvailable) {
       if (!mounted) return;
+      _stopClock();
       setState(() {
         _stage = _Stage.capture;
         _error = 'Reading needs either the app on a phone (offline reader) or '
@@ -577,7 +839,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
         r = PageOcr(
           pageNo: i + 1,
           text: page.importedText,
-          engine: 'document',
+          engine: page.sourceEngine,
         );
       } else {
         setState(() =>
@@ -598,6 +860,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
     final good = _pages.where((p) => p.result?.ok == true).toList();
     if (good.isEmpty) {
       if (!mounted) return;
+      _stopClock();
       setState(() {
         _stage = _Stage.capture;
         // Two different messages, because the advice that fits a photograph is
@@ -618,12 +881,13 @@ class _SopScanScreenState extends State<SopScanScreen> {
       return;
     }
 
-    setState(() => _progressNote = 'Understanding the document…');
+    setState(() => _progressNote = 'Working out the clause structure…');
     final extract = await SopOcrService.structure(
       good.map((p) => p.result!).toList(),
       fallbackTitle: _titleCtl.text.trim(),
     );
     if (!mounted) return;
+    setState(() => _phaseDone = 1);
 
     _titleCtl.text = extract.title.isNotEmpty ? extract.title : _titleCtl.text;
     _sopNoCtl.text = extract.sopNumber;
@@ -651,8 +915,10 @@ class _SopScanScreenState extends State<SopScanScreen> {
       title: _titleCtl.text.trim(),
     );
     if (!mounted) return;
+    _stopClock();
 
     setState(() {
+      _phaseDone = 2;
       _extract = extract;
       _safety = safety.ok ? safety : null;
       _stage = _Stage.review;
@@ -843,7 +1109,12 @@ class _SopScanScreenState extends State<SopScanScreen> {
           _showOcr = false;
           _stage = _Stage.capture;
           _readDone = 0;
+          _readTotal = 0;
+          _phaseDone = 0;
+          _fastRead = false;
+          _elapsed = Duration.zero;
           _progressNote = '';
+          _skippedPagesNote = '';
           _saving = false;
           _error = null;
           _titleCtl.clear();
@@ -943,7 +1214,11 @@ class _SopScanScreenState extends State<SopScanScreen> {
       // _pages is still empty while a PDF is being opened — this stage is
       // entered before the pages exist — and "Reading 0 of 0" reads as a bug.
       if (_pages.isEmpty) return 'Opening the document';
-      return 'Reading $_readDone of ${_pages.length}';
+      // _readTotal, not _pages.length: on the service route the pages exist
+      // before the total is known, and the two would disagree.
+      final total = _readTotal > 0 ? _readTotal : _pages.length;
+      if (_readDone >= total) return 'Almost done';
+      return 'Reading ${_readDone + 1} of $total';
     }
     return 'Check before saving';
   }
@@ -1171,51 +1446,212 @@ class _SopScanScreenState extends State<SopScanScreen> {
 
   // ── Stage 2: reading ──────────────────────────────────────────────────
 
+  /// The waiting screen — rebuilt because a bare spinner was the single thing the
+  /// user named as broken about this feature ("no idea how long is left or which
+  /// page it is on, so it feels hung").
+  ///
+  /// Four things are on it, in the order a waiting person wants them: a
+  /// percentage and a bar, the counters (page N of M, elapsed, remaining), the
+  /// three phases of the job with the current one marked, and last the
+  /// explanation of why this particular document is quick or slow. Nothing here
+  /// is decorative; every line answers a question that the spinner refused to.
   Widget _readingView(SL sl) {
-    final total = _pages.isEmpty ? 1 : _pages.length;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SizedBox(
-              width: 64,
-              height: 64,
-              child: CircularProgressIndicator(
-                strokeWidth: 4,
-                value: _readDone == 0 ? null : _readDone / total,
-                valueColor:
-                    const AlwaysStoppedAnimation<Color>(AppColors.accent),
-                backgroundColor: sl.card3,
+    final f = _readFraction;
+    final pct = f == null ? null : (f * 100).round();
+    final remaining = _remainingLabel;
+
+    return ListView(
+      padding: _listPadding,
+      children: [
+        const SizedBox(height: 8),
+        GlassCard(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // The spinner stays, small, beside the number. It is the only
+                  // thing on screen that moves when a single page takes 40
+                  // seconds and neither the percentage nor the counter changes.
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(sl.accentText),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _progressNote.isEmpty ? 'Reading…' : _progressNote,
+                      style: TextStyle(
+                        color: sl.text1,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  if (pct != null) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      '$pct%',
+                      style: TextStyle(
+                        color: sl.accentText,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        // Tabular figures so the number does not jitter
+                        // sideways as it climbs through 9→10→11%.
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 14),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  // Null while the page count is unknown. Deliberately not
+                  // faked — see [_readFraction].
+                  value: f,
+                  minHeight: 8,
+                  backgroundColor: sl.card3,
+                  valueColor: AlwaysStoppedAnimation<Color>(sl.accentText),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Wrap, not Row: three chips at a large accessibility text scale
+              // overflow a 320px phone, and an overflowing progress card is a
+              // worse look than a wrapped one.
+              Wrap(
+                spacing: 14,
+                runSpacing: 6,
+                children: [
+                  if (_readTotal > 0)
+                    _progressStat(
+                      sl,
+                      Icons.description_outlined,
+                      _readDone >= _readTotal
+                          ? 'All $_readTotal page(s) read'
+                          : 'Page ${_readDone + 1} of $_readTotal',
+                    ),
+                  _progressStat(
+                      sl, Icons.timer_outlined, '${_clock(_elapsed)} elapsed'),
+                  if (remaining.isNotEmpty)
+                    _progressStat(sl, Icons.hourglass_bottom, remaining),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // The three phases. Shown as a list rather than folded into the note
+        // because two model calls happen AFTER the last page, and a user who has
+        // watched "Page 12 of 12" sit still for a minute needs to see that two
+        // more steps were always part of the job.
+        GlassCard(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            children: [
+              _phaseRow(sl, 0, 'Read the pages',
+                  _readTotal > 0 && _readDone >= _readTotal),
+              _phaseRow(sl, 1, 'Work out the clauses', _phaseDone >= 1),
+              _phaseRow(sl, 2, 'Check safety requirements', _phaseDone >= 2),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Text(
+            _readingHint,
+            style: SLText.hint(sl),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Why this document is quick or slow, in the user's terms.
+  ///
+  /// An honest up-front expectation is what turns a long wait from a fault into
+  /// a fact. The three cases are genuinely two orders of magnitude apart, so one
+  /// generic sentence would be wrong for all of them.
+  String get _readingHint {
+    if (_pages.isEmpty) {
+      return 'Opening the document. If it is a PDF with real text in it, this is '
+          'the whole job and it takes seconds. If it is a scan, each page has to '
+          'be recognised one at a time.';
+    }
+    if (_fastRead) {
+      return 'The text came straight out of the file, so there is nothing to '
+          'recognise — only the clause structure and the safety check left, '
+          'which is a few seconds each.';
+    }
+    if (SopOcrDevice.isAvailable) {
+      return 'Reading on this phone first and asking the AI only for pages it '
+          'cannot handle, which is why most pages come back in a couple of '
+          'seconds. You can leave this screen open; it will not stop.';
+    }
+    return 'Each page is being read by a free AI reader, one at a time, and a '
+        'page can take up to half a minute when the service is busy. This is '
+        'expected — nothing has stalled. Photographs of clean, well-lit pages '
+        'read fastest.';
+  }
+
+  Widget _progressStat(SL sl, IconData icon, String text) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: sl.text4),
+          const SizedBox(width: 5),
+          Text(text, style: SLText.hint(sl)),
+        ],
+      );
+
+  /// One line of the phase list: done, running, or not started.
+  Widget _phaseRow(SL sl, int index, String label, bool done) {
+    // "Running" is the first phase that is not done — not a stored field, so the
+    // list cannot contradict the bar.
+    final firstUnfinished = (_readTotal > 0 && _readDone >= _readTotal)
+        ? (_phaseDone >= 2 ? 3 : _phaseDone + 1)
+        : 0;
+    final running = !done && index == firstUnfinished;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: done
+                ? Icon(Icons.check_circle, size: 18, color: sl.greenText)
+                : running
+                    ? CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(sl.accentText),
+                      )
+                    : Icon(Icons.radio_button_unchecked,
+                        size: 16, color: sl.text4.withOpacity(0.6)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: done || running ? sl.text2 : sl.text4,
+                fontSize: 13,
+                fontWeight: running ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
-            const SizedBox(height: 20),
-            Text(
-              _progressNote.isEmpty ? 'Reading…' : _progressNote,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  color: sl.text1, fontSize: 14, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _pages.isEmpty
-                  ? 'Turning each page of the PDF into an image to read. Long '
-                      'documents take a few seconds per page.'
-                  : _pages.every((p) => p.isText)
-                      ? 'The text came straight out of the file, so there is '
-                          'nothing to recognise — only the clause structure to '
-                          'work out.'
-                      : SopOcrDevice.isAvailable
-                          ? 'Reading on the phone first, and asking the AI only '
-                              'for pages it cannot handle.'
-                          : 'Each page is being read by the AI. This takes a '
-                              'few seconds per page.',
-              textAlign: TextAlign.center,
-              style: SLText.hint(sl),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

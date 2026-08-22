@@ -603,9 +603,23 @@ class AdminMasterData {
 
       // ★ FIX: Pull severity scores from backend
       if (remote['severityScores'] is Map) {
-        final scores = (remote['severityScores'] as Map)
+        var scores = (remote['severityScores'] as Map)
             .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
         final prefs = await SharedPreferences.getInstance();
+        // Rebase HERE as well as in getSeverityScores, and push the correction
+        // back. Without this the pull is a way for the old 5–25 scale to return
+        // permanently: the backend row still holds it, the local one-shot rebase
+        // flag has already been spent, so every launch would re-import the legacy
+        // numbers and nothing would ever correct them again. Rebasing at the
+        // point of import — and writing the result back so other devices and the
+        // next pull agree — closes that loop.
+        if (_isLegacyScale(scores)) {
+          scores = Map<String, int>.from(defaultSeverityScores);
+          await prefs.setBool(_kScoresRebased, true);
+          _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
+              'severity scores (rebased)', 'pushMasterData',
+              {'severityScores': scores});
+        }
         await prefs.setString(_kSeverityScores, jsonEncode(scores));
         updated = true;
       }
@@ -817,12 +831,45 @@ class AdminMasterData {
   // ── SEVERITY SCORING (admin-configurable) ─────────────────────────
   static const String _kSeverityScores = 'admin_severity_scores';
 
+  /// Set once the stored 5–25 scale has been rebased onto 0–100. See
+  /// [_legacySeverityScores].
+  static const String _kScoresRebased = 'admin_severity_scores_rebased_v2';
+
+  /// Default scale, on the 0–100 range that every screen displays.
+  ///
+  /// These used to be 25/15/10/5, which was wrong in a way nobody noticed for a
+  /// long time: the admin editor clamps to 0–100, the AI scan card renders
+  /// "$score/100", the offline analyser emits 72–88, and the PDF prints the same
+  /// number. So a CRITICAL near-miss was filed at "25/100" and read as mild,
+  /// sitting in the same list as an AI scan of a lesser hazard showing 72. The
+  /// numbers were never on the same scale and the lower one was the real one.
   static const Map<String, int> defaultSeverityScores = {
+    'CRITICAL': 90,
+    'HIGH': 70,
+    'MEDIUM': 45,
+    'LOW': 20,
+  };
+
+  /// The old 5–25 scale, kept ONLY so a stored copy of it can be recognised and
+  /// replaced. A reset, or a master-data pull from a device that had reset,
+  /// wrote these numbers into SharedPreferences and into the backend, so plenty
+  /// of installs hold them without any admin having chosen them. Recognised by
+  /// exact match on all four values, so a deliberate scale that happens to be
+  /// low is left exactly as the admin set it.
+  static const Map<String, int> _legacySeverityScores = {
     'CRITICAL': 25,
     'HIGH': 15,
     'MEDIUM': 10,
     'LOW': 5,
   };
+
+  static bool _isLegacyScale(Map<String, int> m) {
+    if (m.length != _legacySeverityScores.length) return false;
+    for (final e in _legacySeverityScores.entries) {
+      if (m[e.key] != e.value) return false;
+    }
+    return true;
+  }
 
   static Future<Map<String, int>> getSeverityScores() async {
     final prefs = await SharedPreferences.getInstance();
@@ -831,6 +878,22 @@ class AdminMasterData {
     try {
       final map = (jsonDecode(raw) as Map)
           .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
+      // Migrate ONCE, then never again — guarded by its own flag rather than by
+      // the shape of the map. Without the flag an admin who deliberately set
+      // 25/15/10/5 after the migration would have it silently overwritten on
+      // every read, which is a worse bug than the one being fixed.
+      if (_isLegacyScale(map) && !(prefs.getBool(_kScoresRebased) ?? false)) {
+        final rebased = Map<String, int>.from(defaultSeverityScores);
+        await prefs.setBool(_kScoresRebased, true);
+        await prefs.setString(_kSeverityScores, jsonEncode(rebased));
+        // Tell the screens. Anything that loaded the old map before this read —
+        // the near-miss form, the AI scan card — is holding 25/15/10/5 and will
+        // keep displaying it until something bumps the revision. Bumping from
+        // inside a getter is unusual, but the alternative is a one-off wrong
+        // number on a safety report.
+        _bump();
+        return rebased;
+      }
       return map;
     } catch (_) {
       return Map<String, int>.from(defaultSeverityScores);
@@ -850,8 +913,38 @@ class AdminMasterData {
   /// Single source of truth — callers must not hardcode their own scale.
   static Future<int> scoreForSeverity(String severity) async {
     final scores = await getSeverityScores();
+    return scoreFromMap(scores, severity);
+  }
+
+  /// Synchronous form, for callers that already hold the map.
+  ///
+  /// Screens that render a score on every frame must not await SharedPreferences
+  /// in `build`. They load the map once, refresh it on [revision], and call this.
+  ///
+  /// The fallback for an unknown label is MEDIUM and then 45 — the middle of the
+  /// scale, never 0. An unrecognised severity means the admin renamed a level,
+  /// and scoring a real hazard 0 because of a rename would file it as harmless.
+  static int scoreFromMap(Map<String, int> scores, String severity) {
     final key = severity.trim().toUpperCase();
-    return scores[key] ?? scores['MEDIUM'] ?? 10;
+    return scores[key] ?? scores['MEDIUM'] ?? defaultSeverityScores['MEDIUM']!;
+  }
+
+  /// Overall score for a set of severity labels: the worst level wins.
+  ///
+  /// Deliberately NOT a sum or an average of the hazards found. The admin panel
+  /// says "the score value for each severity level", so a scan whose worst
+  /// finding is HIGH must show exactly the number the admin typed against HIGH —
+  /// predictable, auditable, and the same on two scans that found the same worst
+  /// thing. Hazard count is already shown next to it and does not need to be
+  /// smuggled into the risk number.
+  static int worstScore(Map<String, int> scores, Iterable<String> severities) {
+    int best = -1;
+    for (final s in severities) {
+      if (s.trim().isEmpty) continue;
+      final v = scoreFromMap(scores, s);
+      if (v > best) best = v;
+    }
+    return best < 0 ? 0 : best;
   }
 
   // ── RESET to defaults ────────────────────────────────────────────

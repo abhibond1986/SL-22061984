@@ -5790,8 +5790,10 @@ class _AdminScreenState extends State<AdminScreen>
                 size: 16, color: AppColors.accent),
             const SizedBox(width: 8),
             Expanded(child: Text(
-              'Set the score value for each severity level. '
-              'These scores are used to calculate the overall risk score of each scan.',
+              'Score out of 100 for each severity level. A report is scored by '
+              'its worst finding, so a scan whose most serious hazard is HIGH '
+              'shows exactly the number you set against HIGH. New reports only '
+              '— reports already filed keep the score they were filed with.',
               style: TextStyle(color: sl.text2, fontSize: 10.5, height: 1.4))),
           ]),
         ),
@@ -5820,8 +5822,12 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   Widget _scoreTile(String level, Color color, SL sl) {
+    // Falls back through the shared helper, not a bare 10: 10 is off the 20-90
+    // default scale entirely, so a severity level the admin has just added showed
+    // a number no other level could ever hold.
     final score = _severityScores[level] ??
-        AdminMasterData.defaultSeverityScores[level] ?? 10;
+        AdminMasterData.defaultSeverityScores[level] ??
+        AdminMasterData.scoreFromMap(_severityScores, level);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -5843,14 +5849,29 @@ class _AdminScreenState extends State<AdminScreen>
           padding: EdgeInsets.zero,
         ),
         Container(
-          width: 48,
+          // minWidth, not a fixed width: "100" at 16px plus "/100" needs about
+          // 50px at text scale 1.0 and overflows a hard 62 by scale 1.25.
+          constraints: const BoxConstraints(minWidth: 62),
           alignment: Alignment.center,
-          padding: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           decoration: BoxDecoration(
             color: color.withOpacity(0.12),
             borderRadius: BorderRadius.circular(6)),
-          child: Text('$score', style: TextStyle(
-              color: color, fontSize: 16, fontWeight: FontWeight.w800)),
+          // "/100" spelled out on the tile, not just in the help text above it:
+          // the numbers used to default to a 5–25 band while every screen
+          // displayed them out of 100, and nothing on this tile said which.
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text('$score', style: TextStyle(
+                  color: color, fontSize: 16, fontWeight: FontWeight.w800)),
+              Text('/100', style: TextStyle(
+                  color: color.withOpacity(0.7),
+                  fontSize: 9, fontWeight: FontWeight.w600)),
+            ],
+          ),
         ),
         IconButton(
           onPressed: () => _adjustScore(level, 5),
@@ -5866,7 +5887,8 @@ class _AdminScreenState extends State<AdminScreen>
   void _adjustScore(String level, int delta) {
     setState(() {
       final current = _severityScores[level] ??
-          AdminMasterData.defaultSeverityScores[level] ?? 10;
+          AdminMasterData.defaultSeverityScores[level] ??
+          AdminMasterData.scoreFromMap(_severityScores, level);
       _severityScores[level] = (current + delta).clamp(0, 100);
     });
     AdminMasterData.saveSeverityScores(_severityScores);
