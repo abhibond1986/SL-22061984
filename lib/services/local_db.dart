@@ -736,7 +736,7 @@ class LocalDB {
   static const Set<String> _workflowKeys = {
     'status', 'correctiveAction', 'rootCause', 'closedBy', 'closingRemarks',
     'closedAt', 'investigationStartedAt', 'actionTakenAt', 'assignedTo',
-    'assignedAt', 'targetDate',
+    'assignedToName', 'assignedAt', 'targetDate',
   };
 
   /// Fields that exist only on this device and have no server column.

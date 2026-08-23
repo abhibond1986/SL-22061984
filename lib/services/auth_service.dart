@@ -202,6 +202,55 @@ class AuthService {
     return null;
   }
 
+  /// Whether this account still has to choose its own password.
+  ///
+  /// Bulk-imported employees start with their SAIL P.no as the password, which is
+  /// printed on their ID card and listed in a spreadsheet several people hold —
+  /// a bootstrap credential, not a secret. The flag is what stops it from being
+  /// a permanent one.
+  ///
+  /// Both spellings are accepted because a record can arrive either from the app
+  /// (`mustChangePassword`) or straight from a Postgres row
+  /// (`must_change_password`), and a flag that is silently read as false would
+  /// leave the whole company on a public password.
+  static bool mustChangePassword(Map<String, dynamic>? u) {
+    if (u == null) return false;
+    final v = u['mustChangePassword'] ?? u['must_change_password'];
+    if (v == null) return false;
+    if (v is bool) return v;
+    final s = v.toString().trim().toLowerCase();
+    return s == 'true' || s == '1' || s == 'yes' || s == 't';
+  }
+
+  /// [_matchFormat], plus case tolerance for an unchanged initial password.
+  ///
+  /// P.nos are upper-case in the SAIL export ("A000168") and nobody types them
+  /// that way. Without this, thousands of first logins fail against a password
+  /// the person is holding in their hand and reading correctly.
+  ///
+  /// Deliberately narrow: it applies ONLY while [mustChangePassword] is set, so
+  /// it can never weaken a password somebody chose. And it costs nothing in
+  /// secrecy — the value it is being lenient about is public by design.
+  static String? _matchLoginPassword(
+      Map<String, dynamic> u, String password) {
+    final direct = _matchFormat(u, password);
+    if (direct != null) return direct;
+    if (!mustChangePassword(u)) return null;
+
+    for (final variant in <String>[
+      password.toUpperCase(),
+      password.toLowerCase(),
+    ]) {
+      if (variant == password) continue;
+      final m = _matchFormat(u, variant);
+      if (m != null) {
+        debugPrint('[Auth] first-login password matched on case variant');
+        return m;
+      }
+    }
+    return null;
+  }
+
   // ═════════════════════════════════════════════════════════════════════════
   //  SIGN IN
   // ═════════════════════════════════════════════════════════════════════════
@@ -245,7 +294,7 @@ class AuthService {
         return AuthResult.fail(AuthFailure.accountDisabled,
             'This account has been disabled. Contact your admin.');
       }
-      final format = _matchFormat(local, password);
+      final format = _matchLoginPassword(local, password);
       if (format != null) {
         if (format != 'salted') {
           // Upgrade in place, and push the upgrade to the server so other
@@ -256,9 +305,15 @@ class AuthService {
           // (true), an offline login would abort _persistCredential before the
           // local write, so the weak credential would survive on this device
           // as well and the upgrade would never happen at all.
+          // setMustChange: null — this re-hashes the SAME password the user just
+          // typed. It is a storage-format upgrade, not a password change, and
+          // must not satisfy a pending first-login requirement.
           await _persistCredential(local['username']?.toString() ?? uname,
               password,
-              pushRemote: true, requireRemote: false, seed: local);
+              pushRemote: true,
+              requireRemote: false,
+              seed: local,
+              setMustChange: null);
           debugPrint('[Auth] upgraded $uname from $format to salted');
         }
         final safe = sanitize(local);
@@ -288,7 +343,7 @@ class AuthService {
           return AuthResult.fail(AuthFailure.accountDisabled,
               'This account has been disabled. Contact your admin.');
         }
-        final format = _matchFormat(remote, password);
+        final format = _matchLoginPassword(remote, password);
         if (format != null) {
           // Cache locally in the CANONICAL format regardless of which format
           // the server row used, so offline login works from now on.
@@ -505,11 +560,16 @@ class AuthService {
 
     // Verify against whichever store knows this account.
     Map<String, dynamic>? record = await _findLocal(uname);
-    var matched = record != null && _matchFormat(record, currentPassword) != null;
+    // _matchLoginPassword, not _matchFormat: the "current password" a
+    // first-login user types is their P.no, and they will type it in the same
+    // case here as on the login screen they just came from.
+    var matched =
+        record != null && _matchLoginPassword(record, currentPassword) != null;
 
     if (!matched && SupabaseConfig.enabled) {
       final remote = await SupabaseService.getUserByUsername(uname);
-      if (remote != null && _matchFormat(remote, currentPassword) != null) {
+      if (remote != null &&
+          _matchLoginPassword(remote, currentPassword) != null) {
         record = remote;
         matched = true;
       }
@@ -620,8 +680,11 @@ class AuthService {
     // header comment; letting it degrade to a local write would reintroduce it.
     // The local write is near-useless for an admin reset anyway: the account
     // holder is on a different device.
+    // setMustChange: true — the admin now knows this password, and read it out
+    // loud to reset it. The account holder must replace it at their next login,
+    // exactly as with an imported P.no.
     return _persistCredential(uname, newPassword,
-        pushRemote: true, requireRemote: true);
+        pushRemote: true, requireRemote: true, setMustChange: true);
   }
 
   /// The ONE place a credential is written. Local always; server too when
@@ -640,19 +703,26 @@ class AuthService {
   /// the lookup race in `signIn` step 1, so the session user had no name,
   /// plant, designation, pno or isAdmin — the profile header read "User", plant
   /// filters came up empty, and an admin quietly lost their admin rights.
+  ///
+  /// [setMustChange] writes the first-login flag alongside the credential:
+  /// false when the account holder chose this password, true when an admin set
+  /// it for them, null to leave it exactly as it was (the legacy re-hash during
+  /// sign-in, which is not a new password at all).
   static Future<AuthResult> _persistCredential(
     String username,
     String newPassword, {
     bool pushRemote = true,
     bool requireRemote = true,
     Map<String, dynamic>? seed,
+    bool? setMustChange = false,
   }) async {
     final uname = username.trim().toLowerCase();
     final cred = _newCredential(newPassword);
 
     if (pushRemote && SupabaseConfig.enabled) {
       var ok = await SupabaseService.updateUserCredentials(
-          uname, cred['passwordHash']!, cred['salt']!);
+          uname, cred['passwordHash']!, cred['salt']!,
+          setMustChangePassword: setMustChange);
 
       if (!ok && SupabaseService.usersLastError.isEmpty) {
         // Update touched zero rows: the account exists locally but was never
@@ -664,6 +734,9 @@ class AuthService {
             ..['username'] = uname
             ..['salt'] = cred['salt']
             ..['passwordHash'] = cred['passwordHash'];
+          if (setMustChange != null) {
+            row['mustChangePassword'] = setMustChange;
+          }
           ok = await SupabaseService.upsertUser(row);
         }
       }
@@ -699,9 +772,31 @@ class AuthService {
       'username': uname,
       'salt': cred['salt'],
       'passwordHash': cred['passwordHash'],
+      // The flag must be lowered on THIS device too, and after the spread so it
+      // wins over the stale copy in `seed`/`local`. Otherwise the user chooses a
+      // new password, the server is satisfied, and the offline login path keeps
+      // sending them back to the change-password screen forever.
+      if (setMustChange != null) 'mustChangePassword': setMustChange,
+      // Both spellings, because a `seed` that came straight from Postgres brings
+      // the snake_case key with it and `mustChangePassword()` reads either.
+      if (setMustChange != null) 'must_change_password': setMustChange,
     }..remove('password');
     await LocalDB.upsertUser(record);
     await LocalDB.clearLegacyPassword(uname);
+
+    // Keep the live session in step with the flag we just wrote. Without this
+    // the signed-in copy still says "must change", and the next app launch signs
+    // the user out again — one relaunch after they did exactly what was asked.
+    if (setMustChange != null) {
+      final current = await LocalDB.getCurrentUser();
+      if (current != null &&
+          (current['username']?.toString().trim().toLowerCase() ?? '') ==
+              uname) {
+        current['mustChangePassword'] = setMustChange;
+        current['must_change_password'] = setMustChange;
+        await LocalDB.setCurrentUser(sanitize(current));
+      }
+    }
 
     return AuthResult.success(sanitize(record), 'Password updated.');
   }

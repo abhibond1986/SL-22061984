@@ -11,6 +11,7 @@
 
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'supabase_config.dart';
 
@@ -79,6 +80,11 @@ class SupabaseService {
     'closingRemarks': 'closing_remarks',
     'closedAt': 'closed_at',
     'assignedTo': 'assigned_to',
+    // Denormalised on purpose. The assignee is a P.no ("a000168"), which tells a
+    // supervisor on another device nothing, and resolving 10,000 usernames to
+    // names for a list of incidents is not a query worth running. Added by
+    // migration_bulk_users.sql.
+    'assignedToName': 'assigned_to_name',
     'assignedAt': 'assigned_at',
     'targetDate': 'target_date',
     'updatedAt': 'updated_at',
@@ -376,7 +382,28 @@ class SupabaseService {
     'status': 'status',
     'passwordHash': 'password_hash',
     'salt': 'salt',
+    // ── Employee-list profile fields (migration_bulk_users.sql) ──
+    // Added for the quarterly bulk import. Any key absent from this map is
+    // SILENTLY DROPPED by _userToRow, so a new profile field that is not listed
+    // here will appear to save on the device and never reach the server.
+    'grade': 'grade',
+    'unit': 'unit',
+    'dob': 'dob',
+    'retireDate': 'retire_dt',
+    'mustChangePassword': 'must_change_password',
+    'importSource': 'import_source',
+    'importBatch': 'import_batch',
+    'importedAt': 'imported_at',
+    'updatedAt': 'updated_at',
   };
+
+  /// Columns typed `date` / `boolean` in Postgres that the app may hold as a
+  /// String. PostgREST rejects `""` for a date column (it is not a valid date)
+  /// with a 400 that would fail the whole batch, so an empty value must become
+  /// null. 202 rows in the January 2026 file have no email and 9 have no dates,
+  /// so this is the normal case, not an edge case.
+  static const Set<String> _userDateCols = {'dob', 'retire_dt'};
+  static const Set<String> _userBoolCols = {'is_admin', 'must_change_password'};
   static final Map<String, String> _userDbToApp = {
     for (final e in _userAppToDb.entries) e.value: e.key,
   };
@@ -386,8 +413,11 @@ class SupabaseService {
     _userAppToDb.forEach((appKey, dbCol) {
       if (!u.containsKey(appKey)) return;
       var v = u[appKey];
-      if (appKey == 'isAdmin') {
+      if (_userBoolCols.contains(dbCol)) {
         v = v is bool ? v : v?.toString().toLowerCase() == 'true';
+      } else if (_userDateCols.contains(dbCol)) {
+        final s = v?.toString().trim() ?? '';
+        v = s.isEmpty ? null : s;
       }
       row[dbCol] = v;
     });
@@ -430,22 +460,63 @@ class SupabaseService {
         e.contains('could not find the');
   }
 
-  /// Fetch all users. Returns [] on error.
-  static Future<List<Map<String, dynamic>>> fetchUsers() async {
+  /// True when the last [fetchUsers] returned a full page and therefore almost
+  /// certainly left rows behind.
+  ///
+  /// This exists because the truncation used to be invisible. PostgREST caps an
+  /// unbounded select at its configured maximum (1000 by default) and returns
+  /// 200 OK with a short list — no error, no warning. After the quarterly import
+  /// the roster is ~10,000 people, so every caller of fetchUsers() was quietly
+  /// looking at the first tenth of the company while a "1000 total" badge sat on
+  /// screen looking authoritative. Callers must now say so.
+  static bool usersTruncated = false;
+
+  /// Fetch users, newest-relevant first. Returns [] on error.
+  ///
+  /// [limit] is explicit and applied server-side rather than left to PostgREST's
+  /// default, so the number on screen is a number this code chose. Do NOT raise
+  /// it to cover the whole roster: the result is cached to device storage by
+  /// SyncService, and 10,000 rows is ~2.3 MB against a ~5 MB browser origin
+  /// budget already shared with incident photos. Search the server instead —
+  /// see [searchUsers].
+  static Future<List<Map<String, dynamic>>> fetchUsers({int limit = 1000}) async {
     if (!isReady) {
       usersLastError = _notReady;
+      usersTruncated = false;
       return [];
     }
     try {
-      final rows = await _db.from('app_users').select();
+      // Ordered by name so the truncated page is at least a predictable slice
+      // rather than whatever order Postgres happened to return.
+      final rows = await _db.from('app_users').select().order('name').limit(limit);
       usersLastError = '';
-      return (rows as List)
+      final list = (rows as List)
           .map((r) => _userFromRow(Map<String, dynamic>.from(r as Map)))
           .toList();
+      usersTruncated = list.length >= limit;
+      return list;
     } catch (e) {
       usersLastError = _describeError(e);
+      usersTruncated = false;
       return [];
     }
+  }
+
+  /// Total number of accounts, or null if it could not be determined.
+  ///
+  /// Delegates to [fetchAllUsernames], which pages with `.range` — the only way
+  /// in this file that is known to see past row 1000. A plain `select('username')`
+  /// would be capped at 1000 and would confidently report "1000 users" for a
+  /// 10,086-person roster, which is precisely the failure this method exists to
+  /// stop. `.count()` on the query builder is deliberately not used: its surface
+  /// varies across the supabase_flutter 2.x line this project pins, and nothing
+  /// here can be compiled to check.
+  ///
+  /// Cost is one short string per employee (~10 KB per page, discarded after
+  /// counting), so this is for a screen the admin opened — not for every load.
+  static Future<int?> countUsers() async {
+    final all = await fetchAllUsernames();
+    return all?.length;
   }
 
   /// Insert or update a user (keyed by username). Returns true on success.
@@ -476,6 +547,207 @@ class SupabaseService {
     }
   }
 
+  // ── BULK ROSTER OPERATIONS (quarterly employee import) ───────────────────
+  //
+  // The SAIL employee list is ~10,000 rows. Everything in this section exists
+  // because the single-row helpers above do not survive that scale:
+  //
+  //   • upsertUser() one row at a time is ~10,000 round trips. At even 80ms
+  //     each that is 13 minutes of an admin staring at a progress bar, and any
+  //     dropped connection leaves the roster half-written.
+  //   • fetchUsers() cannot see the whole roster. PostgREST caps a response at
+  //     its configured maximum (1000 rows by default), so on a full roster it
+  //     returns a TRUNCATED list — which would read as "these users do not
+  //     exist" and let the importer recreate them. It now applies that limit
+  //     explicitly and raises [usersTruncated], but the limit is still there:
+  //     the importer must use fetchAllUsernames(), which pages with .range.
+  //
+  // So: write in chunks, and never load the roster to search it.
+
+  /// Rows per upsert request. 500 keeps each request comfortably inside
+  /// PostgREST's payload limits while cutting 10,000 rows to ~20 requests.
+  static const int kUserBatchSize = 500;
+
+  /// Upsert many users in chunks, keyed by username.
+  ///
+  /// Returns the number of rows successfully written. A chunk that fails does
+  /// NOT abort the rest — a single malformed row out of 10,000 must not cost the
+  /// other 9,999 — and every failure is appended to [usersLastError] so the
+  /// caller can show the admin what did not land.
+  ///
+  /// [onProgress] is called with (written, total) after each chunk so the UI can
+  /// show real progress rather than an indeterminate spinner.
+  static Future<int> upsertUsers(
+    List<Map<String, dynamic>> users, {
+    void Function(int done, int total)? onProgress,
+  }) async {
+    if (!isReady) {
+      usersLastError = _notReady;
+      return 0;
+    }
+    final rows = <Map<String, dynamic>>[];
+    for (final u in users) {
+      final row = _userToRow(u);
+      final name = row['username']?.toString().trim().toLowerCase() ?? '';
+      if (name.isEmpty) continue; // caller validates; this is a backstop
+      row['username'] = name;
+      rows.add(row);
+    }
+
+    final errors = <String>[];
+    int written = 0;
+    for (var i = 0; i < rows.length; i += kUserBatchSize) {
+      final end =
+          (i + kUserBatchSize) > rows.length ? rows.length : i + kUserBatchSize;
+      final chunk = rows.sublist(i, end);
+      try {
+        await _db
+            .from('app_users')
+            .upsert(chunk, onConflict: 'username')
+            // Generous: 500 rows over a plant-floor connection is not fast.
+            .timeout(const Duration(seconds: 60));
+        written += chunk.length;
+      } catch (e) {
+        errors.add('rows ${i + 1}-$end: ${_describeError(e)}');
+      }
+      onProgress?.call(written, rows.length);
+    }
+    usersLastError = errors.isEmpty ? '' : errors.join(' | ');
+    return written;
+  }
+
+  /// Set `status` for many usernames at once, without touching anything else.
+  ///
+  /// Used to deactivate the people an admin selected from the "in the portal but
+  /// not in this quarter's file" list. Deliberately an UPDATE of one column
+  /// rather than an upsert of whole rows: the admin panel's copy of those users
+  /// may be stale, and disabling an account must not silently revert someone's
+  /// plant or designation as a side effect.
+  static Future<int> setUsersStatus(
+      List<String> usernames, String status) async {
+    if (!isReady) {
+      usersLastError = _notReady;
+      return 0;
+    }
+    final names = usernames
+        .map((u) => u.trim().toLowerCase())
+        .where((u) => u.isNotEmpty)
+        .toList();
+    if (names.isEmpty) return 0;
+
+    final errors = <String>[];
+    int changed = 0;
+    for (var i = 0; i < names.length; i += kUserBatchSize) {
+      final end =
+          (i + kUserBatchSize) > names.length ? names.length : i + kUserBatchSize;
+      final chunk = names.sublist(i, end);
+      try {
+        final echoed = await _db
+            .from('app_users')
+            .update({'status': status, 'updated_at': DateTime.now().toIso8601String()})
+            .inFilter('username', chunk)
+            .select('username')
+            .timeout(const Duration(seconds: 60));
+        changed += (echoed as List).length;
+      } catch (e) {
+        errors.add('rows ${i + 1}-$end: ${_describeError(e)}');
+      }
+    }
+    usersLastError = errors.isEmpty ? '' : errors.join(' | ');
+    return changed;
+  }
+
+  /// Every username currently on the server, and nothing else.
+  ///
+  /// Also serves as the roster head-count (`.length`), which is why there is no
+  /// separate count helper: `select().count()` is a postgrest API this codebase
+  /// uses nowhere else, and an unverifiable second way to ask the same question
+  /// is not worth the risk.
+  ///
+  /// The import needs to know which of its 10,000 rows already exist. Fetching
+  /// full rows to answer that would pull megabytes; one text column paginates
+  /// cheaply. Returns null on failure — an EMPTY set would be read as "nobody
+  /// exists yet", which would turn every update into an insert and reset every
+  /// password in the company.
+  static Future<Set<String>?> fetchAllUsernames() async {
+    if (!isReady) {
+      usersLastError = _notReady;
+      return null;
+    }
+    const page = 1000;
+    final out = <String>{};
+    try {
+      for (var from = 0;; from += page) {
+        final rows = await _db
+            .from('app_users')
+            .select('username')
+            .order('username')
+            .range(from, from + page - 1)
+            .timeout(const Duration(seconds: 30));
+        final list = rows as List;
+        for (final r in list) {
+          final u = (r as Map)['username']?.toString();
+          if (u != null && u.isNotEmpty) out.add(u.toLowerCase());
+        }
+        if (list.length < page) break;
+      }
+      usersLastError = '';
+      return out;
+    } catch (e) {
+      usersLastError = _describeError(e);
+      return null;
+    }
+  }
+
+  /// Search the roster by name, P.no or username. Server-side on purpose.
+  ///
+  /// The assign-investigator picker cannot download 10,000 users to filter them
+  /// on the device — that is ~2.3 MB per keystroke-debounce and more than a
+  /// browser origin's whole storage budget. Postgres does the matching, backed
+  /// by the indexes in migration_bulk_users.sql.
+  ///
+  /// [activeOnly] defaults to true: you should not be able to hand an
+  /// investigation to someone who has retired or been disabled.
+  static Future<List<Map<String, dynamic>>> searchUsers(
+    String query, {
+    int limit = 30,
+    bool activeOnly = true,
+  }) async {
+    if (!isReady) {
+      usersLastError = _notReady;
+      return [];
+    }
+    final q = query.trim().toLowerCase();
+    try {
+      var sel = _db.from('app_users').select(
+          'username,name,designation,plant,department,pno,unit,grade,email,mobile,status,is_admin');
+      if (q.isNotEmpty) {
+        // Escape the PostgREST `or` filter separators. A comma would split the
+        // expression into extra conditions and a parenthesis would unbalance it,
+        // so a name containing either could produce a malformed query rather
+        // than no results — worse, because it looks like a server fault.
+        final safe = q.replaceAll(RegExp(r'[,()*]'), ' ').trim();
+        if (safe.isNotEmpty) {
+          sel = sel.or('name.ilike.%$safe%,'
+              'pno.ilike.%$safe%,'
+              'username.ilike.%$safe%');
+        }
+      }
+      if (activeOnly) {
+        sel = sel.not('status', 'in', '("disabled","blocked","inactive")');
+      }
+      final rows =
+          await sel.order('name').limit(limit).timeout(const Duration(seconds: 15));
+      usersLastError = '';
+      return (rows as List)
+          .map((r) => _userFromRow(Map<String, dynamic>.from(r as Map)))
+          .toList();
+    } catch (e) {
+      usersLastError = _describeError(e);
+      return [];
+    }
+  }
+
   /// Write ONLY the credential columns for an existing user.
   ///
   /// Deliberately not upsertUser(): a password change must not carry the
@@ -490,8 +762,17 @@ class SupabaseService {
   ///
   /// Returns true only if a row was actually updated, so the caller can tell
   /// "changed" from "no such user".
+  ///
+  /// [setMustChangePassword] also writes the first-login flag: false when the
+  /// account holder chose this password themselves (the act of choosing is what
+  /// the flag was waiting for), true when an admin set it on their behalf (an
+  /// admin knows it, so it is no more private than the P.no was). Leave it null
+  /// to touch only the credential — which is what the opportunistic legacy
+  /// re-hash during sign-in must do, since it reuses the password the user
+  /// already had and satisfies nothing.
   static Future<bool> updateUserCredentials(
-      String username, String passwordHash, String salt) async {
+      String username, String passwordHash, String salt,
+      {bool? setMustChangePassword}) async {
     if (!isReady) {
       usersLastError = _notReady;
       return false;
@@ -500,19 +781,48 @@ class SupabaseService {
       usersLastError = 'username missing';
       return false;
     }
-    try {
+    final uname = username.trim().toLowerCase();
+
+    Future<bool> attempt(bool withFlag) async {
+      final patch = <String, dynamic>{
+        'password_hash': passwordHash,
+        'salt': salt,
+      };
+      if (withFlag) patch['must_change_password'] = setMustChangePassword;
       final echoed = await _db
           .from('app_users')
-          .update({
-            'password_hash': passwordHash,
-            'salt': salt,
-          })
-          .eq('username', username.trim().toLowerCase())
+          .update(patch)
+          .eq('username', uname)
           .select('username')
           .timeout(const Duration(seconds: 12));
-      usersLastError = '';
       return (echoed as List).isNotEmpty;
+    }
+
+    try {
+      final ok = await attempt(setMustChangePassword != null);
+      usersLastError = '';
+      return ok;
     } catch (e) {
+      // must_change_password only exists once migration_bulk_users.sql has been
+      // run. Rather than let a missing column block every password change on an
+      // un-migrated database, drop the flag and write the credential anyway: a
+      // user locked out of changing their password is a far worse failure than a
+      // flag that stays raised.
+      final msg = e.toString();
+      if (setMustChangePassword != null &&
+          msg.contains('must_change_password')) {
+        try {
+          final ok = await attempt(false);
+          usersLastError = '';
+          debugPrint('[Supabase] must_change_password column missing — '
+              'credential saved without writing the flag. Run '
+              'migration_bulk_users.sql.');
+          return ok;
+        } catch (e2) {
+          usersLastError = _describeError(e2);
+          return false;
+        }
+      }
       usersLastError = _describeError(e);
       return false;
     }

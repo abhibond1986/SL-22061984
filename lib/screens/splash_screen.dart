@@ -2,6 +2,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../services/local_db.dart';
+import '../services/auth_service.dart';
 import '../services/api_keys.dart';
 import '../widgets/glass_card.dart';
 import 'login_screen.dart';
@@ -40,7 +41,16 @@ class _SplashScreenState extends State<SplashScreen>
     if (!mounted) return;
     // Fetch API keys in background during splash (non-blocking)
     ApiKeys.init(); // fire-and-forget, cached for entire session
-    final user = await LocalDB.getCurrentUser();
+    var user = await LocalDB.getCurrentUser();
+    // A session that still owes a password change does not restore. Sign-in
+    // writes the session before the change-password gate is shown, so someone
+    // who simply closed the app at that point would otherwise come straight back
+    // into the dashboard on a password the whole employee list can look up.
+    // Making them sign in again puts the gate back in front of them.
+    if (user != null && AuthService.mustChangePassword(user)) {
+      await LocalDB.signOut();
+      user = null;
+    }
     if (!mounted) return;
     Navigator.pushReplacement(
       context,

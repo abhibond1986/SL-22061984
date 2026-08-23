@@ -51,6 +51,11 @@ import '../services/supabase_service.dart';
 import '../services/supabase_config.dart';
 import '../services/visitor_service.dart';
 import '../services/image_storage.dart';
+import 'bulk_user_import_screen.dart';
+// Searchable, server-side user picker — the in-memory _users list is capped at
+// ~1,000 rows by PostgREST, which is a fraction of the workforce after import.
+import '../widgets/user_picker.dart';
+import 'employee_profile_screen.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
     if (dart.library.html) '../services/pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
@@ -203,6 +208,17 @@ class _AdminScreenState extends State<AdminScreen>
   // ── User mgmt state ─────────────────────────────────────────────
   String _userSearch = '';
   String? _userExpandedUname;
+
+  // ── User Management at 10,000 accounts ────────────────────────────────────
+  // `_users` is whatever fetchUsers() returned, which is capped at 1,000 rows.
+  // Filtering that list therefore searches the first tenth of the company and
+  // reports "no users found" for everyone else, so once the query is long enough
+  // to be worth a round trip the search runs on the server instead.
+  List<Map<String, dynamic>>? _userHits;   // null = not searching the server
+  bool _userSearchBusy = false;
+  int _userSearchSeq = 0;                  // discards out-of-order replies
+  int? _userTotal;                         // real roster size, counted once
+  bool _userTotalAsked = false;
 
   // ── Plant master state ──────────────────────────────────────────
   List<Map<String, String>> _plantsEditable = [];
@@ -386,8 +402,13 @@ class _AdminScreenState extends State<AdminScreen>
       // Locally-deleted usernames must stay hidden even if the sheet still
       // returns them. Prune tombstones the backend no longer knows about.
       final deletedUnames = LocalDB.deletedUsernames();
-      await LocalDB.pruneUsernameTombstones(
-          sheetsUsers.map((u) => (u['username']?.toString() ?? '').trim()).toSet());
+      // ONLY safe on a complete list. fetchUsers() is capped at 1,000 rows, and
+      // pruning against a truncated page would delete the tombstone of anyone
+      // sorting after row 1,000 — which is how a deleted account comes back.
+      if (!SupabaseService.usersTruncated) {
+        await LocalDB.pruneUsernameTombstones(
+            sheetsUsers.map((u) => (u['username']?.toString() ?? '').trim()).toSet());
+      }
 
       final byUname = <String, Map<String, dynamic>>{};
       // Sheets data takes priority, then cached, then local
@@ -484,6 +505,13 @@ class _AdminScreenState extends State<AdminScreen>
         _alertsLoaded   = true;
         _loading   = false;
       });
+      // A server-side search result is not part of `_users`, so a reload leaves
+      // it showing the values from before the edit — the disabled account still
+      // reading "active". Re-run the query instead of clearing it, so the admin
+      // does not lose their place after every action.
+      if (_userHits != null && _userSearch.trim().length >= 2) {
+        _onUserSearchChanged(_userSearch);
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -4326,7 +4354,56 @@ class _AdminScreenState extends State<AdminScreen>
     _toast('Status → $newStatus', _statusColor(newStatus));
   }
 
+  /// Assign an investigator from the Workflow module.
+  ///
+  /// Uses the shared searchable picker rather than a list of `_users`: that list
+  /// is capped at whatever PostgREST returned (~1,000 rows, silently), so after
+  /// the quarterly import most of the workforce simply was not in it.
   Future<void> _wfAssign(Map<String, dynamic> inc) async {
+    final current = inc['assignedTo']?.toString().trim() ?? '';
+    final result = await showUserPicker(
+      context,
+      title: current.isEmpty ? 'Assign investigator' : 'Transfer investigation',
+      currentUsername: current.isEmpty ? null : current,
+    );
+    if (result == null) return;
+
+    final previous = current;
+    if (result.cleared) {
+      inc.remove('assignedTo');
+      inc.remove('assignedToName');
+      inc.remove('assignedAt');
+    } else {
+      if (result.username.isEmpty) {
+        _toast('That employee has no username on file.', AppColors.red);
+        return;
+      }
+      inc['assignedTo'] = result.username;
+      inc['assignedToName'] = result.displayName;
+      inc['assignedAt'] = DateTime.now().toIso8601String();
+    }
+    try {
+      await LocalDB.saveIncident(inc);
+      SyncService.pushIncident(inc).catchError((_) => false);
+    } catch (_) {}
+    await AdminAudit.log(
+      action: AdminAudit.actIncAssign,
+      actor: _currentActor,
+      target: inc['id']?.toString(),
+      targetName: inc['title']?.toString(),
+      meta: {
+        'from': previous.isEmpty ? '(unassigned)' : previous,
+        'to': result.cleared ? '(unassigned)' : result.username,
+      });
+    await _loadAll();
+    _toast(result.cleared
+            ? 'Unassigned'
+            : 'Assigned to ${result.displayName}',
+        const Color(0xFF3949AB));
+  }
+
+  // ignore: unused_element
+  Future<void> _wfAssignLegacyDialog(Map<String, dynamic> inc) async {
     final sl = SL.of(context);
     String? picked = inc['assignedTo']?.toString();
     final ok = await showDialog<bool>(context: context, builder: (_) =>
@@ -4468,16 +4545,29 @@ class _AdminScreenState extends State<AdminScreen>
   //  MODULE 4 — ADVANCED USER MANAGEMENT
   // ══════════════════════════════════════════════════════════════════
   Widget _moduleUsersAdvanced(SL sl) {
-    final filtered = _userSearch.trim().isEmpty
-        ? _users
-        : _users.where((u) {
-            final q = _userSearch.toLowerCase();
-            return [u['username'], u['name'], u['designation'],
-                    u['plant'], u['department'], u['pno']]
-                .whereType<String>().join(' ').toLowerCase().contains(q);
-          }).toList();
+    _ensureUserTotal();
+
+    // Server hits win when we have them; otherwise fall back to filtering the
+    // page we already hold, which is still the right answer for a small roster
+    // and for an offline admin.
+    final filtered = _userHits ??
+        (_userSearch.trim().isEmpty
+            ? _users
+            : _users.where((u) {
+                final q = _userSearch.toLowerCase();
+                return [u['username'], u['name'], u['designation'],
+                        u['plant'], u['department'], u['pno']]
+                    .whereType<String>().join(' ').toLowerCase().contains(q);
+              }).toList());
     final admins = _users.where((u) =>
         u['isAdmin']?.toString().toLowerCase() == 'true').length;
+    // "1,000 total" on a 10,086-person roster is the single most misleading
+    // thing this panel could say, so the badge shows the counted total when we
+    // have it and marks the loaded page as a page when we do not.
+    final loaded = _users.length;
+    final totalLabel = _userTotal != null
+        ? '$_userTotal accounts'
+        : (SupabaseService.usersTruncated ? '$loaded+ accounts' : '$loaded total');
 
     return Column(children: [
       Container(
@@ -4485,13 +4575,19 @@ class _AdminScreenState extends State<AdminScreen>
         color: sl.bg2,
         child: Column(children: [
           TextField(
-            onChanged: (v) => setState(() => _userSearch = v),
+            onChanged: _onUserSearchChanged,
             style: TextStyle(color: sl.text1, fontSize: 12),
             decoration: InputDecoration(
-              hintText: 'Search users by name, plant, PNO…',
+              hintText: 'Search all users by name or SAIL P.no…',
               hintStyle: TextStyle(color: sl.text4, fontSize: 11),
-              prefixIcon: Icon(Icons.search_rounded,
-                  color: sl.text4, size: 16),
+              prefixIcon: _userSearchBusy
+                  ? Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: SizedBox(
+                          width: 13, height: 13,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: sl.text4)))
+                  : Icon(Icons.search_rounded, color: sl.text4, size: 16),
               filled: true, fillColor: sl.card, isDense: true,
               contentPadding: const EdgeInsets.symmetric(
                   horizontal: 8, vertical: 10),
@@ -4500,11 +4596,30 @@ class _AdminScreenState extends State<AdminScreen>
                   borderSide: BorderSide(color: sl.border)))),
           const SizedBox(height: 8),
           Row(children: [
-            _miniBadge('${_users.length} total',
-                const Color(0xFF3949AB), sl),
+            _miniBadge(totalLabel, const Color(0xFF3949AB), sl),
             const SizedBox(width: 6),
             _miniBadge('$admins admins', AppColors.amber, sl),
             const Spacer(),
+            // Bulk upload lives on its own screen (bulk_user_import_screen.dart):
+            // it has a five-stage preview-and-confirm flow of its own and nothing
+            // else in this panel needs to know about it.
+            GestureDetector(
+              onTap: _openBulkUserImport,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.green.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(color: AppColors.green.withOpacity(0.4))),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.upload_file_rounded, size: 13,
+                      color: AppColors.green),
+                  SizedBox(width: 5),
+                  Text('Bulk Upload', style: TextStyle(
+                      color: AppColors.green, fontSize: 11,
+                      fontWeight: FontWeight.w700)),
+                ]))),
+            const SizedBox(width: 6),
             GestureDetector(
               onTap: _addNewUser,
               child: Container(
@@ -4522,15 +4637,100 @@ class _AdminScreenState extends State<AdminScreen>
                 ]))),
           ]),
         ])),
+      // Said once, plainly, rather than leaving the admin to wonder why a
+      // colleague they know exists is not in the list.
+      if (_userHits == null &&
+          _userSearch.trim().isEmpty &&
+          SupabaseService.usersTruncated)
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+          color: AppColors.amber.withOpacity(0.10),
+          child: Text(
+            'Showing the first ${_users.length} accounts by name. '
+            'Type a name or P.no to search the full roster.',
+            style: TextStyle(color: sl.text3, fontSize: 10.5, height: 1.4)),
+        ),
       Expanded(child: filtered.isEmpty
-        ? Center(child: Text('No users found',
-            style: TextStyle(color: sl.text4, fontSize: 12)))
+        ? Center(child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+                _userSearchBusy
+                    ? 'Searching…'
+                    : _userSearch.trim().isEmpty
+                        ? 'No users found'
+                        : 'Nobody matches "${_userSearch.trim()}".',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: sl.text4, fontSize: 12))))
         : ListView.separated(
             padding: const EdgeInsets.all(12),
             itemCount: filtered.length,
             separatorBuilder: (_, __) => const SizedBox(height: 6),
             itemBuilder: (_, i) => _userCard(filtered[i], sl))),
     ]);
+  }
+
+  /// Search the roster, debounced.
+  ///
+  /// Two characters is the threshold: one letter matches thousands of people and
+  /// the reply would be a random 60 of them, which looks like a broken search.
+  /// Below the threshold we drop back to filtering the loaded page, which is
+  /// instant and correct as far as it goes.
+  void _onUserSearchChanged(String v) {
+    setState(() => _userSearch = v);
+    final q = v.trim();
+    final seq = ++_userSearchSeq;
+
+    if (q.length < 2 || !SupabaseConfig.enabled) {
+      setState(() {
+        _userHits = null;
+        _userSearchBusy = false;
+      });
+      return;
+    }
+
+    setState(() => _userSearchBusy = true);
+    // 350ms: long enough that typing a seven-character P.no sends one request
+    // instead of six, short enough not to feel laggy.
+    Future.delayed(const Duration(milliseconds: 350), () async {
+      if (!mounted || seq != _userSearchSeq) return;
+      // activeOnly: false — an admin looking for someone is often looking for
+      // them BECAUSE the account is disabled.
+      final hits = await SupabaseService.searchUsers(q,
+          limit: 60, activeOnly: false);
+      if (!mounted || seq != _userSearchSeq) return;
+      setState(() {
+        _userHits = hits;
+        _userSearchBusy = false;
+      });
+    });
+  }
+
+  /// Count the roster once per visit to this module.
+  ///
+  /// Called from build, which is why it is guarded by a flag and defers the work
+  /// to a microtask: counting pages through the whole username list and must
+  /// never run during a frame, nor once per rebuild.
+  void _ensureUserTotal() {
+    if (_userTotalAsked || !SupabaseConfig.enabled) return;
+    _userTotalAsked = true;
+    Future.microtask(() async {
+      final n = await SupabaseService.countUsers();
+      if (!mounted || n == null) return;
+      setState(() => _userTotal = n);
+    });
+  }
+
+  /// Open the quarterly employee upload, then reload the roster.
+  ///
+  /// The reload is unconditional rather than only-on-success: a run that failed
+  /// part way through still changed accounts, and showing the pre-import list
+  /// afterwards would be the one genuinely misleading thing this screen could do.
+  Future<void> _openBulkUserImport() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => const BulkUserImportScreen()));
+    if (!mounted) return;
+    await _loadAll();
   }
 
   Widget _miniBadge(String label, Color color, SL sl) => Container(
@@ -4644,6 +4844,11 @@ class _AdminScreenState extends State<AdminScreen>
                     fontWeight: FontWeight.w700, letterSpacing: 0.5)),
                 const SizedBox(height: 6),
                 Wrap(spacing: 6, runSpacing: 6, children: [
+                  // First, because it is the only read-only action here and the
+                  // one that answers "is this the right person?" — this row shows
+                  // four of the fifteen fields the quarterly import brings in.
+                  _userBtn('Full profile', Icons.badge_outlined,
+                      const Color(0xFF3949AB), () => _openProfile(u)),
                   if (uname != 'admin')
                     _userBtn(isAdm ? 'Revoke admin' : 'Grant admin',
                         Icons.shield_outlined,
@@ -4680,6 +4885,23 @@ class _AdminScreenState extends State<AdminScreen>
       ]));
   }
 
+  /// Open the read-only employee profile.
+  ///
+  /// The row map is passed as a seed so the screen paints instantly, but it
+  /// re-reads the server itself: `_users` here came from fetchUsers(), which is
+  /// a device-side list that can be a quarter old.
+  ///
+  /// No reload afterwards — the profile screen cannot change anything.
+  Future<void> _openProfile(Map<String, dynamic> u) async {
+    final uname = u['username']?.toString().trim() ?? '';
+    if (uname.isEmpty) {
+      _toast('That record has no username.', AppColors.red);
+      return;
+    }
+    await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => EmployeeProfileScreen(username: uname, seed: u)));
+  }
+
   Widget _userDetail(String label, String value, SL sl, {Color? color}) =>
     Padding(padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(children: [
@@ -4707,7 +4929,52 @@ class _AdminScreenState extends State<AdminScreen>
               color: color, fontSize: 10.5, fontWeight: FontWeight.w700)),
         ])));
 
+  /// Fill in the columns a search result does not carry, before writing it back.
+  ///
+  /// THIS IS A DATA-LOSS GUARD, not an optimisation. searchUsers() projects
+  /// twelve columns — it deliberately does not fetch password_hash, salt, dob,
+  /// retire_dt or the import bookkeeping — so a row that came from the search box
+  /// is a PARTIAL record. Handing it to LocalDB.upsertUser would replace the
+  /// device's complete copy with the partial one and lock the person out of
+  /// offline sign-in, because their hash and salt would simply be gone.
+  ///
+  /// Mutates [u] in place (the caller holds the same map the list is drawing) and
+  /// only fills keys that are absent, so the pending edit is never overwritten.
+  /// Returns false if the full record could not be obtained, in which case the
+  /// caller must not write.
+  Future<bool> _hydrateUser(Map<String, dynamic> u) async {
+    if (u.containsKey('passwordHash') || u.containsKey('salt')) return true;
+    final uname = u['username']?.toString().trim() ?? '';
+    if (uname.isEmpty) return false;
+
+    // The device copy first — it is complete, free, and works offline.
+    for (final c in await LocalDB.getUsers()) {
+      if ((c['username']?.toString().trim().toLowerCase() ?? '') ==
+          uname.toLowerCase()) {
+        c.forEach((k, v) { if (!u.containsKey(k)) u[k] = v; });
+        if (u.containsKey('passwordHash') || u.containsKey('salt')) return true;
+        break;
+      }
+    }
+    if (!SupabaseConfig.enabled) {
+      // No cloud and no local copy: this account exists only in a search result
+      // we can no longer complete. Refusing is the safe answer.
+      return u.containsKey('passwordHash') || u.containsKey('salt');
+    }
+    final full = await SupabaseService.getUserByUsername(uname);
+    if (full == null) {
+      if (mounted) {
+        _toast('Could not load that account — nothing was changed.',
+            AppColors.red);
+      }
+      return false;
+    }
+    full.forEach((k, v) { if (!u.containsKey(k)) u[k] = v; });
+    return true;
+  }
+
   Future<void> _userToggleAdmin(Map<String, dynamic> u) async {
+    if (!await _hydrateUser(u)) return;
     final wasAdm = u['isAdmin']?.toString().toLowerCase() == 'true';
     u['isAdmin'] = (!wasAdm).toString();
     try {
@@ -4725,6 +4992,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   Future<void> _userToggleStatus(Map<String, dynamic> u) async {
+    if (!await _hydrateUser(u)) return;
     final wasActive = (u['status']?.toString().toLowerCase() ?? 'active') == 'active';
     u['status'] = wasActive ? 'disabled' : 'active';
     try {
@@ -4839,6 +5107,7 @@ class _AdminScreenState extends State<AdminScreen>
             child: const Text('Update', style: TextStyle(color: Colors.white))),
         ])));
     if (ok != true || picked == null) return;
+    if (!await _hydrateUser(u)) return;
     u['plant'] = picked;
     try {
       await LocalDB.upsertUser(u);

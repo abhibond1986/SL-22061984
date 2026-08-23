@@ -14,6 +14,7 @@ import '../services/i18n.dart';
 import '../widgets/glass_card.dart';
 import 'home_screen.dart';
 import 'contractor_home_screen.dart';
+import 'force_password_change_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -168,6 +169,26 @@ class _LoginScreenState extends State<LoginScreen> {
       final res = await AuthService.signIn(username, password);
       if (!mounted) return;
       if (res.ok) {
+        // Bulk-imported employees, and anyone whose password an admin has just
+        // reset, must choose their own before the app opens. The gate returns
+        // false if they backed out — it has already signed the session out, so
+        // we simply stay on this screen.
+        if (AuthService.mustChangePassword(res.user)) {
+          final changed = await Navigator.of(context).push<bool>(
+              MaterialPageRoute(
+                  builder: (_) => ForcePasswordChangeScreen(
+                        username: res.user?['username']?.toString() ??
+                            username.toLowerCase(),
+                        currentPassword: password,
+                        name: res.user?['name']?.toString() ?? '',
+                      )));
+          if (!mounted) return;
+          if (changed != true) {
+            setState(() => _err =
+                'Please set your own password to finish signing in.');
+            return;
+          }
+        }
         _goHome();
       } else {
         setState(() => _err = res.message);

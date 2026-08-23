@@ -19,6 +19,9 @@ import '../services/plant_scope.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
+import '../services/admin_audit.dart';
+import '../widgets/user_picker.dart';
+import 'employee_profile_screen.dart';
 
 class IncidentDetailScreen extends StatefulWidget {
   final Map<String, dynamic> incident;
@@ -936,6 +939,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               fontWeight: FontWeight.w700)),
       ]),
       const SizedBox(height: 12),
+      _formLabel('Investigation assigned to', sl),
+      _investigatorField(sl, bg),
+      const SizedBox(height: 10),
       _formLabel('Corrective Action Taken *', sl),
       _formField(_actionCtrl,
           'Describe what was done to mitigate…', 3, sl, bg),
@@ -949,6 +955,165 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       _formLabel('Additional remarks', sl),
       _formField(_remarksCtrl, 'Any other notes…', 2, sl, bg),
     ]));
+
+  /// Who is investigating this incident, and the handover control.
+  ///
+  /// A tappable field backed by [showUserPicker] rather than a dropdown of every
+  /// user: the roster is ~10,000 people after the quarterly import, which is
+  /// neither scrollable nor safe to hold in memory. The picker searches Postgres
+  /// by name AND SAIL P.no, which is how people actually identify each other
+  /// here — two colleagues share a name far more often than a P.no.
+  Widget _investigatorField(SL sl, Color bg) {
+    final fieldBg = sl.isDark
+        ? const Color(0xFF2A2D42) : const Color(0xFFF0F1F5);
+    final assignee = _inc['assignedTo']?.toString().trim() ?? '';
+    final assignedName = _inc['assignedToName']?.toString().trim() ?? '';
+    final assignedAt = _inc['assignedAt']?.toString().trim() ?? '';
+
+    String when = '';
+    if (assignedAt.isNotEmpty) {
+      final d = DateTime.tryParse(assignedAt);
+      if (d != null) when = DateFormat('dd MMM yyyy').format(d);
+    }
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(9),
+      onTap: _saving ? null : _assignInvestigator,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 12),
+        decoration: BoxDecoration(
+          color: fieldBg,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: sl.border.withOpacity(0.6)),
+        ),
+        child: Row(children: [
+          Icon(assignee.isEmpty
+                  ? Icons.person_search_rounded
+                  : Icons.person_rounded,
+              size: 16, color: assignee.isEmpty ? sl.text4 : AppColors.accent),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  assignee.isEmpty
+                      ? 'Nobody assigned — tap to choose'
+                      : (assignedName.isEmpty ? assignee : assignedName),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: assignee.isEmpty ? sl.text4 : sl.text1,
+                      fontSize: 12.5,
+                      fontWeight: assignee.isEmpty
+                          ? FontWeight.w400
+                          : FontWeight.w600),
+                ),
+                if (assignee.isNotEmpty)
+                  Text(
+                    when.isEmpty
+                        ? '@$assignee'
+                        : '@$assignee • assigned $when',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: sl.text4, fontSize: 10.5),
+                  ),
+              ],
+            ),
+          ),
+          // "Who is this?" is a separate question from "hand it to someone
+          // else", and the answer (unit, department, mobile, retirement date)
+          // is what a supervisor needs before chasing a stalled case.
+          if (assignee.isNotEmpty)
+            IconButton(
+              tooltip: 'View profile',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              padding: EdgeInsets.zero,
+              icon: Icon(Icons.badge_outlined, size: 16, color: sl.text3),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => EmployeeProfileScreen(username: assignee))),
+            ),
+          Text(assignee.isEmpty ? 'Assign' : 'Transfer',
+              style: TextStyle(
+                  color: AppColors.accent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800)),
+        ]),
+      ),
+    );
+  }
+
+  /// Assign or hand over the investigation, saved immediately.
+  ///
+  /// Not folded into "Save progress": a handover is a fact about who is
+  /// responsible right now, and leaving it staged behind another button meant a
+  /// reassignment could be silently lost when the screen was closed.
+  Future<void> _assignInvestigator() async {
+    if (_saving) return;
+    if (!await _assertCanAct()) return;
+    if (!mounted) return;
+
+    final current = _inc['assignedTo']?.toString().trim() ?? '';
+    final picked = await showUserPicker(
+      context,
+      title: current.isEmpty ? 'Assign investigator' : 'Transfer investigation',
+      currentUsername: current.isEmpty ? null : current,
+    );
+    if (picked == null || !mounted) return;
+
+    final previous = current;
+    setState(() => _saving = true);
+
+    if (picked.cleared) {
+      _inc.remove('assignedTo');
+      _inc.remove('assignedToName');
+      _inc.remove('assignedAt');
+    } else {
+      if (picked.username.isEmpty) {
+        setState(() => _saving = false);
+        _snack('That employee has no username on file.', AppColors.red);
+        return;
+      }
+      _inc['assignedTo'] = picked.username;
+      // Stored alongside the username so the card can show a person's name
+      // without a lookup — the detail screen must render offline, and a bare
+      // P.no tells a supervisor nothing.
+      _inc['assignedToName'] = picked.displayName;
+      _inc['assignedAt'] = DateTime.now().toIso8601String();
+    }
+
+    // Keep whatever is typed in the form: saving the assignment must not discard
+    // a corrective action the user has half written.
+    _applyFormFields();
+    await LocalDB.saveIncident(_inc);
+    SyncService.pushIncident(_inc).catchError((_) => false);
+
+    final actor = (await LocalDB.getCurrentUser())?['username']?.toString() ??
+        'unknown';
+    await AdminAudit.log(
+      action: AdminAudit.actIncAssign,
+      actor: actor,
+      target: _inc['id']?.toString(),
+      targetName: _inc['title']?.toString(),
+      // `from` makes this a handover record rather than just a current state —
+      // "who was it taken off" is the first question asked when a case stalls.
+      meta: {
+        'from': previous.isEmpty ? '(unassigned)' : previous,
+        'to': picked.cleared ? '(unassigned)' : picked.username,
+      },
+    );
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+    widget.onStatusChanged?.call();
+    _snack(
+      picked.cleared
+          ? 'Investigation unassigned'
+          : 'Assigned to ${picked.displayName}',
+      AppColors.accent,
+    );
+  }
 
   /// Target completion date. A tappable field rather than a text box so the
   /// stored value is always a valid, uniformly formatted date.
@@ -1016,7 +1181,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final rows = <List<String>>[
       ['Corrective Action', _inc['correctiveAction']?.toString() ?? ''],
       ['Target Date',       _inc['targetDate']?.toString() ?? ''],
-      ['Assigned To',       _inc['assignedTo']?.toString() ?? ''],
+      ['Assigned To',       _inc['assignedToName']?.toString().trim().isNotEmpty
+                               == true
+                               ? '${_inc['assignedToName']} '
+                                   '(@${_inc['assignedTo'] ?? ''})'
+                               : _inc['assignedTo']?.toString() ?? ''],
     ].where((r) => r[1].isNotEmpty).toList();
 
     return Container(
