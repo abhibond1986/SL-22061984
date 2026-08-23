@@ -139,6 +139,10 @@ class _AIScanTabState extends State<AIScanTab> {
   /// previously left the headline score untouched, which made the correction look
   /// as though it had been ignored.
   ///
+  /// The rule is [AdminMasterData.combinedScore]: the worst finding sets the
+  /// base, each further hazard adds a few points, and the top-up is capped so it
+  /// cannot cross the next severity level.
+  ///
   /// The model's own number survives only as a last resort, for a report with no
   /// hazards and no overall risk label to score.
   int get _riskScore {
@@ -157,7 +161,7 @@ class _AIScanTabState extends State<AIScanTab> {
       final raw = r['riskScore'];
       return raw is int ? raw : int.tryParse(raw?.toString() ?? '') ?? 0;
     }
-    return AdminMasterData.worstScore(_severityScores, labels);
+    return AdminMasterData.combinedScore(_severityScores, labels);
   }
 
   @override

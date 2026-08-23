@@ -5790,10 +5790,14 @@ class _AdminScreenState extends State<AdminScreen>
                 size: 16, color: AppColors.accent),
             const SizedBox(width: 8),
             Expanded(child: Text(
-              'Score out of 100 for each severity level. A report is scored by '
-              'its worst finding, so a scan whose most serious hazard is HIGH '
-              'shows exactly the number you set against HIGH. New reports only '
-              '— reports already filed keep the score they were filed with.',
+              'Score out of 100 for each severity level. A report starts from '
+              'its worst finding — a scan whose most serious hazard is HIGH '
+              'starts at the number you set against HIGH — then adds '
+              '${AdminMasterData.kExtraHazardPoints} points for each further '
+              'hazard found. That top-up is capped so extra findings can never '
+              'push a report past the next level up: several LOW hazards will '
+              'never outscore one CRITICAL. New reports only — reports already '
+              'filed keep the score they were filed with.',
               style: TextStyle(color: sl.text2, fontSize: 10.5, height: 1.4))),
           ]),
         ),

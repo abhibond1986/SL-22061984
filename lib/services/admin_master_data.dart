@@ -621,6 +621,10 @@ class AdminMasterData {
               {'severityScores': scores});
         }
         await prefs.setString(_kSeverityScores, jsonEncode(scores));
+        // This pull runs on EVERY launch and overwrites whatever the admin saved
+        // locally. If an admin edit did not reach the backend, this is the line
+        // that quietly undoes it — so it must be visible in the console.
+        print('$_kScoreTag backend pull overwrote the local scale with $scores');
         updated = true;
       }
 
@@ -871,10 +875,21 @@ class AdminMasterData {
     return true;
   }
 
+  /// Diagnostic tag for the console. The score that reaches a scan card comes
+  /// through four hands — the stored pref, the backend pull, the legacy rebase,
+  /// and the per-label lookup — and when the number on screen matches none of
+  /// the numbers in the admin panel, the only way to tell WHICH hand changed it
+  /// is to see the map at the moment it is read. Cheap, and worth keeping.
+  static const String _kScoreTag = '[SeverityScores]';
+
   static Future<Map<String, int>> getSeverityScores() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kSeverityScores);
-    if (raw == null) return Map<String, int>.from(defaultSeverityScores);
+    if (raw == null) {
+      print('$_kScoreTag no stored scale — using defaults '
+          '$defaultSeverityScores');
+      return Map<String, int>.from(defaultSeverityScores);
+    }
     try {
       final map = (jsonDecode(raw) as Map)
           .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
@@ -892,12 +907,45 @@ class AdminMasterData {
         // inside a getter is unusual, but the alternative is a one-off wrong
         // number on a safety report.
         _bump();
+        print('$_kScoreTag stored scale was the legacy 5-25 one — rebased to '
+            '$rebased');
         return rebased;
       }
-      return map;
-    } catch (_) {
+      print('$_kScoreTag loaded $map '
+          '(rebase flag=${prefs.getBool(_kScoresRebased) ?? false})');
+      return _withCanonicalLevels(map);
+    } catch (e) {
+      print('$_kScoreTag stored scale could not be parsed ($e) — using '
+          'defaults. Raw value was: $raw');
       return Map<String, int>.from(defaultSeverityScores);
     }
+  }
+
+  /// Guarantees the four canonical levels are present, without touching any
+  /// value the admin actually set.
+  ///
+  /// A stored scale can arrive with a level missing — a partial row in the
+  /// backend, a hand-edited record, a save made while the level list was being
+  /// changed. When that happened the lookup for the missing level fell through
+  /// to MEDIUM, so a CRITICAL hazard was scored as a moderate one. That is a
+  /// safety defect, not a cosmetic one: it under-reports the worst finding on
+  /// the report, and it does so silently. Filling the gap from the defaults
+  /// keeps CRITICAL above HIGH above MEDIUM above LOW no matter how damaged the
+  /// stored record is, and the gap is logged so the underlying cause is still
+  /// visible rather than papered over.
+  ///
+  /// Extra levels the admin invented are preserved untouched — this only adds
+  /// what is missing.
+  static Map<String, int> _withCanonicalLevels(Map<String, int> stored) {
+    final missing = defaultSeverityScores.keys
+        .where((k) => !stored.containsKey(k))
+        .toList(growable: false);
+    if (missing.isEmpty) return stored;
+    final filled = Map<String, int>.from(defaultSeverityScores)..addAll(stored);
+    print('$_kScoreTag stored scale was MISSING $missing — filled from '
+        'defaults, giving $filled. A missing level would otherwise be scored as '
+        'MEDIUM, which under-rates the worst finding on the report.');
+    return filled;
   }
 
   static Future<void> saveSeverityScores(Map<String, int> scores) async {
@@ -926,8 +974,20 @@ class AdminMasterData {
   /// and scoring a real hazard 0 because of a rename would file it as harmless.
   static int scoreFromMap(Map<String, int> scores, String severity) {
     final key = severity.trim().toUpperCase();
-    return scores[key] ?? scores['MEDIUM'] ?? defaultSeverityScores['MEDIUM']!;
+    final exact = scores[key];
+    if (exact != null) return exact;
+
+    // A miss is the single most likely cause of "the number on the scan matches
+    // nothing in the admin panel", so say so — once per label, because this runs
+    // inside build() and a per-frame print would bury the rest of the console.
+    if (_warnedKeys.add(key)) {
+      print('$_kScoreTag NO ENTRY for "$key" — the stored scale has keys '
+          '${scores.keys.toList()}. Falling back to MEDIUM.');
+    }
+    return scores['MEDIUM'] ?? defaultSeverityScores['MEDIUM']!;
   }
+
+  static final Set<String> _warnedKeys = <String>{};
 
   /// Overall score for a set of severity labels: the worst level wins.
   ///
@@ -945,6 +1005,51 @@ class AdminMasterData {
       if (v > best) best = v;
     }
     return best < 0 ? 0 : best;
+  }
+
+  /// Points added for each hazard beyond the most serious one.
+  ///
+  /// Small on purpose. See [combinedScore] for why it cannot simply be tuned up.
+  static const int kExtraHazardPoints = 4;
+
+  /// Overall score for a report: the worst finding, escalated for the others.
+  ///
+  /// [worstScore] alone gave the same number to a photo with one HIGH hazard and
+  /// a photo with one HIGH plus four more — which reads as though the extra
+  /// findings did not count. This adds [kExtraHazardPoints] per additional
+  /// hazard on top of the worst one.
+  ///
+  /// The escalation is CAPPED so that it can never carry a report past the next
+  /// severity level up. That guarantee is the whole design: a stack of LOW
+  /// findings must never outscore a single CRITICAL one, because the moment it
+  /// can, the number stops meaning "how bad is the worst thing here" and a wall
+  /// of trivia can bury a genuine danger. So the ceiling is taken from the
+  /// admin's own scale at runtime — the smallest score above the base — rather
+  /// than from a hardcoded assumption about what the levels are worth. When the
+  /// worst finding is already at the top of the scale the remaining headroom to
+  /// 100 is used instead.
+  ///
+  /// Consequences worth knowing before changing this: the admin's number is now
+  /// the FLOOR for a severity, not the exact value, and several findings at the
+  /// top level will saturate near 100. Both are stated in the admin help text.
+  static int combinedScore(Map<String, int> scores, Iterable<String> severities) {
+    final labels =
+        severities.where((s) => s.trim().isNotEmpty).toList(growable: false);
+    if (labels.isEmpty) return 0;
+
+    final base = worstScore(scores, labels);
+    final extras = labels.length - 1;
+    if (extras <= 0) return base;
+
+    // Lowest score in the scale that still sits above the base. 101 means the
+    // base is already the highest level the admin defined.
+    int nextLevel = 101;
+    for (final v in scores.values) {
+      if (v > base && v < nextLevel) nextLevel = v;
+    }
+    final headroom = (nextLevel - 1 - base).clamp(0, 100);
+    final bump = (extras * kExtraHazardPoints).clamp(0, headroom);
+    return (base + bump).clamp(0, 100);
   }
 
   // ── RESET to defaults ────────────────────────────────────────────
