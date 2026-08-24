@@ -84,19 +84,43 @@ class MyAssignmentsCard extends StatelessWidget {
       // of poking out of the corners.
       child: ClipRRect(
         borderRadius: BorderRadius.circular(15),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        // Stack, NOT a Row with CrossAxisAlignment.stretch. This card lives in a
+        // SingleChildScrollView, so its height constraint is unbounded, and
+        // `stretch` hands a child a tight height equal to maxHeight — infinity —
+        // which throws during layout. That took out every widget below the hero
+        // on the Home screen, not just this card, and in a release build the
+        // failure is a silent blank area with nothing in the console.
+        //
+        // A Stack sizes itself to its non-positioned child (the content Column),
+        // and the rail is then positioned against that measured height. No
+        // intrinsic pass, no unbounded constraint, same result.
+        child: Stack(
+          // passthrough, so the content Column inherits the card's tight WIDTH
+          // instead of a loose one and the card fills the row. The height stays
+          // unbounded, which is what lets the Column size to its content.
+          fit: StackFit.passthrough,
           children: [
-            Container(width: 4, color: rail),
-            Expanded(
-              child: Column(children: [
+            Padding(
+              // Clear of the rail.
+              padding: const EdgeInsets.only(left: 4),
+              child: Column(
+                  // Safe here, unlike on a Row: the cross axis is horizontal and
+                  // the width IS bounded. It makes the row dividers run the full
+                  // width of the card instead of only as wide as their text.
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
                 _header(sl, rail, jobs.length, overdue, news.length),
-                for (var i = 0; i < jobs.length; i++)
-                  _row(sl, jobs[i], divider: true),
-                for (var i = 0; i < news.length; i++)
-                  _row(sl, news[i], divider: true),
+                for (final j in jobs) _row(sl, j, divider: true),
+                for (final n in news) _row(sl, n, divider: true),
                 const SizedBox(height: 4),
               ]),
+            ),
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 4,
+              child: ColoredBox(color: rail),
             ),
           ],
         ),
