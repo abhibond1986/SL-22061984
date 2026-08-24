@@ -14,10 +14,7 @@ import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
 import '../services/realtime_sync.dart';
-import '../services/assignment_inbox.dart';
-import '../widgets/my_assignments_card.dart';
 import 'admin_screen.dart';
-import 'incident_detail_screen.dart';
 
 class DashboardTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -48,19 +45,9 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _loading    = true;
   bool _refreshing = false;
 
-  /// Investigations handed to the signed-in user, plus progress on reports they
-  /// filed. Derived in [_loadLocal] — see AssignmentInbox for why none of this
-  /// is stored.
-  List<AssignmentItem> _assignments = [];
-
-  /// Which of those the user had not seen before this session started.
-  ///
-  /// Resolved ONCE per session and then left alone. If it were recomputed on
-  /// every load, the realtime listener would clear the NEW flag within a second
-  /// of it appearing — the badge would technically be correct and practically
-  /// invisible.
-  Set<String> _unseenAssignments = {};
-  bool _unseenResolved = false;
+  // NOTE: the "assigned to you" card is NOT here. This widget is not wired into
+  // any navigator — the live Home screen is HomeTab in home_tab.dart — so the
+  // assignment inbox lives there, in one place only.
 
   // SINGLE SOURCE OF TRUTH: always AdminMasterData. Seeded from the shared
   // const (never a re-typed copy) purely so the first frame has something to
@@ -154,31 +141,16 @@ class _DashboardTabState extends State<DashboardTab> {
 
   Future<void> _loadLocal() async {
     final scope = await PlantScope.forUser(widget.user);
-    final allInc = await LocalDB.getIncidents();
     // Filter at source, not in the widgets: a locked user's _incidents list must
     // never contain another plant's records, or any getter added later silently
     // reintroduces the leak.
-    final inc   = await scope.filterIncidents(allInc);
+    final inc   = await scope.filterIncidents(await LocalDB.getIncidents());
     final users = _usersInScope(await LocalDB.getAllUsers(), scope);
-
-    // Built from the UNSCOPED list on purpose, and this is the only place that
-    // does so. Both filters inside build() are "this record is about me": a case
-    // assigned to me, or a report I filed. A job you have been given but cannot
-    // open is not a job, and a plant-locked user assigned a case from a
-    // neighbouring unit would otherwise be accountable for work that is
-    // invisible to them. It widens nothing else — an incident that is neither
-    // assigned to you nor reported by you can never appear here.
-    final assignments = AssignmentInbox.build(
-      user: widget.user,
-      incidents: allInc,
-      openStatuses: _openStatuses,
-    );
 
     if (!mounted) return;
     setState(() {
       _scope        = scope;
       _incidents    = inc;
-      _assignments  = assignments;
       _allUsers     = users.isNotEmpty ? users : _fallbackUsers();
       _selectedUser ??= _findUser(widget.user?['username']?.toString() ?? '');
       _selectedUser ??= _allUsers.isNotEmpty ? _allUsers.first : widget.user;
@@ -189,35 +161,6 @@ class _DashboardTabState extends State<DashboardTab> {
       }
       _loading = false;
     });
-
-    await _resolveUnseenAssignments();
-  }
-
-  /// Work out which assignments are new, once, then remember that they've been
-  /// shown so the next session doesn't flag them again.
-  ///
-  /// Marked seen immediately rather than on tap: the point of NEW is "this
-  /// arrived since you last looked", and the user has now looked. Marking on tap
-  /// would keep flagging an assignment the user has consciously decided to deal
-  /// with later.
-  Future<void> _resolveUnseenAssignments() async {
-    if (_unseenResolved || _assignments.isEmpty) return;
-    _unseenResolved = true;
-    final fresh = await AssignmentInbox.unseen(widget.user, _assignments);
-    await AssignmentInbox.markSeen(widget.user, _assignments);
-    if (!mounted || fresh.isEmpty) return;
-    setState(() => _unseenAssignments = fresh);
-  }
-
-  /// Open an assigned case, then reload so a status change made in there is
-  /// reflected on the card the user comes back to.
-  Future<void> _openAssignment(Map<String, dynamic> incident) async {
-    await Navigator.push(
-        context,
-        MaterialPageRoute(
-            builder: (_) => IncidentDetailScreen(incident: incident)));
-    if (!mounted) return;
-    await _loadLocal();
   }
 
   /// Users a locked plant user may inspect: their own plant's, plus always
@@ -422,14 +365,6 @@ class _DashboardTabState extends State<DashboardTab> {
                     sliver: SliverList(
                       delegate: SliverChildListDelegate([
                         _scopeBanner(sl),
-                        // Above everything: this is the one thing on the
-                        // dashboard that is addressed to the person reading it.
-                        // Renders nothing when there is nothing assigned.
-                        MyAssignmentsCard(
-                          items: _assignments,
-                          unseen: _unseenAssignments,
-                          onOpen: _openAssignment,
-                        ),
                         _buildUserSwitcher(sl),
                         const SizedBox(height: 16),
                         _buildPlantSummary(sl),

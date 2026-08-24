@@ -19,11 +19,14 @@ import '../services/plant_scope.dart';
 import '../services/sync_service.dart';
 import '../services/i18n.dart';
 import '../services/realtime_sync.dart';
+import '../services/assignment_inbox.dart';
 import 'reports_tab.dart';
 import 'admin_screen.dart';
 import 'doc_qa_screen.dart';
+import 'incident_detail_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
+import '../widgets/my_assignments_card.dart';
 
 class HomeTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -64,6 +67,17 @@ class _HomeTabState extends State<HomeTab> {
   /// "home" numbers were really SAIL-wide.
   PlantScope _scope = const PlantScope(plant: '', seesAllPlants: false);
 
+  /// Investigations handed to this user, plus progress on reports they filed.
+  /// Derived in [_loadLocalOnly] — see AssignmentInbox for why none of this is
+  /// stored anywhere.
+  List<AssignmentItem> _assignments = [];
+
+  /// Seen-keys that are new to this user. Resolved ONCE per session and then
+  /// left alone: if it were recomputed on every load, the realtime listener
+  /// would clear the NEW flag within a second of it appearing.
+  Set<String> _unseenAssignments = {};
+  bool _unseenResolved = false;
+
   @override
   void initState() {
     super.initState();
@@ -99,21 +113,66 @@ class _HomeTabState extends State<HomeTab> {
     final scope = await PlantScope.forUser();
     // Scope at the source so no stat, chart or activity row below can reach
     // another plant's records.
-    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
+    final allInc = await LocalDB.getIncidents();
+    final inc = await scope.filterIncidents(allInc);
     final plants = await AdminMasterData.getPlants();
     final openStatuses = await AdminMasterData.getOpenStatuses();
     final statuses = await AdminMasterData.getStatuses();
     final closed = await AdminMasterData.lastStatus();
+
+    // Built from the UNSCOPED list on purpose, and this is the only thing on
+    // this screen that is. Both filters inside build() are "this record is about
+    // me": a case assigned to me, or a report I filed. A job you have been given
+    // but cannot open is not a job, and a plant-locked user assigned a case from
+    // a neighbouring unit would otherwise be accountable for work that is
+    // invisible to them. It widens nothing else — an incident that is neither
+    // assigned to you nor reported by you can never appear here.
+    final assignments = AssignmentInbox.build(
+      user: widget.user,
+      incidents: allInc,
+      openStatuses: openStatuses,
+    );
+
     if (!mounted || gen != _loadGen) return;
     setState(() {
       _scope = scope;
       _incidents = inc;
+      _assignments = assignments;
       _plantDefs = plants;
       _openStatuses = openStatuses;
       _statuses = statuses;
       _closedStatus = closed.toUpperCase();
       _loading = false;
     });
+
+    await _resolveUnseenAssignments();
+  }
+
+  /// Work out which assignments are new, once, then remember that they have been
+  /// shown so the next session does not flag them again.
+  ///
+  /// Marked seen immediately rather than on tap: the point of NEW is "this
+  /// arrived since you last looked", and the user has now looked. Marking on tap
+  /// would keep flagging an assignment the user has consciously decided to deal
+  /// with later.
+  Future<void> _resolveUnseenAssignments() async {
+    if (_unseenResolved || _assignments.isEmpty) return;
+    _unseenResolved = true;
+    final fresh = await AssignmentInbox.unseen(widget.user, _assignments);
+    await AssignmentInbox.markSeen(widget.user, _assignments);
+    if (!mounted || fresh.isEmpty) return;
+    setState(() => _unseenAssignments = fresh);
+  }
+
+  /// Open an assigned case, then reload so a status change made in there is
+  /// reflected on the card the user comes back to.
+  Future<void> _openAssignment(Map<String, dynamic> incident) async {
+    await Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => IncidentDetailScreen(incident: incident)));
+    if (!mounted) return;
+    await _loadLocalOnly();
   }
 
   /// See [_loadLocalOnly] — sequence number for in-flight local reloads.
@@ -327,6 +386,19 @@ class _HomeTabState extends State<HomeTab> {
               child: Column(children: [
                 _heroSection(sl, firstName),
                 const SizedBox(height: 16),
+                // Above the stats: this is the one thing on the home screen that
+                // is addressed to the person reading it. Renders nothing at all
+                // when they have no assignments, so it costs non-investigators
+                // no vertical space. The padding matches _statsGrid so the card
+                // lines up with the tiles below it.
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: MyAssignmentsCard(
+                    items: _assignments,
+                    unseen: _unseenAssignments,
+                    onOpen: _openAssignment,
+                  ),
+                ),
                 _statsGrid(sl),
                 const SizedBox(height: 18),
                 _safetyScoreCard(sl),
