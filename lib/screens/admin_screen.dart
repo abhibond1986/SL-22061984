@@ -38,6 +38,7 @@ import '../services/auth_service.dart';
 import '../services/admin_audit.dart';
 import '../services/admin_master_data.dart';
 import '../services/admin_alerts.dart';
+import '../services/assign_scope.dart';
 import '../services/kb_seed_data.dart';
 import '../services/knowledge_service.dart';
 import '../services/groq_service.dart';
@@ -4361,12 +4362,18 @@ class _AdminScreenState extends State<AdminScreen>
   /// the quarterly import most of the workforce simply was not in it.
   Future<void> _wfAssign(Map<String, dynamic> inc) async {
     final current = inc['assignedTo']?.toString().trim() ?? '';
+    // Eligibility belongs to the CASE, not to the admin opening it — see
+    // AssignScope. This module is exactly where it matters: an admin here is
+    // working a mixed queue of every plant's cases at once.
+    final scope = await AssignScope.forIncident(inc);
+    if (!mounted) return;
     final result = await showUserPicker(
       context,
       title: current.isEmpty ? 'Assign investigator' : 'Transfer investigation',
       currentUsername: current.isEmpty ? null : current,
+      scope: scope,
     );
-    if (result == null) return;
+    if (result == null || !mounted) return;
 
     final previous = current;
     if (result.cleared) {

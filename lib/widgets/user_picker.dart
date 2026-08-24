@@ -21,6 +21,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../main.dart';
+import '../services/admin_master_data.dart';
+import '../services/assign_scope.dart';
 import '../services/local_db.dart';
 import '../services/supabase_config.dart';
 import '../services/supabase_service.dart';
@@ -47,11 +49,16 @@ class UserPickResult {
 }
 
 /// Show the picker. Returns null if the sheet was dismissed.
+///
+/// [scope] restricts the list to one plant's personnel — see [AssignScope] for
+/// the rule and why it is enforced here, at the point of choice, rather than
+/// validated afterwards. Pass null (or an unrestricted scope) to offer everyone.
 Future<UserPickResult?> showUserPicker(
   BuildContext context, {
   String title = 'Choose an employee',
   String? currentUsername,
   bool allowClear = true,
+  AssignScope? scope,
 }) {
   return showModalBottomSheet<UserPickResult>(
     context: context,
@@ -61,6 +68,7 @@ Future<UserPickResult?> showUserPicker(
       title: title,
       currentUsername: currentUsername,
       allowClear: allowClear,
+      scope: scope ?? const AssignScope.unrestricted(),
     ),
   );
 }
@@ -70,11 +78,13 @@ class _UserPickerSheet extends StatefulWidget {
     required this.title,
     required this.currentUsername,
     required this.allowClear,
+    required this.scope,
   });
 
   final String title;
   final String? currentUsername;
   final bool allowClear;
+  final AssignScope scope;
 
   @override
   State<_UserPickerSheet> createState() => _UserPickerSheetState();
@@ -90,11 +100,26 @@ class _UserPickerSheetState extends State<_UserPickerSheet> {
   String _note = '';
   int _requestSeq = 0;
 
+  /// Active plant master, needed to decide each candidate's plant membership.
+  /// Loaded once; an empty list means every candidate is let through, which is
+  /// the same fail-open stance AssignScope takes when it cannot resolve a plant.
+  List<Map<String, String>> _plants = const [];
+
   @override
   void initState() {
     super.initState();
     // Something in the list from the outset: an empty sheet reads as broken.
-    _search('');
+    _loadPlantsThenSearch();
+  }
+
+  Future<void> _loadPlantsThenSearch() async {
+    if (widget.scope.restricted) {
+      try {
+        _plants = await AdminMasterData.getPlants();
+      } catch (_) {}
+      if (!mounted) return;
+    }
+    await _search('');
   }
 
   @override
@@ -123,8 +148,17 @@ class _UserPickerSheetState extends State<_UserPickerSheet> {
     var localOnly = false;
     var note = '';
 
+    final restricted = widget.scope.restricted;
+
     if (SupabaseConfig.enabled) {
-      found = await SupabaseService.searchUsers(q, limit: 40);
+      // A larger page when restricted: the plant filter is applied by the server
+      // only loosely, and this list is then cut down again on the client, so
+      // asking for 40 would leave far fewer than 40 on screen.
+      found = await SupabaseService.searchUsers(
+        q,
+        limit: restricted ? 80 : 40,
+        plantTerms: restricted ? widget.scope.terms : null,
+      );
       if (found.isEmpty && SupabaseService.usersLastError.isNotEmpty) {
         localOnly = true;
         note = 'Showing only people saved on this device — the employee list '
@@ -139,6 +173,16 @@ class _UserPickerSheetState extends State<_UserPickerSheet> {
       if (note.isEmpty) {
         note = 'Showing people saved on this device.';
       }
+    }
+
+    // The client is the authority on plant membership; the server-side ILIKE was
+    // only a narrowing pass and lets through neighbouring units whose names share
+    // a code fragment. Applied to the local fallback too, so the rule does not
+    // quietly lapse when the connection drops.
+    if (restricted) {
+      found = found
+          .where((u) => widget.scope.allows(u, _plants))
+          .toList();
     }
 
     // A slow earlier query must not overwrite a newer one's results.
@@ -222,6 +266,35 @@ class _UserPickerSheetState extends State<_UserPickerSheet> {
                 ),
             ]),
           ),
+          // The restriction is stated before the search box, not after an empty
+          // result. Somebody typing a colleague's name and getting nothing back
+          // needs to know it is a rule and not a fault.
+          if (widget.scope.restricted)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: sl.accentText.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border:
+                      Border.all(color: sl.accentText.withOpacity(0.25)),
+                ),
+                child: Row(children: [
+                  Icon(Icons.apartment_rounded,
+                      size: 14, color: sl.accentText),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(widget.scope.note,
+                        style: TextStyle(
+                            color: sl.accentText,
+                            fontSize: 11.5,
+                            height: 1.35,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: TextField(
@@ -278,8 +351,13 @@ class _UserPickerSheetState extends State<_UserPickerSheet> {
                       child: Text(
                         _ctrl.text.trim().isEmpty
                             ? 'Start typing a name or P.no.'
-                            : 'Nobody matches "${_ctrl.text.trim()}". Retired '
-                                'and disabled accounts are not shown.',
+                            : widget.scope.restricted
+                                ? 'Nobody in ${widget.scope.label} matches '
+                                    '"${_ctrl.text.trim()}". This case can only '
+                                    'be assigned within its own plant. Retired '
+                                    'and disabled accounts are not shown.'
+                                : 'Nobody matches "${_ctrl.text.trim()}". Retired '
+                                    'and disabled accounts are not shown.',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: sl.text4, fontSize: 13),
                       ),

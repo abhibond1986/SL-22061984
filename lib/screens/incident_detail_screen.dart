@@ -20,6 +20,7 @@ import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
 import '../services/admin_audit.dart';
+import '../services/assign_scope.dart';
 import '../widgets/user_picker.dart';
 import 'employee_profile_screen.dart';
 
@@ -1055,10 +1056,16 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     if (!mounted) return;
 
     final current = _inc['assignedTo']?.toString().trim() ?? '';
+    // Who is eligible is a property of the CASE, not of whoever opened it — see
+    // AssignScope. Resolved before the sheet opens so the restriction is on
+    // screen from the first frame rather than appearing a moment later.
+    final scope = await AssignScope.forIncident(_inc);
+    if (!mounted) return;
     final picked = await showUserPicker(
       context,
       title: current.isEmpty ? 'Assign investigator' : 'Transfer investigation',
       currentUsername: current.isEmpty ? null : current,
+      scope: scope,
     );
     if (picked == null || !mounted) return;
 

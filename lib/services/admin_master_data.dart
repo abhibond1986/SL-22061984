@@ -288,6 +288,68 @@ class AdminMasterData {
     return cleaned; // no confident match — keep the cleaned original
   }
 
+  /// Which entry of the ACTIVE plant list a raw plant string belongs to, or null
+  /// when it cannot be resolved confidently.
+  ///
+  /// Deliberately NOT implemented as "canonicalPlantFrom(raw) == plantLabel(p)".
+  /// [canonicalPlantFrom] checks [plantNameMappings] first and returns the bare
+  /// mapped name, so 'SSO Ranchi' canonicalises to 'SSO Ranchi' while the code
+  /// 'SSO' canonicalises to 'SSO — SSO Ranchi' — two different strings for one
+  /// plant. Comparing labels would therefore fail for exactly the unit that
+  /// matters most here. This resolves to the ENTRY instead, so callers can
+  /// compare plants by code and never by spelling.
+  ///
+  /// Pass order matters: the exact name check runs before the code-token check
+  /// so 'BSP Mines' resolves to BSP Mines and not to Bhilai Steel Plant.
+  static Map<String, String>? plantEntryFor(
+      String raw, List<Map<String, String>> plants) {
+    final cleaned = raw
+        .replaceAll(RegExp(r'[‒–—―-]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .toUpperCase();
+    if (cleaned.isEmpty) return null;
+
+    final words = cleaned
+        .replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ')
+        .split(' ')
+        .where((w) => w.isNotEmpty)
+        .toSet();
+
+    for (final p in plants) {
+      final code = (p['code'] ?? '').toUpperCase();
+      final name = (p['name'] ?? '').toUpperCase();
+      if (cleaned == code || cleaned == name) return p;
+    }
+    for (final p in plants) {
+      final code = (p['code'] ?? '').toUpperCase();
+      if (code.isNotEmpty && code != 'OTHER' && words.contains(code)) return p;
+    }
+    for (final p in plants) {
+      final name = (p['name'] ?? '').toUpperCase();
+      if (name.isEmpty || name == 'OTHERS') continue;
+      final nameWords = name
+          .replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ')
+          .split(' ')
+          .where((w) => w.length > 2)
+          .toSet();
+      if (nameWords.isNotEmpty && nameWords.every(words.contains)) return p;
+    }
+    return null;
+  }
+
+  /// Strings that identify a plant inside the `app_users.plant` and
+  /// `app_users.unit` columns, for use as ILIKE terms. Both the code and the
+  /// full name, because the roster has been written both ways over time.
+  static List<String> plantMatchTerms(Map<String, String> p) {
+    final out = <String>[];
+    final code = (p['code'] ?? '').trim();
+    final name = (p['name'] ?? '').trim();
+    if (code.isNotEmpty && code.toUpperCase() != 'OTHER') out.add(code);
+    if (name.isNotEmpty && name.toUpperCase() != 'OTHERS') out.add(name);
+    return out;
+  }
+
   /// The ONE canonical display label for a plant entry: "CODE — Name"
   /// (or just the name when it already carries its own separator, e.g.
   /// "SSO Ranchi", or when there is no useful code).

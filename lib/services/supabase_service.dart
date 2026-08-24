@@ -708,10 +708,29 @@ class SupabaseService {
   ///
   /// [activeOnly] defaults to true: you should not be able to hand an
   /// investigation to someone who has retired or been disabled.
+  /// [plantTerms] narrows the result to people who look like they belong to one
+  /// plant. Each term is matched with ILIKE against both `plant` and `unit`, and
+  /// the terms are OR-ed together, so passing the plant's code and its full name
+  /// catches rows stored either way ('DSP', 'Durgapur Steel Plant',
+  /// 'DSP — Durgapur Steel Plant').
+  ///
+  /// This is a NARROWING filter, not the authority. It is deliberately loose:
+  /// ILIKE '%BSP%' also matches 'BSP Mines', which is a different unit. The
+  /// caller must still decide membership with AssignScope.allows, which resolves
+  /// each candidate to a plant ENTRY via AdminMasterData.plantEntryFor and
+  /// compares codes. Doing it the other way round — an exact
+  /// `eq` on the plant column — would return nothing at all whenever the stored
+  /// spelling differs from the canonical one, and an empty picker reads as a
+  /// broken feature rather than as a strict rule.
+  ///
+  /// Two separate `.or()` calls are intentional: PostgREST combines repeated
+  /// `or=` parameters with AND, so the text search and the plant filter are both
+  /// required rather than either-or.
   static Future<List<Map<String, dynamic>>> searchUsers(
     String query, {
     int limit = 30,
     bool activeOnly = true,
+    List<String>? plantTerms,
   }) async {
     if (!isReady) {
       usersLastError = _notReady;
@@ -721,6 +740,18 @@ class SupabaseService {
     try {
       var sel = _db.from('app_users').select(
           'username,name,designation,plant,department,pno,unit,grade,email,mobile,status,is_admin');
+      if (plantTerms != null && plantTerms.isNotEmpty) {
+        // Same escaping rule as the name search below: a comma would split the
+        // expression into extra conditions and a parenthesis would unbalance it.
+        final parts = <String>[];
+        for (final t in plantTerms) {
+          final safe = t.trim().replaceAll(RegExp(r'[,()*]'), ' ').trim();
+          if (safe.isEmpty) continue;
+          parts.add('plant.ilike.%$safe%');
+          parts.add('unit.ilike.%$safe%');
+        }
+        if (parts.isNotEmpty) sel = sel.or(parts.join(','));
+      }
       if (q.isNotEmpty) {
         // Escape the PostgREST `or` filter separators. A comma would split the
         // expression into extra conditions and a parenthesis would unbalance it,
