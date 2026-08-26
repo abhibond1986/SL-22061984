@@ -374,6 +374,11 @@ These rules OVERRIDE all other instructions:
    - 65-84: Good evidence, minor interpretation
    - 45-64: Partial evidence, moderate assumption
    - Below 45: Poor image quality or uncertain identification
+7a. EVERY hazard carries its OWN "confidence", scored on the evidence for THAT
+   hazard alone. Do not repeat one number across all hazards. The top-level
+   "confidence" is about the assessment as a whole, which is a different thing.
+   An honest low score is useful and is never penalised — a safety officer reads
+   every finding, and a padded score costs them time on your guesses.
 8. If the image shows a SAFE scene with good practices, SAY SO — report LOW risk.
 9. Each "description" MUST start with "Visible: [specific thing seen]" as proof.
 10. WRONG regulation = worse than no regulation. When unsure, use the broader category.
@@ -798,6 +803,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       "regulation": "MUST be from verified table above e.g. FA 1948 S37",
       "correctiveAction": "starts with action verb; specific measurable steps relevant to this section",
       "type": "{{OBS_TYPES}}",
+      "confidence": 0-100 (YOUR certainty about THIS hazard specifically — required),
       "wsaCause": "EXACT wording from the hazard category list below",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7}

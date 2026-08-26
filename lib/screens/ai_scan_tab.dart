@@ -2509,6 +2509,14 @@ class _AIScanTabState extends State<AIScanTab> {
     // there is nothing to rate, so the OVERALL RISK card and the hazard table
     // are both suppressed — see GeminiVision._offlineFallback for why.
     final analysed    = _result!['_imageAnalysed'] != false;
+    // Roll-up written by HazardValidator. Absent means the report was never
+    // validated (an older cached scan, or validation itself failed) — which must
+    // look different from "validated and clean", so the strip is simply omitted
+    // rather than shown with zeroes.
+    final rawValidation = _result!['validation'];
+    final validation = rawValidation is Map
+        ? Map<String, dynamic>.from(rawValidation)
+        : null;
     final riskColor   = _sevColor(overallRisk);
     final hasBbox     = hazards.any((h) {
       final bbox = (h as Map)['bbox'];
@@ -2623,6 +2631,7 @@ class _AIScanTabState extends State<AIScanTab> {
               fontWeight: FontWeight.w800)),
             Text('${hazards.length} hazards · $confidence% confidence',
               style: TextStyle(color: sl.text3, fontSize: 10)),
+            if (validation != null) _validationStrip(validation, sl),
             if (hasBbox)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -2844,6 +2853,15 @@ class _AIScanTabState extends State<AIScanTab> {
           final isH = _highlightedRow == i;
           final color = _sevColor(sev);
           final regText = hm['regulation']?.toString() ?? '';
+          // Written by HazardValidator. Presence of the reasons list is what
+          // distinguishes "scored" from "never checked" — a confidence number
+          // alone could have come straight from the model.
+          final scored      = hm['confidenceReasons'] is List;
+          final conf        = (hm['confidence'] as num?)?.round();
+          final needsCheck  = hm['needsReview'] == true;
+          final regVerified = hm['regulationVerified'] == true;
+          final regBy       = hm['regulationVerifiedBy']?.toString() ?? '';
+          final regIssue    = hm['regulationIssue']?.toString() ?? '';
           return Container(
             key: i < _hazardRowKeys.length ? _hazardRowKeys[i] : null,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -2883,7 +2901,10 @@ class _AIScanTabState extends State<AIScanTab> {
                             fontSize: 8, fontWeight: FontWeight.w600))),
                     _sevPill(sev, color),
                   ]),
-                  // Regulation — bold, light background
+                  // Regulation — bold, light background, with the outcome of
+                  // the citation check attached to it rather than shown
+                  // elsewhere: an unverified section number is only meaningful
+                  // next to the number itself.
                   if (regText.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 5),
@@ -2894,11 +2915,67 @@ class _AIScanTabState extends State<AIScanTab> {
                             ? Colors.white.withOpacity(0.05)
                             : const Color(0xFFF0F4FF),
                           borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: sl.border.withOpacity(0.3))),
-                        child: Text(regText,
-                          style: TextStyle(color: sl.text1, fontSize: 9.5,
-                            fontWeight: FontWeight.w700, height: 1.3)),
+                          border: Border.all(color: scored && !regVerified
+                            ? AppColors.amber.withOpacity(0.55)
+                            : sl.border.withOpacity(0.3))),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                              if (scored) ...[
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 1, right: 4),
+                                  child: Icon(
+                                    regVerified
+                                      ? Icons.verified_outlined
+                                      : Icons.help_outline,
+                                    size: 11,
+                                    color: regVerified
+                                      ? sl.greenText : sl.amberText)),
+                              ],
+                              Expanded(child: Text(regText,
+                                style: TextStyle(color: sl.text1, fontSize: 9.5,
+                                  fontWeight: FontWeight.w700, height: 1.3))),
+                            ]),
+                            if (scored)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text(
+                                  regVerified
+                                    ? 'Verified against ${regBy.isEmpty ? "reference" : regBy}'
+                                    : (regIssue.isNotEmpty
+                                        ? regIssue
+                                        : 'Could not be verified — check before issuing'),
+                                  style: TextStyle(
+                                    color: regVerified ? sl.greenText : sl.amberText,
+                                    fontSize: 9, height: 1.3,
+                                    fontWeight: FontWeight.w600))),
+                          ]),
                       )),
+                  // Confidence for THIS hazard, plus the human-check flag.
+                  if (scored && conf != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Wrap(spacing: 5, runSpacing: 4, children: [
+                        _confidenceChip(conf, hm, sl),
+                        if (needsCheck) _needsCheckChip(sl),
+                      ])),
+                  if (hm['kbCorroboration'] != null &&
+                      hm['kbCorroboration'].toString().trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 1, right: 3),
+                          child: Icon(Icons.menu_book_outlined,
+                            size: 10, color: sl.cyanText)),
+                        Expanded(child: Text(
+                          hm['kbCorroboration'].toString(),
+                          style: TextStyle(color: sl.cyanText,
+                            fontSize: 9, height: 1.3))),
+                      ])),
                 ],
               )),
               const SizedBox(width: 8),
@@ -2916,6 +2993,194 @@ class _AIScanTabState extends State<AIScanTab> {
           );
         }),
       ]));
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  CONFIDENCE & VALIDATION  (HazardValidator output)
+  // ═══════════════════════════════════════════════════════════════
+
+  /// Report-level roll-up: how many citations stood up to checking and how many
+  /// findings want a human eye. Shown beside the overall risk so the reader
+  /// knows how much of the report is corroborated before reading any of it.
+  Widget _validationStrip(Map<String, dynamic> v, SL sl) {
+    final total    = (v['hazards'] as num?)?.round() ?? 0;
+    final verified = (v['citationsVerified'] as num?)?.round() ?? 0;
+    final review   = (v['needsReview'] as num?)?.round() ?? 0;
+    if (total == 0) return const SizedBox.shrink();
+    final mean = (v['meanConfidence'] as num?)?.round();
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Wrap(spacing: 8, runSpacing: 2, children: [
+        Text('$verified/$total citations verified',
+          style: TextStyle(
+            color: verified == total ? sl.greenText : sl.amberText,
+            fontSize: 9, fontWeight: FontWeight.w600)),
+        if (review > 0)
+          Text('$review need a check',
+            style: TextStyle(color: sl.amberText,
+              fontSize: 9, fontWeight: FontWeight.w600)),
+        if (mean != null)
+          Text('avg $mean% per hazard',
+            style: TextStyle(color: sl.text3, fontSize: 9)),
+      ]));
+  }
+
+  /// Colour band for a per-hazard confidence figure. Fill tokens only — every
+  /// caller pairs these with `sl.textOn(...)` or a `*Text` variant.
+  Color _confColor(int c) {
+    if (c >= 80) return AppColors.green;
+    if (c >= 60) return AppColors.cyan;
+    if (c >= 40) return AppColors.amber;
+    return AppColors.red;
+  }
+
+  /// Tappable per-hazard confidence pill. Tapping opens the itemised reasons:
+  /// a bare number a safety officer cannot interrogate would invite either
+  /// blind trust or blanket dismissal.
+  Widget _confidenceChip(int conf, Map<String, dynamic> hm, SL sl) {
+    final c = _confColor(conf);
+    return GestureDetector(
+      onTap: () => _showConfidenceDetail(hm, conf),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: c.withOpacity(0.12),
+          border: Border.all(color: c, width: 1),
+          borderRadius: BorderRadius.circular(4)),
+        child: Row(children: [
+          Icon(Icons.insights_outlined, size: 9, color: sl.textOn(c)),
+          const SizedBox(width: 3),
+          Text('$conf% confident',
+            style: TextStyle(color: sl.textOn(c),
+              fontSize: 8, fontWeight: FontWeight.w800)),
+          const SizedBox(width: 2),
+          Icon(Icons.info_outline, size: 8, color: sl.textOn(c)),
+        ])));
+  }
+
+  Widget _needsCheckChip(SL sl) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: AppColors.amber.withOpacity(0.14),
+      border: Border.all(color: AppColors.amber, width: 1),
+      borderRadius: BorderRadius.circular(4)),
+    child: Row(children: [
+      Icon(Icons.person_search_outlined, size: 9,
+        color: sl.textOn(AppColors.amber)),
+      const SizedBox(width: 3),
+      Text('CHECK ON SITE',
+        style: TextStyle(color: sl.textOn(AppColors.amber),
+          fontSize: 8, fontWeight: FontWeight.w800)),
+    ]));
+
+  /// Explains one hazard's score, item by item, in the validator's own words.
+  void _showConfidenceDetail(Map<String, dynamic> hm, int conf) {
+    final sl = SL.of(context);
+    final reasons = (hm['confidenceReasons'] as List?) ?? const [];
+    final basis = hm['confidenceBasis']?.toString() ?? '';
+    final modelConf = (hm['modelConfidence'] as num?)?.round();
+    final c = _confColor(conf);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      isScrollControlled: true,
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: c.withOpacity(0.14),
+                      border: Border.all(color: c),
+                      borderRadius: BorderRadius.circular(6)),
+                    child: Text('$conf%',
+                      style: TextStyle(color: sl.textOn(c),
+                        fontSize: 13, fontWeight: FontWeight.w900))),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text('How this confidence was worked out',
+                    style: TextStyle(color: sl.text1,
+                      fontSize: 12.5, fontWeight: FontWeight.w800))),
+                ]),
+                const SizedBox(height: 6),
+                Text(
+                  hm['name']?.toString() ?? '',
+                  style: TextStyle(color: sl.text2, fontSize: 11,
+                    fontWeight: FontWeight.w600)),
+                const SizedBox(height: 10),
+                Text(
+                  basis == 'model'
+                    ? 'Started from the AI\'s own score for this hazard'
+                        '${modelConf != null ? " ($modelConf%)" : ""}, then '
+                        'adjusted by what the app could check independently.'
+                    : basis == 'report'
+                      ? 'The AI gave no score for this hazard, so the '
+                        'report-level figure was used as a starting point and '
+                        'then adjusted by what the app could check.'
+                      : 'The AI gave no confidence score, so a neutral '
+                        'starting point was used and then adjusted by what the '
+                        'app could check.',
+                  style: TextStyle(color: sl.text3, fontSize: 10.5, height: 1.45)),
+                const SizedBox(height: 12),
+                ...reasons.whereType<Map>().map((r) {
+                  final delta = (r['delta'] as num?)?.round() ?? 0;
+                  final severe = r['severe'] == true;
+                  final tone = delta > 0
+                    ? AppColors.green
+                    : (severe || delta <= -15 ? AppColors.red : AppColors.amber);
+                  final toneText = delta > 0
+                    ? sl.greenText
+                    : (severe || delta <= -15 ? sl.redText : sl.amberText);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 7),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                      Container(
+                        width: 40,
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        decoration: BoxDecoration(
+                          color: delta == 0
+                            ? sl.border.withOpacity(0.25)
+                            : tone.withOpacity(0.14),
+                          borderRadius: BorderRadius.circular(4)),
+                        child: Center(child: Text(
+                          delta == 0
+                            ? '—'
+                            : (delta > 0 ? '+$delta' : '$delta'),
+                          style: TextStyle(
+                            color: delta == 0 ? sl.text3 : toneText,
+                            fontSize: 10, fontWeight: FontWeight.w800)))),
+                      const SizedBox(width: 9),
+                      Expanded(child: Text(r['label']?.toString() ?? '',
+                        style: TextStyle(
+                          color: severe ? sl.text1 : sl.text2,
+                          fontSize: 10.5, height: 1.4,
+                          fontWeight: severe
+                            ? FontWeight.w700 : FontWeight.w400))),
+                    ]));
+                }),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.all(9),
+                  decoration: BoxDecoration(
+                    color: sl.isDark
+                      ? Colors.white.withOpacity(0.04)
+                      : const Color(0xFFF5F6FA),
+                    borderRadius: BorderRadius.circular(8)),
+                  child: Text(
+                    'A low score does not mean the hazard is not real — it '
+                    'means the app could not corroborate it, so it is worth '
+                    'confirming on site. Nothing is hidden from this report.',
+                    style: TextStyle(color: sl.text3,
+                      fontSize: 9.5, height: 1.45))),
+              ])))));
   }
 
   Widget _sevPill(String sev, Color color) => Container(

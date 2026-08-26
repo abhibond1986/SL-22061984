@@ -451,7 +451,7 @@ HOW TO USE IT:
     final stopwatch = Stopwatch()..start();
 
     // Records one run and passes the result straight through, so each exit
-    // stays a single `return await logged(...)` and none can be forgotten.
+    // stays a single `return logged(...)` and none can be forgotten.
     // Fire-and-forget: telemetry must never delay or break a scan.
     //
     // This is also where hazards are VALIDATED against the app's own knowledge —
@@ -518,7 +518,7 @@ HOW TO USE IT:
         // few ms, so counting it in the timing would flatter the average badly,
         // and counting it as a model success would let a warm cache hide a
         // completely broken provider chain.
-        return await logged(cached, outcome: AiRunLog.outcomeCached, imageHash: imgHash);
+        return logged(cached, outcome: AiRunLog.outcomeCached, imageHash: imgHash);
       }
 
       // Prevent concurrent analysis
@@ -529,7 +529,7 @@ HOW TO USE IT:
           if (!_isAnalyzing) break;
         }
         if (_isAnalyzing) {
-          return await logged(
+          return logged(
             await _offlineFallback(bytes,
                 reason: 'another scan was still running',
                 hint: 'Only one photo can be analysed at a time. Try this one '
@@ -556,7 +556,7 @@ HOW TO USE IT:
         if (!networkStatus['hasInternet']!) {
           print('GeminiVision: No internet → offline fallback');
           _isAnalyzing = false;
-          return await logged(
+          return logged(
             await _offlineFallback(bytes,
                 reason: 'this device has no internet connection',
                 hint: 'Reconnect and scan again. You can record the '
@@ -718,7 +718,7 @@ HOW TO USE IT:
                 // The only SUCCESS path: a real provider returned hazards for
                 // this image. Model is passed explicitly so the dashboard can
                 // compare the primary and secondary models' latency.
-                return await logged(orResult,
+                return logged(orResult,
                     outcome: AiRunLog.outcomeSuccess,
                     model: model,
                     imageHash: imgHash);
@@ -806,7 +806,7 @@ HOW TO USE IT:
             _lastCallTime = DateTime.now();
             _isAnalyzing = false;
             await _writeCachedResult(imgHash, gemResult);
-            return await logged(gemResult,
+            return logged(gemResult,
                 outcome: AiRunLog.outcomeSuccess,
                 model: model,
                 imageHash: imgHash);
@@ -892,7 +892,7 @@ HOW TO USE IT:
             _lastCallTime = DateTime.now();
             _isAnalyzing = false;
             await _writeCachedResult(imgHash, naraResult);
-            return await logged(naraResult,
+            return logged(naraResult,
                 outcome: AiRunLog.outcomeSuccess,
                 model: servedModel,
                 imageHash: imgHash);
@@ -1004,7 +1004,7 @@ HOW TO USE IT:
         hint = 'This is usually temporary. Try the scan again in a minute, '
             'or record the observation manually.';
       }
-      return await logged(
+      return logged(
         await _offlineFallback(bytes, reason: reason, hint: hint),
         outcome: AiRunLog.outcomeFailed,
         failReason: AiRunLog.reasonExhausted,
@@ -1013,7 +1013,7 @@ HOW TO USE IT:
     } catch (e) {
       print('GeminiVision: Unexpected error: $e');
       _isAnalyzing = false;
-      return await logged(
+      return logged(
         await _offlineFallback(bytes,
             reason: 'the scan hit an unexpected error',
             hint: 'Please try once more. If it keeps happening, report it to '

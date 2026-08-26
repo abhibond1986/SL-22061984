@@ -1273,6 +1273,13 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       final refinedData = _applyHardenedV15Filters(rawName, rawDesc, rawAction, rawReg, rawCause);
 
       final sev        = (first?['severity']?.toString() ?? 'MEDIUM').toUpperCase();
+      // HazardValidator scores each hazard individually, and this screen shows
+      // exactly ONE of them, so the per-hazard figure is the honest one here —
+      // the report-level number describes findings the user never sees.
+      // The citation verdict is only carried through when the hardened filter
+      // has not swapped the citation out from under it; a verdict about a
+      // reference that is no longer displayed would be worse than none.
+      final regUnchanged = (refinedData['reg']?.toString() ?? '') == rawReg;
       // isOnline already declared above (line ~381)
 
       final user              = await LocalDB.getCurrentUser();
@@ -1286,7 +1293,13 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           'statutory':  (refinedData['reg']?.toString() ?? '').isEmpty ? 'Refer Factories Act S35-41' : refinedData['reg'].toString(),
           'type':       refinedData['obsType'],
           'severity':   sev,
-          'confidence': result?['confidence'] ?? 75,
+          'confidence': first?['confidence'] ?? result?['confidence'] ?? 75,
+          'needsReview': first?['needsReview'] == true,
+          'regChecked': regUnchanged && first?['confidenceReasons'] is List,
+          'regVerified': regUnchanged && first?['regulationVerified'] == true,
+          'regIssue': regUnchanged
+              ? (first?['regulationIssue']?.toString() ?? '')
+              : '',
           'isOnline':   isOnline,
           // Carried through so the banner below can name the ACTUAL cause of an
           // offline result (spent daily allowance, rejected key, throttle, no
@@ -2253,7 +2266,53 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           const SizedBox(height: 10),
           _briefRow('Identified', _aiBrief!['identified'].toString(), sl),
           _briefRow('Statutory',  _aiBrief!['statutory'].toString(),  sl),
+          // Outcome of checking that citation against the citable table and the
+          // plant's own knowledge base. Shown directly beneath the citation
+          // because that is the only place it means anything.
+          if (_aiBrief!['regChecked'] == true)
+            Padding(
+              // Indented to line up with the value column of _briefRow (80px
+              // label), minus room for the leading icon.
+              padding: const EdgeInsets.only(left: 80, bottom: 4),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 1, right: 4),
+                  child: Icon(
+                    _aiBrief!['regVerified'] == true
+                      ? Icons.verified_outlined : Icons.help_outline,
+                    size: 11,
+                    color: _aiBrief!['regVerified'] == true
+                      ? sl.greenText : sl.amberText)),
+                Expanded(child: Text(
+                  _aiBrief!['regVerified'] == true
+                    ? 'Citation verified against the reference table'
+                    : ((_aiBrief!['regIssue']?.toString() ?? '').isNotEmpty
+                        ? _aiBrief!['regIssue'].toString()
+                        : 'Citation could not be verified — confirm before issuing'),
+                  style: TextStyle(
+                    color: _aiBrief!['regVerified'] == true
+                      ? sl.greenText : sl.amberText,
+                    fontSize: 9.5, height: 1.3, fontWeight: FontWeight.w600))),
+              ])),
           _briefRow('Type',       _aiBrief!['type'].toString(),       sl),
+          if (_aiBrief!['needsReview'] == true) ...[
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.amber.withOpacity(0.10),
+                border: Border.all(color: AppColors.amber.withOpacity(0.5)),
+                borderRadius: BorderRadius.circular(8)),
+              child: Row(children: [
+                Icon(Icons.person_search_outlined, size: 13, color: sl.amberText),
+                const SizedBox(width: 7),
+                Expanded(child: Text(
+                  'Worth confirming on site — the app could not fully '
+                  'corroborate this finding. Edit anything that looks wrong '
+                  'before submitting.',
+                  style: TextStyle(color: sl.amberText, fontSize: 9.5, height: 1.35))),
+              ])),
+          ],
           const SizedBox(height: 10),
           Text('AI brief (editable):', style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
