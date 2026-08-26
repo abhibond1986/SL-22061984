@@ -9,6 +9,7 @@ import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
+import '../../widgets/bottom_nav_gap.dart';
 
 /// Org overview.
 ///
@@ -336,7 +337,10 @@ class _OverviewTabState extends State<OverviewTab> {
       color: AppColors.accent,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(14),
+        // Bottom inset, not a flat 14: the shell sets `extendBody: true`, so the
+        // last card would otherwise scroll under the translucent nav bar and be
+        // unreadable. BottomNavGap measures the bar instead of guessing.
+        padding: EdgeInsets.fromLTRB(14, 14, 14, BottomNavGap.height(context) + 16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // Every card below is now plant-scoped, so a locked user gets one
           // header naming the scope. Without it these figures read as SAIL-wide,
@@ -377,7 +381,7 @@ class _OverviewTabState extends State<OverviewTab> {
         border: Border.all(color: AppColors.accent.withOpacity(0.30)),
       ),
       child: Row(children: [
-        const Icon(Icons.factory_rounded, size: 16, color: AppColors.accent),
+        Icon(Icons.factory_rounded, size: 16, color: sl.accentText),
         const SizedBox(width: 9),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -521,7 +525,7 @@ class _OverviewTabState extends State<OverviewTab> {
                           border: Border.all(color: color.withOpacity(0.3)),
                         ),
                         child: Center(child: Text('$count',
-                            style: TextStyle(color: color, fontSize: 16,
+                            style: TextStyle(color: sl.textOn(color), fontSize: 16,
                                 fontWeight: FontWeight.w800))),
                       ),
                       const SizedBox(height: 4),
@@ -559,7 +563,7 @@ class _OverviewTabState extends State<OverviewTab> {
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              Icon(Icons.trending_up_rounded, color: AppColors.accent, size: 16),
+              Icon(Icons.trending_up_rounded, color: sl.accentText, size: 16),
               const SizedBox(width: 6),
               Text('Monthly Trend', style: TextStyle(
                   color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
@@ -719,7 +723,7 @@ class _OverviewTabState extends State<OverviewTab> {
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              Icon(Icons.priority_high_rounded, color: AppColors.red, size: 16),
+              Icon(Icons.priority_high_rounded, color: sl.redText, size: 16),
               const SizedBox(width: 6),
               Text('Attention Areas', style: TextStyle(
                   color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700)),
@@ -787,7 +791,7 @@ class _OverviewTabState extends State<OverviewTab> {
                   fontWeight: FontWeight.w700)),
               const Spacer(),
               Text('${incidents.length}', style: TextStyle(
-                  color: AppColors.accent, fontSize: 14, fontWeight: FontWeight.w800)),
+                  color: sl.accentText, fontSize: 14, fontWeight: FontWeight.w800)),
             ]),
           ),
           const Divider(height: 1),
@@ -858,7 +862,7 @@ class _OverviewTabState extends State<OverviewTab> {
                 decoration: BoxDecoration(
                     color: sevColor.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(4)),
-                child: Text(sev, style: TextStyle(color: sevColor, fontSize: 8, fontWeight: FontWeight.w800)),
+                child: Text(sev, style: TextStyle(color: sl.textOn(sevColor), fontSize: 8, fontWeight: FontWeight.w800)),
               ),
               const SizedBox(height: 4),
               Text(status, style: TextStyle(color: sl.text4, fontSize: 10, fontWeight: FontWeight.w600)),
@@ -871,6 +875,7 @@ class _OverviewTabState extends State<OverviewTab> {
 
   /// Thumbnail widget for overview incident cards
   Widget _buildSheetThumbnail(Map<String, dynamic> inc, Color sevColor) {
+    final sl = SL.of(context);
     final thumbnail = inc['thumbnailBase64']?.toString() ?? '';
     final isAiScan = (inc['type']?.toString().toUpperCase() ?? '') == 'AI_SCAN';
     return Container(
@@ -889,11 +894,11 @@ class _OverviewTabState extends State<OverviewTab> {
               width: 42, height: 42,
               errorBuilder: (_, __, ___) => Icon(
                 isAiScan ? Icons.image_search_rounded : Icons.warning_amber_rounded,
-                color: sevColor, size: 20),
+                color: sl.textOn(sevColor), size: 20),
             )
           : Icon(
               isAiScan ? Icons.image_search_rounded : Icons.warning_amber_rounded,
-              color: sevColor, size: 20),
+              color: sl.textOn(sevColor), size: 20),
     );
   }
 
@@ -1079,7 +1084,7 @@ class _OverviewTabState extends State<OverviewTab> {
                 border: Border.all(color: color)),
               child: Text(badge,
                   style: TextStyle(
-                      color: color, fontSize: 10, fontWeight: FontWeight.w800))),
+                      color: sl.textOn(color), fontSize: 10, fontWeight: FontWeight.w800))),
           ],
         ]),
       ]),
@@ -1184,14 +1189,14 @@ class _OverviewTabState extends State<OverviewTab> {
               borderRadius: BorderRadius.circular(6),
               border: Border.all(color: AppColors.red.withOpacity(0.3))),
             child: Row(children: [
-              const Icon(Icons.warning_amber_rounded,
-                  color: AppColors.red, size: 14),
+              Icon(Icons.warning_amber_rounded,
+                  color: sl.redText, size: 14),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   '${ps.staleHighCritical} HIGH/CRITICAL incident(s) open >7 days',
-                  style: const TextStyle(
-                      color: AppColors.red, fontSize: 10, fontWeight: FontWeight.w700))),
+                  style: TextStyle(
+                      color: sl.redText, fontSize: 10, fontWeight: FontWeight.w700))),
             ])),
         ],
       ]),
@@ -1201,11 +1206,11 @@ class _OverviewTabState extends State<OverviewTab> {
   Widget _spiMetric(IconData icon, String label, String value, Color color, SL sl) {
     return Expanded(
       child: Column(children: [
-        Icon(icon, color: color, size: 14),
+        Icon(icon, color: sl.textOn(color), size: 14),
         const SizedBox(height: 3),
         Text(value,
             style: TextStyle(
-                color: color, fontSize: 12, fontWeight: FontWeight.w800)),
+                color: sl.textOn(color), fontSize: 12, fontWeight: FontWeight.w800)),
         const SizedBox(height: 1),
         Text(label,
             style: TextStyle(

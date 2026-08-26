@@ -273,10 +273,10 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: AppColors.accent.withOpacity(0.3))),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      const Icon(Icons.factory_outlined, color: AppColors.accent, size: 14),
+                      Icon(Icons.factory_outlined, color: sl.accentText, size: 14),
                       const SizedBox(width: 6),
                       Text('${u['plant']}',
-                          style: const TextStyle(color: AppColors.accent,
+                          style: TextStyle(color: sl.accentText,
                               fontSize: 12, fontWeight: FontWeight.w600)),
                     ])),
 
@@ -315,7 +315,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                         border: Border.all(color: AppColors.amber.withOpacity(0.4))),
                       child: Text(
                         I18n.langName(I18n.currentLang),
-                        style: const TextStyle(color: AppColors.amber,
+                        style: TextStyle(color: sl.amberText,
                             fontSize: 12, fontWeight: FontWeight.w700)),
                     ),
                   ),
@@ -325,8 +325,8 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 _menuRow(
                   icon: Icons.cloud_upload_rounded,
                   label: I18n.t('settings.exportData'),
-                  trailing: const Icon(Icons.chevron_right_rounded,
-                      color: AppColors.text3, size: 20),
+                  trailing: Icon(Icons.chevron_right_rounded,
+                      color: sl.text3, size: 20),
                   onTap: () { Navigator.pop(ctx); _doExport(); },
                   sl: sl,
                 ),
@@ -347,10 +347,10 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: AppColors.red.withOpacity(0.3))),
                       child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        const Icon(Icons.logout_rounded, color: AppColors.red, size: 18),
+                        Icon(Icons.logout_rounded, color: sl.redText, size: 18),
                         const SizedBox(width: 8),
                         Text(I18n.t('settings.signOut'),
-                            style: const TextStyle(color: AppColors.red,
+                            style: TextStyle(color: sl.redText,
                                 fontSize: 14, fontWeight: FontWeight.w700)),
                       ]))),
 

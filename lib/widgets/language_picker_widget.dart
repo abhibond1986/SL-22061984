@@ -11,6 +11,7 @@ class LanguagePickerWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sl = SL.of(context);
     final l10n = AppLocalizations.of(context);
     final current = LocaleService().locale.languageCode;
 
@@ -21,8 +22,8 @@ class LanguagePickerWidget extends StatelessWidget {
           padding: const EdgeInsets.only(bottom: 8),
           child: Text(
             l10n.selectLanguage,
-            style: const TextStyle(
-              color: AppColors.text3,
+            style: TextStyle(
+              color: sl.text3,
               fontSize: 11,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.5,
@@ -46,12 +47,12 @@ class LanguagePickerWidget extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: isSelected
                           ? AppColors.accent.withOpacity(0.15)
-                          : AppColors.card2,
+                          : sl.card2,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
                         color: isSelected
                             ? AppColors.accent
-                            : AppColors.border,
+                            : sl.border,
                         width: isSelected ? 1.5 : 1,
                       ),
                     ),
@@ -63,8 +64,8 @@ class LanguagePickerWidget extends StatelessWidget {
                           lang['native']!,
                           style: TextStyle(
                             color: isSelected
-                                ? AppColors.accent
-                                : AppColors.text3,
+                                ? sl.accentText
+                                : sl.text3,
                             fontSize: 10,
                             fontWeight: isSelected
                                 ? FontWeight.w700

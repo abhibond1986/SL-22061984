@@ -594,7 +594,7 @@ class SeverityBadge extends StatelessWidget {
       child: Text(
           small && label.length > 4 ? label.substring(0, 4) : label,
           style: TextStyle(
-              color: c,
+              color: SL.of(context).textOn(c),
               fontSize: small ? 8 : 10,
               fontWeight: FontWeight.w800,
               letterSpacing: 0.5)),

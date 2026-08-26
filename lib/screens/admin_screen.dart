@@ -733,7 +733,7 @@ class _AdminScreenState extends State<AdminScreen>
         Icon(icon, size: 11, color: color),
         const SizedBox(width: 3),
         Text(text, style: TextStyle(
-            color: color, fontSize: 10.5, fontWeight: FontWeight.w800)),
+            color: sl.textOn(color), fontSize: 10.5, fontWeight: FontWeight.w800)),
       ]));
 
   // ── DRAWER ─────────────────────────────────────────────────────
@@ -1024,8 +1024,8 @@ class _AdminScreenState extends State<AdminScreen>
         trailing: TextButton(
           onPressed: () => setState(() => _activeId = 5),
           style: TextButton.styleFrom(padding: const EdgeInsets.all(4)),
-          child: const Text('View all →',
-              style: TextStyle(color: AppColors.amber, fontSize: 11)),
+          child: Text('View all →',
+              style: TextStyle(color: sl.amberText, fontSize: 11)),
         )),
       const SizedBox(height: 6),
       if (_auditLog.isEmpty)
@@ -1063,7 +1063,7 @@ class _AdminScreenState extends State<AdminScreen>
         ]),
         const SizedBox(height: 6),
         Text(value, style: TextStyle(
-            color: color, fontSize: 26, fontWeight: FontWeight.w800,
+            color: sl.textOn(color), fontSize: 26, fontWeight: FontWeight.w800,
             height: 1.0)),
         if (sub != null) ...[
           const SizedBox(height: 2),
@@ -1081,10 +1081,12 @@ class _AdminScreenState extends State<AdminScreen>
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: color.withOpacity(0.3))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 15),
+          // `sl` is not in scope in this arrow-bodied helper, so the theme is
+          // read off `context` (an instance member of the State) instead.
+          Icon(icon, color: SL.of(context).textOn(color), size: 15),
           const SizedBox(width: 6),
           Text(label, style: TextStyle(
-              color: color, fontSize: 12, fontWeight: FontWeight.w700)),
+              color: SL.of(context).textOn(color), fontSize: 12, fontWeight: FontWeight.w700)),
         ])));
 
   // ══════════════════════════════════════════════════════════════════
@@ -1325,7 +1327,7 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(height: 4),
           Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
             Text(value, style: TextStyle(
-                color: color, fontSize: 22, fontWeight: FontWeight.w800)),
+                color: sl.textOn(color), fontSize: 22, fontWeight: FontWeight.w800)),
             if (suffix != null)
               Padding(padding: const EdgeInsets.only(left: 2, bottom: 4),
                 child: Text(suffix, style: TextStyle(
@@ -1337,7 +1339,7 @@ class _AdminScreenState extends State<AdminScreen>
     final pct = total == 0 ? 0.0 : count / total;
     return Row(children: [
       SizedBox(width: 70, child: Text(label, style: TextStyle(
-          color: color, fontSize: 11, fontWeight: FontWeight.w700))),
+          color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700))),
       Expanded(child: Stack(children: [
         Container(height: 12, decoration: BoxDecoration(
           color: sl.border.withOpacity(0.3),
@@ -1351,7 +1353,7 @@ class _AdminScreenState extends State<AdminScreen>
       SizedBox(width: 64, child: Text(
         '$count (${(pct * 100).round()}%)',
         textAlign: TextAlign.right,
-        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700))),
+        style: TextStyle(color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700))),
     ]);
   }
 
@@ -1409,7 +1411,7 @@ class _AdminScreenState extends State<AdminScreen>
             maxLines: 1, overflow: TextOverflow.ellipsis)),
         const SizedBox(width: 6),
         Text('$count', style: TextStyle(
-            color: color, fontSize: 11, fontWeight: FontWeight.w800)),
+            color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w800)),
       ]),
       const SizedBox(height: 3),
       Stack(children: [
@@ -1548,7 +1550,7 @@ class _AdminScreenState extends State<AdminScreen>
       SizedBox(width: 72, child: Text(
         '$closed/$total · ${(pct*100).round()}%',
         textAlign: TextAlign.right,
-        style: TextStyle(color: color, fontSize: 10,
+        style: TextStyle(color: sl.textOn(color), fontSize: 10,
             fontWeight: FontWeight.w700))),
     ]);
   }
@@ -1602,7 +1604,7 @@ class _AdminScreenState extends State<AdminScreen>
                 filtered.every((e) =>
                   _bulkSelected.contains(e['id']?.toString() ?? ''))
                   ? 'Deselect all' : 'Select all',
-                style: const TextStyle(color: AppColors.amber, fontSize: 11,
+                style: TextStyle(color: sl.amberText, fontSize: 11,
                     fontWeight: FontWeight.w700)),
             ),
           ]),
@@ -1649,10 +1651,12 @@ class _AdminScreenState extends State<AdminScreen>
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: color.withOpacity(0.4))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 14),
+          // No `sl` local in this arrow-bodied helper — read the theme off
+          // `context`, which the State provides.
+          Icon(icon, color: SL.of(context).textOn(color), size: 14),
           const SizedBox(width: 5),
           Text(label, style: TextStyle(
-              color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+              color: SL.of(context).textOn(color), fontSize: 11, fontWeight: FontWeight.w700)),
         ])));
 
   Widget _bulkRow(Map<String, dynamic> inc, SL sl) {
@@ -1990,7 +1994,7 @@ class _AdminScreenState extends State<AdminScreen>
               borderRadius: BorderRadius.circular(4)),
             child: Text(AdminAudit.label(action),
                 style: TextStyle(
-                    color: color, fontSize: 10.5,
+                    color: sl.textOn(color), fontSize: 10.5,
                     fontWeight: FontWeight.w800))),
           const SizedBox(width: 6),
           Text('by $actor',
@@ -2061,8 +2065,8 @@ class _AdminScreenState extends State<AdminScreen>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Text('Clear Audit Log?',
-            style: TextStyle(color: AppColors.red, fontSize: 14,
+        title: Text('Clear Audit Log?',
+            style: TextStyle(color: sl.redText, fontSize: 14,
                 fontWeight: FontWeight.w800)),
         content: Text(
           'Permanently erase all ${_auditLog.length} audit events. '
@@ -2291,7 +2295,7 @@ class _AdminScreenState extends State<AdminScreen>
               backgroundColor: SL.of(context).card,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               title: Row(children: [
-                const Icon(Icons.check_circle, color: AppColors.green, size: 22),
+                Icon(Icons.check_circle, color: SL.of(context).greenText, size: 22),
                 const SizedBox(width: 10),
                 Text('Normalization Complete',
                     style: TextStyle(color: SL.of(context).text1, fontSize: 14,
@@ -2321,10 +2325,10 @@ class _AdminScreenState extends State<AdminScreen>
                             child: Text(e.key,
                                 style: TextStyle(color: SL.of(context).text3, fontSize: 10),
                                 overflow: TextOverflow.ellipsis)),
-                          const Icon(Icons.arrow_forward, size: 12, color: AppColors.amber),
+                          Icon(Icons.arrow_forward, size: 12, color: SL.of(context).amberText),
                           Expanded(
                             child: Text(e.value,
-                                style: TextStyle(color: AppColors.green, fontSize: 10,
+                                style: TextStyle(color: SL.of(context).greenText, fontSize: 10,
                                     fontWeight: FontWeight.w600),
                                 overflow: TextOverflow.ellipsis)),
                         ]))),
@@ -2337,8 +2341,8 @@ class _AdminScreenState extends State<AdminScreen>
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
-                  child: const Text('Close',
-                      style: TextStyle(color: AppColors.green,
+                  child: Text('Close',
+                      style: TextStyle(color: SL.of(context).greenText,
                           fontWeight: FontWeight.w700))),
               ]));
         }
@@ -2357,7 +2361,7 @@ class _AdminScreenState extends State<AdminScreen>
         Expanded(child: Text(label, style: TextStyle(
             color: sl.text3, fontSize: 11))),
         Text(value, style: TextStyle(
-            color: color, fontSize: 12, fontWeight: FontWeight.w800)),
+            color: sl.textOn(color), fontSize: 12, fontWeight: FontWeight.w800)),
       ]));
 
   Widget _plantNormalizationCard(SL sl) {
@@ -2379,8 +2383,8 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Plant Name Cleanup',
-                  style: TextStyle(color: AppColors.amber,
+              Text('Plant Name Cleanup',
+                  style: TextStyle(color: sl.amberText,
                       fontSize: 13, fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
               Text('Normalize all incident plant names to canonical list',
@@ -2429,7 +2433,7 @@ class _AdminScreenState extends State<AdminScreen>
     Padding(
       padding: const EdgeInsets.only(bottom: 4, left: 6),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Icon(Icons.check_circle, size: 12, color: AppColors.amber),
+        Icon(Icons.check_circle, size: 12, color: sl.amberText),
         const SizedBox(width: 6),
         Expanded(child: Text(text,
             style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
@@ -2454,8 +2458,8 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Delete All Incidents',
-                  style: TextStyle(color: AppColors.red,
+              Text('Delete All Incidents',
+                  style: TextStyle(color: sl.redText,
                       fontSize: 13, fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
               Text('Permanently delete all incident data from system',
@@ -2471,10 +2475,10 @@ class _AdminScreenState extends State<AdminScreen>
             border: Border.all(color: AppColors.red.withOpacity(0.2))),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              const Icon(Icons.warning_rounded, size: 16, color: AppColors.red),
+              Icon(Icons.warning_rounded, size: 16, color: sl.redText),
               const SizedBox(width: 8),
               Text('⚠️ DANGER ZONE',
-                  style: TextStyle(color: AppColors.red, fontSize: 11,
+                  style: TextStyle(color: sl.redText, fontSize: 11,
                       fontWeight: FontWeight.w800)),
             ]),
             const SizedBox(height: 8),
@@ -2515,7 +2519,7 @@ class _AdminScreenState extends State<AdminScreen>
     Padding(
       padding: const EdgeInsets.only(bottom: 4, left: 6),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Icon(Icons.close, size: 12, color: AppColors.red),
+        Icon(Icons.close, size: 12, color: sl.redText),
         const SizedBox(width: 6),
         Expanded(child: Text(text,
             style: TextStyle(color: sl.text3, fontSize: 10, height: 1.4))),
@@ -2529,7 +2533,7 @@ class _AdminScreenState extends State<AdminScreen>
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Row(children: [
-          const Icon(Icons.warning_rounded, color: AppColors.red, size: 24),
+          Icon(Icons.warning_rounded, color: sl.redText, size: 24),
           const SizedBox(width: 12),
           Expanded(child: Text('Delete ALL Incidents?',
               style: TextStyle(color: sl.text1, fontSize: 15,
@@ -2561,7 +2565,7 @@ class _AdminScreenState extends State<AdminScreen>
                 color: AppColors.red.withOpacity(0.08),
                 borderRadius: BorderRadius.circular(6)),
               child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Icon(Icons.info_outline, size: 14, color: AppColors.red),
+                Icon(Icons.info_outline, size: 14, color: sl.redText),
                 const SizedBox(width: 8),
                 Expanded(child: Text(
                   'This action cannot be undone. All incident data will be permanently lost.',
@@ -3667,7 +3671,7 @@ class _AdminScreenState extends State<AdminScreen>
       Expanded(child: Text(label, style: TextStyle(
           color: sl.text3, fontSize: 11))),
       Text(value, style: TextStyle(
-          color: color, fontSize: 11.5, fontWeight: FontWeight.w800)),
+          color: sl.textOn(color), fontSize: 11.5, fontWeight: FontWeight.w800)),
     ]);
 
   Widget _intRow(String name, String detail, Color color,
@@ -3955,7 +3959,7 @@ class _AdminScreenState extends State<AdminScreen>
       color: color.withOpacity(0.12),
       borderRadius: BorderRadius.circular(3)),
     child: Text(text, style: TextStyle(
-        color: color, fontSize: 8.5, fontWeight: FontWeight.w800)));
+        color: SL.of(context).textOn(color), fontSize: 8.5, fontWeight: FontWeight.w800)));
 
   Color _sevColor(String s) {
     switch (s.toUpperCase()) {
@@ -4747,7 +4751,7 @@ class _AdminScreenState extends State<AdminScreen>
       borderRadius: BorderRadius.circular(5),
       border: Border.all(color: color.withOpacity(0.3))),
     child: Text(label, style: TextStyle(
-        color: color, fontSize: 10, fontWeight: FontWeight.w800)));
+        color: sl.textOn(color), fontSize: 10, fontWeight: FontWeight.w800)));
 
   Widget _userCard(Map<String, dynamic> u, SL sl) {
     final uname = u['username']?.toString() ?? '?';
@@ -4930,10 +4934,12 @@ class _AdminScreenState extends State<AdminScreen>
           borderRadius: BorderRadius.circular(6),
           border: Border.all(color: color.withOpacity(0.3))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 12),
+          // No `sl` local in this arrow-bodied helper — read the theme off
+          // `context`, which the State provides.
+          Icon(icon, color: SL.of(context).textOn(color), size: 12),
           const SizedBox(width: 5),
           Text(label, style: TextStyle(
-              color: color, fontSize: 10.5, fontWeight: FontWeight.w700)),
+              color: SL.of(context).textOn(color), fontSize: 10.5, fontWeight: FontWeight.w700)),
         ])));
 
   /// Fill in the columns a search result does not carry, before writing it back.
@@ -5137,7 +5143,7 @@ class _AdminScreenState extends State<AdminScreen>
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('Delete user ${u['username']}?',
-            style: const TextStyle(color: AppColors.red, fontSize: 14,
+            style: TextStyle(color: sl.redText, fontSize: 14,
                 fontWeight: FontWeight.w800)),
         content: Text('This will remove ${u['name']} from local and Google Sheets. Cannot be undone.',
             style: TextStyle(color: sl.text2, fontSize: 12)),
@@ -5431,9 +5437,9 @@ class _AdminScreenState extends State<AdminScreen>
       const SizedBox(height: 18),
       OutlinedButton.icon(
         onPressed: _resetMasters,
-        icon: const Icon(Icons.refresh_rounded, size: 14, color: AppColors.red),
-        label: const Text('Reset all masters to defaults',
-            style: TextStyle(color: AppColors.red, fontSize: 11,
+        icon: Icon(Icons.refresh_rounded, size: 14, color: sl.redText),
+        label: Text('Reset all masters to defaults',
+            style: TextStyle(color: sl.redText, fontSize: 11,
                 fontWeight: FontWeight.w700)),
         style: OutlinedButton.styleFrom(
           side: BorderSide(color: AppColors.red.withOpacity(0.4)),
@@ -5497,7 +5503,7 @@ class _AdminScreenState extends State<AdminScreen>
       const SizedBox(width: 4),
       GestureDetector(
         onTap: () => _deleteDept(idx),
-        child: const Icon(Icons.close_rounded, color: AppColors.red, size: 12)),
+        child: Icon(Icons.close_rounded, color: sl.redText, size: 12)),
     ]));
 
   Future<void> _addPlant() async {
@@ -5532,7 +5538,7 @@ class _AdminScreenState extends State<AdminScreen>
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('Delete ${p['name']}?',
-            style: const TextStyle(color: AppColors.red, fontSize: 14,
+            style: TextStyle(color: sl.redText, fontSize: 14,
                 fontWeight: FontWeight.w800)),
         content: Text(
             'This removes the plant from dropdowns. Existing incidents tagged with this plant will keep the label.',
@@ -5657,7 +5663,7 @@ class _AdminScreenState extends State<AdminScreen>
                 ),
                 const SizedBox(height: 8),
                 Text('Key will be saved & synced to all devices automatically.',
-                  style: TextStyle(color: AppColors.green, fontSize: 9, fontWeight: FontWeight.w600)),
+                  style: TextStyle(color: sl.greenText, fontSize: 9, fontWeight: FontWeight.w600)),
               ]),
               actions: [
                 TextButton(
@@ -5939,8 +5945,8 @@ class _AdminScreenState extends State<AdminScreen>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Text('Reset all masters?',
-            style: TextStyle(color: AppColors.red, fontSize: 14,
+        title: Text('Reset all masters?',
+            style: TextStyle(color: sl.redText, fontSize: 14,
                 fontWeight: FontWeight.w800)),
         content: Text(
             'Plants, departments, WSA causes, severities, statuses, and observation types will be reset to factory defaults.',
@@ -6146,7 +6152,7 @@ class _AdminScreenState extends State<AdminScreen>
             textBaseline: TextBaseline.alphabetic,
             children: [
               Text('$score', style: TextStyle(
-                  color: color, fontSize: 16, fontWeight: FontWeight.w800)),
+                  color: sl.textOn(color), fontSize: 16, fontWeight: FontWeight.w800)),
               Text('/100', style: TextStyle(
                   color: color.withOpacity(0.7),
                   fontSize: 9, fontWeight: FontWeight.w600)),
@@ -6565,8 +6571,8 @@ class _AdminScreenState extends State<AdminScreen>
             onPressed: () => _deleteAlertRule(r),
             icon: const Icon(Icons.delete_outline_rounded,
                 color: AppColors.red, size: 12),
-            label: const Text('Delete',
-                style: TextStyle(color: AppColors.red, fontSize: 10))),
+            label: Text('Delete',
+                style: TextStyle(color: sl.redText, fontSize: 10))),
         ]),
       ]));
   }
@@ -6800,7 +6806,7 @@ class _AdminScreenState extends State<AdminScreen>
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('Delete rule "${r['name']}"?',
-            style: const TextStyle(color: AppColors.red, fontSize: 14,
+            style: TextStyle(color: sl.redText, fontSize: 14,
                 fontWeight: FontWeight.w800)),
         content: Text('This rule will no longer fire.',
             style: TextStyle(color: sl.text2, fontSize: 12)),
@@ -6903,7 +6909,7 @@ class _AdminScreenState extends State<AdminScreen>
           border: Border.all(color: AppColors.red.withOpacity(0.3))),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            const Icon(Icons.restore_rounded, color: AppColors.red, size: 22),
+            Icon(Icons.restore_rounded, color: sl.redText, size: 22),
             const SizedBox(width: 10),
             Text('Restore from Backup',
                 style: TextStyle(color: sl.text1, fontSize: 15,
@@ -7003,8 +7009,8 @@ class _AdminScreenState extends State<AdminScreen>
           AlertDialog(
             backgroundColor: sl.card,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            title: const Text('Unrecognised format',
-                style: TextStyle(color: AppColors.amber, fontSize: 14,
+            title: Text('Unrecognised format',
+                style: TextStyle(color: sl.amberText, fontSize: 14,
                     fontWeight: FontWeight.w800)),
             content: Text(
                 'This file is not a Safety Lens backup (missing app marker). '
@@ -7032,8 +7038,8 @@ class _AdminScreenState extends State<AdminScreen>
         AlertDialog(
           backgroundColor: sl.card,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          title: const Text('Restore from backup?',
-              style: TextStyle(color: AppColors.red, fontSize: 14,
+          title: Text('Restore from backup?',
+              style: TextStyle(color: sl.redText, fontSize: 14,
                   fontWeight: FontWeight.w800)),
           content: Column(mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -7047,10 +7053,10 @@ class _AdminScreenState extends State<AdminScreen>
               Text('• $nInc incidents\n• $nUsr users\n• $nKb KB entries',
                   style: TextStyle(color: sl.text1, fontSize: 11.5)),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 'Current data will be REPLACED. This cannot be undone unless '
                 'you have another backup.',
-                style: TextStyle(color: AppColors.red, fontSize: 10.5,
+                style: TextStyle(color: sl.redText, fontSize: 10.5,
                     fontWeight: FontWeight.w700)),
             ]),
           actions: [
@@ -7331,7 +7337,7 @@ class _AdminScreenState extends State<AdminScreen>
               const SizedBox(width: 5),
               Expanded(child: Text(
                 '${pc.staleHighCritical} HIGH/CRITICAL incident(s) open >7 days — escalate',
-                style: const TextStyle(color: AppColors.red, fontSize: 10,
+                style: TextStyle(color: sl.redText, fontSize: 10,
                     fontWeight: FontWeight.w700))),
             ])),
         ],
@@ -7343,7 +7349,7 @@ class _AdminScreenState extends State<AdminScreen>
     children: [
       Text(label, style: TextStyle(color: sl.text4, fontSize: 9.5)),
       Text(value, style: TextStyle(
-          color: color, fontSize: 14, fontWeight: FontWeight.w800)),
+          color: sl.textOn(color), fontSize: 14, fontWeight: FontWeight.w800)),
     ]);
 
   Widget _spiCard(List<_PlantCompliance> rows, SL sl) {
@@ -7600,7 +7606,7 @@ class _AdminScreenState extends State<AdminScreen>
             color: color.withOpacity(0.12),
             borderRadius: BorderRadius.circular(3)),
           child: Text(status,
-              style: TextStyle(color: color, fontSize: 9,
+              style: TextStyle(color: sl.textOn(color), fontSize: 9,
                   fontWeight: FontWeight.w800))),
       ]));
   }
@@ -7718,9 +7724,9 @@ class _AdminScreenState extends State<AdminScreen>
             const SizedBox(width: 10),
             Expanded(child: OutlinedButton.icon(
               onPressed: _clearAllKb,
-              icon: Icon(Icons.delete_sweep_rounded, size: 15, color: AppColors.red),
+              icon: Icon(Icons.delete_sweep_rounded, size: 15, color: sl.redText),
               label: Text('Clear All KB',
-                style: TextStyle(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.w600)),
+                style: TextStyle(color: sl.redText, fontSize: 11, fontWeight: FontWeight.w600)),
               style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 side: BorderSide(color: AppColors.red.withOpacity(0.5)),
@@ -7782,7 +7788,7 @@ class _AdminScreenState extends State<AdminScreen>
                 ])),
               GestureDetector(
                 onTap: () => _deleteKbEntry(doc['id']?.toString() ?? ''),
-                child: Icon(Icons.delete_outline_rounded, size: 16, color: AppColors.red.withOpacity(0.6))),
+                child: Icon(Icons.delete_outline_rounded, size: 16, color: sl.redText.withOpacity(0.6))),
             ]),
           );
         })),
@@ -8047,7 +8053,7 @@ class _AdminScreenState extends State<AdminScreen>
         child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
           Icon(icon, size: 16, color: color),
           const SizedBox(width: 8),
-          Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+          Text(label, style: TextStyle(color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w600)),
         ]),
       ),
     );
@@ -8437,7 +8443,7 @@ class _AdminScreenState extends State<AdminScreen>
         Icon(icon, color: color, size: 20),
         const SizedBox(height: 6),
         Text(value, style: TextStyle(
-            color: color, fontSize: 16, fontWeight: FontWeight.w900)),
+            color: sl.textOn(color), fontSize: 16, fontWeight: FontWeight.w900)),
         const SizedBox(height: 2),
         Text(label, style: TextStyle(color: sl.text3, fontSize: 9),
             textAlign: TextAlign.center),
@@ -8590,11 +8596,11 @@ class _AdminScreenState extends State<AdminScreen>
               borderRadius: BorderRadius.circular(6),
             ),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Row(children: [
-                Icon(Icons.info_outline_rounded, color: AppColors.amber, size: 11),
+              Row(children: [
+                Icon(Icons.info_outline_rounded, color: sl.amberText, size: 11),
                 SizedBox(width: 4),
                 Text('Discrepancy Notes', style: TextStyle(
-                    color: AppColors.amber, fontSize: 9, fontWeight: FontWeight.w700)),
+                    color: sl.amberText, fontSize: 9, fontWeight: FontWeight.w700)),
               ]),
               const SizedBox(height: 4),
               Text(notes, style: TextStyle(color: sl.text3, fontSize: 9, height: 1.4),
@@ -8974,7 +8980,7 @@ class _AdminScreenState extends State<AdminScreen>
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(label, style: TextStyle(
-            color: color, fontSize: 9, fontWeight: FontWeight.w700)),
+            color: sl.textOn(color), fontSize: 9, fontWeight: FontWeight.w700)),
         const SizedBox(height: 4),
         Text(value.isEmpty ? '(empty)' : value, style: TextStyle(
             color: value.isEmpty ? sl.text4 : sl.text2, fontSize: 10, height: 1.35),
@@ -9842,7 +9848,7 @@ class _AdminScreenState extends State<AdminScreen>
                 maxLines: 1, overflow: TextOverflow.ellipsis)),
             const SizedBox(width: 8),
             Text('$count', style: TextStyle(
-                color: color, fontSize: 11, fontWeight: FontWeight.w900)),
+                color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w900)),
             const SizedBox(width: 6),
             Text('(${pct.toStringAsFixed(0)}%)',
                 style: TextStyle(color: sl.text4, fontSize: 9)),
@@ -9923,7 +9929,7 @@ class _AdminScreenState extends State<AdminScreen>
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(badge, style: TextStyle(
-                  color: c, fontSize: 8, fontWeight: FontWeight.w900)),
+                  color: sl.textOn(c), fontSize: 8, fontWeight: FontWeight.w900)),
             ),
             const SizedBox(width: 6),
             Expanded(child: Text(_runTypeLabel((r['runType'] ?? '').toString()),

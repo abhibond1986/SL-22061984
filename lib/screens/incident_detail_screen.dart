@@ -1154,7 +1154,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               : sl.border.withOpacity(0.5))),
         child: Row(children: [
           Icon(Icons.event_rounded,
-              size: 15, color: overdue ? AppColors.red : sl.text4),
+              size: 15, color: overdue ? sl.redText : sl.text4),
           const SizedBox(width: 8),
           Expanded(child: Text(
             _targetDate == null
@@ -1166,8 +1166,8 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                 fontWeight: _targetDate == null
                     ? FontWeight.w400 : FontWeight.w600))),
           if (overdue)
-            const Text('OVERDUE', style: TextStyle(
-                color: AppColors.red, fontSize: 9.5,
+            Text('OVERDUE', style: TextStyle(
+                color: sl.redText, fontSize: 9.5,
                 fontWeight: FontWeight.w800)),
           if (_targetDate != null && !overdue)
             IconButton(
@@ -1427,7 +1427,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       color: color.withOpacity(0.1),
       borderRadius: BorderRadius.circular(7),
       border: Border.all(color: color.withOpacity(0.5))),
-    child: Text(text, style: TextStyle(color: color,
+    child: Text(text, style: TextStyle(color: SL.of(context).textOn(color),
         fontSize: 11, fontWeight: FontWeight.w700)));
 
   Widget _scoreCircle(dynamic score, Color color) => Container(
@@ -1439,9 +1439,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     child: Center(child: Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Text('$score', style: TextStyle(color: color,
+        Text('$score', style: TextStyle(color: SL.of(context).textOn(color),
             fontSize: 12, fontWeight: FontWeight.w800)),
-        Text('/100', style: TextStyle(color: color, fontSize: 10)),
+        Text('/100', style: TextStyle(color: SL.of(context).textOn(color), fontSize: 10)),
       ])));
 
   Widget _secLabel(String lbl, SL sl) => Padding(

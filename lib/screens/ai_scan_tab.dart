@@ -1329,8 +1329,8 @@ class _AIScanTabState extends State<AIScanTab> {
                 onPressed: () { Navigator.pop(ctx); _openSheetsLink(); },
                 icon: const Icon(Icons.open_in_new_rounded,
                     size: 14, color: AppColors.accent),
-                label: const Text('View Sheet',
-                    style: TextStyle(color: AppColors.accent,
+                label: Text('View Sheet',
+                    style: TextStyle(color: sl.accentText,
                         fontSize: 12, fontWeight: FontWeight.w700)),
                 style: OutlinedButton.styleFrom(
                   side: const BorderSide(color: AppColors.accent, width: 1.5),
@@ -1382,6 +1382,7 @@ class _AIScanTabState extends State<AIScanTab> {
   // ─── SHARE HELPERS ───────────────────────────────────────────
   Widget _shareBtn({IconData? icon, Widget? iconWidget, required String label,
       required Color color, required VoidCallback onTap}) {
+    final sl = SL.of(context);
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -1393,7 +1394,7 @@ class _AIScanTabState extends State<AIScanTab> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           iconWidget ?? Icon(icon, color: color, size: 20),
           const SizedBox(height: 4),
-          Text(label, style: TextStyle(color: color, fontSize: 10,
+          Text(label, style: TextStyle(color: sl.textOn(color), fontSize: 10,
               fontWeight: FontWeight.w700)),
         ]),
       ),
@@ -1998,14 +1999,15 @@ class _AIScanTabState extends State<AIScanTab> {
 
   void _shareReport() {
     if (_result == null) return;
+    final sl = SL.of(context);
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (_) => Container(
         padding: const EdgeInsets.all(24),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -2014,11 +2016,11 @@ class _AIScanTabState extends State<AIScanTab> {
               width: 40, height: 4,
               margin: const EdgeInsets.only(bottom: 16),
               decoration: BoxDecoration(
-                color: Colors.grey[300],
+                color: sl.border,
                 borderRadius: BorderRadius.circular(2)),
             ),
-            const Text('Share Report',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            Text('Share Report',
+              style: TextStyle(color: sl.text1, fontSize: 16, fontWeight: FontWeight.w700)),
             const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -2037,7 +2039,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 ),
                 _shareOption(
                   icon: Icons.more_horiz_rounded,
-                  color: Colors.grey[700]!,
+                  color: sl.text3,
                   label: 'Other',
                   onTap: () { Navigator.pop(context); _shareResultGeneric(); },
                 ),
@@ -2056,6 +2058,7 @@ class _AIScanTabState extends State<AIScanTab> {
     required String label,
     required VoidCallback onTap,
   }) {
+    final sl = SL.of(context);
     return GestureDetector(
       onTap: onTap,
       child: Column(children: [
@@ -2070,7 +2073,7 @@ class _AIScanTabState extends State<AIScanTab> {
         ),
         const SizedBox(height: 8),
         Text(label, style: TextStyle(
-          color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+          color: sl.textOn(color), fontSize: 12, fontWeight: FontWeight.w600)),
       ]),
     );
   }
@@ -2362,7 +2365,7 @@ class _AIScanTabState extends State<AIScanTab> {
     // would lose the one line that explains a long wait.
     height: 210,
     decoration: BoxDecoration(
-      color: const Color(0xFF252840),
+      color: SL.of(context).card2,
       borderRadius: BorderRadius.circular(12),
       image: _imageBytes != null ? DecorationImage(
           image: MemoryImage(_imageBytes!),
@@ -2434,7 +2437,7 @@ class _AIScanTabState extends State<AIScanTab> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(label,
-              style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+              style: TextStyle(color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700)),
             // Say plainly what "cached" means, because otherwise a stored
             // analysis is indistinguishable from a fresh one and there is no
             // clue that a second opinion is even possible.
@@ -2537,11 +2540,11 @@ class _AIScanTabState extends State<AIScanTab> {
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: AppColors.green.withOpacity(0.4))),
         child: Row(children: [
-          const Icon(Icons.check_circle_outline,
-              color: AppColors.green, size: 16),
+          Icon(Icons.check_circle_outline,
+              color: sl.greenText, size: 16),
           const SizedBox(width: 8),
-          const Expanded(child: Text('Saved & synced to Sheets',
-            style: TextStyle(color: AppColors.green,
+          Expanded(child: Text('Saved & synced to Sheets',
+            style: TextStyle(color: sl.greenText,
                 fontSize: 11, fontWeight: FontWeight.w600))),
           GestureDetector(
             onTap: _openSheetsLink,
@@ -2621,10 +2624,10 @@ class _AIScanTabState extends State<AIScanTab> {
             Text('${hazards.length} hazards · $confidence% confidence',
               style: TextStyle(color: sl.text3, fontSize: 10)),
             if (hasBbox)
-              const Padding(
-                padding: EdgeInsets.only(top: 4),
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
                 child: Text('Tap boxes on image → jumps to row',
-                  style: TextStyle(color: AppColors.accent,
+                  style: TextStyle(color: sl.accentText,
                       fontSize: 9, fontStyle: FontStyle.italic))),
           ])),
         ])),
@@ -2667,7 +2670,7 @@ class _AIScanTabState extends State<AIScanTab> {
             borderRadius: BorderRadius.circular(12)),
           child: Column(
             children: [
-              const Icon(Icons.cloud_off_rounded, color: AppColors.amber, size: 32),
+              Icon(Icons.cloud_off_rounded, color: sl.amberText, size: 32),
               const SizedBox(height: 8),
               Text('This image was not analysed',
                 style: TextStyle(color: sl.text1, fontSize: 14, fontWeight: FontWeight.w700)),
@@ -2741,9 +2744,9 @@ class _AIScanTabState extends State<AIScanTab> {
         const SizedBox(width: 6),
         Expanded(child: OutlinedButton.icon(
           onPressed: _reset,
-          icon: const Icon(Icons.refresh, size: 14, color: AppColors.accent),
-          label: const Text('New',
-              style: TextStyle(color: AppColors.accent,
+          icon: Icon(Icons.refresh, size: 14, color: sl.accentText),
+          label: Text('New',
+              style: TextStyle(color: sl.accentText,
                   fontSize: 11, fontWeight: FontWeight.w700)),
           style: OutlinedButton.styleFrom(
             side: const BorderSide(color: AppColors.accent, width: 2),
@@ -2795,7 +2798,7 @@ class _AIScanTabState extends State<AIScanTab> {
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
           child: Row(children: [
-            const Icon(Icons.table_view_outlined, size: 14, color: AppColors.red),
+            Icon(Icons.table_view_outlined, size: 14, color: sl.redText),
             const SizedBox(width: 6),
             Text('HAZARD ANALYSIS', style: TextStyle(
               color: sl.text4, fontSize: 10,
@@ -2808,7 +2811,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 borderRadius: BorderRadius.circular(99),
                 border: Border.all(color: AppColors.red.withOpacity(0.3))),
               child: Text('${hazards.length} hazards',
-                style: const TextStyle(color: AppColors.red,
+                style: TextStyle(color: sl.redText,
                     fontSize: 9, fontWeight: FontWeight.w700))),
           ])),
         // Column headers
@@ -2922,7 +2925,7 @@ class _AIScanTabState extends State<AIScanTab> {
       border: Border.all(color: color, width: 1),
       borderRadius: BorderRadius.circular(4)),
     child: Text(sev,
-      style: TextStyle(color: color, fontSize: 8,
+      style: TextStyle(color: SL.of(context).textOn(color), fontSize: 8,
           fontWeight: FontWeight.w800)));
 
   Color _sevColor(String sev) {
@@ -3036,7 +3039,7 @@ class _AIScanTabState extends State<AIScanTab> {
                       child: Text(
                         sev.substring(0, sev.length > 4 ? 4 : sev.length),
                         style: TextStyle(
-                            color: color, fontSize: 8,
+                            color: sl.textOn(color), fontSize: 8,
                             fontWeight: FontWeight.w800)),
                     ),
                   ]),
@@ -3108,7 +3111,7 @@ class _AIScanTabState extends State<AIScanTab> {
         children: [
           Row(
             children: [
-              const Icon(Icons.location_on, color: AppColors.accent, size: 18),
+              Icon(Icons.location_on, color: sl.accentText, size: 18),
               const SizedBox(width: 8),
               Text('GPS Location', style: TextStyle(
                 color: sl.text1,
@@ -3127,10 +3130,10 @@ class _AIScanTabState extends State<AIScanTab> {
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.edit, size: 14, color: AppColors.accent),
+                      Icon(Icons.edit, size: 14, color: sl.accentText),
                       const SizedBox(width: 4),
-                      const Text('Edit', style: TextStyle(
-                        color: AppColors.accent,
+                      Text('Edit', style: TextStyle(
+                        color: sl.accentText,
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
                       )),
@@ -3169,10 +3172,10 @@ class _AIScanTabState extends State<AIScanTab> {
               onTap: () => _openInMaps(loc.latitude!, loc.longitude!),
               child: Row(
                 children: [
-                  const Icon(Icons.map, size: 14, color: AppColors.accent),
+                  Icon(Icons.map, size: 14, color: sl.accentText),
                   const SizedBox(width: 6),
-                  const Text('View on Google Maps',
-                    style: TextStyle(color: AppColors.accent, fontSize: 12)),
+                  Text('View on Google Maps',
+                    style: TextStyle(color: sl.accentText, fontSize: 12)),
                 ],
               ),
             ),

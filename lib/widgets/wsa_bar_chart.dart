@@ -204,7 +204,7 @@ class _WsaBarChartState extends State<WsaBarChart> {
         children: [
           // Header with title + filter
           Row(children: [
-            Icon(Icons.bar_chart_rounded, color: AppColors.accent, size: 20),
+            Icon(Icons.bar_chart_rounded, color: sl.accentText, size: 20),
             const SizedBox(width: 8),
             Expanded(child: Text(
               I18n.t('dashboard.wsaChart'),
@@ -221,8 +221,8 @@ class _WsaBarChartState extends State<WsaBarChart> {
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: AppColors.accent.withOpacity(0.3))),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.factory_rounded,
-                      size: 12, color: AppColors.accent),
+                  Icon(Icons.factory_rounded,
+                      size: 12, color: sl.accentText),
                   const SizedBox(width: 5),
                   // Bounded rather than Flexible: this Row sits in an unbounded
                   // slot of the header row, where a flex child would throw.
@@ -231,8 +231,8 @@ class _WsaBarChartState extends State<WsaBarChart> {
                     child: Text(_scope.plant,
                         overflow: TextOverflow.ellipsis,
                         maxLines: 1,
-                        style: const TextStyle(
-                            color: AppColors.accent,
+                        style: TextStyle(
+                            color: sl.accentText,
                             fontSize: 11,
                             fontWeight: FontWeight.w600)),
                   ),
@@ -250,10 +250,10 @@ class _WsaBarChartState extends State<WsaBarChart> {
                   value: _selectedPlant,
                   isDense: true,
                   dropdownColor: sl.card,
-                  style: TextStyle(color: AppColors.accent, fontSize: 11,
+                  style: TextStyle(color: sl.accentText, fontSize: 11,
                     fontWeight: FontWeight.w600),
                   icon: Icon(Icons.arrow_drop_down,
-                    color: AppColors.accent, size: 16),
+                    color: sl.accentText, size: 16),
                   items: _plants.map((p) => DropdownMenuItem(
                     value: p['code'],
                     child: Text(

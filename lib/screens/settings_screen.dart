@@ -127,15 +127,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ─── SHOW URL INFO DIALOG ────────────────────────────────────
   void _showAdminUrlDialog() {
+    final sl = SL.of(context);
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: Theme.of(context).colorScheme.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Row(children: [
-          Icon(Icons.admin_panel_settings, color: AppColors.accent, size: 20),
-          SizedBox(width: 8),
-          Text('Admin Panel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        title: Row(children: [
+          Icon(Icons.admin_panel_settings, color: sl.accentText, size: 20),
+          const SizedBox(width: 8),
+          const Text('Admin Panel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         ]),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -159,9 +160,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: AppColors.amber.withOpacity(0.4)),
               ),
-              child: const Text(
+              child: Text(
                 '⚠️ Change the default password after first login.',
-                style: TextStyle(color: AppColors.amber, fontSize: 10, height: 1.4),
+                style: TextStyle(color: sl.amberText, fontSize: 10, height: 1.4),
               ),
             ),
           ],
@@ -271,14 +272,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             color: AppColors.accent.withOpacity(0.15),
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: const Icon(
+                          child: Icon(
                             Icons.admin_panel_settings_rounded,
-                            color: AppColors.accent,
+                            color: sl.accentText,
                             size: 22,
                           ),
                         ),
                         const SizedBox(width: 12),
-                        const Expanded(
+                        Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -290,7 +291,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   fontWeight: FontWeight.w700,
                                 ),
                               ),
-                              SizedBox(height: 3),
+                              const SizedBox(height: 3),
                               Text(
                                 'Manage users · Set roles · View plant-wise activity · Configure sync',
                                 style: TextStyle(
@@ -403,13 +404,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(children: const [
-                    Icon(Icons.cloud_done, color: AppColors.green, size: 22),
-                    SizedBox(width: 8),
+                  Row(children: [
+                    Icon(Icons.cloud_done, color: sl.greenText, size: 22),
+                    const SizedBox(width: 8),
                     Text(
                       'Connected — live sync active',
                       style: TextStyle(
-                        color: AppColors.green,
+                        color: sl.greenText,
                         fontSize: 13,
                         fontWeight: FontWeight.w700,
                       ),
@@ -432,8 +433,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 4),
                     Text(
                       '$_pendingCount items waiting to sync',
-                      style: const TextStyle(
-                        color: AppColors.amber,
+                      style: TextStyle(
+                        color: sl.amberText,
                         fontSize: 10,
                         fontWeight: FontWeight.w600,
                       ),
@@ -486,8 +487,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           : Icons.error_outline,
                       size: 14,
                       color: _status.startsWith('✓')
-                          ? AppColors.green
-                          : AppColors.red,
+                          ? sl.greenText
+                          : sl.redText,
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -533,14 +534,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 border: Border.all(color: AppColors.amber.withOpacity(0.4)),
               ),
               child: Row(children: [
-                const Icon(Icons.info_outline, color: AppColors.amber, size: 16),
+                Icon(Icons.info_outline, color: sl.amberText, size: 16),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     'Pilot only: "Anyone access" means anyone with the URL can read/write. '
                     'For production, restrict to your org domain and add API key auth.',
                     style: TextStyle(
-                        color: AppColors.amber, fontSize: 10, height: 1.4),
+                        color: sl.amberText, fontSize: 10, height: 1.4),
                   ),
                 ),
               ]),
@@ -575,11 +576,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       border: Border.all(color: AppColors.accent.withOpacity(0.25)),
     ),
     child: Row(mainAxisSize: MainAxisSize.min, children: [
-      Icon(icon, size: 11, color: AppColors.accent),
+      Icon(icon, size: 11, color: SL.of(context).accentText),
       const SizedBox(width: 4),
       Text(label,
-          style: const TextStyle(
-              color: AppColors.accent,
+          style: TextStyle(
+              color: SL.of(context).accentText,
               fontSize: 10,
               fontWeight: FontWeight.w600)),
     ]),
@@ -606,8 +607,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Text(text,
-                style: const TextStyle(
-                    color: sl.text2, fontSize: 11, height: 1.4)),
+                style: TextStyle(
+                    color: SL.of(context).text2, fontSize: 11, height: 1.4)),
           ),
         ),
       ]),

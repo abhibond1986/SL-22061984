@@ -7,6 +7,7 @@ import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
+import '../../widgets/bottom_nav_gap.dart';
 
 /// Plant dashboard — cross-plant, for everyone.
 ///
@@ -353,7 +354,8 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(14),
+      // Bottom inset clears the translucent bottom nav bar (`extendBody: true`).
+      padding: EdgeInsets.fromLTRB(14, 14, 14, BottomNavGap.height(context) + 16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         // Dropdown of EVERY plant, for every user — this screen is exempt from
         // the plant lock on purpose. It falls back to a plain header only when
@@ -425,7 +427,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         border: Border.all(color: AppColors.accent.withOpacity(0.30)),
       ),
       child: Row(children: [
-        const Icon(Icons.factory_rounded, size: 16, color: AppColors.accent),
+        Icon(Icons.factory_rounded, size: 16, color: sl.accentText),
         const SizedBox(width: 9),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -555,8 +557,8 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
             isExpanded: true,
             hint: Text('Select a plant',
                 style: TextStyle(color: sl.text3, fontSize: 12)),
-            icon: const Icon(Icons.expand_more_rounded,
-                color: AppColors.accent, size: 20),
+            icon: Icon(Icons.expand_more_rounded,
+                color: sl.accentText, size: 20),
             dropdownColor: sl.card,
             borderRadius: BorderRadius.circular(12),
             style: TextStyle(
@@ -566,8 +568,8 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
               return DropdownMenuItem<String>(
                 value: p,
                 child: Row(children: [
-                  const Icon(Icons.factory_rounded,
-                      size: 14, color: AppColors.accent),
+                  Icon(Icons.factory_rounded,
+                      size: 14, color: sl.accentText),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(p,
@@ -583,7 +585,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                   const SizedBox(width: 8),
                   Text(n > 0 ? '$n' : '—',
                       style: TextStyle(
-                          color: n > 0 ? AppColors.accent : sl.text4,
+                          color: n > 0 ? sl.accentText : sl.text4,
                           fontSize: 11,
                           fontWeight: FontWeight.w700)),
                 ]),
@@ -644,7 +646,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
           ),
           child: Column(children: [
             Text(value, style: TextStyle(
-                color: color, fontSize: 18, fontWeight: FontWeight.w800)),
+                color: sl.textOn(color), fontSize: 18, fontWeight: FontWeight.w800)),
             const SizedBox(height: 2),
             Text(label, style: TextStyle(color: sl.text3, fontSize: 9)),
           ]),
@@ -699,7 +701,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                     }).toList()),
                 child: Column(children: [
                   Text('$count', style: TextStyle(
-                      color: color, fontSize: 18, fontWeight: FontWeight.w800)),
+                      color: sl.textOn(color), fontSize: 18, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 2),
                   Text(label, style: TextStyle(
                       color: sl.text3, fontSize: 9), textAlign: TextAlign.center),
@@ -924,7 +926,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                     color: sevColor.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(4)),
                   child: Text(sev, style: TextStyle(
-                      color: sevColor, fontSize: 8, fontWeight: FontWeight.w800)),
+                      color: sl.textOn(sevColor), fontSize: 8, fontWeight: FontWeight.w800)),
                 ),
               ]),
             ),
@@ -962,7 +964,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                   fontWeight: FontWeight.w700)),
               const Spacer(),
               Text('${incidents.length}', style: TextStyle(
-                  color: AppColors.accent, fontSize: 14, fontWeight: FontWeight.w800)),
+                  color: sl.accentText, fontSize: 14, fontWeight: FontWeight.w800)),
             ]),
           ),
           const Divider(height: 1),
@@ -1026,7 +1028,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                                     color: sevColor.withOpacity(0.12),
                                     borderRadius: BorderRadius.circular(4)),
                                 child: Text(sev, style: TextStyle(
-                                    color: sevColor, fontSize: 8, fontWeight: FontWeight.w800)),
+                                    color: sl.textOn(sevColor), fontSize: 8, fontWeight: FontWeight.w800)),
                               ),
                             ]),
                           ),

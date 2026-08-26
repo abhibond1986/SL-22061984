@@ -292,7 +292,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                 _myReportsOnly = false;
               }),
               child: Text('Clear filters', style: TextStyle(
-                  color: AppColors.accent, fontSize: 11,
+                  color: sl.accentText, fontSize: 11,
                   fontWeight: FontWeight.w600)),
             ),
         ]),
@@ -383,7 +383,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         border: Border.all(color: sl.glassBorder),
       ),
       child: Row(children: [
-        const Icon(Icons.factory_rounded, size: 13, color: AppColors.accent),
+        Icon(Icons.factory_rounded, size: 13, color: sl.accentText),
         const SizedBox(width: 6),
         Expanded(child: Text(_scope.plant,
             style: TextStyle(color: sl.text1, fontSize: 12,
@@ -623,7 +623,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                       border: Border.all(color: statusColor.withOpacity(0.3)),
                     ),
                     child: Text(status, style: TextStyle(
-                        color: statusColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
+                        color: sl.textOn(statusColor), fontSize: 9.5, fontWeight: FontWeight.w800)),
                   ),
                 ],
               ),
@@ -650,7 +650,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                       color: sevColor.withOpacity(0.12),
                       borderRadius: BorderRadius.circular(4)),
                     child: Text(sev, style: TextStyle(
-                        color: sevColor, fontSize: 9.5, fontWeight: FontWeight.w800)),
+                        color: sl.textOn(sevColor), fontSize: 9.5, fontWeight: FontWeight.w800)),
                   ),
                 ],
               ),
@@ -752,6 +752,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     required IconData icon, required String label,
     required Color color, required VoidCallback onTap,
   }) {
+    final sl = SL.of(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -765,10 +766,10 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
             border: Border.all(color: color.withOpacity(0.35)),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(icon, color: color, size: 14),
+            Icon(icon, color: sl.textOn(color), size: 14),
             const SizedBox(width: 5),
             Text(label, style: TextStyle(
-                color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+                color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700)),
           ]),
         ),
       ),
@@ -815,7 +816,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Row(children: [
-          const Icon(Icons.delete_forever_rounded, color: AppColors.red, size: 20),
+          Icon(Icons.delete_forever_rounded, color: sl.redText, size: 20),
           const SizedBox(width: 8),
           Expanded(child: Text('Delete report?',
               style: TextStyle(color: sl.text1, fontSize: 15, fontWeight: FontWeight.w800))),

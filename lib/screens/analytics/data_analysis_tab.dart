@@ -6,6 +6,7 @@ import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
+import '../../widgets/bottom_nav_gap.dart';
 
 class DataAnalysisTab extends StatefulWidget {
   const DataAnalysisTab({super.key});
@@ -233,7 +234,8 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     final hasView = _view.isNotEmpty;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      // Bottom inset clears the translucent bottom nav bar (`extendBody: true`).
+      padding: EdgeInsets.fromLTRB(16, 16, 16, BottomNavGap.height(context) + 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -449,7 +451,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
             ),
             child: Column(children: [
               Text(value, style: TextStyle(
-                  fontSize: 18, fontWeight: FontWeight.w800, color: color)),
+                  fontSize: 18, fontWeight: FontWeight.w800, color: sl.textOn(color))),
               const SizedBox(height: 2),
               Text(label, style: TextStyle(fontSize: 9, color: sl.text3)),
             ]),
@@ -863,10 +865,10 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
           border: Border.all(color: color.withOpacity(0.3)),
         ),
         child: Column(children: [
-          Icon(Icons.timer_outlined, color: color, size: 18),
+          Icon(Icons.timer_outlined, color: sl.textOn(color), size: 18),
           const SizedBox(height: 6),
           Text(display, style: TextStyle(
-              color: color, fontSize: 16, fontWeight: FontWeight.w800)),
+              color: sl.textOn(color), fontSize: 16, fontWeight: FontWeight.w800)),
           const SizedBox(height: 2),
           Text(label, style: TextStyle(
               color: sl.text3, fontSize: 9, fontWeight: FontWeight.w600),

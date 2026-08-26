@@ -24,6 +24,7 @@ import '../widgets/universal_app_bar.dart';
 import '../services/error_log_service.dart';
 import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
+import '../widgets/bottom_nav_gap.dart';
 import 'dart:io' show Platform;
 
 class ChatTab extends StatefulWidget {
@@ -661,7 +662,7 @@ class _ChatTabState extends State<ChatTab> {
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(children: [
-          const Icon(Icons.info_outline, color: AppColors.amber, size: 20),
+          Icon(Icons.info_outline, color: sl.amberText, size: 20),
           const SizedBox(width: 8),
           Text('Could not read file', style: TextStyle(
               color: sl.text1, fontSize: 15, fontWeight: FontWeight.w700)),
@@ -679,8 +680,8 @@ class _ChatTabState extends State<ChatTab> {
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: AppColors.accent.withOpacity(0.3))),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('✅  Better options:', style: TextStyle(
-                    color: AppColors.accent, fontSize: 12, fontWeight: FontWeight.w700)),
+                Text('✅  Better options:', style: TextStyle(
+                    color: sl.accentText, fontSize: 12, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 Text('1. Copy text → paste via Admin Panel → Add Text Entry',
                     style: TextStyle(color: sl.text2, fontSize: 12, height: 1.4)),
@@ -718,8 +719,8 @@ class _ChatTabState extends State<ChatTab> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(children: [
-                const Icon(Icons.library_books_outlined,
-                    color: AppColors.amber, size: 20),
+                Icon(Icons.library_books_outlined,
+                    color: sl.amberText, size: 20),
                 const SizedBox(width: 8),
                 Expanded(child: Text('Knowledge Base (Admin)',
                     style: TextStyle(color: sl.text1,
@@ -772,8 +773,8 @@ class _ChatTabState extends State<ChatTab> {
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(color: sl.border)),
                           child: Row(children: [
-                            const Icon(Icons.description_outlined,
-                                color: AppColors.amber, size: 16),
+                            Icon(Icons.description_outlined,
+                                color: sl.amberText, size: 16),
                             const SizedBox(width: 8),
                             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                               Text(d['title']?.toString() ?? '',
@@ -784,8 +785,8 @@ class _ChatTabState extends State<ChatTab> {
                                   style: TextStyle(color: sl.text4, fontSize: 9)),
                             ])),
                             IconButton(
-                              icon: const Icon(Icons.delete_outline,
-                                  color: AppColors.red, size: 18),
+                              icon: Icon(Icons.delete_outline,
+                                  color: sl.redText, size: 18),
                               onPressed: () async {
                                 await LocalDB.deleteKnowledgeDoc(d['id'].toString());
                                 final fresh = await LocalDB.getKnowledgeDocs();
@@ -840,7 +841,13 @@ class _ChatTabState extends State<ChatTab> {
 
         // ── Input bar ─────────────────────────────────────────────
         Container(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          // The bottom pad is measured, not 8: the shell sets `extendBody: true`,
+          // so this Column reaches the physical bottom of the screen and the
+          // frosted nav bar paints on top of it. Without the extra inset the
+          // whole compose row — the only way to talk to the assistant — sits
+          // underneath the bar.
+          padding: EdgeInsets.fromLTRB(
+              10, 8, 10, BottomNavGap.height(context) + 8),
           decoration: BoxDecoration(
             color: sl.bg2,
             border: Border(top: BorderSide(color: sl.border, width: 0.8))),
@@ -1075,7 +1082,7 @@ class _ChatTabState extends State<ChatTab> {
         widgets.add(Padding(
           padding: const EdgeInsets.only(bottom: 4, top: 2),
           child: Text(trimmed, style: TextStyle(
-            color: AppColors.accent, fontSize: 13,
+            color: sl.accentText, fontSize: 13,
             fontWeight: FontWeight.w800))));
       }
       // 📋 Regulation line — blue (dark-safe)
@@ -1088,8 +1095,8 @@ class _ChatTabState extends State<ChatTab> {
       else if (trimmed.startsWith('⚡')) {
         widgets.add(Padding(
           padding: const EdgeInsets.only(top: 4),
-          child: Text(trimmed, style: const TextStyle(
-            color: AppColors.amber, fontSize: 12,
+          child: Text(trimmed, style: TextStyle(
+            color: sl.amberText, fontSize: 12,
             fontWeight: FontWeight.w700, height: 1.5))));
       }
       // ✅ Action line — green (dark-safe)

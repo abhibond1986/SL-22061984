@@ -422,8 +422,8 @@ class _DashboardTabState extends State<DashboardTab> {
           tooltip: 'Admin Panel',
           onPressed: () => Navigator.push(context,
               MaterialPageRoute(builder: (_) => const AdminScreen())),
-          icon: const Icon(Icons.admin_panel_settings_outlined,
-              color: AppColors.amber, size: 22)),
+          icon: Icon(Icons.admin_panel_settings_outlined,
+              color: sl.amberText, size: 22)),
       IconButton(
         tooltip: 'Toggle theme',
         onPressed: widget.toggleTheme,
@@ -450,8 +450,8 @@ class _DashboardTabState extends State<DashboardTab> {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: AppColors.amber.withOpacity(0.4))),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Icon(Icons.info_outline_rounded,
-            color: AppColors.amber, size: 16),
+        Icon(Icons.info_outline_rounded,
+            color: sl.amberText, size: 16),
         const SizedBox(width: 8),
         Expanded(child: Text(problem,
             style: TextStyle(color: sl.text2, fontSize: 11, height: 1.35))),
@@ -494,7 +494,7 @@ class _DashboardTabState extends State<DashboardTab> {
               dropdownColor: sl.bg2,
               style: TextStyle(color: sl.text1, fontSize: 13,
                   fontWeight: FontWeight.w600),
-              icon: Icon(Icons.expand_more, color: AppColors.accent, size: 18),
+              icon: Icon(Icons.expand_more, color: sl.accentText, size: 18),
               onChanged: (val) {
                 if (val == null) return;
                 final found = _allUsers.firstWhere(
@@ -519,8 +519,8 @@ class _DashboardTabState extends State<DashboardTab> {
                         decoration: BoxDecoration(
                           color: AppColors.accent.withOpacity(0.15),
                           borderRadius: BorderRadius.circular(4)),
-                        child: Text(code, style: const TextStyle(
-                            color: AppColors.accent, fontSize: 9,
+                        child: Text(code, style: TextStyle(
+                            color: sl.accentText, fontSize: 9,
                             fontWeight: FontWeight.w700))),
                   ]));
               }).toList(),
@@ -636,10 +636,10 @@ class _DashboardTabState extends State<DashboardTab> {
           const SizedBox(width: 10),
           GestureDetector(
             onTap: onTap,
-            child: Text('$count', style: TextStyle(color: color, fontSize: 16,
+            child: Text('$count', style: TextStyle(color: sl.textOn(color), fontSize: 16,
               fontWeight: FontWeight.w800,
               decoration: TextDecoration.underline,
-              decorationColor: color,
+              decorationColor: sl.textOn(color),
               decorationStyle: TextDecorationStyle.dotted))),
         ]),
       ),
@@ -771,7 +771,7 @@ class _DashboardTabState extends State<DashboardTab> {
                   children: [
                     Icon(
                       trendUp ? Icons.trending_up_rounded : Icons.trending_down_rounded,
-                      color: trendUp ? AppColors.red : AppColors.green,
+                      color: trendUp ? sl.redText : sl.greenText,
                       size: 18,
                     ),
                     const SizedBox(width: 8),
@@ -806,14 +806,14 @@ class _DashboardTabState extends State<DashboardTab> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.engineering_outlined, size: 13, color: AppColors.accent),
+                      Icon(Icons.engineering_outlined, size: 13, color: sl.accentText),
                       const SizedBox(width: 6),
                       Text(
                         '${topDept.key} (${topDept.value} ${topDept.value == 1 ? "incident" : "incidents"})',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
-                          color: AppColors.accent,
+                          color: sl.accentText,
                         ),
                       ),
                     ],
@@ -890,8 +890,8 @@ class _DashboardTabState extends State<DashboardTab> {
             style: TextButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               minimumSize: Size.zero),
-            child: const Text('View all →', style: TextStyle(
-                color: AppColors.accent, fontSize: 11, fontWeight: FontWeight.w600))),
+            child: Text('View all →', style: TextStyle(
+                color: sl.accentText, fontSize: 11, fontWeight: FontWeight.w600))),
       ]),
       Text(locked ? 'Your plant · tap row for details'
                   : 'All SAIL plants · tap row for details',
@@ -941,7 +941,7 @@ class _DashboardTabState extends State<DashboardTab> {
               borderRadius: BorderRadius.circular(10)),
             child: Center(child: Text(code, textAlign: TextAlign.center,
               style: TextStyle(
-                color: isMy ? Colors.white : AppColors.accent,
+                color: isMy ? Colors.white : sl.accentText,
                 fontSize: code.length > 3 ? 8 : 10,
                 fontWeight: FontWeight.w800)))),
           const SizedBox(width: 10),
@@ -1060,14 +1060,14 @@ class _DashboardTabState extends State<DashboardTab> {
         border: Border.all(color: color.withOpacity(0.25))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Icon(icon, color: color, size: 16),
+          Icon(icon, color: sl.textOn(color), size: 16),
           const SizedBox(width: 5),
           Expanded(child: Text(label, style: TextStyle(color: sl.text3, fontSize: 10),
             maxLines: 1, overflow: TextOverflow.ellipsis)),
         ]),
         const SizedBox(height: 6),
         Text('$value', style: TextStyle(
-          color: color, fontSize: 28, fontWeight: FontWeight.w800,
+          color: sl.textOn(color), fontSize: 28, fontWeight: FontWeight.w800,
           decoration: TextDecoration.underline,
           decorationColor: color.withOpacity(0.5),
           decorationStyle: TextDecorationStyle.dotted)),
@@ -1083,11 +1083,11 @@ class _DashboardTabState extends State<DashboardTab> {
           color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(12),
           border: Border.all(color: color.withOpacity(0.25))),
         child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(icon, color: color, size: 22),
+          Icon(icon, color: sl.textOn(color), size: 22),
           const SizedBox(height: 5),
           Flexible(
             child: Text(label, textAlign: TextAlign.center,
-              style: TextStyle(color: color, fontSize: 11,    // Improved: was 9px
+              style: TextStyle(color: sl.textOn(color), fontSize: 11,    // Improved: was 9px
                   fontWeight: FontWeight.w700, height: 1.3),  // Increased weight for emphasis
               maxLines: 2,
               overflow: TextOverflow.ellipsis),
@@ -1102,10 +1102,11 @@ class _DashboardTabState extends State<DashboardTab> {
         decoration: BoxDecoration(
           color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(6),
           border: Border.all(color: color.withOpacity(0.3))),
-        child: Text(text, style: TextStyle(color: color, fontSize: 10,
+        child: Text(text, style: TextStyle(color: SL.of(context).textOn(color), fontSize: 10,
           fontWeight: FontWeight.w700,
           decoration: TextDecoration.underline,
-          decorationColor: color, decorationStyle: TextDecorationStyle.dotted))));
+          decorationColor: SL.of(context).textOn(color),
+          decorationStyle: TextDecorationStyle.dotted))));
 }
 
 
@@ -1145,8 +1146,8 @@ class _CasesSheet extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: AppColors.accent.withOpacity(0.15),
                   borderRadius: BorderRadius.circular(99)),
-                child: Text('${cases.length}', style: const TextStyle(
-                    color: AppColors.accent, fontSize: 12, fontWeight: FontWeight.w700))),
+                child: Text('${cases.length}', style: TextStyle(
+                    color: sl.accentText, fontSize: 12, fontWeight: FontWeight.w700))),
               const SizedBox(width: 8),
               IconButton(
                 padding: EdgeInsets.zero, constraints: const BoxConstraints(),
@@ -1235,7 +1236,7 @@ class _CaseCardState extends State<_CaseCard> {
         backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Row(children: [
-          const Icon(Icons.lock_rounded, color: AppColors.green, size: 20),
+          Icon(Icons.lock_rounded, color: sl.greenText, size: 20),
           const SizedBox(width: 8),
           Expanded(child: Text('Close Case',
             style: TextStyle(color: sl.text1, fontSize: 15, fontWeight: FontWeight.w700))),
@@ -1420,12 +1421,12 @@ class _CaseCardState extends State<_CaseCard> {
                   ? const SizedBox(width: 13, height: 13,
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: AppColors.green))
-                  : const Row(mainAxisSize: MainAxisSize.min, children: [
+                  : Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(Icons.lock_outline_rounded,
-                          color: AppColors.green, size: 12),
-                      SizedBox(width: 4),
+                          color: sl.greenText, size: 12),
+                      const SizedBox(width: 4),
                       Text('Close', style: TextStyle(
-                          color: AppColors.green, fontSize: 10,
+                          color: sl.greenText, fontSize: 10,
                           fontWeight: FontWeight.w700)),
                     ]))),
           ],
@@ -1439,12 +1440,12 @@ class _CaseCardState extends State<_CaseCard> {
               color: AppColors.green.withOpacity(0.07),
               borderRadius: BorderRadius.circular(7)),
             child: Row(children: [
-              const Icon(Icons.check_circle_outline,
-                  color: AppColors.green, size: 12),
+              Icon(Icons.check_circle_outline,
+                  color: sl.greenText, size: 12),
               const SizedBox(width: 5),
               Expanded(child: Text(
                 _inc['correctiveAction']?.toString() ?? '',
-                style: const TextStyle(color: AppColors.green,
+                style: TextStyle(color: sl.greenText,
                     fontSize: 10, height: 1.4),
                 maxLines: 2, overflow: TextOverflow.ellipsis)),
             ])),
@@ -1459,7 +1460,7 @@ class _CaseCardState extends State<_CaseCard> {
       borderRadius: BorderRadius.circular(99),
       border: Border.all(color: color.withOpacity(0.3))),
     child: Text(text, style: TextStyle(
-        color: color, fontSize: 10, fontWeight: FontWeight.w600)));
+        color: widget.sl.textOn(color), fontSize: 10, fontWeight: FontWeight.w600)));
 }
 
 
@@ -1547,8 +1548,8 @@ class _PlantSheet extends StatelessWidget {
         color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(8),
         border: Border.all(color: color.withOpacity(0.25))),
       child: Column(children: [
-        Text('$val', style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w800)),
-        Text(label, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w600)),
+        Text('$val', style: TextStyle(color: sl.textOn(color), fontSize: 18, fontWeight: FontWeight.w800)),
+        Text(label, style: TextStyle(color: sl.textOn(color), fontSize: 9, fontWeight: FontWeight.w600)),
       ])));
 }
 
@@ -1619,7 +1620,7 @@ class _AllPlantsSheet extends StatelessWidget {
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
                       Text('$total', style: TextStyle(
-                        color: isMy ? AppColors.accent : sl.text1,
+                        color: isMy ? sl.accentText : sl.text1,
                         fontSize: 22, fontWeight: FontWeight.w800)),
                       const Spacer(),
                       if (isMy)
@@ -1635,12 +1636,12 @@ class _AllPlantsSheet extends StatelessWidget {
                           decoration: BoxDecoration(
                             color: AppColors.crit.withOpacity(0.15),
                             borderRadius: BorderRadius.circular(4)),
-                          child: Text('$crit 🔴', style: const TextStyle(
-                              color: AppColors.crit, fontSize: 9, fontWeight: FontWeight.w700))),
+                          child: Text('$crit 🔴', style: TextStyle(
+                              color: sl.critText, fontSize: 9, fontWeight: FontWeight.w700))),
                     ]),
                     const SizedBox(height: 4),
                     Text(code, style: TextStyle(
-                      color: isMy ? AppColors.accent : sl.text2,
+                      color: isMy ? sl.accentText : sl.text2,
                       fontSize: 13, fontWeight: FontWeight.w700)),
                     Text(name.split(' ').take(3).join(' '),
                       style: TextStyle(color: sl.text4, fontSize: 9),

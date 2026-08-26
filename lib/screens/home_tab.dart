@@ -27,6 +27,7 @@ import 'incident_detail_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
+import '../widgets/bottom_nav_gap.dart';
 
 class HomeTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -418,7 +419,12 @@ class _HomeTabState extends State<HomeTab> {
                   const SizedBox(height: 18),
                 ],
                 _recentActivity(sl),
-                const SizedBox(height: 24),
+                // NOT a fixed spacer: the shell builds its Scaffold with
+                // `extendBody: true` so this column scrolls *behind* the frosted
+                // nav bar. A flat 24 left the final Recent Activity row sitting
+                // under the bar — visible but unreadable. BottomNavGap measures
+                // the bar (60 + gesture inset) instead of guessing.
+                const BottomNavGap(),
               ]),
             )),
     );
@@ -729,7 +735,7 @@ class _HomeTabState extends State<HomeTab> {
                 decoration: BoxDecoration(
                     color: color.withOpacity(0.15),
                     borderRadius: BorderRadius.circular(10)),
-                child: Icon(icon, color: color, size: 18)),
+                child: Icon(icon, color: sl.textOn(color), size: 18)),
               const Spacer(),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
@@ -737,7 +743,7 @@ class _HomeTabState extends State<HomeTab> {
                   color: color.withOpacity(0.12),
                   borderRadius: BorderRadius.circular(4)),
                 child: Text(I18n.t('home.thisWeek'),
-                    style: TextStyle(color: color, fontSize: 10,
+                    style: TextStyle(color: sl.textOn(color), fontSize: 10,
                         fontWeight: FontWeight.w700, letterSpacing: 0.3))),
             ]),
             const SizedBox(height: 12),
@@ -847,7 +853,7 @@ class _HomeTabState extends State<HomeTab> {
       ])),
       const SizedBox(width: 6),
       Text('${(v * 100).clamp(0, 100).round()}%',
-          style: TextStyle(color: color, fontSize: 10,
+          style: TextStyle(color: sl.textOn(color), fontSize: 10,
               fontWeight: FontWeight.w700)),
     ]);
   }
@@ -1008,7 +1014,7 @@ class _HomeTabState extends State<HomeTab> {
               border: Border.all(color: sl.border, width: 1)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
-                Icon(Icons.trending_up_rounded, color: AppColors.accent, size: 16),
+                Icon(Icons.trending_up_rounded, color: sl.accentText, size: 16),
                 const SizedBox(width: 6),
                 Text(I18n.t('home.weeklyTrend'),
                     style: TextStyle(color: sl.text1, fontSize: 13,
@@ -1046,7 +1052,7 @@ class _HomeTabState extends State<HomeTab> {
                       const SizedBox(height: 4),
                       Text(dayLabels[(todayDow - (6 - i) + 7) % 7],
                           style: TextStyle(
-                              color: isToday ? AppColors.accent : sl.text4,
+                              color: isToday ? sl.accentText : sl.text4,
                               fontSize: 9,
                               fontWeight: isToday ? FontWeight.w800 : FontWeight.w500)),
                     ]),
@@ -1083,7 +1089,7 @@ class _HomeTabState extends State<HomeTab> {
               border: Border.all(color: sl.border, width: 1)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
-                Icon(Icons.factory_outlined, color: AppColors.accent, size: 16),
+                Icon(Icons.factory_outlined, color: sl.accentText, size: 16),
                 const SizedBox(width: 6),
                 Text(I18n.t('home.byPlant'),
                     style: TextStyle(color: sl.text1, fontSize: 13,
@@ -1122,7 +1128,7 @@ class _HomeTabState extends State<HomeTab> {
                     SizedBox(width: 20,
                       child: Text('${entry.value}',
                           textAlign: TextAlign.right,
-                          style: TextStyle(color: color, fontSize: 12,
+                          style: TextStyle(color: sl.textOn(color), fontSize: 12,
                               fontWeight: FontWeight.w800))),
                   ]),
                 );
@@ -1152,10 +1158,10 @@ class _HomeTabState extends State<HomeTab> {
             onTap: () => widget.onTabChange(AppTabs.reports),
             child: Row(children: [
               Text(I18n.t('home.viewAll'),
-                  style: const TextStyle(color: AppColors.accent,
+                  style: TextStyle(color: sl.accentText,
                       fontSize: 11, fontWeight: FontWeight.w600)),
-              const Icon(Icons.chevron_right_rounded,
-                  color: AppColors.accent, size: 14),
+              Icon(Icons.chevron_right_rounded,
+                  color: sl.accentText, size: 14),
             ])),
         ]),
         const SizedBox(height: 10),
@@ -1220,7 +1226,7 @@ class _HomeTabState extends State<HomeTab> {
                     sev == 'CRITICAL' ? Icons.warning_rounded
                         : sev == 'HIGH' ? Icons.error_outline_rounded
                         : Icons.info_outline_rounded,
-                    color: sevColor, size: 18)),
+                    color: sl.textOn(sevColor), size: 18)),
               const SizedBox(width: 10),
               Expanded(child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1238,7 +1244,7 @@ class _HomeTabState extends State<HomeTab> {
                   color: sevColor.withOpacity(0.12),
                   borderRadius: BorderRadius.circular(4)),
                 child: Text(sev,
-                    style: TextStyle(color: sevColor, fontSize: 8,
+                    style: TextStyle(color: sl.textOn(sevColor), fontSize: 8,
                         fontWeight: FontWeight.w800))),
             ]),
           ))),
@@ -1251,7 +1257,7 @@ class _HomeTabState extends State<HomeTab> {
           color: AppColors.accent,
           borderRadius: BorderRadius.circular(2))),
     const SizedBox(width: 8),
-    Icon(icon, color: AppColors.accent, size: 14),
+    Icon(icon, color: sl.accentText, size: 14),
     const SizedBox(width: 6),
     Text(title, style: TextStyle(color: sl.text1, fontSize: 14,
         fontWeight: FontWeight.w700)),

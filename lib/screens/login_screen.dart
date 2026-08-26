@@ -345,12 +345,12 @@ class _LoginScreenState extends State<LoginScreen> {
                               border: Border.all(
                                 color: AppColors.crit.withOpacity(0.4))),
                             child: Row(children: [
-                              const Icon(Icons.error_outline,
-                                color: AppColors.crit, size: 16),
+                              Icon(Icons.error_outline,
+                                color: sl.critText, size: 16),
                               const SizedBox(width: 8),
                               Expanded(child: Text(_err,
-                                style: const TextStyle(
-                                  color: AppColors.crit, fontSize: 12))),
+                                style: TextStyle(
+                                  color: sl.critText, fontSize: 12))),
                             ])),
                         ],
 
@@ -785,12 +785,12 @@ class _LoginScreenState extends State<LoginScreen> {
                         border:
                             Border.all(color: AppColors.crit.withOpacity(0.4))),
                       child: Row(children: [
-                        const Icon(Icons.error_outline,
-                            color: AppColors.crit, size: 16),
+                        Icon(Icons.error_outline,
+                            color: sl.critText, size: 16),
                         const SizedBox(width: 8),
                         Expanded(child: Text(err,
-                            style: const TextStyle(
-                                color: AppColors.crit, fontSize: 12,
+                            style: TextStyle(
+                                color: sl.critText, fontSize: 12,
                                 height: 1.35))),
                       ])),
                   ],

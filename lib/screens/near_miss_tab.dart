@@ -1545,6 +1545,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   // ═══════════════════════════════════════════════════════════════
 
   void _showSaveSuccessDialog(Map<String, dynamic> incident, bool synced, bool exported, [Uint8List? savedImageBytes]) {
+    final sl = SL.of(context);
     showDialog(context: context, builder: (ctx) => Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Padding(padding: const EdgeInsets.all(24), child: Column(
@@ -1556,16 +1557,16 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               shape: BoxShape.circle),
             child: Icon(
               exported ? Icons.picture_as_pdf_rounded : Icons.check_circle_rounded,
-              color: exported ? AppColors.accent : AppColors.green, size: 48)),
+              color: exported ? sl.accentText : sl.greenText, size: 48)),
           const SizedBox(height: 16),
           Text(exported ? 'Saved + PDF Exported' : 'Near Miss Saved!',
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
           Text(synced ? 'Synced to cloud ☁️' : 'Saved locally (will sync later)',
-            style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+            style: TextStyle(fontSize: 13, color: sl.text3)),
           const SizedBox(height: 20),
           // Share buttons — always show for Save, show for PDF too
-          Text('Share Report', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+          Text('Share Report', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: sl.text3)),
           const SizedBox(height: 10),
           Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
             _shareBtn(iconWidget: _whatsAppIcon(20), label: 'WhatsApp',
@@ -1588,6 +1589,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
 
   Widget _shareBtn({IconData? icon, Widget? iconWidget, required String label,
       required Color color, required VoidCallback onTap}) {
+    final sl = SL.of(context);
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -1597,9 +1599,9 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: color.withOpacity(0.4))),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          iconWidget ?? Icon(icon, color: color, size: 20),
+          iconWidget ?? Icon(icon, color: sl.textOn(color), size: 20),
           const SizedBox(height: 4),
-          Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w700)),
+          Text(label, style: TextStyle(color: sl.textOn(color), fontSize: 10, fontWeight: FontWeight.w700)),
         ]),
       ),
     );
@@ -1845,9 +1847,9 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           decoration: BoxDecoration(
             color: AppColors.amber.withOpacity(0.15),
             borderRadius: BorderRadius.circular(6)),
-          child: const Icon(Icons.lightbulb_outline_rounded, size: 14, color: AppColors.amber)),
+          child: Icon(Icons.lightbulb_outline_rounded, size: 14, color: sl.amberText)),
         const SizedBox(width: 8),
-        const Text('Reporting Guidance', style: TextStyle(color: AppColors.amber, fontSize: 12, fontWeight: FontWeight.w700)),
+        Text('Reporting Guidance', style: TextStyle(color: sl.amberText, fontSize: 12, fontWeight: FontWeight.w700)),
       ]),
       const SizedBox(height: 8),
       Text(
@@ -1898,7 +1900,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             color: AppColors.green.withOpacity(0.08),
             borderRadius: BorderRadius.circular(8)),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Icon(Icons.check_circle, size: 13, color: AppColors.green),
+            Icon(Icons.check_circle, size: 13, color: sl.greenText),
             const SizedBox(width: 6),
             Text('Image attached', style: TextStyle(color: sl.text2, fontSize: 11, fontWeight: FontWeight.w600)),
           ]),
@@ -1912,9 +1914,9 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               border: Border.all(color: AppColors.red.withOpacity(0.5)),
               borderRadius: BorderRadius.circular(8)),
             child: Row(children: [
-              const Icon(Icons.delete_outline_rounded, size: 13, color: AppColors.red),
+              Icon(Icons.delete_outline_rounded, size: 13, color: sl.redText),
               const SizedBox(width: 4),
-              const Text('Remove', style: TextStyle(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.w600)),
+              Text('Remove', style: TextStyle(color: sl.redText, fontSize: 11, fontWeight: FontWeight.w600)),
             ]),
           ),
         ),
@@ -1939,7 +1941,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             decoration: BoxDecoration(
               gradient: LinearGradient(colors: [AppColors.accent.withOpacity(0.15), AppColors.accent.withOpacity(0.05)]),
               shape: BoxShape.circle),
-            child: const Icon(Icons.camera_alt_rounded, size: 28, color: AppColors.accent)),
+            child: Icon(Icons.camera_alt_rounded, size: 28, color: sl.accentText)),
           const SizedBox(height: 12),
           Text('Tap to capture hazard photo', style: TextStyle(color: sl.text1, fontSize: 13, fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
@@ -1965,6 +1967,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   ]);
 
   Widget _actionButton({required IconData icon, required String label, required bool filled, required VoidCallback onTap}) {
+    final sl = SL.of(context);
     if (filled) {
       return Container(
         decoration: BoxDecoration(
@@ -1983,8 +1986,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     }
     return OutlinedButton.icon(
       onPressed: onTap,
-      icon: Icon(icon, size: 15, color: AppColors.accent),
-      label: Text(label, style: const TextStyle(color: AppColors.accent, fontSize: 12, fontWeight: FontWeight.w600)),
+      icon: Icon(icon, size: 15, color: sl.accentText),
+      label: Text(label, style: TextStyle(color: sl.accentText, fontSize: 12, fontWeight: FontWeight.w600)),
       style: OutlinedButton.styleFrom(
         side: const BorderSide(color: AppColors.accent, width: 1.5),
         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1992,14 +1995,16 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
-  Widget _analyzingImage() => Container(
+  Widget _analyzingImage() {
+    final sl = SL.of(context);
+    return Container(
     // 140 → 190 to fit the progress bar, its phase caption and the elapsed
     // counter. "Please wait..." is gone: it was the least informative line on
     // the screen and the space is better spent saying what is happening and how
     // long it has been.
     height: 190,
     decoration: BoxDecoration(
-      color: const Color(0xFF252840),
+      color: sl.card2,
       borderRadius: BorderRadius.circular(12),
       image: _imageBytes != null ? DecorationImage(image: MemoryImage(_imageBytes!), fit: BoxFit.cover) : null),
     child: Container(
@@ -2015,6 +2020,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           const SizedBox(height: 8),
           const AnalysisProgress(accent: AppColors.accent, compact: true),
         ]))));
+  }
 
   /// Plain-language reason this photo was not analysed.
   ///
@@ -2088,10 +2094,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           borderRadius: BorderRadius.circular(14)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Icon(Icons.auto_awesome, size: 14, color: _isOnlineMode ? AppColors.accent : AppColors.amber),
+            Icon(Icons.auto_awesome, size: 14, color: _isOnlineMode ? sl.accentText : sl.amberText),
             const SizedBox(width: 6),
             Text(_isOnlineMode ? 'AI Assessment' : 'AI Unavailable — Manual Entry',
-              style: TextStyle(color: _isOnlineMode ? AppColors.accent : AppColors.amber, fontSize: 12, fontWeight: FontWeight.w700)),
+              style: TextStyle(color: _isOnlineMode ? sl.accentText : sl.amberText, fontSize: 12, fontWeight: FontWeight.w700)),
             const Spacer(),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -2100,7 +2106,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 border: Border.all(color: AppColors.amber.withOpacity(0.6)),
                 borderRadius: BorderRadius.circular(8)),
               child: Text('${_aiBrief!['severity']} · ${_aiBrief!['confidence']}%',
-                style: const TextStyle(color: AppColors.amber, fontSize: 11, fontWeight: FontWeight.w800))),  // Improved: was 9px
+                style: TextStyle(color: sl.amberText, fontSize: 11, fontWeight: FontWeight.w800))),  // Improved: was 9px
           ]),
           if (!_isOnlineMode) ...[
             const SizedBox(height: 8),
@@ -2110,7 +2116,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 color: AppColors.amber.withOpacity(0.08),
                 borderRadius: BorderRadius.circular(8)),
               child: Row(children: [
-                Icon(_offlineIcon(), color: AppColors.amber, size: 14),
+                Icon(_offlineIcon(), color: sl.amberText, size: 14),
                 const SizedBox(width: 8),
                 Expanded(child: Text(
                   _offlineExplanation(),
@@ -2142,8 +2148,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
       const SizedBox(height: 10),
       OutlinedButton.icon(
         onPressed: () => setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _brief.clear(); }),
-        icon: const Icon(Icons.delete_outline_rounded, size: 15, color: AppColors.red),
-        label: const Text('Remove Image', style: TextStyle(color: AppColors.red, fontSize: 12, fontWeight: FontWeight.w600)),
+        icon: Icon(Icons.delete_outline_rounded, size: 15, color: sl.redText),
+        label: Text('Remove Image', style: TextStyle(color: sl.redText, fontSize: 12, fontWeight: FontWeight.w600)),
         style: OutlinedButton.styleFrom(
           side: BorderSide(color: AppColors.red.withOpacity(0.5), width: 1.5),
           padding: const EdgeInsets.symmetric(vertical: 11),
@@ -2199,10 +2205,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(children: [
-                      Icon(Icons.summarize_rounded, size: 13, color: AppColors.accent),
+                      Icon(Icons.summarize_rounded, size: 13, color: sl.accentText),
                       const SizedBox(width: 6),
                       Text('Summary of Near Miss',
-                        style: TextStyle(color: AppColors.accent, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+                        style: TextStyle(color: sl.accentText, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.3)),
                       const Spacer(),
                       GestureDetector(
                         onTap: () => setState(() => _aiSummary = null),
@@ -2246,7 +2252,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                     }),
                     child: Padding(
                       padding: const EdgeInsets.only(top: 14, left: 4),
-                      child: Icon(Icons.remove_circle_outline, size: 20, color: AppColors.red.withOpacity(0.7)),
+                      child: Icon(Icons.remove_circle_outline, size: 20, color: sl.redText.withOpacity(0.7)),
                     ),
                   ),
                 ],
@@ -2265,10 +2271,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                   borderRadius: BorderRadius.circular(8),
                   color: AppColors.accent.withOpacity(0.04)),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.add_circle_outline, size: 15, color: AppColors.accent),
+                  Icon(Icons.add_circle_outline, size: 15, color: sl.accentText),
                   const SizedBox(width: 6),
                   Text('Add Corrective Action',
-                    style: TextStyle(color: AppColors.accent, fontSize: 11, fontWeight: FontWeight.w600)),
+                    style: TextStyle(color: sl.accentText, fontSize: 11, fontWeight: FontWeight.w600)),
                 ]),
               ),
             ),
@@ -2280,6 +2286,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
 
   /// ★ v25: Animated mic button — tap to start, long-press to pick language
   Widget _micButton(TextEditingController field) {
+    final sl = SL.of(context);
     final isActive = _isListening && _activeMicField == field;
     return AnimatedBuilder(
       animation: _micPulse,
@@ -2299,7 +2306,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             scale: isActive ? _micPulse.value * 0.85 : 1.0,
             child: Icon(
               isActive ? Icons.mic : Icons.mic_none_rounded,
-              color: isActive ? Colors.red : AppColors.accent,
+              color: isActive ? Colors.red : sl.accentText,
               size: 18)),
         ),
       ),
@@ -2362,7 +2369,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 ),
                 child: Text(l['label']!,
                   style: TextStyle(
-                    color: isSelected ? AppColors.accent : sl.text3,
+                    color: isSelected ? sl.accentText : sl.text3,
                     fontSize: 10,
                     fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400)),
               ),
@@ -2374,13 +2381,14 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   }
 
   Widget _langOption(String code, String label, String flag) {
+    final sl = SL.of(context);
     final isSelected = _selectedVoiceLang == code;
     return ListTile(
       leading: Text(flag, style: const TextStyle(fontSize: 22)),
       title: Text(label, style: TextStyle(
         fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400,
-        color: isSelected ? AppColors.accent : null)),
-      trailing: isSelected ? const Icon(Icons.check_circle, color: AppColors.accent, size: 20) : null,
+        color: isSelected ? sl.accentText : null)),
+      trailing: isSelected ? Icon(Icons.check_circle, color: sl.accentText, size: 20) : null,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       tileColor: isSelected ? AppColors.accent.withOpacity(0.08) : null,
       onTap: () {
@@ -2629,14 +2637,14 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             prefixIcon: Padding(
               padding: const EdgeInsets.only(left: 12, right: 8),
               child: Icon(Icons.location_on_outlined, size: 18,
-                color: isAutoFilled ? AppColors.green : AppColors.accent.withOpacity(0.7))),
+                color: isAutoFilled ? sl.greenText : sl.accentText.withOpacity(0.7))),
             prefixIconConstraints: const BoxConstraints(minWidth: 40),
             suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
               if (isAutoFilled)
                 Padding(
                   padding: const EdgeInsets.only(right: 4),
                   child: Icon(Icons.gps_fixed_rounded, size: 14,
-                    color: AppColors.green.withOpacity(0.7))),
+                    color: sl.greenText.withOpacity(0.7))),
               _micButton(_location),
             ]),
             filled: true,
@@ -2659,7 +2667,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             padding: const EdgeInsets.only(left: 14, top: 4),
             child: Text(
               '📍 Auto-detected from ${_location.text.contains(',') && _capturedLocation?.address == null ? "image EXIF" : "GPS"} — tap to edit if incorrect',
-              style: TextStyle(color: AppColors.green.withOpacity(0.8), fontSize: 10, fontStyle: FontStyle.italic),
+              style: TextStyle(color: sl.greenText.withOpacity(0.8), fontSize: 10, fontStyle: FontStyle.italic),
             ),
           ),
       ]),
@@ -2680,7 +2688,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           labelStyle: TextStyle(color: sl.text3, fontSize: 11.5),
           prefixIcon: Padding(
             padding: const EdgeInsets.only(left: 12, right: 8),
-            child: Icon(icon, size: 18, color: AppColors.accent.withOpacity(0.7))),
+            child: Icon(icon, size: 18, color: sl.accentText.withOpacity(0.7))),
           prefixIconConstraints: const BoxConstraints(minWidth: 40),
           suffixIcon: suffix,
           filled: true,
@@ -2720,7 +2728,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             style: TextStyle(
               fontSize: 12,
               fontStyle: e == 'Other' ? FontStyle.italic : FontStyle.normal,
-              color: e == 'Other' ? AppColors.accent : sl.text1,
+              color: e == 'Other' ? sl.accentText : sl.text1,
             ),
           ),
         )).toList(),
@@ -2850,12 +2858,12 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(color: AppColors.green.withOpacity(0.3))),
                     child: Row(children: [
-                      const Icon(Icons.check_circle_rounded,
-                        color: AppColors.green, size: 22),
+                      Icon(Icons.check_circle_rounded,
+                        color: sl.greenText, size: 22),
                       const SizedBox(width: 10),
                       Expanded(child: Text(
                         'Report saved successfully!',
-                        style: TextStyle(color: AppColors.green,
+                        style: TextStyle(color: sl.greenText,
                           fontSize: 13, fontWeight: FontWeight.w700))),
                     ]),
                   ),

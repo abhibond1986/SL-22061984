@@ -181,7 +181,7 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
                       : AppColors.accent.withOpacity(0.3))),
                 child: Icon(
                   _isListening ? Icons.stop_rounded : Icons.mic_rounded,
-                  color: _isListening ? AppColors.red : AppColors.accent,
+                  color: _isListening ? sl.redText : sl.accentText,
                   size: 18),
               ),
             ),
@@ -197,7 +197,7 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
                   color: AppColors.red, shape: BoxShape.circle)),
               const SizedBox(width: 6),
               Text(I18n.t('nearMiss.recording'),
-                style: TextStyle(color: AppColors.red, fontSize: 10,
+                style: TextStyle(color: sl.redText, fontSize: 10,
                   fontWeight: FontWeight.w600)),
               const SizedBox(width: 8),
               Text('(${I18n.langName(I18n.currentLang)})',

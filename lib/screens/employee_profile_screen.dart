@@ -376,7 +376,7 @@ class _EmployeeProfileScreenState extends State<EmployeeProfileScreen> {
         ),
         child: Text(text,
             style: TextStyle(
-                color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+                color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700)),
       );
 
   Widget _banner(SL sl, IconData icon, String text, Color color) => Container(

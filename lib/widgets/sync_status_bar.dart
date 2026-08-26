@@ -114,7 +114,7 @@ class _SyncStatusBarState extends State<SyncStatusBar> {
               onTap: _triggerSync,
               child: Icon(
                 Icons.refresh_rounded,
-                color: AppColors.accent,
+                color: sl.accentText,
                 size: 18,
               ),
             ),
