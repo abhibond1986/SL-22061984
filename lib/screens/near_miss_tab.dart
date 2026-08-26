@@ -371,7 +371,6 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     _lastRecognized = '';
     try {
       await Future.delayed(const Duration(milliseconds: 300));
-      _armSilenceWatchdog(field, sessionId);
       await _speech.listen(
         onResult: (result) {
           if (!mounted || _activeMicField != field) return;
@@ -396,8 +395,12 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         cancelOnError:  false,
         listenMode:   stt.ListenMode.dictation,
       );
+      // Armed after listen() resolves, for the same reason as in _toggleVoice:
+      // engine startup must not eat into the worker's five seconds.
+      _armSilenceWatchdog(field, sessionId);
     } catch (e) {
       debugPrint('Speech restart error: $e');
+      _cancelSilenceWatchdog();
       if (mounted) setState(() => _isListening = false);
     }
   }
@@ -454,9 +457,6 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     debugPrint('Speech: Starting with locale=${_voiceLocaleId} (selectedVoiceLang=$_selectedVoiceLang)');
     try {
       setState(() => _isListening = true);
-      // Armed BEFORE listen() rather than in the first onResult: the case this
-      // exists for is the engine that never calls onResult at all.
-      _armSilenceWatchdog(targetField, sessionId);
       await _speech.listen(
         onResult: (result) {
           if (!mounted || _activeMicField != targetField) return;
@@ -483,9 +483,19 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         cancelOnError:  false,
         listenMode:     stt.ListenMode.dictation,
       );
-      // The old 8-second "locale not installed" diagnostic lived here. It is now
-      // the no-speech branch of _onSilenceTimeout, so there is one timer instead
-      // of two racing ones, and the hint appears at 5s like everything else.
+      // The clock starts HERE, only once listen() has actually resolved — not
+      // before the call. `listen()` does not return until the engine is up, and
+      // on web that includes the browser's "Allow microphone?" prompt, which the
+      // worker may take several seconds to click. Arming earlier meant the five
+      // seconds could elapse during permission/startup and the mic was killed
+      // before it had ever been able to hear a word. The user's five seconds are
+      // five seconds of *listening*, not of waiting.
+      //
+      // This is still ahead of any onResult callback, so the case the watchdog
+      // exists for — an engine that never reports anything at all — is caught.
+      // (It also replaces an older 8-second "locale not installed" probe that
+      // used to sit here, so there is one timer now instead of two racing ones.)
+      _armSilenceWatchdog(targetField, sessionId);
     } catch (e) {
       debugPrint('Speech listen error: $e');
       _cancelSilenceWatchdog();
