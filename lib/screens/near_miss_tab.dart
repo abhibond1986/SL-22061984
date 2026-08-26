@@ -108,6 +108,25 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   bool                    _voiceSessionEnded = false; // ★ v29: prevent double AI trigger
   int                     _voiceSessionId = 0; // ★ v29: stale timeout protection
   TextEditingController? _activeMicField;
+
+  // ── SILENCE WATCHDOG ──────────────────────────────────────────────────────
+  // `pauseFor` on speech_to_text is advisory, and on web it is routinely not
+  // honoured at all: if the engine never hears a single word it often emits no
+  // terminal status, so the mic stayed armed indefinitely and the AI never ran.
+  // This timer is the guarantee that a dictation session always ends.
+  Timer? _silenceTimer;
+  static const _silenceLimit = Duration(seconds: 5);
+
+  /// Field contents when the current session started, so the watchdog can tell
+  /// "spoke, then went quiet" (hand it to the AI) from "never heard anything"
+  /// (nothing to analyse — tell the user why).
+  String _voiceBaseText = '';
+
+  /// Last string the engine reported this session. Partial results repeat the
+  /// same text while the user is silent, so the watchdog is only re-armed when
+  /// the transcript actually GREW — otherwise a chattery engine would keep the
+  /// mic alive forever and defeat the whole mechanism.
+  String _lastRecognized = '';
   String                  _detectedLang    = I18n.currentLang; // input language (seed from app locale)
 
   // Mic pulse animation
@@ -198,6 +217,86 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
 
   static bool _micPermissionGranted = false;
 
+  // ═══════════════════════════════════════════════════════════════
+  //  SILENCE WATCHDOG — 5s of nothing heard ⇒ stop mic, run AI
+  // ═══════════════════════════════════════════════════════════════
+
+  /// (Re)start the 5-second countdown. Called when a session begins and again
+  /// each time the transcript actually grows, so the clock only runs against
+  /// genuine silence.
+  void _armSilenceWatchdog(TextEditingController field, int sessionId) {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer(_silenceLimit, () => _onSilenceTimeout(field, sessionId));
+  }
+
+  void _cancelSilenceWatchdog() {
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+  }
+
+  /// Five seconds with no new words. Ends the session unconditionally, then
+  /// either hands the text to the AI (the worker spoke and stopped — the normal
+  /// case) or explains why nothing was captured.
+  Future<void> _onSilenceTimeout(TextEditingController field, int sessionId) async {
+    // Bail if this timer belongs to a session that has already moved on: the
+    // user may have tapped the mic off, switched fields, or started a new
+    // dictation while this callback was queued.
+    if (!mounted ||
+        sessionId != _voiceSessionId ||
+        !_isListening ||
+        _activeMicField != field) return;
+
+    final heardSomething = field.text.trim() != _voiceBaseText.trim();
+
+    // Both guards matter: _pauseTimedOut stops onError from auto-restarting the
+    // engine behind our back, and _voiceSessionEnded stops onStatus from firing
+    // the AI a second time when the plugin finally reports 'done'.
+    _pauseTimedOut     = true;
+    _voiceSessionEnded = true;
+    _cancelSilenceWatchdog();
+
+    try {
+      await _speech.stop();
+    } catch (e) {
+      debugPrint('Speech stop (silence timeout) error: $e');
+    }
+    if (!mounted) return;
+    setState(() { _isListening = false; _activeMicField = null; });
+
+    if (heardSomething) {
+      _autoRefineAfterVoice(field);
+    } else {
+      // Nothing at all was recognised in 5s. Overwhelmingly this means the
+      // locale has no on-device dictation model, so say so rather than leaving
+      // the worker tapping a mic that will never work.
+      final langName = _selectedVoiceLang == 'hi' ? 'Hindi (हिंदी)' : 'English';
+      _snack('$langName speech recognition isn\'t available on this device. '
+             'Install the $langName language pack in your keyboard/voice settings, '
+             'or type the report — AI will still refine it in $langName.',
+             AppColors.amber);
+    }
+  }
+
+  /// Hand a just-dictated field to the AI. Single copy of a rule that used to be
+  /// pasted in three places (manual stop, plugin 'done', silence timeout) and so
+  /// drifted between them. Corrective Action is deliberately absent — a worker's
+  /// stated remedy is a commitment and must not be reworded.
+  void _autoRefineAfterVoice(TextEditingController field) {
+    if (field == _description && _description.text.trim().length >= 10) {
+      _refineWithAI(_description.text.trim());
+    } else if (field == _location && _location.text.trim().length >= 5) {
+      _refineFieldWithAI(_location, 'Exact Location of Incident');
+    }
+  }
+
+  /// Note the transcript growing, and report whether it did. Used to decide
+  /// whether the watchdog deserves a fresh 5 seconds.
+  bool _noteRecognized(String words) {
+    if (words == _lastRecognized) return false;
+    _lastRecognized = words;
+    return true;
+  }
+
   Future<void> _initSpeech() async {
     try {
       if (!kIsWeb && !_micPermissionGranted) {
@@ -215,6 +314,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         onError: (e) {
           debugPrint('Speech error: ${e.errorMsg} (permanent: ${e.permanent})');
           if (mounted) setState(() => _isListening = false);
+          _cancelSilenceWatchdog();
           // ✅ Auto-retry on non-permanent errors (but NOT after pause-timeout)
           if (!e.permanent && _activeMicField != null && !_pauseTimedOut) {
             Future.delayed(const Duration(seconds: 1), () {
@@ -230,15 +330,13 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
           if ((s == 'done' || s == 'notListening') && _isListening && _activeMicField != null) {
             if (_voiceSessionEnded) return; // already handled
             _voiceSessionEnded = true;
+            _cancelSilenceWatchdog();
             final field = _activeMicField;
             setState(() { _isListening = false; _activeMicField = null; });
             // ★ Auto-trigger AI for description & location only (not corrective action)
-            if (field == _description && _description.text.trim().length >= 10) {
-              _refineWithAI(_description.text.trim());
-            } else if (field == _location && _location.text.trim().length >= 5) {
-              _refineFieldWithAI(_location, 'Exact Location of Incident');
-            }
+            if (field != null) _autoRefineAfterVoice(field);
           } else if (s == 'notListening' && mounted) {
+            _cancelSilenceWatchdog();
             setState(() => _isListening = false);
           }
         },
@@ -256,11 +354,21 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     final field    = _activeMicField!;
     final baseText = field.text;
     _pauseTimedOut = false;
+    // A retry continues the same logical dictation, so the watchdog keeps the
+    // same session id — but the clock restarts, since the dropout itself is not
+    // the worker's fault.
+    final sessionId = _voiceSessionId;
+    _voiceBaseText  = baseText;
+    _lastRecognized = '';
     try {
       await Future.delayed(const Duration(milliseconds: 300));
+      _armSilenceWatchdog(field, sessionId);
       await _speech.listen(
         onResult: (result) {
           if (!mounted || _activeMicField != field) return;
+          if (_noteRecognized(result.recognizedWords)) {
+            _armSilenceWatchdog(field, sessionId);
+          }
           final appended = result.recognizedWords.isEmpty
               ? baseText
               : '$baseText ${result.recognizedWords}'.trim();
@@ -291,20 +399,18 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     // If already listening on the same field, stop
     if (_isListening && _activeMicField == targetField) {
       _voiceSessionEnded = true; // prevent double AI from onStatus
+      _cancelSilenceWatchdog();
       await _speech.stop();
       setState(() { _isListening = false; _activeMicField = null; });
       // ★ v28: AI correction for description & location only (not corrective action)
-      if (targetField == _description && _description.text.trim().length >= 10) {
-        _refineWithAI(_description.text.trim());
-      } else if (targetField == _location && _location.text.trim().length >= 5) {
-        _refineFieldWithAI(_location, 'Exact Location of Incident');
-      }
+      _autoRefineAfterVoice(targetField);
       return;
     }
 
     // If listening on a different field, stop first
     if (_isListening) {
       _voiceSessionEnded = true;
+      _cancelSilenceWatchdog();
       await _speech.stop();
       setState(() { _isListening = false; _activeMicField = null; });
       await Future.delayed(const Duration(milliseconds: 300));
@@ -333,13 +439,24 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     final baseText = targetField.text;
     _activeMicField = targetField;
     _pauseTimedOut = false;
+    _voiceBaseText  = baseText;
+    _lastRecognized = '';
+    final sessionId = _voiceSessionId;
     debugPrint('Speech: Starting with locale=${_voiceLocaleId} (selectedVoiceLang=$_selectedVoiceLang)');
     try {
       setState(() => _isListening = true);
+      // Armed BEFORE listen() rather than in the first onResult: the case this
+      // exists for is the engine that never calls onResult at all.
+      _armSilenceWatchdog(targetField, sessionId);
       await _speech.listen(
         onResult: (result) {
           if (!mounted || _activeMicField != targetField) return;
           final words = result.recognizedWords;
+          // Re-arm on real progress only. Repeated identical partials mean the
+          // worker has gone quiet even though callbacks keep arriving.
+          if (_noteRecognized(words)) {
+            _armSilenceWatchdog(targetField, sessionId);
+          }
           if (words.isEmpty) return;
           final appended = baseText.isEmpty ? words : '$baseText $words';
           setState(() {
@@ -357,23 +474,12 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         cancelOnError:  false,
         listenMode:     stt.ListenMode.dictation,
       );
-      // Voice diagnostic — if NOTHING is recognized after 8s, the selected
-      // locale likely isn't installed for on-device dictation. (Kept longer
-      // than the 5s pauseFor so a normal pause doesn't trigger this.)
-      Future.delayed(const Duration(seconds: 8), () {
-        if (!mounted || !_isListening || _activeMicField != targetField) return;
-        if (targetField.text == baseText) {
-          _speech.stop();
-          setState(() { _isListening = false; _activeMicField = null; });
-          final langName = _selectedVoiceLang == 'hi' ? 'Hindi (हिंदी)' : 'English';
-          _snack('$langName speech recognition isn\'t available on this device. '
-                 'Install the $langName language pack in your keyboard/voice settings, '
-                 'or type the report — AI will still refine it in $langName.',
-                 AppColors.amber);
-        }
-      });
+      // The old 8-second "locale not installed" diagnostic lived here. It is now
+      // the no-speech branch of _onSilenceTimeout, so there is one timer instead
+      // of two racing ones, and the hint appears at 5s like everything else.
     } catch (e) {
       debugPrint('Speech listen error: $e');
+      _cancelSilenceWatchdog();
       if (mounted) setState(() { _isListening = false; _activeMicField = null; });
       _snack('Voice input failed. Try again.', AppColors.red);
     }
@@ -883,6 +989,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     _descDebounce?.cancel();
     _locationDebounce?.cancel();
     _actionDebounce?.cancel();
+    _silenceTimer?.cancel();
     _micPulseCtrl.dispose();
     _speech.cancel();
     AdminMasterData.revision.removeListener(_loadMasterData);
@@ -1773,7 +1880,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('Listening...', style: TextStyle(color: Colors.red.shade700, fontSize: 12, fontWeight: FontWeight.w700)),
-              Text('Speak in any language. Auto-stops after 6s pause → AI frames it.',
+              Text('Speak in any language. Auto-stops after 5s pause → AI frames it.',
                 style: TextStyle(color: sl.text3, fontSize: 10)),
             ])),
           GestureDetector(
@@ -2223,6 +2330,16 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             ),
           // ★ v25: Voice language selector chips
           _buildVoiceLangChips(sl),
+          // Names the box the mic feeds. The field's own placeholder only talks
+          // about the mic, which made voice look like the ONLY way in; a worker
+          // who would rather type needs to be told that is equally fine. Sits
+          // below the language chips because it covers both input routes.
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6, left: 2),
+            child: Text('Describe Near Miss either by typing or by voice',
+              style: TextStyle(
+                color: sl.text2, fontSize: 12, fontWeight: FontWeight.w700)),
+          ),
           _buildTextField('Tap mic → speak in ${_selectedVoiceLang == "hi" ? "Hindi" : "English"} → AI frames it', _description, Icons.description_outlined, sl, maxLines: 3,
             suffix: _micButton(_description), onChanged: _onDescriptionChanged),
           // ★ AI Suggestion Card
