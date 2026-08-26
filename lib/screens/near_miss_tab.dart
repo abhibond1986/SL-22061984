@@ -266,14 +266,23 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     if (heardSomething) {
       _autoRefineAfterVoice(field);
     } else {
-      // Nothing at all was recognised in 5s. Overwhelmingly this means the
-      // locale has no on-device dictation model, so say so rather than leaving
-      // the worker tapping a mic that will never work.
+      // Nothing at all was recognised. The likely cause differs by platform, and
+      // the advice has to match: on a phone it really is usually a missing
+      // on-device dictation model, but in a browser there is no "language pack"
+      // to install — it is a muted/blocked mic, a noisy room, or a browser
+      // without speech support. Telling a desktop user to install a keyboard
+      // language pack sends them somewhere that does not exist.
       final langName = _selectedVoiceLang == 'hi' ? 'Hindi (हिंदी)' : 'English';
-      _snack('$langName speech recognition isn\'t available on this device. '
-             'Install the $langName language pack in your keyboard/voice settings, '
-             'or type the report — AI will still refine it in $langName.',
-             AppColors.amber);
+      _snack(
+        kIsWeb
+          ? 'Didn\'t catch anything. Check that the mic is unmuted and allowed for '
+            'this site, then tap the mic again — or just type it, AI will still '
+            'refine it in $langName.'
+          : '$langName speech recognition isn\'t available on this device. '
+            'Install the $langName language pack in your keyboard/voice settings, '
+            'or type the report — AI will still refine it in $langName.',
+        AppColors.amber,
+      );
     }
   }
 
