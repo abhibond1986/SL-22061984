@@ -5,14 +5,13 @@
 // Each hazard's `bbox` is expected as [yMin, xMin, yMax, xMax] normalized 0–1000
 // (Gemini Vision format) OR as [x, y, w, h] normalized 0–1.
 //
-// A hazard may also carry `lofZone`, the LINE OF FIRE: the path from an energy
-// source to the person standing in it. That is drawn as a directional corridor
-// and arrow (see _LineOfFirePainter), with geometry resolved by the shared
-// services/line_of_fire.dart so the screen and the exported PDF cannot disagree.
+// A hazard may also carry `lofZone`, the LINE OF FIRE: the path from a named
+// energy source to the person standing in it. That is drawn as a single arrow
+// with a dot at the source and a ring on the person (see _LineOfFirePainter),
+// with geometry resolved by the shared services/line_of_fire.dart so the screen
+// and the exported PDF cannot disagree.
 
-// No additional imports needed — LinearGradient comes from material.dart
 import 'dart:math' as math;
-import 'dart:ui' as ui show Gradient;
 
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/material.dart';
@@ -358,9 +357,19 @@ class _LineOfFirePainter extends CustomPainter {
   final int index;
 
   static const Color _hot   = Color(0xFFE53935); // energy / danger
-  static const Color _warm  = Color(0xFFFF7043); // corridor gradient far end
   static const Color _halo  = Color(0xE6FFFFFF);
 
+  /// Draws ONE arrow from the energy source to the exposed person, a dot at the
+  /// source, a ring on the person, and a short caption. Nothing else.
+  ///
+  /// WHY SO PLAIN: the first version shaded a tapering, hatched corridor between
+  /// the two ends, with radiating rays at the source. On a busy shop-floor
+  /// photograph that read as damage to the image rather than as information —
+  /// and the hatching obscured the very equipment the reader was being told to
+  /// look at. A safety officer needs to answer two questions in one glance:
+  /// what could hit someone, and who. An arrow answers both. It also survives
+  /// the two conditions this drawing actually has to live through: a thumbnail
+  /// in a list, and a monochrome print of the PDF.
   @override
   void paint(Canvas canvas, Size size) {
     if (size.width < 8 || size.height < 8) return;
@@ -371,97 +380,55 @@ class _LineOfFirePainter extends CustomPainter {
     // arrow that would point at nothing in particular.
     if (plan.degenerate) {
       _drawExposureRing(canvas, Offset(plan.personX, plan.personY), 14);
-      _drawLabel(canvas, size, Offset(plan.personX, plan.personY + 22),
-          '⚠ LINE OF FIRE ${index + 1}');
+      _drawLabel(canvas, size, Offset(plan.personX, plan.personY + 24),
+          'LINE OF FIRE ${index + 1}');
       return;
     }
 
-    final corridor = Path();
-    corridor.moveTo(plan.corridor[0].x, plan.corridor[0].y);
-    for (final p in plan.corridor.skip(1)) {
-      corridor.lineTo(p.x, p.y);
-    }
-    corridor.close();
+    final source = Offset(plan.sourceX, plan.sourceY);
+    final person = Offset(plan.personX, plan.personY);
 
-    // ── Corridor fill: strongest at the person, where the energy arrives ──
-    canvas.drawPath(
-      corridor,
-      Paint()
-        ..shader = ui.Gradient.linear(
-          Offset(plan.sourceX, plan.sourceY),
-          Offset(plan.personX, plan.personY),
-          const [Color(0x1AFF7043), Color(0x4DE53935)],
-        ),
-    );
+    // Arrowhead scaled to the arrow, not to the corridor width, and capped so a
+    // short exposure does not become a head with no shaft.
+    final headLen = (plan.length * 0.22).clamp(9.0, 22.0);
+    final ringR = (plan.halfWidth * 0.8).clamp(11.0, 24.0);
 
-    // ── Hatching, clipped to the corridor: reads as "keep out" ──
-    canvas.save();
-    canvas.clipPath(corridor);
-    final hatch = Paint()
-      ..color = const Color(0x33E53935)
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-    final bounds = corridor.getBounds();
-    const spacing = 9.0;
-    for (double d = 0; d < bounds.width + bounds.height; d += spacing) {
-      canvas.drawLine(
-        Offset(bounds.left + d, bounds.top),
-        Offset(bounds.left + d - bounds.height, bounds.bottom),
-        hatch,
-      );
-    }
-    canvas.restore();
-
-    // ── Corridor edges, haloed so they read on any background ──
-    canvas.drawPath(
-      corridor,
-      Paint()
-        ..color = _halo
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.4,
-    );
-    canvas.drawPath(
-      corridor,
-      Paint()
-        ..color = _hot.withOpacity(0.9)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.6,
-    );
-
-    // ── The arrow itself, along the centre line ──
-    // Stops short of the person so the arrowhead sits beside them rather than
-    // covering the very thing the reader is being asked to look at.
-    final headLen = (plan.halfWidth * 1.35).clamp(11.0, 30.0);
-    final shaftEnd = _along(plan, plan.length - headLen * 0.9);
-    final shaftStart = _along(plan, math.min(plan.length * 0.12, 14.0));
+    // Both ends are pulled in: the tail clears the source dot, and the head
+    // stops at the ring rather than covering the person — their posture and PPE
+    // are frequently the actual finding.
+    final startD = math.min(6.0, plan.length * 0.15);
+    final endD =
+        math.max(startD + 1.0, plan.length - ringR - headLen * 0.85);
+    final shaftStart = _along(plan, startD);
+    final shaftEnd = _along(plan, endD);
 
     canvas.drawLine(shaftStart, shaftEnd,
-        Paint()..color = _halo..strokeWidth = 6.0..strokeCap = StrokeCap.round);
+        Paint()..color = _halo..strokeWidth = 6.5..strokeCap = StrokeCap.round);
     canvas.drawLine(shaftStart, shaftEnd,
-        Paint()..color = _hot..strokeWidth = 3.0..strokeCap = StrokeCap.round);
+        Paint()..color = _hot..strokeWidth = 3.2..strokeCap = StrokeCap.round);
 
-    _drawArrowHead(canvas, plan, headLen);
+    _drawArrowHead(canvas, plan, headLen, ringR);
+    _drawSourceDot(canvas, source);
+    _drawExposureRing(canvas, person, ringR);
 
-    // ── Source burst: where the energy comes from ──
-    _drawSourceBurst(canvas, Offset(plan.sourceX, plan.sourceY),
-        (plan.halfWidth * 0.55).clamp(7.0, 15.0));
-
-    // ── The exposed person ──
-    _drawExposureRing(canvas, Offset(plan.personX, plan.personY),
-        (plan.halfWidth * 0.8).clamp(11.0, 24.0));
-
-    // ── Label, placed off to the side of the midpoint so it never sits on top
-    //    of the arrowhead or the person.
+    // Caption offset perpendicular to the arrow so it never sits on the shaft,
+    // the head or the person.
     final mid = _along(plan, plan.length * 0.5);
     final nx = -math.sin(plan.angle);
     final ny = math.cos(plan.angle);
-    final labelAnchor = Offset(
-      mid.dx + nx * (plan.halfWidth + 12),
-      mid.dy + ny * (plan.halfWidth + 12),
-    );
-    final exposure = lof.exposure.isEmpty ? '' : ' · ${lof.exposure}';
-    _drawLabel(canvas, size, labelAnchor,
-        '⚠ LINE OF FIRE ${index + 1}$exposure');
+    final labelAnchor = Offset(mid.dx + nx * 15, mid.dy + ny * 15);
+    _drawLabel(canvas, size, labelAnchor, _caption());
+  }
+
+  /// Short caption: what could strike, and who is in the way. Falls back to the
+  /// bare label when the model named neither.
+  String _caption() {
+    final src = lof.source.trim();
+    final who = lof.exposure.trim();
+    if (src.isNotEmpty && who.isNotEmpty) return '${index + 1}  $src → $who';
+    if (src.isNotEmpty) return '${index + 1}  $src → person';
+    if (who.isNotEmpty) return '${index + 1}  LINE OF FIRE · $who';
+    return 'LINE OF FIRE ${index + 1}';
   }
 
   /// A point [distance] pixels along the source→person centre line.
@@ -473,12 +440,16 @@ class _LineOfFirePainter extends CustomPainter {
     );
   }
 
-  void _drawArrowHead(Canvas canvas, LofPlan plan, double headLen) {
-    final tip = _along(plan, plan.length - headLen * 0.15);
-    final back = _along(plan, plan.length - headLen * 1.15);
+  void _drawArrowHead(
+      Canvas canvas, LofPlan plan, double headLen, double ringR) {
+    // The tip stops at the edge of the ring on the person, so the arrow reads as
+    // "arriving at them" without drawing over them.
+    final tipD = math.max(headLen, plan.length - ringR);
+    final tip = _along(plan, tipD);
+    final back = _along(plan, tipD - headLen);
     final nx = -math.sin(plan.angle);
     final ny = math.cos(plan.angle);
-    final halfBase = headLen * 0.58;
+    final halfBase = headLen * 0.55;
 
     final head = Path()
       ..moveTo(tip.dx, tip.dy)
@@ -494,27 +465,11 @@ class _LineOfFirePainter extends CustomPainter {
     canvas.drawPath(head, Paint()..color = _hot);
   }
 
-  /// Short radiating strokes at the energy source — the visual shorthand for
-  /// "this is where it comes from", distinguishable from the ring on the person.
-  void _drawSourceBurst(Canvas canvas, Offset c, double r) {
-    final halo = Paint()
-      ..color = _halo
-      ..strokeWidth = 3.6
-      ..strokeCap = StrokeCap.round;
-    final ink = Paint()
-      ..color = _warm
-      ..strokeWidth = 1.8
-      ..strokeCap = StrokeCap.round;
-    for (int i = 0; i < 8; i++) {
-      final a = i * math.pi / 4;
-      final p1 = Offset(c.dx + math.cos(a) * r * 0.45,
-          c.dy + math.sin(a) * r * 0.45);
-      final p2 = Offset(c.dx + math.cos(a) * r, c.dy + math.sin(a) * r);
-      canvas.drawLine(p1, p2, halo);
-      canvas.drawLine(p1, p2, ink);
-    }
-    canvas.drawCircle(c, r * 0.3, Paint()..color = _halo);
-    canvas.drawCircle(c, r * 0.22, Paint()..color = _warm);
+  /// A small filled dot at the energy source: enough to say "it starts here",
+  /// small enough not to compete with the ring on the person, who is the point.
+  void _drawSourceDot(Canvas canvas, Offset c) {
+    canvas.drawCircle(c, 5.0, Paint()..color = _halo);
+    canvas.drawCircle(c, 3.2, Paint()..color = _hot);
   }
 
   /// Concentric ring marking the person in the path. A ring rather than a filled
@@ -579,5 +534,6 @@ class _LineOfFirePainter extends CustomPainter {
       old.lof.personX != lof.personX ||
       old.lof.personY != lof.personY ||
       old.lof.width != lof.width ||
-      old.lof.exposure != lof.exposure;
+      old.lof.exposure != lof.exposure ||
+      old.lof.source != lof.source;
 }

@@ -388,6 +388,47 @@ SELF-CHECK BEFORE OUTPUTTING EACH HAZARD:
   □ Would another inspector looking at this image agree? → If unlikely, delete.
   □ Am I reporting this because I SEE it or because it's "typical"? → If typical, delete.
   □ Is my regulation citation from the VERIFIED table? → If not, fix or delete.
+  □ Am I claiming something is MISSING? → Then fill "absenceCheck" (see below).
+  □ Did I already report this same physical condition under another name? → Merge.
+
+═══════════════════════════════════════════════════════
+★★★ CLAIMING SOMETHING IS MISSING ★★★
+═══════════════════════════════════════════════════════
+You cannot photograph a thing that is not there. "There is no guardrail" is a
+CONCLUSION, not an observation, and it is how these reports go wrong. A recent
+scan called an elevated walkway "no guardrail on the open side — CRITICAL". The
+photograph showed a handrail on BOTH sides.
+
+Before you may say ANY protection is missing — guardrail, handrail, railing,
+barrier, toe board, machine guard, cover, fence, mesh, net, harness, lanyard,
+helmet, goggles, gloves, safety shoes, signage, earthing, interlock — you MUST
+look along the WHOLE edge / around the WHOLE machine / at the WHOLE person, and
+put in "absenceCheck" where you looked and what you found there instead:
+  Good: "Traced the right edge from the near post to the far wall: bare concrete
+         lip, no posts, no post sockets, no rail stubs."
+  Bad:  "No guardrail visible."           → that is the claim, not the check.
+  Bad:  "Railing is not clearly visible." → that means you could NOT see, which
+                                            is the opposite of proof.
+If the edge, machine or body part is cut off by the frame, obscured or too small
+to resolve, SAY SO in "absenceCheck" and give the hazard LOW severity.
+An absence claim without an honest "absenceCheck" is automatically reduced to LOW
+and marked "could not confirm" — a vague check costs you the finding.
+
+★ NEVER state a figure you cannot derive from this one frame: no heights
+  ("10+ meters above ground"), distances, weights, voltages, temperatures or
+  noise levels. Say "elevated walkway several floors up", not "12 m". An invented
+  number gets quoted in an incident file as fact.
+
+═══════════════════════════════════════════════════════
+★★★ ONE FINDING = ONE ROW ★★★
+═══════════════════════════════════════════════════════
+Never report one physical condition two or three times under different names.
+"Unprotected Fall Hazard" + "Unsecured Walkway Edge" + "Inadequate Fall
+Protection" for a single walkway edge is ONE hazard. Splitting it triples the
+hazard count and inflates the risk score off one observation. Two SEPARATE
+objects are two hazards and their bounding boxes will not overlap — if your boxes
+overlap, you are describing one thing twice, so merge it and keep the highest
+severity with all corrective actions in that row.
 {{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
 METHODOLOGY — EVIDENCE-BASED SYSTEMATIC INSPECTION
@@ -716,6 +757,8 @@ HAZARD CHECKLIST — Check EVERY applicable category
   lofZone defines the DANGER PATH from energy source to person:
     "lofZone": {"x1": <SOURCE x 0-1>, "y1": <SOURCE y 0-1>,
                 "x2": <PERSON x 0-1>, "y2": <PERSON y 0-1>,
+                "source": "<max 4 words NAMING the visible energy source at
+                            x1,y1 — e.g. 'suspended steel coil'>",
                 "width": <corridor width at the person, 0.02-0.22>,
                 "exposure": "<max 4 words: who is exposed>"}
   (x1,y1) = center of energy source/hazard origin; (x2,y2) = center of exposed person.
@@ -723,10 +766,22 @@ HAZARD CHECKLIST — Check EVERY applicable category
   ★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
     person is above or to the left of it. Never reorder to make numbers ascend —
     the arrow would point at the machine instead of the worker.
+  ★ "source" is MANDATORY and must name something you can SEE: a suspended or
+    hoisted load, a vehicle or mobile equipment, a moving/rotating machine part,
+    a pressurised or hot release point, an energised electrical part, or an
+    unstable stack/coil. A lofZone with no named source is DISCARDED and no arrow
+    is drawn.
+  ★ These get a bbox ONLY and NEVER a lofZone: falls from height and open edges
+    (the hazard is the drop, not a projectile), missing or wrong PPE,
+    housekeeping/spills/clutter, and signage or training gaps.
+    A recent report drew an arrow down an empty walkway from a worker to bare
+    deck, labelled "worker on walkway" — nothing was at either end, and it told
+    the reader to look at nothing.
   ★ Include lofZone for EVERY hazard typed "Line of Fire", AND for any other
-    hazard where a person you can SEE stands in the path of the energy,
-    whatever type you gave it.
-  ★ Omit lofZone when no person is visible in the path.
+    hazard where a person you can SEE stands in the path of a NAMED energy
+    source, whatever type you gave it.
+  ★ Omit lofZone when no person is visible in the path, or when you cannot name
+    the source.
 
 ═══════════════════════════════════════════════════════
 GAS CYLINDER COLOUR CODES (IS 4379:1981)
@@ -809,6 +864,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       "severity": "{{SEVERITIES}}",
       "description": "MUST START WITH 'Visible: [specific object/condition seen].' Then: why dangerous, potential consequence in THIS SECTION.",
       "visualEvidence": "What specific object/condition/person in the image PROVES this hazard exists (1 sentence)",
+      "absenceCheck": "ONLY if this hazard claims something is missing: where you looked along the edge/machine/person and what you found there instead. Omit for hazards that are not absence claims.",
       "regulation": "MUST be from verified table above e.g. FA 1948 S37",
       "correctiveAction": "starts with action verb; specific measurable steps relevant to this section",
       "type": "{{OBS_TYPES}}",
@@ -816,6 +872,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       "wsaCause": "EXACT wording from the hazard category list below",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7,
+                  "source": "suspended steel coil",
                   "width": 0.08, "exposure": "rigger below load"}
     }
   ],
@@ -827,6 +884,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
 }
 
 ★ FINAL CHECK: Before outputting, verify EVERY hazard has a "visualEvidence" field that describes something you can actually SEE. Delete any hazard where you wrote generic text like "not visible but typically..." or "commonly found in...".
+★ FINAL CHECK 2: Every hazard that says something is missing/absent/inadequate/unguarded/unprotected has an "absenceCheck" naming where you looked. Every "lofZone" has a "source" naming a visible energy source. No two hazards describe the same physical condition.
 
 ''';
   }

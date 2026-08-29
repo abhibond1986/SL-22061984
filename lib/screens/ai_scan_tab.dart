@@ -165,6 +165,37 @@ class _AIScanTabState extends State<AIScanTab> {
     return AdminMasterData.combinedScore(_severityScores, labels);
   }
 
+  /// The headline risk label, reconciled with the hazard rows underneath it.
+  ///
+  /// The model reports "overallRisk" as a separate judgement from the individual
+  /// severities, and it does not always add up: one report carried a HIGH banner
+  /// above a CRITICAL hazard row. A reader who trusts the banner then files the
+  /// worst finding in the report one level too low.
+  ///
+  /// So the banner is raised to the worst severity actually listed. It is never
+  /// lowered — if the model saw the scene as a whole as worse than any single
+  /// row, that judgement is kept. Severity is ranked through the admin scale, so
+  /// a renamed or re-weighted level still orders correctly.
+  String get _overallRisk {
+    final r = _result;
+    if (r == null) return 'MEDIUM';
+    var label = r['overallRisk']?.toString().trim() ?? '';
+    var best = label.isEmpty
+        ? -1
+        : AdminMasterData.scoreFromMap(_severityScores, label);
+    for (final h in (r['hazards'] as List?) ?? const []) {
+      if (h is! Map) continue;
+      final s = h['severity']?.toString().trim() ?? '';
+      if (s.isEmpty) continue;
+      final v = AdminMasterData.scoreFromMap(_severityScores, s);
+      if (v > best) {
+        best = v;
+        label = s;
+      }
+    }
+    return label.isEmpty ? 'MEDIUM' : label;
+  }
+
   @override
   void dispose() {
     AdminMasterData.revision.removeListener(_loadMasterData);
@@ -563,7 +594,7 @@ class _AIScanTabState extends State<AIScanTab> {
 
     final sl        = SL.of(context);
     final riskColor = _sevColor(
-        _result!['overallRisk']?.toString() ?? 'MEDIUM');
+        _overallRisk);
 
     final List<Map<String, dynamic>> editableHazards =
         ((_result!['hazards'] as List?) ?? [])
@@ -718,7 +749,7 @@ class _AIScanTabState extends State<AIScanTab> {
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: riskColor)),
                       child: Text(
-                        '${_result!['overallRisk']} · $_riskScore/100',
+                        '$_overallRisk · $_riskScore/100',
                         style: TextStyle(color: riskColor,
                             fontSize: 12,
                             fontWeight: FontWeight.w800))),
@@ -1883,7 +1914,7 @@ class _AIScanTabState extends State<AIScanTab> {
       'detectedSection': detectedSection,
       'sectionCues':     sectionCues,
       'location':        'AI scan result — $detectedSection',
-      'severity':        _result!['overallRisk'] ?? 'MEDIUM',
+      'severity':        _overallRisk,
       'wsaCategory':     firstHazardMap['wsaCause']?.toString() ?? 'Multiple causes',
       'obsType':         'N/A',
       'summary':         _result!['summary']?.toString() ?? '',
@@ -2081,7 +2112,7 @@ class _AIScanTabState extends State<AIScanTab> {
 
   String _buildResultShareText() {
     final hazards = (_result!['hazards'] as List?) ?? [];
-    final risk = _result!['overallRisk']?.toString() ?? 'UNKNOWN';
+    final risk = _overallRisk;
     final score = _riskScore;
     final buffer = StringBuffer();
     buffer.writeln('🔴 SAIL SAFETY LENS — HAZARD REPORT');
@@ -2130,7 +2161,7 @@ class _AIScanTabState extends State<AIScanTab> {
     String text;
     if (pdfUrl != null && pdfUrl.isNotEmpty) {
       final hazards = (_result!['hazards'] as List?) ?? [];
-      final risk = _result!['overallRisk']?.toString() ?? 'UNKNOWN';
+      final risk = _overallRisk;
       final score = _riskScore;
       text = '⚠️ *SAIL Safety Lens — AI Hazard Report*\n\n'
           '🔴 *Overall Risk:* $risk (Score: $score/100)\n'
@@ -2492,7 +2523,7 @@ class _AIScanTabState extends State<AIScanTab> {
   }
 
   Widget _resultView(SL sl) {
-    final overallRisk = _result!['overallRisk']?.toString() ?? 'MEDIUM';
+    final overallRisk = _overallRisk;
     final score       = _riskScore;
     final confidence  = _result!['confidence']   ?? 75;
     final summary     = _result!['summary']?.toString() ?? '';
@@ -2979,6 +3010,43 @@ class _AIScanTabState extends State<AIScanTab> {
                           style: TextStyle(color: sl.cyanText,
                             fontSize: 9, height: 1.3))),
                       ])),
+                  // An unproven claim that something is MISSING. Shown, never
+                  // hidden — the rail may genuinely be absent. But it sits at
+                  // LOW severity with the reason attached, so a reader is told
+                  // to go and look rather than told a conclusion.
+                  if (hm['absenceUnconfirmed'] == true)
+                    _hazardNote(
+                      sl,
+                      Icons.visibility_off_outlined,
+                      sl.amberText,
+                      hm['absenceIssue']?.toString().isNotEmpty == true
+                        ? hm['absenceIssue'].toString()
+                        : 'Could not confirm this is missing — verify on site.',
+                      trailing: hm['severityBeforeAudit'] != null
+                        ? ' (model said ${hm['severityBeforeAudit']})'
+                        : '',
+                    ),
+                  // A figure one photograph cannot establish. Flagged because
+                  // this is the number that gets copied into an incident file.
+                  if (hm['unmeasuredFigure'] != null)
+                    _hazardNote(
+                      sl,
+                      Icons.straighten_outlined,
+                      sl.amberText,
+                      '"${hm['unmeasuredFigure']}" is not measurable from a '
+                      'photograph — measure on site before quoting it.',
+                    ),
+                  // Says out loud that the model reported this more than once,
+                  // so a reader who remembers three rows knows where they went.
+                  if (hm['mergedFrom'] is List &&
+                      (hm['mergedFrom'] as List).length > 1)
+                    _hazardNote(
+                      sl,
+                      Icons.merge_type_rounded,
+                      sl.text3,
+                      'Reported ${(hm['mergedFrom'] as List).length} ways, '
+                      'merged: ${(hm['mergedFrom'] as List).join(' • ')}',
+                    ),
                 ],
               )),
               const SizedBox(width: 8),
@@ -3060,6 +3128,28 @@ class _AIScanTabState extends State<AIScanTab> {
           Icon(Icons.info_outline, size: 8, color: sl.textOn(c)),
         ])));
   }
+
+  /// One small annotation line under a hazard: icon + wrapping text.
+  ///
+  /// Shared so the absence flag, the unmeasurable-figure flag and the merge note
+  /// cannot drift apart visually — three different-looking warnings under one
+  /// row read as three unrelated problems.
+  ///
+  /// Set at 10.5px, not the 9px used by the knowledge-base citation above it.
+  /// That note is supporting evidence; these three each ask the reader to go and
+  /// check something on site, so they must survive a phone screen in daylight.
+  Widget _hazardNote(SL sl, IconData icon, Color colour, String text,
+          {String trailing = ''}) =>
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1.5, right: 3),
+            child: Icon(icon, size: 11, color: colour)),
+          Expanded(child: Text('$text$trailing',
+            style: TextStyle(color: colour, fontSize: 10.5, height: 1.3,
+              fontWeight: FontWeight.w600))),
+        ]));
 
   Widget _needsCheckChip(SL sl) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),

@@ -52,6 +52,7 @@ import 'knowledge_service.dart';
 // validator can check citations against exactly what the model was shown.
 import 'regulation_catalog.dart';
 import 'hazard_validator.dart';
+import 'hazard_quality.dart';
 // For LocalDB.kbRevision — the KB context cache below is keyed to it so an
 // admin knowledge upload reaches the analyser without an app restart.
 import 'local_db.dart';
@@ -472,6 +473,14 @@ HOW TO USE IT:
       // can have grown since the scan. Validation is idempotent, so this is
       // cheap for anything already carrying its verdict.
       if (result != null) {
+        // Order matters. The quality pass runs FIRST because it changes what
+        // there is to validate: it collapses three names for one finding into a
+        // single row, and it caps a claim that something is missing when nothing
+        // in the finding establishes that. Validation then scores what survives,
+        // and the risk score — which escalates with hazard count — is computed
+        // downstream from this list. Run it after validation and a single
+        // disputed observation would still be counted three times.
+        HazardQuality.apply(result);
         result = await HazardValidator.validate(result);
       }
       final hazards = result?['hazards'];
@@ -1594,6 +1603,53 @@ ANTI-HALLUCINATION RULES (CRITICAL — READ FIRST)
   every finding; an inflated score wastes their time on your guesses, and a
   deflated one on your good work. Report what you actually believe.
 ★ If image is blurry, dark, or shows nothing hazardous, return LOW risk with 1-2 hazards max.
+
+═══════════════════════════════════════════════════════
+CLAIMING SOMETHING IS MISSING (the hardest claim to make)
+═══════════════════════════════════════════════════════
+You cannot photograph a thing that is not there. So "there is no guardrail" is
+NOT an observation — it is a conclusion, and it is the single most common way
+these reports go wrong. A recent scan of an elevated walkway reported "no
+guardrail on the open side" as CRITICAL. The photograph showed a handrail on
+BOTH sides. That report went to a safety officer with a regulation citation on it.
+
+Before you may say any protection is missing — guardrail, handrail, railing,
+barrier, toe board, machine guard, cover, fence, mesh, net, harness, lanyard,
+helmet, goggles, gloves, safety shoes, signage, earthing, interlock — you MUST:
+1. LOOK ALONG the whole edge / around the whole machine / at the whole person.
+2. State in "absenceCheck" WHERE you looked and WHAT YOU FOUND THERE instead.
+   Good:  "Traced the right edge from the near post to the far wall: bare
+           concrete lip, no posts, no post sockets, no rail stubs."
+   Good:  "Head fully visible in profile, hair and ears uncovered, no shell,
+           brim or chin strap."
+   Bad:   "No guardrail visible."          (that is the claim, not the check)
+   Bad:   "Railing is not clearly visible." (that means you could not see —
+                                             which is the OPPOSITE of proof)
+3. If the edge, machine or body part is cut off by the frame, obscured, back-lit,
+   or too small to resolve — SAY SO in "absenceCheck" and give the hazard
+   severity LOW. Do not upgrade a thing you could not see into a CRITICAL finding.
+
+An absence claim with no honest "absenceCheck" will be automatically reduced to
+LOW severity and marked "could not confirm" in the report, so a vague check costs
+you the very finding you were trying to raise.
+
+★ NEVER state a number you cannot derive from this one frame. No heights
+  ("10+ meters above ground"), no distances, no weights, no voltages, no
+  temperatures, no noise levels. Say "elevated walkway several floors up", not
+  "12 m". An invented figure gets quoted in an incident file as fact.
+
+═══════════════════════════════════════════════════════
+ONE FINDING = ONE ROW
+═══════════════════════════════════════════════════════
+Do NOT report the same physical condition two or three times under different
+names. "Unprotected Fall Hazard" + "Unsecured Walkway Edge" + "Inadequate Fall
+Protection" describing one walkway edge is ONE hazard, not three. Splitting it
+triples the hazard count and inflates the risk score for a single observation.
+Report it once, at the severity it truly deserves, with all the corrective
+actions in that one row.
+Two SEPARATE objects (two different unguarded machines) are two hazards — their
+bounding boxes will not overlap. If your boxes overlap, you are describing one
+thing twice: merge it.
 {{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
 METHODOLOGY — EVIDENCE-BASED INSPECTION
@@ -1619,10 +1675,26 @@ HARD RULES:
   section above, when present, is part of this table and may be cited freely.
 
 ═══════════════════════════════════════════════════════
-LINE OF FIRE (LOF) — ONLY if persons visible near energy sources
+LINE OF FIRE (LOF) — needs a NAMED ENERGY SOURCE, every time
 ═══════════════════════════════════════════════════════
-"Line of Fire" = person positioned where energy/objects could strike them.
-★ ONLY report LOF if you can SEE both the person AND the energy source in the image.
+"Line of Fire" = a person standing where a SPECIFIC, VISIBLE energy source could
+release and strike them. The arrow you are asked for runs FROM that source TO
+that person, so if you cannot name the thing at the arrow's tail, there is no
+line of fire to draw.
+
+★ You MUST be able to name the source as one of these, and SEE it in the image:
+  • a suspended or hoisted load        • a vehicle or mobile equipment
+  • a moving/rotating machine part     • a pressurised or hot release point
+  • an energised electrical part       • an unstable stack, coil or load
+★ These are NOT energy sources and get a "bbox" ONLY — never a "lofZone":
+  • a fall from height or an open edge (the hazard is the drop, not a projectile)
+  • missing or wrong PPE
+  • housekeeping, spills, clutter, obstructed exits
+  • signage, documentation or training gaps
+  A recent report drew a line of fire straight down an empty walkway from a
+  worker to bare deck, labelled "worker on walkway". Nothing was at either end.
+  That arrow tells a safety officer to look at nothing.
+★ ONLY report LOF if you can SEE both the person AND the energy source.
 ★ Do NOT assume LOF if no persons are visible.
 
 Types:
@@ -1641,19 +1713,26 @@ two ENDS OF THE PATH, in this order and no other:
   "lofZone": {
     "x1": <energy SOURCE centre x, 0-1>,  "y1": <energy SOURCE centre y, 0-1>,
     "x2": <exposed PERSON centre x, 0-1>, "y2": <exposed PERSON centre y, 0-1>,
+    "source": "<max 4 words NAMING the visible energy source at x1,y1 —
+                e.g. 'suspended steel coil', 'reversing tipper',
+                'open ladle of hot metal'. NOT 'walkway', NOT 'height',
+                NOT 'the floor', NOT 'the worker'.>",
     "width": <how wide the danger corridor is at the person, 0.02-0.22>,
     "exposure": "<max 4 words: who is exposed, e.g. 'rigger below load'>"
   }
+★ "source" is MANDATORY. A "lofZone" without a named, visible energy source is
+  DISCARDED and no arrow is drawn — so an unnamed path loses you the overlay.
 ★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
   person is above or to the left of the source. Do not reorder them to make the
   numbers ascending — the arrow would then point at the machine instead of the
   worker.
 ★ Include "lofZone" for ANY hazard where a person you can SEE stands in the path
-  of the energy, whatever "type" you gave it. A worker under a suspended load is
-  in the line of fire whether the row is typed "Line of Fire" or
-  "Unsafe Condition".
-★ Omit "lofZone" entirely when no person is visible in the path. An invented
-  path draws a confident arrow at nobody.
+  of a NAMED energy source, whatever "type" you gave it. A worker under a
+  suspended load is in the line of fire whether the row is typed "Line of Fire"
+  or "Unsafe Condition".
+★ Omit "lofZone" entirely when no person is visible in the path, or when you
+  cannot name the energy source. An invented path draws a confident arrow at
+  nobody, and a reader who follows two of those stops following any of them.
 
 ═══════════════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
@@ -1674,8 +1753,12 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
       "type": "{{OBS_TYPES}}",
       "confidence": 0-100,
       "visualEvidence": "<brief: what specific object/condition in the image proves this hazard>",
+      "absenceCheck": "<REQUIRED ONLY if this hazard claims something is missing.
+                        Where you looked and what you found there instead.
+                        Omit entirely for hazards that are not absence claims.>",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7,
+                  "source": "energised 415V panel",
                   "width": 0.08, "exposure": "operator at panel"}
     }
   ]
@@ -1687,11 +1770,16 @@ FIELD RULES:
   certainty about the ASSESSMENT AS A WHOLE (image quality, coverage), which is
   not the same as your certainty about any single hazard.
 • "bbox" is approximate location of hazard in image (normalized 0-1).
+• "absenceCheck" is REQUIRED whenever the hazard says a protection is missing,
+  absent, inadequate, unguarded or unprotected. Without it the finding is
+  auto-reduced to LOW and marked unconfirmed.
 • "lofZone" is REQUIRED for "Line of Fire" type, and expected on ANY other
-  hazard where a visible person is in the path. Omit when nobody is exposed.
-  x1,y1 = source; x2,y2 = person — never swapped.
+  hazard where a visible person stands in the path of a NAMED energy source.
+  Omit when nobody is exposed or the source cannot be named.
+  x1,y1 = source; x2,y2 = person — never swapped. "source" is mandatory.
 • "description" MUST begin with "Visible: ..." stating what you physically observe.
-• Maximum 7 hazards. Quality over quantity.
+• Maximum 7 hazards, and no two describing the same physical condition.
+  Quality over quantity.
 • If nothing hazardous is visible, return overallRisk "LOW", riskScore <20, empty hazards [].''';
   }
 

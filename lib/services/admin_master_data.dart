@@ -1031,9 +1031,11 @@ class AdminMasterData {
   /// Screens that render a score on every frame must not await SharedPreferences
   /// in `build`. They load the map once, refresh it on [revision], and call this.
   ///
-  /// The fallback for an unknown label is MEDIUM and then 45 — the middle of the
-  /// scale, never 0. An unrecognised severity means the admin renamed a level,
-  /// and scoring a real hazard 0 because of a rename would file it as harmless.
+  /// Fallback order for a label the stored scale does not contain: the app's own
+  /// [defaultSeverityScores] entry for THAT label, then MEDIUM, then 45 — never
+  /// 0. An unrecognised severity usually means the admin renamed or removed a
+  /// level, and scoring a real hazard 0 because of a rename would file it as
+  /// harmless.
   static int scoreFromMap(Map<String, int> scores, String severity) {
     final key = severity.trim().toUpperCase();
     final exact = scores[key];
@@ -1042,10 +1044,22 @@ class AdminMasterData {
     // A miss is the single most likely cause of "the number on the scan matches
     // nothing in the admin panel", so say so — once per label, because this runs
     // inside build() and a per-frame print would bury the rest of the console.
+    //
+    // The fallback order matters, and getting it wrong is how a report ended up
+    // showing a CRITICAL hazard beside a risk score of 23/100. If the stored
+    // scale is missing or incomplete, EVERY label — CRITICAL included —
+    // collapsed to the MEDIUM value, and the only trace was this console line,
+    // which no safety officer ever sees. So: try the built-in score for THIS
+    // label first. A CRITICAL finding is still worth 90 when an admin scale is
+    // incomplete; only a label that is genuinely unknown to the app falls back
+    // to the middle of the scale.
+    final builtIn = defaultSeverityScores[key];
     if (_warnedKeys.add(key)) {
       print('$_kScoreTag NO ENTRY for "$key" — the stored scale has keys '
-          '${scores.keys.toList()}. Falling back to MEDIUM.');
+          '${scores.keys.toList()}. Falling back to '
+          '${builtIn != null ? "the built-in $key score ($builtIn)" : "MEDIUM"}.');
     }
+    if (builtIn != null) return builtIn;
     return scores['MEDIUM'] ?? defaultSeverityScores['MEDIUM']!;
   }
 

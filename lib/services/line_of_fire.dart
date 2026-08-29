@@ -35,6 +35,7 @@ class LineOfFire {
     required this.width,
     required this.degenerate,
     this.exposure = '',
+    this.source = '',
   });
 
   /// Centre of the energy source — the crane load, the nip point, the ladle.
@@ -58,6 +59,12 @@ class LineOfFire {
 
   /// Optional short phrase naming who or what is exposed, for the label.
   final String exposure;
+
+  /// Short phrase naming the energy source at the tail of the arrow — the
+  /// suspended coil, the reversing tipper, the open ladle. Never empty on a
+  /// [LineOfFire] that [LineOfFireGeometry.parse] agreed to return: an arrow
+  /// whose tail cannot be named points at nothing.
+  final String source;
 
   /// Straight-line distance from source to person, normalised. Only meaningful
   /// as a rough magnitude — see [LineOfFireGeometry.plan] for real geometry,
@@ -121,6 +128,175 @@ class LineOfFireGeometry {
   static const double minWidth = 0.02;
   static const double maxWidth = 0.22;
 
+  /// Beyond this normalised separation the "path" spans essentially the whole
+  /// frame corner to corner. Real exposure is local — a load swings, a jet
+  /// throws, a vehicle reverses — so a line this long is almost always a model
+  /// drawing a stripe across the picture rather than tracing an energy path.
+  /// The theoretical maximum is sqrt(2) ≈ 1.414, so this only rejects the
+  /// genuinely frame-spanning case.
+  static const double maxSeparation = 1.15;
+
+  /// Things that can actually release energy at a person. The arrow's tail must
+  /// be one of these; this is the whole basis of the concept.
+  ///
+  /// WHY THIS GATE EXISTS: a scan of an elevated walkway drew a line of fire
+  /// down the length of the walkway from a worker to bare deck, labelled
+  /// "worker on walkway". Nothing was at either end. A safety officer who
+  /// follows two arrows like that stops following any of them, which costs the
+  /// overlay its entire value on the photographs where it is right.
+  static const List<String> energySourceWords = [
+    // suspended and lifted loads
+    'load', 'coil', 'slab', 'billet', 'bloom', 'crane', 'hoist', 'sling',
+    'chain block', 'lifting', 'rigging', 'shackle', 'hook', 'skip', 'bucket',
+    'grab', 'magnet', 'ladle', 'tundish', 'mould', 'ingot',
+    // vehicles and mobile equipment
+    'vehicle', 'truck', 'tipper', 'dumper', 'trailer', 'forklift', 'loader',
+    'excavator', 'crawler', 'locomotive', 'wagon', 'trolley', 'bogie',
+    'car', 'charging car', 'pushing ram', 'ram',
+    // moving machine parts
+    'conveyor', 'belt', 'pulley', 'drum', 'roller', 'roll', 'gear', 'shaft',
+    'coupling', 'flywheel', 'fan', 'blower', 'impeller', 'blade', 'shear',
+    'press', 'mill', 'saw', 'grinder', 'grinding wheel', 'agitator', 'mixer',
+    'screw', 'nip point', 'pinch point', 'rotating', 'moving machine',
+    // pressure, heat, molten and chemical release
+    'hot metal', 'molten', 'slag', 'metal splash', 'splash', 'tapping',
+    'furnace', 'converter', 'burner', 'flame', 'torch', 'steam', 'header',
+    'pressuris', 'pressuriz', 'pressure', 'hydraulic', 'pneumatic',
+    'compressed air', 'hose', 'valve', 'flange', 'bleeder', 'pipeline',
+    'gas line', 'cylinder', 'acetylene', 'oxygen', 'chemical', 'acid',
+    'caustic', 'nozzle', 'jet', 'relief', 'boiler', 'accumulator',
+    // stored energy and instability
+    'stack', 'stacked', 'stockpile', 'bundle', 'pile', 'spool', 'reel',
+    'tensioned', 'spring', 'counterweight', 'suspended',
+    // electrical
+    'energised', 'energized', 'live', 'busbar', 'bus bar', 'switchgear',
+    'transformer', 'panel', 'breaker', 'conductor', 'cable', 'terminal',
+    'arc', 'electrical',
+    // falling objects from above
+    'falling object', 'overhead', 'above', 'loose material', 'debris from',
+  ];
+
+  /// Named sources that are NOT energy sources. Checked FIRST, because a model
+  /// asked for a source will happily write "walkway" or "the worker" and those
+  /// words would otherwise slip past on a partial match ('roll' inside
+  /// 'rolling', 'above' inside a sentence about height).
+  static const List<String> nonEnergySourceWords = [
+    'walkway', 'pathway', 'path', 'gangway', 'passage', 'corridor', 'aisle',
+    'floor', 'ground', 'deck', 'platform', 'edge', 'opening', 'gap', 'height',
+    'elevation', 'fall', 'drop', 'stair', 'step', 'ladder', 'railing',
+    'guardrail', 'handrail', 'barrier', 'worker', 'person', 'operator',
+    'employee', 'man', 'himself', 'ppe', 'helmet', 'harness', 'housekeeping',
+    'spill', 'clutter', 'scrap', 'signage', 'sign', 'training', 'procedure',
+    'unknown', 'none', 'n/a', 'na', 'not visible', 'not applicable',
+  ];
+
+  /// Hazard wording that means the danger is the DROP or a gap in protection,
+  /// not something travelling toward the person. These get a bounding box only.
+  static final RegExp _boxOnlyHazard = RegExp(
+    r'\b(fall(?:s|ing)? from|fall protection|fall arrest|fall hazard|'
+    r'open edge|unprotected edge|edge protection|guard ?rail|hand ?rail|'
+    r'railing|toe ?board|working at height|work at height|'
+    r'ppe|personal protective|helmet|hard ?hat|goggles?|glove|safety shoe|'
+    r'housekeeping|spill|slip|trip|clutter|obstruct|signage|'
+    r'documentation|training|permit)\b',
+    caseSensitive: false,
+  );
+
+  /// Whether this hazard names an energy source that could travel to the person.
+  ///
+  /// The order of these checks is the design:
+  ///   1. An explicitly named source that is plainly NOT energy → reject. The
+  ///      model has told us there is nothing at the arrow's tail.
+  ///   2. An explicitly named source that IS energy → accept, even if the
+  ///      hazard also mentions height. A rigger standing at an open edge under a
+  ///      suspended coil is in the line of fire of the coil.
+  ///   3. No source field at all (older cached reports, and models that ignore
+  ///      the field) → fall back to the hazard's own wording, but only when that
+  ///      wording is not itself a fall / PPE / housekeeping finding. This keeps
+  ///      genuine historic overlays alive without letting the walkway case back
+  ///      in.
+  static bool namesEnergySource(Map hazard) {
+    final zone = hazard['lofZone'];
+    final named = _lower((zone is Map ? zone['source'] : null) ??
+        hazard['lofSource'] ??
+        '');
+
+    if (named.isNotEmpty) {
+      if (_containsWord(named, nonEnergySourceWords) &&
+          !_containsWord(named, energySourceWords)) {
+        return false;
+      }
+      if (_containsWord(named, energySourceWords)) return true;
+      // Named, but unrecognised. Treated as a real source rather than discarded:
+      // this vocabulary cannot possibly list every piece of plant in an
+      // integrated steel works, and silently dropping an arrow the model was
+      // specific about is the worse failure.
+      return true;
+    }
+
+    final text = _lower('${hazard['name'] ?? ''} ${hazard['description'] ?? ''} '
+        '${hazard['visualEvidence'] ?? ''} '
+        '${zone is Map ? zone['exposure'] ?? '' : ''}');
+    if (text.isEmpty) return false;
+    if (!_containsWord(text, energySourceWords)) return false;
+    // The hazard mentions machinery AND is fundamentally a fall/PPE finding —
+    // e.g. "no handrail on the conveyor walkway". The conveyor is scenery here,
+    // not the thing about to strike anyone.
+    if (_boxOnlyHazard.hasMatch(text)) return false;
+    return true;
+  }
+
+  /// A best-effort name for the arrow's tail, for the caption.
+  static String describeSource(Map hazard) {
+    final zone = hazard['lofZone'];
+    final named = ((zone is Map ? zone['source'] : null) ??
+            hazard['lofSource'] ??
+            '')
+        .toString()
+        .trim();
+    if (named.isNotEmpty) return named;
+    final text = _lower('${hazard['name'] ?? ''} ${hazard['description'] ?? ''}');
+    for (final w in energySourceWords) {
+      if (_containsWord(text, [w])) return w;
+    }
+    return '';
+  }
+
+  static String _lower(Object v) =>
+      v.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9/]+'), ' ').trim();
+
+  /// Whole-word (or word-prefix) containment. A bare `contains` is what lets
+  /// "ppe" match "slippery" and "roll" match "controlled", so every candidate is
+  /// anchored at a word boundary.
+  static bool _containsWord(String text, List<String> words) {
+    final padded = ' $text ';
+    for (final w in words) {
+      if (_boundedAfter(padded, w)) return true;
+    }
+    return false;
+  }
+
+  /// True when [w] appears at a word start and is followed only by a plural or
+  /// gerund tail — so 'roll' matches 'rolls' and 'rolling' but not 'controlled'
+  /// (wrong start) and not 'rollover' (unrelated word).
+  static bool _boundedAfter(String padded, String w) {
+    var from = 0;
+    while (true) {
+      final i = padded.indexOf(' $w', from);
+      if (i < 0) return false;
+      final after = i + 1 + w.length;
+      final tail = padded.substring(after);
+      if (tail.startsWith(' ') ||
+          tail.startsWith('s ') ||
+          tail.startsWith('es ') ||
+          tail.startsWith('ing ') ||
+          tail.startsWith('ed ')) {
+        return true;
+      }
+      from = i + 1;
+    }
+  }
+
   /// Reads a hazard map and returns its line of fire, or null when the hazard
   /// has no usable path.
   ///
@@ -131,6 +307,11 @@ class LineOfFireGeometry {
     try {
       final zone = hazard['lofZone'];
       if (zone is! Map) return null;
+
+      // An arrow needs something at its tail. Falls, PPE gaps and housekeeping
+      // are real hazards and keep their bounding box — they just have no energy
+      // travelling toward anyone, so there is no line of fire to draw.
+      if (!namesEnergySource(hazard)) return null;
 
       var sx = _num(zone['x1']);
       var sy = _num(zone['y1']);
@@ -170,6 +351,8 @@ class LineOfFireGeometry {
       width = (width ?? defaultWidth).clamp(minWidth, maxWidth);
 
       final separation = math.sqrt(math.pow(px - sx, 2) + math.pow(py - sy, 2));
+      // A stripe from one corner of the photograph to the other is not a path.
+      if (separation > maxSeparation) return null;
 
       return LineOfFire(
         sourceX: sx,
@@ -181,6 +364,7 @@ class LineOfFireGeometry {
         exposure: (zone['exposure'] ?? hazard['lofExposure'] ?? '')
             .toString()
             .trim(),
+        source: describeSource(hazard),
       );
     } catch (_) {
       // A drawing overlay is never worth a crash.

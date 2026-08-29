@@ -715,91 +715,46 @@ class PdfExport {
       return;
     }
 
-    final c = plan.corridor;
+    // ONE arrow, source dot, ring on the person. Nothing else.
+    //
+    // The shaded, hatched corridor that used to be drawn here has gone. Two
+    // reasons, both about the person reading the printout: the wash and the
+    // hatching sat over the equipment they were being told to inspect, and at
+    // the size this photo appears on an A4 page the corridor read as a printing
+    // defect rather than as information. An arrow says "this could hit that
+    // person" in one glance, and it says it in black and white too.
 
-    // ── shaded corridor ───────────────────────────────────────────────────
-    canvas
-      ..saveContext()
-      ..setGraphicState(const PdfGraphicState(fillOpacity: 0.20))
-      ..setFillColor(_lofHot)
-      ..moveTo(c[0].x, fy(c[0].y));
-    for (var i = 1; i < 4; i++) {
-      canvas.lineTo(c[i].x, fy(c[i].y));
-    }
-    canvas
-      ..closePath()
-      ..fillPath()
-      ..restoreContext();
-
-    // ── hatching, clipped to the corridor ─────────────────────────────────
-    // Hatching survives greyscale printing and photocopying, which a 20%
-    // red wash does not — a printed report is what actually gets signed.
-    canvas
-      ..saveContext()
-      ..moveTo(c[0].x, fy(c[0].y));
-    for (var i = 1; i < 4; i++) {
-      canvas.lineTo(c[i].x, fy(c[i].y));
-    }
-    canvas
-      ..closePath()
-      ..clipPath()
-      ..setGraphicState(const PdfGraphicState(strokeOpacity: 0.38))
-      ..setStrokeColor(_lofHot)
-      ..setLineWidth(0.6);
-
-    var minX = c[0].x, maxX = c[0].x, minY = fy(c[0].y), maxY = fy(c[0].y);
-    for (final pt in c) {
-      minX = math.min(minX, pt.x);
-      maxX = math.max(maxX, pt.x);
-      minY = math.min(minY, fy(pt.y));
-      maxY = math.max(maxY, fy(pt.y));
-    }
-    // 45° lines: x - y = k. Step chosen so the texture reads as a warning
-    // without turning the corridor into a solid block over fine detail.
-    const step = 7.0;
-    final span = (maxX - minX) + (maxY - minY);
-    for (var k = 0.0; k <= span; k += step) {
-      canvas
-        ..moveTo(minX + k, minY)
-        ..lineTo(minX + k - (maxY - minY), maxY);
-    }
-    canvas
-      ..strokePath()
-      ..restoreContext();
-
-    // ── corridor edges, haloed so they read over rust and red machinery ───
-    for (final pass in const [(w: 2.4, halo: true), (w: 1.0, halo: false)]) {
-      canvas
-        ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
-        ..setLineWidth(pass.w)
-        ..moveTo(c[0].x, fy(c[0].y))
-        ..lineTo(c[1].x, fy(c[1].y))
-        ..moveTo(c[3].x, fy(c[3].y))
-        ..lineTo(c[2].x, fy(c[2].y))
-        ..strokePath();
-    }
-
-    // ── shaft, stopping short of the person so the arrowhead has room ─────
-    final headLen = math.max(7.0, math.min(plan.length * 0.22, 16.0));
-    final tipT = 0.94;
-    final tipX = plan.sourceX + (plan.personX - plan.sourceX) * tipT;
-    final tipY = plan.sourceY + (plan.personY - plan.sourceY) * tipT;
     final ux = (plan.personX - plan.sourceX) / plan.length;
     final uy = (plan.personY - plan.sourceY) / plan.length;
+
+    final ringR = math.max(7.5, math.min(plan.halfWidth * 0.62, 26.0));
+    final headLen = math.max(6.0, math.min(plan.length * 0.22, 14.0));
+
+    // Tip lands on the ring, not on the person: their posture and PPE are
+    // frequently the actual finding, so nothing is drawn over them.
+    final tipD = math.max(headLen + 1.0, plan.length - ringR);
+    final tipX = plan.sourceX + ux * tipD;
+    final tipY = plan.sourceY + uy * tipD;
     final baseX = tipX - ux * headLen;
     final baseY = tipY - uy * headLen;
 
+    // Tail starts clear of the source dot.
+    final tailD = math.min(4.5, plan.length * 0.15);
+    final tailX = plan.sourceX + ux * tailD;
+    final tailY = plan.sourceY + uy * tailD;
+
+    // ── shaft, haloed so it reads over rust, red machinery and dark steel ──
     for (final pass in const [(w: 3.6, halo: true), (w: 1.8, halo: false)]) {
       canvas
         ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
         ..setLineWidth(pass.w)
         ..setLineCap(PdfLineCap.round)
-        ..moveTo(plan.sourceX, fy(plan.sourceY))
+        ..moveTo(tailX, fy(tailY))
         ..lineTo(baseX, fy(baseY))
         ..strokePath();
     }
 
-    // ── arrowhead ─────────────────────────────────────────────────────────
+    // ── arrowhead, drawn twice: a white outline pass then the red fill ────
     final nx = -uy;
     final ny = ux;
     final halfHead = headLen * 0.46;
@@ -816,35 +771,22 @@ class PdfExport {
     canvas.setFillColor(_lofHot);
     head(0);
 
-    // ── burst on the energy source ────────────────────────────────────────
-    const r = 3.4;
+    // ── small dot on the energy source ────────────────────────────────────
+    // Enough to say "it starts here"; small enough not to compete with the ring
+    // on the person, who is the point of the drawing.
+    const r = 2.6;
     canvas
-      ..setStrokeColor(_lofHalo)
-      ..setLineWidth(2.2)
-      ..drawEllipse(plan.sourceX, fy(plan.sourceY), r, r)
-      ..strokePath()
+      ..setFillColor(_lofHalo)
+      ..drawEllipse(plan.sourceX, fy(plan.sourceY), r + 1.2, r + 1.2)
+      ..fillPath()
       ..setFillColor(_lofHot)
       ..drawEllipse(plan.sourceX, fy(plan.sourceY), r, r)
       ..fillPath();
-    for (var i = 0; i < 4; i++) {
-      final a = plan.angle + math.pi / 4 + i * math.pi / 2;
-      final dx = math.cos(a);
-      final dy = math.sin(a);
-      for (final pass in const [(w: 2.0, halo: true), (w: 0.9, halo: false)]) {
-        canvas
-          ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
-          ..setLineWidth(pass.w)
-          ..moveTo(plan.sourceX + dx * (r + 1.4), fy(plan.sourceY + dy * (r + 1.4)))
-          ..lineTo(plan.sourceX + dx * (r + 5.0), fy(plan.sourceY + dy * (r + 5.0)))
-          ..strokePath();
-      }
-    }
 
     // ── ring on the exposed person ────────────────────────────────────────
     // A ring, never a filled disc: the officer has to be able to see the
     // person's posture and PPE to judge the finding.
-    _ring(canvas, plan.personX, fy(plan.personY),
-        math.max(7.5, math.min(plan.halfWidth * 0.62, 26.0)));
+    _ring(canvas, plan.personX, fy(plan.personY), ringR);
   }
 
   static void _ring(PdfGraphics canvas, double x, double y, double radius) {
@@ -868,8 +810,21 @@ class PdfExport {
       double displayedW,
       double displayedH) {
 
-    final exposure = lof.exposure.isEmpty ? '' : ' · ${lof.exposure}';
-    final text = 'LINE OF FIRE ${index + 1}$exposure';
+    // Caption says WHAT could strike and WHO is in the way — the two things the
+    // arrow itself cannot spell out. Kept to one short line: a caption longer
+    // than the arrow becomes the thing the eye reads instead of the photograph.
+    final src = lof.source.trim();
+    final who = lof.exposure.trim();
+    final String text;
+    if (src.isNotEmpty && who.isNotEmpty) {
+      text = '${index + 1}  $src → $who';
+    } else if (src.isNotEmpty) {
+      text = '${index + 1}  $src → person';
+    } else if (who.isNotEmpty) {
+      text = '${index + 1}  LINE OF FIRE · $who';
+    } else {
+      text = 'LINE OF FIRE ${index + 1}';
+    }
 
     // Rough plate size. The pdf package will not clip an overflowing Text, so
     // the estimate only has to be good enough to keep the plate inside the
@@ -877,11 +832,11 @@ class PdfExport {
     final plateW = math.min(text.length * 3.6 + 8, displayedW);
     const plateH = 11.0;
 
-    // Sit the plate beside the midpoint, pushed off the corridor so it does not
-    // hide the very path it names.
+    // Sit the plate beside the midpoint, pushed clear of the shaft so it does
+    // not hide the very path it names.
     final midX = (plan.sourceX + plan.personX) / 2;
     final midY = (plan.sourceY + plan.personY) / 2;
-    final push = plan.halfWidth * 0.75 + 8;
+    const push = 9.0;
     var lx = midX - plateW / 2;
     var ly = midY - push - plateH;
     if (ly < 0) ly = midY + push;
