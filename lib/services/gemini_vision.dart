@@ -1635,6 +1635,26 @@ Types:
 • Person near gas cylinders during use → SMPV Rules 2016 Rule 14
 • Person near electrical panel → CEA Regulations 2010 Reg 46
 
+MARKING THE PATH — "lofZone"
+The path is drawn on the photograph as an arrow, so the two ends must be the
+two ENDS OF THE PATH, in this order and no other:
+  "lofZone": {
+    "x1": <energy SOURCE centre x, 0-1>,  "y1": <energy SOURCE centre y, 0-1>,
+    "x2": <exposed PERSON centre x, 0-1>, "y2": <exposed PERSON centre y, 0-1>,
+    "width": <how wide the danger corridor is at the person, 0.02-0.22>,
+    "exposure": "<max 4 words: who is exposed, e.g. 'rigger below load'>"
+  }
+★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
+  person is above or to the left of the source. Do not reorder them to make the
+  numbers ascending — the arrow would then point at the machine instead of the
+  worker.
+★ Include "lofZone" for ANY hazard where a person you can SEE stands in the path
+  of the energy, whatever "type" you gave it. A worker under a suspended load is
+  in the line of fire whether the row is typed "Line of Fire" or
+  "Unsafe Condition".
+★ Omit "lofZone" entirely when no person is visible in the path. An invented
+  path draws a confident arrow at nobody.
+
 ═══════════════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 ═══════════════════════════════════════════════════════
@@ -1655,7 +1675,8 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
       "confidence": 0-100,
       "visualEvidence": "<brief: what specific object/condition in the image proves this hazard>",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
-      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7}
+      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7,
+                  "width": 0.08, "exposure": "operator at panel"}
     }
   ]
 }
@@ -1666,7 +1687,9 @@ FIELD RULES:
   certainty about the ASSESSMENT AS A WHOLE (image quality, coverage), which is
   not the same as your certainty about any single hazard.
 • "bbox" is approximate location of hazard in image (normalized 0-1).
-• "lofZone" is REQUIRED for "Line of Fire" type ONLY. Omit for others.
+• "lofZone" is REQUIRED for "Line of Fire" type, and expected on ANY other
+  hazard where a visible person is in the path. Omit when nobody is exposed.
+  x1,y1 = source; x2,y2 = person — never swapped.
 • "description" MUST begin with "Visible: ..." stating what you physically observe.
 • Maximum 7 hazards. Quality over quantity.
 • If nothing hazardous is visible, return overallRisk "LOW", riskScore <20, empty hazards [].''';

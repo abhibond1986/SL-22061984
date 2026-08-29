@@ -23,6 +23,7 @@ import '../services/image_storage.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/geo_service.dart';
+import '../services/line_of_fire.dart';
 import '../utils/image_prep.dart';
 import '../widgets/analysis_progress.dart';
 import '../widgets/hazard_annotated_image.dart';
@@ -2590,7 +2591,9 @@ class _AIScanTabState extends State<AIScanTab> {
         // Each chip = number + severity colour + hazard name.
         // Tapping a chip highlights that hazard's row in the table below,
         // exactly like tapping the corresponding box on the image.
-        if (hasBbox) ...[
+        // Also shown when there is a line of fire but no bounding boxes: the
+        // arrow would otherwise appear on the image with nothing explaining it.
+        if (hasBbox || _lofCount(hazards) > 0) ...[
           const SizedBox(height: 8),
           _hazardLegendStrip(hazards, sl),
         ],
@@ -3313,8 +3316,36 @@ class _AIScanTabState extends State<AIScanTab> {
             }).toList(),
           ),
         ),
+        // The red arrow needs explaining, or it reads as decoration. Only shown
+        // when something on the image actually carries a line of fire, and it
+        // names the count so a reader can tell how many people are exposed.
+        if (_lofCount(hazards) > 0) ...[
+          const SizedBox(height: 7),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1, right: 5),
+              child: Icon(Icons.arrow_outward_rounded,
+                  size: 12, color: sl.redText)),
+            Expanded(child: Text(
+              _lofCount(hazards) == 1
+                ? 'Red arrow = LINE OF FIRE: energy source → the person in its '
+                  'path. 1 person exposed.'
+                : 'Red arrows = LINE OF FIRE: energy source → the person in its '
+                  'path. ${_lofCount(hazards)} exposures marked.',
+              style: TextStyle(color: sl.redText, fontSize: 9.5, height: 1.35,
+                  fontWeight: FontWeight.w600))),
+          ]),
+        ],
       ]));
   }
+
+  /// How many hazards resolve to a drawable line of fire. Counted through the
+  /// same parser the painter uses, so the caption can never claim an arrow that
+  /// was not drawn.
+  int _lofCount(List hazards) => hazards
+      .whereType<Map>()
+      .where((h) => LineOfFireGeometry.parse(h) != null)
+      .length;
 
   Widget _infoBox(SL sl) {
     final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;

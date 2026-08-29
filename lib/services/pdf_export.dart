@@ -9,6 +9,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:pdf/pdf.dart';
@@ -17,6 +18,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 import 'image_storage.dart';
+import 'line_of_fire.dart';
 import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
 
 class PdfExport {
@@ -544,8 +546,20 @@ class PdfExport {
       if (hazards[i]['bbox'] is Map) bboxed.add(i);
     }
 
-    // No bbox data, or undecodable image → plain image
-    if (bboxed.isEmpty || imgW <= 0 || imgH <= 0) {
+    // Lines of fire, resolved through the shared geometry contract so this page
+    // and the AI Scan screen cannot disagree about where the arrow points.
+    // Indexed so the label can carry the same number as the hazards table.
+    final lofs = <({int index, LineOfFire lof})>[];
+    for (var i = 0; i < hazards.length; i++) {
+      final lof = LineOfFireGeometry.parse(hazards[i]);
+      if (lof != null) lofs.add((index: i, lof: lof));
+    }
+
+    // Nothing to annotate, or undecodable image → plain image. A hazard can
+    // carry a line of fire without a bbox, so the LOF list has to be consulted
+    // too — otherwise the one annotation that shows WHO is in danger is the one
+    // that gets dropped.
+    if ((bboxed.isEmpty && lofs.isEmpty) || imgW <= 0 || imgH <= 0) {
       return pw.Image(memImage, height: containerH, fit: pw.BoxFit.contain);
     }
 
@@ -570,39 +584,14 @@ class PdfExport {
               width: displayedW, height: displayedH,
               fit: pw.BoxFit.fill)),
 
-          // ✅ LOF Zone indicators (light shaded rectangles for Line of Fire hazards)
-          ...hazards.asMap().entries
-              .where((e) =>
-                  e.value['type']?.toString().toLowerCase() == 'line of fire' &&
-                  e.value['lofZone'] is Map)
-              .map((entry) {
-            final zone = entry.value['lofZone'] as Map;
-            final zx1 = _asDouble(zone['x1']).clamp(0.0, 1.0);
-            final zy1 = _asDouble(zone['y1']).clamp(0.0, 1.0);
-            final zx2 = _asDouble(zone['x2']).clamp(0.0, 1.0);
-            final zy2 = _asDouble(zone['y2']).clamp(0.0, 1.0);
-            // Draw a rectangle covering the LOF corridor
-            final left = (zx1 < zx2 ? zx1 : zx2);
-            final top  = (zy1 < zy2 ? zy1 : zy2);
-            final right  = (zx1 > zx2 ? zx1 : zx2);
-            final bottom = (zy1 > zy2 ? zy1 : zy2);
-            // Expand slightly for visibility
-            final zoneW = ((right - left) * displayedW).clamp(20.0, displayedW);
-            final zoneH = ((bottom - top) * displayedH).clamp(20.0, displayedH);
-            return pw.Positioned(
-              left: offsetX + left * displayedW,
-              top: offsetY + top * displayedH,
-              child: pw.Container(
-                width: zoneW,
-                height: zoneH,
-                decoration: pw.BoxDecoration(
-                  color: PdfColor.fromHex('#E5393520'),
-                  border: pw.Border.all(
-                    color: PdfColor.fromHex('#E5393560'), width: 0.8),
-                ),
-              ),
-            );
-          }),
+          // LINE OF FIRE — a tapered corridor from the energy source to the
+          // person in its path, with an arrowhead giving the DIRECTION of
+          // travel. It used to be an axis-aligned rectangle from min/max of the
+          // two points, which showed a region rather than a direction and told
+          // the reader nothing about which end the danger comes from.
+          ...(lofs.isEmpty
+              ? const <pw.Widget>[]
+              : _lofLayers(lofs, offsetX, offsetY, displayedW, displayedH)),
 
           ...bboxed.map((i) {
             final h     = hazards[i];
@@ -653,6 +642,270 @@ class PdfExport {
             );
           }),
         ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  LINE-OF-FIRE OVERLAY (PDF)
+  //
+  //  The screen renderer (widgets/hazard_annotated_image.dart) and this one both
+  //  draw from LineOfFireGeometry.plan(), so the printed report shows the same
+  //  arrow the officer approved on screen.
+  //
+  //  COORDINATES. pw.CustomPaint hands the painter a canvas translated to the
+  //  widget box's bottom-left corner with y growing UPWARD (PDF convention),
+  //  whereas plan() works in screen space with y growing downward. Everything
+  //  below therefore passes vertical values through _fy(). Getting this wrong
+  //  does not throw — it silently mirrors the arrow, so the report would point
+  //  the danger at the wrong person.
+  // ─────────────────────────────────────────────────────────────────────────
+  static final PdfColor _lofHot  = PdfColor.fromHex('#E53935');
+  static final PdfColor _lofHalo = PdfColor.fromHex('#FFFFFF');
+
+  static List<pw.Widget> _lofLayers(
+      List<({int index, LineOfFire lof})> lofs,
+      double offsetX,
+      double offsetY,
+      double displayedW,
+      double displayedH) {
+
+    final plans = <({int index, LineOfFire lof, LofPlan plan})>[
+      for (final e in lofs)
+        (
+          index: e.index,
+          lof: e.lof,
+          plan: LineOfFireGeometry.plan(e.lof, displayedW, displayedH),
+        ),
+    ];
+
+    return <pw.Widget>[
+      // All corridors and arrows in one painter: a single graphics stream keeps
+      // the clip/opacity save-restore pairs local and avoids one widget per
+      // hazard fighting over the same pixels.
+      pw.Positioned(
+        left: offsetX,
+        top: offsetY,
+        child: pw.CustomPaint(
+          size: PdfPoint(displayedW, displayedH),
+          painter: (canvas, size) {
+            for (final p in plans) {
+              _paintLof(canvas, p.plan, displayedH);
+            }
+          },
+        ),
+      ),
+
+      // Labels are widgets rather than canvas text: drawString needs a font
+      // handle the painter does not get, and a laid-out Container gives the
+      // plate a readable background over a busy photograph.
+      ...plans.map((p) => _lofLabel(p.index, p.lof, p.plan,
+          offsetX, offsetY, displayedW, displayedH)),
+    ];
+  }
+
+  static void _paintLof(PdfGraphics canvas, LofPlan plan, double boxH) {
+    double fy(double v) => boxH - v;
+
+    // No usable direction (source and person resolved to the same spot). Mark
+    // the place instead of drawing a zero-length arrow that reads as a smudge.
+    if (plan.degenerate || plan.corridor.length != 4) {
+      _ring(canvas, plan.personX, fy(plan.personY),
+          math.max(9.0, plan.halfWidth * 0.6));
+      return;
+    }
+
+    final c = plan.corridor;
+
+    // ── shaded corridor ───────────────────────────────────────────────────
+    canvas
+      ..saveContext()
+      ..setGraphicState(const PdfGraphicState(fillOpacity: 0.20))
+      ..setFillColor(_lofHot)
+      ..moveTo(c[0].x, fy(c[0].y));
+    for (var i = 1; i < 4; i++) {
+      canvas.lineTo(c[i].x, fy(c[i].y));
+    }
+    canvas
+      ..closePath()
+      ..fillPath()
+      ..restoreContext();
+
+    // ── hatching, clipped to the corridor ─────────────────────────────────
+    // Hatching survives greyscale printing and photocopying, which a 20%
+    // red wash does not — a printed report is what actually gets signed.
+    canvas
+      ..saveContext()
+      ..moveTo(c[0].x, fy(c[0].y));
+    for (var i = 1; i < 4; i++) {
+      canvas.lineTo(c[i].x, fy(c[i].y));
+    }
+    canvas
+      ..closePath()
+      ..clipPath()
+      ..setGraphicState(const PdfGraphicState(strokeOpacity: 0.38))
+      ..setStrokeColor(_lofHot)
+      ..setLineWidth(0.6);
+
+    var minX = c[0].x, maxX = c[0].x, minY = fy(c[0].y), maxY = fy(c[0].y);
+    for (final pt in c) {
+      minX = math.min(minX, pt.x);
+      maxX = math.max(maxX, pt.x);
+      minY = math.min(minY, fy(pt.y));
+      maxY = math.max(maxY, fy(pt.y));
+    }
+    // 45° lines: x - y = k. Step chosen so the texture reads as a warning
+    // without turning the corridor into a solid block over fine detail.
+    const step = 7.0;
+    final span = (maxX - minX) + (maxY - minY);
+    for (var k = 0.0; k <= span; k += step) {
+      canvas
+        ..moveTo(minX + k, minY)
+        ..lineTo(minX + k - (maxY - minY), maxY);
+    }
+    canvas
+      ..strokePath()
+      ..restoreContext();
+
+    // ── corridor edges, haloed so they read over rust and red machinery ───
+    for (final pass in const [(w: 2.4, halo: true), (w: 1.0, halo: false)]) {
+      canvas
+        ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
+        ..setLineWidth(pass.w)
+        ..moveTo(c[0].x, fy(c[0].y))
+        ..lineTo(c[1].x, fy(c[1].y))
+        ..moveTo(c[3].x, fy(c[3].y))
+        ..lineTo(c[2].x, fy(c[2].y))
+        ..strokePath();
+    }
+
+    // ── shaft, stopping short of the person so the arrowhead has room ─────
+    final headLen = math.max(7.0, math.min(plan.length * 0.22, 16.0));
+    final tipT = 0.94;
+    final tipX = plan.sourceX + (plan.personX - plan.sourceX) * tipT;
+    final tipY = plan.sourceY + (plan.personY - plan.sourceY) * tipT;
+    final ux = (plan.personX - plan.sourceX) / plan.length;
+    final uy = (plan.personY - plan.sourceY) / plan.length;
+    final baseX = tipX - ux * headLen;
+    final baseY = tipY - uy * headLen;
+
+    for (final pass in const [(w: 3.6, halo: true), (w: 1.8, halo: false)]) {
+      canvas
+        ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
+        ..setLineWidth(pass.w)
+        ..setLineCap(PdfLineCap.round)
+        ..moveTo(plan.sourceX, fy(plan.sourceY))
+        ..lineTo(baseX, fy(baseY))
+        ..strokePath();
+    }
+
+    // ── arrowhead ─────────────────────────────────────────────────────────
+    final nx = -uy;
+    final ny = ux;
+    final halfHead = headLen * 0.46;
+    void head(double grow) {
+      canvas
+        ..moveTo(tipX + ux * grow, fy(tipY + uy * grow))
+        ..lineTo(baseX + nx * (halfHead + grow), fy(baseY + ny * (halfHead + grow)))
+        ..lineTo(baseX - nx * (halfHead + grow), fy(baseY - ny * (halfHead + grow)))
+        ..closePath()
+        ..fillPath();
+    }
+    canvas.setFillColor(_lofHalo);
+    head(1.5);
+    canvas.setFillColor(_lofHot);
+    head(0);
+
+    // ── burst on the energy source ────────────────────────────────────────
+    const r = 3.4;
+    canvas
+      ..setStrokeColor(_lofHalo)
+      ..setLineWidth(2.2)
+      ..drawEllipse(plan.sourceX, fy(plan.sourceY), r, r)
+      ..strokePath()
+      ..setFillColor(_lofHot)
+      ..drawEllipse(plan.sourceX, fy(plan.sourceY), r, r)
+      ..fillPath();
+    for (var i = 0; i < 4; i++) {
+      final a = plan.angle + math.pi / 4 + i * math.pi / 2;
+      final dx = math.cos(a);
+      final dy = math.sin(a);
+      for (final pass in const [(w: 2.0, halo: true), (w: 0.9, halo: false)]) {
+        canvas
+          ..setStrokeColor(pass.halo ? _lofHalo : _lofHot)
+          ..setLineWidth(pass.w)
+          ..moveTo(plan.sourceX + dx * (r + 1.4), fy(plan.sourceY + dy * (r + 1.4)))
+          ..lineTo(plan.sourceX + dx * (r + 5.0), fy(plan.sourceY + dy * (r + 5.0)))
+          ..strokePath();
+      }
+    }
+
+    // ── ring on the exposed person ────────────────────────────────────────
+    // A ring, never a filled disc: the officer has to be able to see the
+    // person's posture and PPE to judge the finding.
+    _ring(canvas, plan.personX, fy(plan.personY),
+        math.max(7.5, math.min(plan.halfWidth * 0.62, 26.0)));
+  }
+
+  static void _ring(PdfGraphics canvas, double x, double y, double radius) {
+    canvas
+      ..setStrokeColor(_lofHalo)
+      ..setLineWidth(2.6)
+      ..drawEllipse(x, y, radius, radius)
+      ..strokePath()
+      ..setStrokeColor(_lofHot)
+      ..setLineWidth(1.4)
+      ..drawEllipse(x, y, radius, radius)
+      ..strokePath();
+  }
+
+  static pw.Widget _lofLabel(
+      int index,
+      LineOfFire lof,
+      LofPlan plan,
+      double offsetX,
+      double offsetY,
+      double displayedW,
+      double displayedH) {
+
+    final exposure = lof.exposure.isEmpty ? '' : ' · ${lof.exposure}';
+    final text = 'LINE OF FIRE ${index + 1}$exposure';
+
+    // Rough plate size. The pdf package will not clip an overflowing Text, so
+    // the estimate only has to be good enough to keep the plate inside the
+    // photo — 3.6pt per character at 6.5pt is a safe over-estimate for Helvetica.
+    final plateW = math.min(text.length * 3.6 + 8, displayedW);
+    const plateH = 11.0;
+
+    // Sit the plate beside the midpoint, pushed off the corridor so it does not
+    // hide the very path it names.
+    final midX = (plan.sourceX + plan.personX) / 2;
+    final midY = (plan.sourceY + plan.personY) / 2;
+    final push = plan.halfWidth * 0.75 + 8;
+    var lx = midX - plateW / 2;
+    var ly = midY - push - plateH;
+    if (ly < 0) ly = midY + push;
+
+    lx = lx.clamp(0.0, math.max(0.0, displayedW - plateW));
+    ly = ly.clamp(0.0, math.max(0.0, displayedH - plateH));
+
+    return pw.Positioned(
+      left: offsetX + lx,
+      top: offsetY + ly,
+      child: pw.Container(
+        width: plateW,
+        height: plateH,
+        alignment: pw.Alignment.center,
+        decoration: pw.BoxDecoration(
+          color: _lofHot,
+          border: pw.Border.all(color: PdfColors.white, width: 0.7),
+        ),
+        child: pw.Text(text,
+          maxLines: 1,
+          style: pw.TextStyle(
+            color: PdfColors.white,
+            fontSize: 6.5,
+            fontWeight: pw.FontWeight.bold)),
       ),
     );
   }

@@ -1,13 +1,23 @@
 // lib/widgets/hazard_annotated_image.dart
-// ✅ v17: Shows FULL image at natural aspect ratio with hazard bounding boxes.
-// No zoom, no crop — entire uploaded image visible with clear hazard markings.
+// Shows the FULL image at its natural aspect ratio with hazard bounding boxes.
+// No zoom, no crop — the entire uploaded image stays visible.
 //
 // Each hazard's `bbox` is expected as [yMin, xMin, yMax, xMax] normalized 0–1000
 // (Gemini Vision format) OR as [x, y, w, h] normalized 0–1.
+//
+// A hazard may also carry `lofZone`, the LINE OF FIRE: the path from an energy
+// source to the person standing in it. That is drawn as a directional corridor
+// and arrow (see _LineOfFirePainter), with geometry resolved by the shared
+// services/line_of_fire.dart so the screen and the exported PDF cannot disagree.
 
 // No additional imports needed — LinearGradient comes from material.dart
+import 'dart:math' as math;
+import 'dart:ui' as ui show Gradient;
+
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/material.dart';
+
+import '../services/line_of_fire.dart';
 
 class HazardAnnotatedImage extends StatefulWidget {
   final Uint8List imageBytes;
@@ -79,12 +89,24 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
         double offsetX = 0;
         double offsetY = 0;
 
-        if (_imageSize != null && _imageSize!.width > 0 && _imageSize!.height > 0) {
-          final aspect = _imageSize!.width / _imageSize!.height;
-          imageRenderH = containerW / aspect;
-        } else {
-          // Fallback: assume 4:3 until image loads
-          imageRenderH = containerW * 0.75;
+        final aspect =
+            (_imageSize != null && _imageSize!.width > 0 && _imageSize!.height > 0)
+                ? _imageSize!.width / _imageSize!.height
+                : 4 / 3; // assume 4:3 until the image decodes
+        imageRenderH = containerW / aspect;
+
+        // Respect a bounded height from the caller. Width-driven sizing alone
+        // makes a portrait photo taller than its slot — the widget used to
+        // overflow instead of letterboxing, so a caller could only ever place it
+        // somewhere with unlimited vertical room. Capping here and centring the
+        // narrower image keeps the annotation geometry correct, because the
+        // overlay is positioned on the SAME rect the photo is drawn in.
+        if (constraints.hasBoundedHeight &&
+            constraints.maxHeight.isFinite &&
+            imageRenderH > constraints.maxHeight) {
+          imageRenderH = constraints.maxHeight;
+          imageRenderW = imageRenderH * aspect;
+          offsetX = (containerW - imageRenderW) / 2;
         }
 
         return SizedBox(
@@ -94,11 +116,15 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
             clipBehavior: Clip.hardEdge,
             children: [
               // Full image
-              Image.memory(
-                widget.imageBytes,
-                width: containerW,
+              Positioned(
+                left: offsetX,
+                top: offsetY,
+                width: imageRenderW,
                 height: imageRenderH,
-                fit: BoxFit.contain,
+                child: Image.memory(
+                  widget.imageBytes,
+                  fit: BoxFit.contain,
+                ),
               ),
               // Overlay bounding boxes — constrained to image area
               Positioned(
@@ -135,24 +161,24 @@ class _BboxOverlay extends StatelessWidget {
         return Stack(
           clipBehavior: Clip.hardEdge,
           children: [
-            // ✅ LOF Zone overlays (rendered BELOW bboxes)
-            ...hazards.asMap().entries
-                .where((e) =>
-                    (e.value as Map)['type']?.toString().toLowerCase() ==
-                        'line of fire' &&
-                    (e.value as Map)['lofZone'] != null)
-                .map((entry) {
-              final hazard = Map<String, dynamic>.from(entry.value as Map);
-              final zone = hazard['lofZone'] as Map;
-              final x1 = (num.tryParse(zone['x1']?.toString() ?? '') ?? 0).toDouble();
-              final y1 = (num.tryParse(zone['y1']?.toString() ?? '') ?? 0).toDouble();
-              final x2 = (num.tryParse(zone['x2']?.toString() ?? '') ?? 0).toDouble();
-              final y2 = (num.tryParse(zone['y2']?.toString() ?? '') ?? 0).toDouble();
+            // Line-of-fire paths, rendered BELOW the bounding boxes so a box
+            // outline is never hidden by the corridor shading.
+            //
+            // Drawn for ANY hazard that resolves to a usable path, not only
+            // those the model happened to type 'Line of Fire': a worker under a
+            // suspended load is in the line of fire whichever label the row got.
+            ...hazards.asMap().entries.map((entry) {
+              final hazard = entry.value;
+              if (hazard is! Map) return const SizedBox.shrink();
+              final lof = LineOfFireGeometry.parse(hazard);
+              if (lof == null) return const SizedBox.shrink();
               return Positioned.fill(
-                child: CustomPaint(
-                  painter: _LofZonePainter(
-                    x1: x1, y1: y1, x2: x2, y2: y2,
-                    containerW: w, containerH: h,
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _LineOfFirePainter(
+                      lof: lof,
+                      index: entry.key,
+                    ),
                   ),
                 ),
               );
@@ -306,110 +332,252 @@ class _BboxOverlay extends StatelessWidget {
   }
 }
 
-/// ✅ Custom painter for Line of Fire shaded danger zone
-/// Draws a semi-transparent red/orange shaded rectangular region covering
-/// the approximate area where energy/material could strike a person.
-/// (x1,y1) = top-left of zone, (x2,y2) = bottom-right of zone (normalized 0-1)
-class _LofZonePainter extends CustomPainter {
-  final double x1, y1, x2, y2;
-  final double containerW, containerH;
+/// Draws one hazard's LINE OF FIRE: a tapered danger corridor running from the
+/// energy source to the person standing in its path, with an arrowhead at the
+/// person end.
+///
+/// WHY A DIRECTION AND NOT A BOX
+/// -----------------------------
+/// This replaces a painter that read the path's two endpoints as a rectangle's
+/// corners. That was wrong twice over. It drew a region where the concept is
+/// about a direction, and — because `Rect.fromLTRB` produces a negative width
+/// when right < left — it drew NOTHING at all whenever the exposed person stood
+/// above or to the left of the energy source, which is about half of real
+/// photographs. A silently missing line of fire is the worst possible failure
+/// here: the reader sees a clean image and concludes nobody is exposed.
+///
+/// Everything is drawn with a white halo underneath. A shop-floor photograph can
+/// be any colour, and a red arrow over rust or a red ladle is invisible.
+class _LineOfFirePainter extends CustomPainter {
+  _LineOfFirePainter({required this.lof, required this.index});
 
-  _LofZonePainter({
-    required this.x1, required this.y1,
-    required this.x2, required this.y2,
-    required this.containerW, required this.containerH,
-  });
+  final LineOfFire lof;
+
+  /// Hazard's position in the list, so the arrow can be tied to the numbered
+  /// bounding box and table row rather than floating unexplained.
+  final int index;
+
+  static const Color _hot   = Color(0xFFE53935); // energy / danger
+  static const Color _warm  = Color(0xFFFF7043); // corridor gradient far end
+  static const Color _halo  = Color(0xE6FFFFFF);
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Convert normalized coords to pixel coords
-    final left   = x1 * containerW;
-    final top    = y1 * containerH;
-    final right  = x2 * containerW;
-    final bottom = y2 * containerH;
+    if (size.width < 8 || size.height < 8) return;
+    final plan = LineOfFireGeometry.plan(lof, size.width, size.height);
 
-    final zoneRect = Rect.fromLTRB(
-      left.clamp(0, containerW),
-      top.clamp(0, containerH),
-      right.clamp(0, containerW),
-      bottom.clamp(0, containerH),
+    // No usable direction: the model put the source and the person on top of
+    // each other. Mark the spot honestly rather than drawing a zero-length
+    // arrow that would point at nothing in particular.
+    if (plan.degenerate) {
+      _drawExposureRing(canvas, Offset(plan.personX, plan.personY), 14);
+      _drawLabel(canvas, size, Offset(plan.personX, plan.personY + 22),
+          '⚠ LINE OF FIRE ${index + 1}');
+      return;
+    }
+
+    final corridor = Path();
+    corridor.moveTo(plan.corridor[0].x, plan.corridor[0].y);
+    for (final p in plan.corridor.skip(1)) {
+      corridor.lineTo(p.x, p.y);
+    }
+    corridor.close();
+
+    // ── Corridor fill: strongest at the person, where the energy arrives ──
+    canvas.drawPath(
+      corridor,
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(plan.sourceX, plan.sourceY),
+          Offset(plan.personX, plan.personY),
+          const [Color(0x1AFF7043), Color(0x4DE53935)],
+        ),
     );
 
-    if (zoneRect.width < 5 || zoneRect.height < 5) return;
-
-    // Gradient fill: red-orange, ~20% opacity (visible but not obscuring)
-    final fillPaint = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          Color(0x30FF5722), // orange-red ~19% opacity
-          Color(0x28E53935), // red ~16% opacity
-        ],
-      ).createShader(zoneRect)
-      ..style = PaintingStyle.fill;
-
-    final rrect = RRect.fromRectAndRadius(zoneRect, const Radius.circular(6));
-    canvas.drawRRect(rrect, fillPaint);
-
-    // Dashed-style border (hatched pattern feel)
-    final borderPaint = Paint()
-      ..color = const Color(0x88E53935) // ~53% opacity red border
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
-    canvas.drawRRect(rrect, borderPaint);
-
-    // Diagonal hatch lines for "danger zone" feel
+    // ── Hatching, clipped to the corridor: reads as "keep out" ──
     canvas.save();
-    canvas.clipRRect(rrect);
-    final hatchPaint = Paint()
-      ..color = const Color(0x18E53935) // very subtle hatch
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
-    const spacing = 12.0;
-    for (double d = -zoneRect.height; d < zoneRect.width + zoneRect.height; d += spacing) {
+    canvas.clipPath(corridor);
+    final hatch = Paint()
+      ..color = const Color(0x33E53935)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    final bounds = corridor.getBounds();
+    const spacing = 9.0;
+    for (double d = 0; d < bounds.width + bounds.height; d += spacing) {
       canvas.drawLine(
-        Offset(zoneRect.left + d, zoneRect.top),
-        Offset(zoneRect.left + d - zoneRect.height, zoneRect.bottom),
-        hatchPaint,
+        Offset(bounds.left + d, bounds.top),
+        Offset(bounds.left + d - bounds.height, bounds.bottom),
+        hatch,
       );
     }
     canvas.restore();
 
-    // "LOF" label in the zone
-    final textPainter = TextPainter(
-      text: const TextSpan(
-        text: '⚠ LINE OF FIRE',
-        style: TextStyle(
-          color: Color(0xBBD32F2F),
-          fontSize: 9,
+    // ── Corridor edges, haloed so they read on any background ──
+    canvas.drawPath(
+      corridor,
+      Paint()
+        ..color = _halo
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.4,
+    );
+    canvas.drawPath(
+      corridor,
+      Paint()
+        ..color = _hot.withOpacity(0.9)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6,
+    );
+
+    // ── The arrow itself, along the centre line ──
+    // Stops short of the person so the arrowhead sits beside them rather than
+    // covering the very thing the reader is being asked to look at.
+    final headLen = (plan.halfWidth * 1.35).clamp(11.0, 30.0);
+    final shaftEnd = _along(plan, plan.length - headLen * 0.9);
+    final shaftStart = _along(plan, math.min(plan.length * 0.12, 14.0));
+
+    canvas.drawLine(shaftStart, shaftEnd,
+        Paint()..color = _halo..strokeWidth = 6.0..strokeCap = StrokeCap.round);
+    canvas.drawLine(shaftStart, shaftEnd,
+        Paint()..color = _hot..strokeWidth = 3.0..strokeCap = StrokeCap.round);
+
+    _drawArrowHead(canvas, plan, headLen);
+
+    // ── Source burst: where the energy comes from ──
+    _drawSourceBurst(canvas, Offset(plan.sourceX, plan.sourceY),
+        (plan.halfWidth * 0.55).clamp(7.0, 15.0));
+
+    // ── The exposed person ──
+    _drawExposureRing(canvas, Offset(plan.personX, plan.personY),
+        (plan.halfWidth * 0.8).clamp(11.0, 24.0));
+
+    // ── Label, placed off to the side of the midpoint so it never sits on top
+    //    of the arrowhead or the person.
+    final mid = _along(plan, plan.length * 0.5);
+    final nx = -math.sin(plan.angle);
+    final ny = math.cos(plan.angle);
+    final labelAnchor = Offset(
+      mid.dx + nx * (plan.halfWidth + 12),
+      mid.dy + ny * (plan.halfWidth + 12),
+    );
+    final exposure = lof.exposure.isEmpty ? '' : ' · ${lof.exposure}';
+    _drawLabel(canvas, size, labelAnchor,
+        '⚠ LINE OF FIRE ${index + 1}$exposure');
+  }
+
+  /// A point [distance] pixels along the source→person centre line.
+  Offset _along(LofPlan plan, double distance) {
+    final t = plan.length == 0 ? 0.0 : (distance / plan.length).clamp(0.0, 1.0);
+    return Offset(
+      plan.sourceX + (plan.personX - plan.sourceX) * t,
+      plan.sourceY + (plan.personY - plan.sourceY) * t,
+    );
+  }
+
+  void _drawArrowHead(Canvas canvas, LofPlan plan, double headLen) {
+    final tip = _along(plan, plan.length - headLen * 0.15);
+    final back = _along(plan, plan.length - headLen * 1.15);
+    final nx = -math.sin(plan.angle);
+    final ny = math.cos(plan.angle);
+    final halfBase = headLen * 0.58;
+
+    final head = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(back.dx + nx * halfBase, back.dy + ny * halfBase)
+      ..lineTo(back.dx - nx * halfBase, back.dy - ny * halfBase)
+      ..close();
+
+    canvas.drawPath(head, Paint()
+      ..color = _halo
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4.0
+      ..strokeJoin = StrokeJoin.round);
+    canvas.drawPath(head, Paint()..color = _hot);
+  }
+
+  /// Short radiating strokes at the energy source — the visual shorthand for
+  /// "this is where it comes from", distinguishable from the ring on the person.
+  void _drawSourceBurst(Canvas canvas, Offset c, double r) {
+    final halo = Paint()
+      ..color = _halo
+      ..strokeWidth = 3.6
+      ..strokeCap = StrokeCap.round;
+    final ink = Paint()
+      ..color = _warm
+      ..strokeWidth = 1.8
+      ..strokeCap = StrokeCap.round;
+    for (int i = 0; i < 8; i++) {
+      final a = i * math.pi / 4;
+      final p1 = Offset(c.dx + math.cos(a) * r * 0.45,
+          c.dy + math.sin(a) * r * 0.45);
+      final p2 = Offset(c.dx + math.cos(a) * r, c.dy + math.sin(a) * r);
+      canvas.drawLine(p1, p2, halo);
+      canvas.drawLine(p1, p2, ink);
+    }
+    canvas.drawCircle(c, r * 0.3, Paint()..color = _halo);
+    canvas.drawCircle(c, r * 0.22, Paint()..color = _warm);
+  }
+
+  /// Concentric ring marking the person in the path. A ring rather than a filled
+  /// disc, so their posture and PPE stay visible underneath — that detail is
+  /// often the actual finding.
+  void _drawExposureRing(Canvas canvas, Offset c, double r) {
+    canvas.drawCircle(c, r, Paint()
+      ..color = _halo
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4.5);
+    canvas.drawCircle(c, r, Paint()
+      ..color = _hot
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4);
+    canvas.drawCircle(c, r * 0.45, Paint()
+      ..color = _hot.withOpacity(0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4);
+  }
+
+  /// Label on an opaque plate. Kept fully inside [size] — a caption clipped at
+  /// the image edge is how "LINE OF FIRE" becomes "LINE OF FI".
+  void _drawLabel(Canvas canvas, Size size, Offset anchor, String text) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(
+          color: Color(0xFFB3261E),
+          fontSize: 10,
           fontWeight: FontWeight.w800,
-          letterSpacing: 0.5,
+          letterSpacing: 0.4,
+          height: 1.1,
         ),
       ),
       textDirection: TextDirection.ltr,
-    )..layout();
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: math.max(60.0, size.width - 16));
 
-    // Position label at top-center of zone
-    final labelX = zoneRect.center.dx - textPainter.width / 2;
-    final labelY = zoneRect.top + 4;
+    var left = anchor.dx - tp.width / 2;
+    var top = anchor.dy - tp.height / 2;
+    left = left.clamp(4.0, math.max(4.0, size.width - tp.width - 4));
+    top = top.clamp(4.0, math.max(4.0, size.height - tp.height - 4));
 
-    // Label background
-    final labelRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(labelX - 4, labelY - 2,
-          textPainter.width + 8, textPainter.height + 4),
-      const Radius.circular(3),
+    final plate = RRect.fromRectAndRadius(
+      Rect.fromLTWH(left - 5, top - 3, tp.width + 10, tp.height + 6),
+      const Radius.circular(4),
     );
-    canvas.drawRRect(labelRect, Paint()..color = const Color(0xCCFFFFFF));
-    canvas.drawRRect(labelRect, Paint()
-      ..color = const Color(0x66E53935)
+    canvas.drawRRect(plate, Paint()..color = const Color(0xF2FFFFFF));
+    canvas.drawRRect(plate, Paint()
+      ..color = _hot.withOpacity(0.75)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.5);
-
-    textPainter.paint(canvas, Offset(labelX, labelY));
+      ..strokeWidth = 1.0);
+    tp.paint(canvas, Offset(left, top));
   }
 
   @override
-  bool shouldRepaint(covariant _LofZonePainter old) =>
-      x1 != old.x1 || y1 != old.y1 || x2 != old.x2 || y2 != old.y2;
+  bool shouldRepaint(covariant _LineOfFirePainter old) =>
+      old.index != index ||
+      old.lof.sourceX != lof.sourceX ||
+      old.lof.sourceY != lof.sourceY ||
+      old.lof.personX != lof.personX ||
+      old.lof.personY != lof.personY ||
+      old.lof.width != lof.width ||
+      old.lof.exposure != lof.exposure;
 }

@@ -712,12 +712,21 @@ HAZARD CHECKLIST — Check EVERY applicable category
   POWER PLANT: Person near steam header flange, person below coal conveyor, person in turbine oil spray zone
   GAS NETWORK: Person downstream of bleeder without CO detector, person near valve under pressure
 
-── LOF ZONE (mandatory for type "Line of Fire") ──
-  For EVERY hazard with type "Line of Fire", include "lofZone" in the JSON.
+── LOF ZONE (the path drawn on the photograph) ──
   lofZone defines the DANGER PATH from energy source to person:
-    "lofZone": {"x1": <source x 0-1>, "y1": <source y 0-1>, "x2": <person x 0-1>, "y2": <person y 0-1>}
+    "lofZone": {"x1": <SOURCE x 0-1>, "y1": <SOURCE y 0-1>,
+                "x2": <PERSON x 0-1>, "y2": <PERSON y 0-1>,
+                "width": <corridor width at the person, 0.02-0.22>,
+                "exposure": "<max 4 words: who is exposed>"}
   (x1,y1) = center of energy source/hazard origin; (x2,y2) = center of exposed person.
-  This draws a shaded corridor showing the line of fire path on the image.
+  This is rendered as an ARROW from source to person, so the order matters:
+  ★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
+    person is above or to the left of it. Never reorder to make numbers ascend —
+    the arrow would point at the machine instead of the worker.
+  ★ Include lofZone for EVERY hazard typed "Line of Fire", AND for any other
+    hazard where a person you can SEE stands in the path of the energy,
+    whatever type you gave it.
+  ★ Omit lofZone when no person is visible in the path.
 
 ═══════════════════════════════════════════════════════
 GAS CYLINDER COLOUR CODES (IS 4379:1981)
@@ -806,7 +815,8 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       "confidence": 0-100 (YOUR certainty about THIS hazard specifically — required),
       "wsaCause": "EXACT wording from the hazard category list below",
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
-      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7}
+      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7,
+                  "width": 0.08, "exposure": "rigger below load"}
     }
   ],
   "wsa": ["list of WSA causes ACTUALLY applicable — only those with visual evidence"],

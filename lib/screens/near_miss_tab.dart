@@ -29,7 +29,9 @@ import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/geo_service.dart';
 import '../services/knowledge_service.dart';
+import '../services/line_of_fire.dart';
 import '../widgets/analysis_progress.dart';
+import '../widgets/hazard_annotated_image.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
@@ -60,6 +62,11 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   bool        _analyzing = false;
   String      _step      = '';
   Map<String, dynamic>? _aiBrief;
+  // The full hazard list from the scan, kept only so the attached photo can be
+  // annotated with bounding boxes and the line of fire. The FORM still reflects
+  // the first hazard alone — this is about showing the reporter what the model
+  // actually looked at, which is otherwise invisible on this screen.
+  List<Map<String, dynamic>> _aiHazards = const [];
   bool        _isOnlineMode = true;
 
   final _brief           = TextEditingController();
@@ -1041,7 +1048,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     final bytes = await picked.readAsBytes();
     setState(() {
       _pickedFile = picked; _imageBytes = bytes;
-      _aiBrief = null;
+      _aiBrief = null; _aiHazards = const [];
     });
 
     // ★ v32: Try EXIF GPS first (more accurate for gallery photos — exact capture location)
@@ -1175,6 +1182,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       _snack('Offline - Image analysis skipped. Fill form manually.', const Color(0xFFD97706));
       setState(() {
         _isOnlineMode = false;
+        _aiHazards = const [];
         _aiBrief = {
           'identified': 'Manual entry — Offline',
           'statutory':  'Complete form manually',
@@ -1227,6 +1235,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         final user = await LocalDB.getCurrentUser();
         setState(() {
           _isOnlineMode = false;
+          _aiHazards = const [];
           _aiBrief = {
             'identified': 'AI unavailable — fill form manually',
             'statutory':  'Refer applicable regulations',
@@ -1280,6 +1289,14 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       // has not swapped the citation out from under it; a verdict about a
       // reference that is no longer displayed would be worse than none.
       final regUnchanged = (refinedData['reg']?.toString() ?? '') == rawReg;
+
+      // Copied defensively: the annotated photo must not hold a live reference
+      // into the raw model response, and a non-Map entry in the list would break
+      // the overlay for every other hazard in it.
+      final annotatable = <Map<String, dynamic>>[
+        for (final h in hazards)
+          if (h is Map) Map<String, dynamic>.from(h),
+      ];
       // isOnline already declared above (line ~381)
 
       final user              = await LocalDB.getCurrentUser();
@@ -1288,6 +1305,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
 
       setState(() {
         _isOnlineMode = isOnline;
+        _aiHazards = annotatable;
         _aiBrief = {
           'identified': refinedData['name'],
           'statutory':  (refinedData['reg']?.toString() ?? '').isEmpty ? 'Refer Factories Act S35-41' : refinedData['reg'].toString(),
@@ -1336,6 +1354,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     } catch (e) {
       setState(() {
         _isOnlineMode = false;
+        _aiHazards = const [];
         _aiBrief = {
           'identified': 'Manual entry — Analysis failed',
           'statutory':  'Complete form manually',
@@ -1433,7 +1452,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
   void _resetForm() {
     setState(() {
       _saved = false;
-      _pickedFile = null; _imageBytes = null; _aiBrief = null;
+      _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const [];
       _brief.clear(); _deptOther.clear(); _selectedDept = ''; _showOtherDept = false;
       _location.clear(); _description.clear(); _immediateAction.clear();
       for (final c in _additionalActions) { c.dispose(); }
@@ -2211,16 +2230,76 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     return Icons.info_outline_rounded;
   }
 
+  /// Whether there is anything to draw on the photo. A hazard with neither a
+  /// bbox nor a line of fire would render an annotated image indistinguishable
+  /// from the plain one, plus a caption promising markings that aren't there.
+  bool get _annotatable =>
+      _imageBytes != null &&
+      _aiHazards.any((h) =>
+          h['bbox'] != null || LineOfFireGeometry.parse(h) != null);
+
+  int get _lofCount =>
+      _aiHazards.where((h) => LineOfFireGeometry.parse(h) != null).length;
+
+  Widget _annotationCaption(SL sl) {
+    final boxes = _aiHazards.where((h) => h['bbox'] != null).length;
+    final lofs = _lofCount;
+    final parts = <String>[
+      if (boxes > 0) boxes == 1 ? '1 hazard boxed' : '$boxes hazards boxed',
+      if (lofs > 0)
+        lofs == 1 ? '1 line of fire marked' : '$lofs lines of fire marked',
+    ];
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1, right: 5),
+          child: Icon(
+            lofs > 0 ? Icons.arrow_outward_rounded : Icons.crop_free_rounded,
+            size: 12,
+            color: lofs > 0 ? sl.redText : sl.accentText),
+        ),
+        Expanded(
+          child: Text(
+            lofs > 0
+              ? '${parts.join(' · ')}. The red arrow runs from the energy '
+                'source to the person in its path.'
+              : '${parts.join(' · ')} by AI. Check each one on site.',
+            style: TextStyle(
+              color: lofs > 0 ? sl.redText : sl.accentText,
+              fontSize: 9.5,
+              height: 1.35,
+              fontWeight: FontWeight.w600)),
+        ),
+      ],
+    );
+  }
+
   Widget _imageWithBrief(SL sl) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
+      // The photo carries the AI's own markings: a box round each hazard and,
+      // where a person stands in the path of an energy source, the line of fire.
+      // Without them the reporter is asked to confirm a finding without being
+      // shown WHERE in the picture it is — and the line of fire is the one thing
+      // that names who would have been hurt.
       ConstrainedBox(
         constraints: const BoxConstraints(maxHeight: 250),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
-          child: Image.memory(_imageBytes!, fit: BoxFit.contain, width: double.infinity),
+          child: _annotatable
+            ? HazardAnnotatedImage(
+                imageBytes: _imageBytes!,
+                hazards: _aiHazards,
+              )
+            : Image.memory(_imageBytes!,
+                fit: BoxFit.contain, width: double.infinity),
         ),
       ),
+      if (_annotatable) ...[
+        const SizedBox(height: 6),
+        _annotationCaption(sl),
+      ],
       const SizedBox(height: 12),
       Container(
         padding: const EdgeInsets.all(14),
@@ -2332,7 +2411,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         ])),
       const SizedBox(height: 10),
       OutlinedButton.icon(
-        onPressed: () => setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _brief.clear(); }),
+        onPressed: () => setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _brief.clear(); }),
         icon: Icon(Icons.delete_outline_rounded, size: 15, color: sl.redText),
         label: Text('Remove Image', style: TextStyle(color: sl.redText, fontSize: 12, fontWeight: FontWeight.w600)),
         style: OutlinedButton.styleFrom(
