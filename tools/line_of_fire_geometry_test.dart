@@ -349,6 +349,103 @@ void main() {
   ok(!LineOfFireGeometry.caption(0, unseen, arrow: '->').contains('worker'),
       'and never repeat the invented "potential worker" wording');
 
+  // ── the hallucinated-source regression ──────────────────────────────────
+  //
+  // A stockyard panorama produced a hazard called "Unguarded Elevated Walkway"
+  // whose lofZone claimed `"source": "suspended steel coil"`. No coil existed
+  // anywhere in the photograph, and the old gate passed it because "coil" is in
+  // the energy vocabulary. A source now has to appear in the hazard's own
+  // evidence.
+  print('the source must be in the picture');
+
+  ok(!LineOfFireGeometry.namesEnergySource({
+        'name': 'Unguarded Elevated Walkway',
+        'description': 'Visible: A large steel truss walkway spans across the '
+            'image with no visible guardrails on the open side. The walkway is '
+            'elevated several floors above ground level with open edges.',
+        'lofZone': {'source': 'suspended steel coil'},
+      }),
+      'a coil nobody described -> no path, however energetic the word is');
+
+  // "steel" is shared with the walkway description, and matching on it would let
+  // the coil straight back in. Material and size words carry no identification.
+  ok(!LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Unguarded Elevated Walkway',
+        'description': 'A large steel truss walkway.',
+        'lofZone': {'source': 'large steel coil'},
+      }),
+      '"steel" and "large" alone do not corroborate anything');
+
+  ok(LineOfFireGeometry.namesEnergySource({
+        'name': 'Unsecured Suspended Load',
+        'description': 'Visible: a suspended load hangs from the crane hook '
+            'above the bay with no tag line.',
+        'lofZone': {'source': 'suspended steel load'},
+      }),
+      'a source the description actually reports -> path kept');
+
+  ok(LineOfFireGeometry.namesEnergySource({
+        'name': 'Reversing tipper near stockpile',
+        'description': 'Visible: a tipper truck reversing toward the pile.',
+        'lofZone': {'source': 'reversing tipper'},
+      }),
+      'plural/verb tails still match ("tipper" in both)');
+
+  // Unrecognised but corroborated: the vocabulary cannot list every machine in a
+  // steel works, so a specific source the hazard also describes is trusted.
+  ok(LineOfFireGeometry.namesEnergySource({
+        'name': 'Open pusher ram path',
+        'description': 'Visible: the pusher ram travels along the open track.',
+        'lofZone': {'source': 'pusher ram'},
+      }),
+      'an unlisted machine the hazard describes is still trusted');
+
+  // A source made only of generic words cannot be matched, so fall back to
+  // asking whether the evidence names any energy source at all.
+  ok(LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Moving equipment',
+        'description': 'Visible: an overhead crane travels above the aisle.',
+        'lofZone': {'source': 'heavy machinery'},
+      }),
+      'an all-generic source falls back to the evidence vocabulary');
+  ok(!LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Poor housekeeping',
+        'description': 'Visible: scrap strewn across the floor.',
+        'lofZone': {'source': 'heavy machinery'},
+      }),
+      'an all-generic source with no energy in evidence -> not corroborated');
+
+  // Unverifiable is not the same as contradicted. A hazard that arrived with no
+  // description at all — an older cached report, or a salvaged partial answer —
+  // cannot corroborate anything, so it is left alone rather than stripped.
+  ok(LineOfFireGeometry.sourceIsCorroborated({
+        'lofZone': {'source': 'suspended steel coil'},
+      }),
+      'no evidence text -> unverifiable, not rejected');
+
+  // A name is a label, not an observation, so a hazard with no description cannot
+  // contradict its source either — but a name that DOES mention the source still
+  // corroborates it.
+  ok(LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Rigger under load',
+        'lofZone': {'source': 'suspended coil'},
+      }),
+      'a name without a description cannot contradict a source');
+  ok(LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Rigger under suspended coil',
+        'description': 'Visible: rigger standing in the drop zone.',
+        'lofZone': {'source': 'suspended coil'},
+      }),
+      'a source named in the title counts as corroborated');
+
+  // No source claimed at all is not a hallucination; the older text-based path
+  // still decides those.
+  ok(LineOfFireGeometry.sourceIsCorroborated({
+        'name': 'Worker beside conveyor',
+        'description': 'Visible: worker beside a running belt conveyor.',
+      }),
+      'no source claimed -> nothing to corroborate');
+
   print('');
   print(fails == 0 ? 'ALL PASS' : '$fails FAILURE(S)');
 }

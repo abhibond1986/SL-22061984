@@ -240,11 +240,16 @@ class LineOfFireGeometry {
           !_containsWord(named, energySourceWords)) {
         return false;
       }
+      // The source must be something this hazard actually reported seeing.
+      // Recognised energy vocabulary is NOT enough on its own — see
+      // sourceIsCorroborated for the report that forced this.
+      if (!sourceIsCorroborated(hazard)) return false;
       if (_containsWord(named, energySourceWords)) return true;
-      // Named, but unrecognised. Treated as a real source rather than discarded:
-      // this vocabulary cannot possibly list every piece of plant in an
-      // integrated steel works, and silently dropping an arrow the model was
-      // specific about is the worse failure.
+      // Named, corroborated, but unrecognised vocabulary. Treated as a real
+      // source rather than discarded: this list cannot possibly cover every piece
+      // of plant in an integrated steel works, and silently dropping an arrow the
+      // model was specific about — and backed up in its own description — is the
+      // worse failure.
       return true;
     }
 
@@ -258,6 +263,73 @@ class LineOfFireGeometry {
     // not the thing about to strike anyone.
     if (_boxOnlyHazard.hasMatch(text)) return false;
     return true;
+  }
+
+  /// Generic words in a source name that identify nothing on their own.
+  ///
+  /// Materials and sizes are here because they are the words a model reaches for
+  /// when it is padding: "large steel coil" in a photograph of a steel plant is
+  /// corroborated by the word "steel" no matter what the picture contains, so
+  /// matching on it would defeat the whole check.
+  static const List<String> _genericSourceWords = [
+    'the', 'a', 'an', 'of', 'and', 'with', 'from', 'on', 'in', 'at', 'its',
+    'large', 'small', 'big', 'huge', 'heavy', 'long', 'tall', 'wide',
+    'steel', 'metal', 'iron', 'mild', 'ms', 'cast', 'material', 'object',
+    'industrial', 'plant', 'unit', 'area', 'zone', 'site', 'equipment',
+    'machine', 'machinery', 'system', 'unguarded', 'unsecured', 'exposed',
+    'red', 'brown', 'black', 'grey', 'gray', 'white', 'blue', 'yellow',
+  ];
+
+  /// Whether the hazard's OWN evidence backs up the source its `lofZone` names.
+  ///
+  /// **Why:** a scan of a stockyard panorama produced a hazard called "Unguarded
+  /// Elevated Walkway", described only as a truss walkway with no guardrails, and
+  /// attached `"source": "suspended steel coil"` to it. There was no coil
+  /// anywhere in the photograph. [namesEnergySource] passed it because "coil" and
+  /// "suspended" are both in [energySourceWords] — the gate asked whether the
+  /// source was a KIND of energy, and never whether it was IN THE PICTURE. So the
+  /// report drew a danger zone around a hallucinated object and captioned it
+  /// confidently.
+  ///
+  /// **How to apply:** the check is deliberately loose. Take the source's own
+  /// words, drop the generic padding ([_genericSourceWords]), and require just one
+  /// of the rest to appear in the hazard's name, description or visual evidence.
+  /// The `lofZone`'s own fields are excluded — a source cannot corroborate itself.
+  /// One shared word is a low bar on purpose: the aim is to catch an object the
+  /// hazard never mentioned at all, not to police the model's phrasing. When the
+  /// source is nothing but generic words there is nothing to match, so fall back
+  /// to asking whether the evidence mentions any energy source at all.
+  static bool sourceIsCorroborated(Map hazard) {
+    final zone = hazard['lofZone'];
+    final named =
+        _lower((zone is Map ? zone['source'] : null) ?? hazard['lofSource'] ?? '');
+    if (named.isEmpty) return true; // nothing claimed, nothing to corroborate
+
+    // Only the OBSERVATION fields can contradict a source. A hazard's `name` is a
+    // label ("Rigger under load"), not a report of what the camera saw, so its
+    // absence must not be read as evidence against anything — but its words still
+    // count towards corroboration, which is why it joins the matching pool below.
+    final observed = _lower('${hazard['description'] ?? ''} '
+        '${hazard['visualEvidence'] ?? ''} ${hazard['visual_evidence'] ?? ''} '
+        '${hazard['observation'] ?? ''}');
+    // No observation text at all — an older cached report, or a salvaged partial
+    // answer. The claim cannot be checked, and "unverifiable" is not the same as
+    // "contradicted": punishing it would silently drop paths from every hazard
+    // that arrived without a description. Only a source the hazard's own words
+    // ARGUE AGAINST is rejected.
+    if (observed.trim().isEmpty) return true;
+
+    final evidence = '${_lower(hazard['name'] ?? '')} $observed';
+
+    final significant = named
+        .split(RegExp(r'[^a-z0-9]+'))
+        .where((w) => w.length > 2 && !_genericSourceWords.contains(w))
+        .toList(growable: false);
+
+    if (significant.isEmpty) {
+      return _containsWord(evidence, energySourceWords);
+    }
+    return _containsWord(evidence, significant);
   }
 
   /// Wording that describes a person who might be there rather than one who is.

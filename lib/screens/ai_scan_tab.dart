@@ -24,6 +24,7 @@ import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/geo_service.dart';
 import '../services/line_of_fire.dart';
+import '../services/hazard_quality.dart';
 import '../utils/image_prep.dart';
 import '../widgets/analysis_progress.dart';
 import '../widgets/hazard_annotated_image.dart';
@@ -160,9 +161,14 @@ class _AIScanTabState extends State<AIScanTab> {
     if (labels.isEmpty && overall.isNotEmpty) labels.add(overall);
     if (labels.isEmpty) {
       final raw = r['riskScore'];
-      return raw is int ? raw : int.tryParse(raw?.toString() ?? '') ?? 0;
+      return AdminMasterData.scoreForDisplay(_overallRisk, raw);
     }
-    return AdminMasterData.combinedScore(_severityScores, labels);
+    // Banded against the label the card actually shows. combinedScore already
+    // derives from the same severities, so this normally changes nothing — it
+    // catches the case where the stored scale is on the wrong range, which put
+    // "23 / 100" under a CRITICAL banner on a real report.
+    return AdminMasterData.scoreForDisplay(
+        _overallRisk, AdminMasterData.combinedScore(_severityScores, labels));
   }
 
   /// The headline risk label, reconciled with the hazard rows underneath it.
@@ -1932,6 +1938,11 @@ class _AIScanTabState extends State<AIScanTab> {
       // number that lands in the incident row, the PDF and the admin KPI.
       'riskScore':       _riskScore,
       'confidence':      _result!['confidence']   ?? 0,
+      // Carried into the record so the exported PDF and any later reader see the
+      // same qualification the screen showed. A general-view scan that is filed
+      // without it becomes, months later, an unqualified severity.
+      if (_result!['_viewUninspectable'] == true) 'viewCaveat':
+          _result!['viewCaveat']?.toString() ?? HazardQuality.kUninspectableCaveat,
       'ptw_required':    _result!['ptw_required']?.toString() ?? 'None',
       'section_specific_risks': _result!['section_specific_risks'] ?? [],
       'imageBase64':     _imageBytes != null
@@ -2674,6 +2685,33 @@ class _AIScanTabState extends State<AIScanTab> {
                       fontSize: 9, fontStyle: FontStyle.italic))),
           ])),
         ])),
+      // The photograph is a general view, so every severity above it was capped
+      // and the report says so before anyone acts on a number. Placed directly
+      // under the risk card because it qualifies THAT number — a caveat further
+      // down the page is a caveat nobody reads.
+      if (analysed && _result!['_viewUninspectable'] == true) ...[
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(
+            color: AppColors.amber.withOpacity(0.09),
+            border: Border.all(color: AppColors.amber.withOpacity(0.55)),
+            borderRadius: BorderRadius.circular(12)),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1, right: 8),
+              child: Icon(Icons.landscape_outlined,
+                  size: 15, color: sl.amberText)),
+            Expanded(child: Text(
+              _result!['viewCaveat']?.toString().isNotEmpty == true
+                  ? _result!['viewCaveat'].toString()
+                  : HazardQuality.kUninspectableCaveat,
+              // 11px, not 10.5: this caveat governs how every severity below it
+              // should be read, so it must not be the smallest text on the card.
+              style: TextStyle(color: sl.amberText, fontSize: 11,
+                  height: 1.35, fontWeight: FontWeight.w500))),
+          ])),
+      ],
       if (analysed) const SizedBox(height: 10),
 
       Container(
@@ -3025,6 +3063,19 @@ class _AIScanTabState extends State<AIScanTab> {
                       trailing: hm['severityBeforeAudit'] != null
                         ? ' (model said ${hm['severityBeforeAudit']})'
                         : '',
+                    ),
+                  // The model marked an area so large it located nothing, so no
+                  // box was drawn for this row. Said out loud, because a reader
+                  // comparing rows to boxes would otherwise assume one was lost.
+                  if (hm['locationUnpinned'] == true)
+                    _hazardNote(
+                      sl,
+                      Icons.crop_free_rounded,
+                      sl.amberText,
+                      hm['locationIssue']?.toString().isNotEmpty == true
+                        ? hm['locationIssue'].toString()
+                        : 'The marked area covered most of the photograph, so no '
+                          'box was drawn — identify the location on site.',
                     ),
                   // A figure one photograph cannot establish. Flagged because
                   // this is the number that gets copied into an incident file.

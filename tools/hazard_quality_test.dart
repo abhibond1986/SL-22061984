@@ -330,6 +330,110 @@ void main() {
       (twice['hazards'] as List).first['severityBeforeAudit'] == 'CRITICAL',
       'the recorded original severity is not overwritten by the second pass');
 
+  // ── a box too large to locate anything ─────────────────────────────────
+  //
+  // The stockyard panorama's "Unguarded Elevated Walkway" box spanned ~90% of the
+  // frame width. The hazard stays; only the drawing is withdrawn.
+  final huge = hz(
+      name: 'Unguarded Elevated Walkway',
+      description: 'Visible: a truss walkway crosses the frame.',
+      severity: 'CRITICAL',
+      bbox: box(0.05, 0.30, 0.90, 0.34));
+  ok(HazardQuality.auditBoxPrecision(huge), 'a frame-spanning box is withdrawn');
+  ok(huge['bbox'] == null, 'the box is no longer drawn');
+  ok(huge['bboxRejected'] != null, 'the rejected box is kept for inspection');
+  ok(huge['locationUnpinned'] == true, 'the row says its location is unpinned');
+  ok((huge['locationIssue'] as String).isNotEmpty, 'with a plain-language reason');
+  ok(huge['severity'] == 'CRITICAL',
+      'severity is NOT touched — this rule judges the box, not the finding');
+
+  // A wide, shallow stripe fails on span even though its area is small.
+  final stripe = hz(name: 'Spillage along belt line', bbox: box(0.02, 0.7, 0.95, 0.12));
+  ok(HazardQuality.auditBoxPrecision(stripe),
+      'a full-width stripe is withdrawn on span, not area');
+
+  // A normal box, and one right at the edge of acceptable, are left alone.
+  final tight = hz(name: 'Worker without helmet', bbox: box(0.41, 0.38, 0.12, 0.22));
+  ok(!HazardQuality.auditBoxPrecision(tight), 'a locating box is left alone');
+  ok(tight['bbox'] != null && tight['locationUnpinned'] == null,
+      'and is not flagged');
+  final borderline = hz(name: 'Stockpile face', bbox: box(0.1, 0.4, 0.55, 0.5));
+  ok(!HazardQuality.auditBoxPrecision(borderline),
+      'a large but still locating box (27% of frame) is kept');
+  ok(!HazardQuality.auditBoxPrecision(hz(name: 'No box at all')),
+      'a hazard with no box is not flagged');
+
+  // Through the whole pass: counted, and the hazard is still in the list.
+  final wide = <String, dynamic>{
+    'hazards': [
+      hz(
+          name: 'Unguarded Elevated Walkway',
+          description: 'Visible: a truss walkway crosses the frame.',
+          severity: 'CRITICAL',
+          evidence: 'The truss spans the width of the photograph.',
+          absenceCheck: 'Looked along the full length of the deck; no rail seen.',
+          bbox: box(0.05, 0.30, 0.90, 0.34)),
+    ],
+  };
+  final wideReport = HazardQuality.apply(wide);
+  ok(wideReport.boxesWithdrawn == 1, 'apply() counts the withdrawn box');
+  ok(wideReport.changedAnything, 'and reports that something changed');
+  ok((wide['hazards'] as List).length == 1, 'the hazard itself is kept');
+
+  // ── a photograph that cannot be inspected ──────────────────────────────
+  //
+  // The stockyard panorama: three findings, a CRITICAL banner, and nothing in the
+  // frame close enough to judge. The findings stay; the severities do not.
+  final panorama = <String, dynamic>{
+    'overallRisk': 'CRITICAL',
+    'viewType': 'GENERAL_VIEW',
+    'hazards': [
+      hz(name: 'Conveyor gallery corrosion', severity: 'CRITICAL',
+          bbox: box(0.1, 0.2, 0.5, 0.3)),
+      hz(name: 'Fugitive dust plume', severity: 'HIGH'),
+      hz(name: 'Housekeeping in yard', severity: 'LOW'),
+    ],
+  };
+  final panReport = HazardQuality.apply(panorama);
+  final panOut = (panorama['hazards'] as List).cast<Map<String, dynamic>>();
+  ok(panorama[HazardQuality.kUninspectableFlag] == true,
+      'a declared GENERAL_VIEW is flagged');
+  ok(panReport.viewCapped == 2, 'both severities above MEDIUM are capped');
+  ok(panOut.every((h) =>
+          HazardQuality.severityRank(h['severity'] as String) <=
+          HazardQuality.severityRank(HazardQuality.kUninspectableSeverity)),
+      'nothing is left above MEDIUM');
+  ok(panOut.first['severityBeforeViewCap'] == 'CRITICAL',
+      "the model's own severity stays on the record");
+  ok(panOut.last['severity'] == 'LOW', 'a LOW finding is not raised');
+  ok(panorama['overallRisk'] == 'MEDIUM' &&
+          panorama['overallRiskBeforeViewCap'] == 'CRITICAL',
+      'the stored banner comes down with the rows');
+  ok((panorama['viewCaveat'] as String).contains('pending site verification'),
+      'the report says what the reader must do about it');
+  ok(panOut.length == 3, 'no finding is deleted');
+
+  // The model's own word is believed in both directions.
+  ok(!HazardQuality.viewIsUninspectable(
+          <String, dynamic>{'viewType': 'CLOSE_UP'}, [hz(name: 'x')]),
+      'a declared CLOSE_UP is not capped');
+  ok(HazardQuality.viewIsUninspectable(
+          <String, dynamic>{'inspectable': false}, [hz(name: 'x')]),
+      'inspectable: false is honoured on its own');
+
+  // With no declaration, the boxes are the evidence.
+  final unpinned = hz(name: 'Wide finding', bbox: box(0.02, 0.3, 0.95, 0.4));
+  HazardQuality.auditBoxPrecision(unpinned);
+  ok(HazardQuality.viewIsUninspectable(<String, dynamic>{}, [unpinned]),
+      'a withdrawn box with nothing pinned anywhere reads as a general view');
+  final alsoPinned = hz(name: 'Worker without helmet', bbox: box(0.4, 0.4, 0.1, 0.15));
+  ok(!HazardQuality.viewIsUninspectable(<String, dynamic>{}, [unpinned, alsoPinned]),
+      'one tightly-located box is enough to treat the photo as inspectable');
+  ok(!HazardQuality.viewIsUninspectable(<String, dynamic>{}, [alsoPinned]),
+      'ordinary boxes alone never trigger the cap');
+  ok(!HazardQuality.viewIsUninspectable(<String, dynamic>{}, const []),
+      'a scan with no hazards is not judged');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

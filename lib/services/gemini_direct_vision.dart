@@ -845,6 +845,43 @@ COMMON FALSE POSITIVE TRAPS — AVOID THESE
 • Reporting "inadequate lighting" from a photo taken with flash/poor camera
 • Assuming gas cylinders are "not separated" when you can't see the full storage area
 • Reporting housekeeping issues in areas that are actually work-in-progress
+• Calling a CONVEYOR GALLERY / BELT TRESTLE a "walkway". A long trussed bridge
+  between buildings, or one sloping up to a junction house or stockpile, carries a
+  belt. Its maintenance walkway and handrails are INSIDE the truss and invisible
+  from outside, so you cannot report them missing. The same goes for pipe bridges,
+  duct runs and cable galleries.
+• Reporting missing machine guarding (S21) on a part nobody can reach. Guarding
+  bites at REACHABLE moving parts — head and tail pulleys, drive drums, gear
+  trains, couplings, floor-level idlers, shear and roller-table nip points. An
+  elevated belt needs no perimeter barrier.
+• Recommending "fencing around material piles". That is not a stockpile control
+  and it marks the report as inexpert. The controls are angle of repose, no
+  undercutting or working the face from below, keeping people off and out from
+  under the face, dust control at the face and transfer points, and benching for
+  machine access. Do not cite FA 1948 S32 (floors, passages, handrails) for a
+  stockpile — that reads as a mis-citation.
+
+═══════════════════════════════════════════════════════
+CLASSES OF HAZARD THESE SCANS KEEP MISSING
+═══════════════════════════════════════════════════════
+Look for these before you reach for guarding or fall protection. In a plant
+photograph they are usually the most defensible findings, because the evidence is
+in the pixels:
+• Housekeeping in the working area — scrap, offcuts, coiled hose or cable across a
+  walking route.
+• Fugitive dust — a visible plume at a transfer point, a ground-level cloud, heavy
+  grey deposits over plant and ground.
+• Conveyor spillage heaped under the belt line — the precursor to cleaning under a
+  running belt, which is how people are killed on conveyors.
+• Structural corrosion — rusted gallery members, perforated cladding, corroded
+  shells, missing floor plates or handrail sections.
+• Obstructed road or rail — a track buried in spillage, a roadway blocked by
+  material.
+• Unchocked cylindrical loads — coils, shells, pipes or drums in a yard with no
+  chocks or cradles.
+• An unidentified release at ground level — steam, smoke, gas or dust from plant or
+  ground. In an integrated steel works this may be carbon monoxide, colourless and
+  odourless and the leading cause of fatal gas exposure, so report it.
 
 ═══════════════════════════════════════════════════════
 SECTION-SPECIFIC HAZARD PRIORITIES
@@ -872,6 +909,9 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
   "riskScore": 0-100,
   "confidence": 0-100 (reflects YOUR certainty based on image clarity + evidence strength),
   "people": <integer count of ACTUALLY VISIBLE persons, 0 if none>,
+  "viewType": "CLOSE_UP|WORKING_DISTANCE|GENERAL_VIEW",
+  "inspectable": <true ONLY if individual fittings — a rail, a nip point, a
+                  person's PPE — are resolved well enough to judge them>,
   "detectedSection": "BLAST FURNACE|SMS|COKE OVEN|SINTER PLANT|ROLLING MILL|POWER PLANT|ELECTRICAL|GAS NETWORK|MATERIAL HANDLING|MAINTENANCE|WATER TREATMENT|TRANSPORT|REFRACTORY|OXYGEN PLANT|CIVIL|LABORATORY|GENERAL",
   "sectionConfidence": 0-100,
   "sectionCues": "brief list of visual cues that led to section identification",
@@ -905,6 +945,15 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
 ★ FINAL CHECK: Before outputting, verify EVERY hazard has a "visualEvidence" field that describes something you can actually SEE. Delete any hazard where you wrote generic text like "not visible but typically..." or "commonly found in...".
 ★ FINAL CHECK 2: Every hazard that says something is missing/absent/inadequate/unguarded/unprotected has an "absenceCheck" naming where you looked. Every "lofZone" has a "source" naming a visible energy source. No two hazards describe the same physical condition.
 ★ FINAL CHECK 3: If "people" is 0, NO hazard has a "lofZone". If any hazard does have one, its "exposure" names a person you can point to in the image — not "potential worker", not "anyone", not "personnel".
+★ FINAL CHECK 4: "viewType"/"inspectable" describe THE PHOTOGRAPH, not the site.
+  GENERAL_VIEW = a whole yard, plant or building seen from a distance: layout and
+  large structures readable, fittings not. On a GENERAL_VIEW, or when
+  "inspectable" is false, cap EVERY severity at MEDIUM and word each finding as an
+  observation to be verified on site. A hazy long shot cannot establish that a
+  handrail is missing, that a nip point is unguarded, or that anyone was working
+  there. Raising a CRITICAL from such a frame is the single fastest way to lose a
+  safety officer's trust in the whole report — including the findings that are
+  defensible.
 
 ''';
   }

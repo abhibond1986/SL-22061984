@@ -669,14 +669,16 @@ class AdminMasterData {
             .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
         final prefs = await SharedPreferences.getInstance();
         // Rebase HERE as well as in getSeverityScores, and push the correction
-        // back. Without this the pull is a way for the old 5–25 scale to return
+        // back — judged by RANGE (_isOutOfRangeScale), so a near-miss of the old
+        // numbers is caught too, not only an exact 25/15/10/5 match.
+        // Without this the pull is a way for the old 5–25 scale to return
         // permanently: the backend row still holds it, the local one-shot rebase
         // flag has already been spent, so every launch would re-import the legacy
         // numbers and nothing would ever correct them again. Rebasing at the
         // point of import — and writing the result back so other devices and the
         // next pull agree — closes that loop.
-        if (_isLegacyScale(scores)) {
-          scores = Map<String, int>.from(defaultSeverityScores);
+        if (_isOutOfRangeScale(scores)) {
+          scores = _normaliseScale(scores);
           await prefs.setBool(_kScoresRebased, true);
           _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
               'severity scores (rebased)', 'pushMasterData',
@@ -937,6 +939,46 @@ class AdminMasterData {
     return true;
   }
 
+  /// The lowest credible top-of-scale for a number rendered as "N / 100".
+  ///
+  /// Nothing in the app displays a risk score except against 100 — the scan card,
+  /// the near-miss form and the PDF all print "/100". A scale whose worst level is
+  /// below this is therefore not "a low scale an admin chose", it is a scale on the
+  /// wrong RANGE, and it makes the app contradict itself in print: a CRITICAL
+  /// finding came out as "23 / 100" on a real exported report.
+  static const int _kMinTopOfScale = 30;
+
+  static int _topOf(Map<String, int> m) =>
+      m.values.fold<int>(0, (a, b) => b > a ? b : a);
+
+  /// Whether [m] is on a range the app cannot display honestly.
+  ///
+  /// **Why a shape test rather than an exact match:** [_isLegacyScale] only
+  /// recognised 25/15/10/5 exactly, so any variant of the old range — an admin who
+  /// nudged HIGH to 16, a partially-synced row, a backend record from a device that
+  /// had reset — sailed straight through and kept printing single-digit "/100"
+  /// scores. Judging the range instead of the exact values catches all of them.
+  static bool _isOutOfRangeScale(Map<String, int> m) {
+    final top = _topOf(m);
+    return top > 0 && top <= _kMinTopOfScale;
+  }
+
+  /// Lift an out-of-range scale onto 0–100 while keeping the admin's ordering.
+  ///
+  /// The exact legacy map is replaced by the app defaults, since that is what it
+  /// was meant to be. Anything else is scaled proportionally so that its worst
+  /// level lands on the default CRITICAL score: an admin who set 25/18/9/3 clearly
+  /// meant HIGH to sit well above MEDIUM, and flattening them all onto the defaults
+  /// would throw that judgement away. Zero and negative entries are left alone —
+  /// they are a deliberate "does not count", not a mis-scaled value.
+  static Map<String, int> _normaliseScale(Map<String, int> m) {
+    if (!_isOutOfRangeScale(m)) return m;
+    if (_isLegacyScale(m)) return Map<String, int>.from(defaultSeverityScores);
+    final factor = defaultSeverityScores['CRITICAL']! / _topOf(m);
+    return m.map((k, v) =>
+        MapEntry(k, v <= 0 ? v : (v * factor).round().clamp(1, 100)));
+  }
+
   /// Diagnostic tag for the console. The score that reaches a scan card comes
   /// through four hands — the stored pref, the backend pull, the legacy rebase,
   /// and the per-label lookup — and when the number on screen matches none of
@@ -955,12 +997,18 @@ class AdminMasterData {
     try {
       final map = (jsonDecode(raw) as Map)
           .map((k, v) => MapEntry(k.toString(), (v is int) ? v : int.tryParse(v.toString()) ?? 0));
-      // Migrate ONCE, then never again — guarded by its own flag rather than by
-      // the shape of the map. Without the flag an admin who deliberately set
-      // 25/15/10/5 after the migration would have it silently overwritten on
-      // every read, which is a worse bug than the one being fixed.
-      if (_isLegacyScale(map) && !(prefs.getBool(_kScoresRebased) ?? false)) {
-        final rebased = Map<String, int>.from(defaultSeverityScores);
+      // Correct an out-of-range scale on EVERY read, not once.
+      //
+      // This used to be a one-shot migration guarded by _kScoresRebased. That flag
+      // was the hole: once it was spent, any later write of a low scale — a backend
+      // master-data pull, a restore, a hand-edited row — stuck permanently, and the
+      // app went back to printing "23 / 100" beside "RISK: CRITICAL". The flag is
+      // still set (other code reads it) but it no longer gates the correction: a
+      // score that cannot be displayed honestly is fixed every time it is loaded,
+      // and the fix is written back so the next read is a no-op rather than a
+      // repeated rewrite.
+      if (_isOutOfRangeScale(map)) {
+        final rebased = _withCanonicalLevels(_normaliseScale(map));
         await prefs.setBool(_kScoresRebased, true);
         await prefs.setString(_kSeverityScores, jsonEncode(rebased));
         // Tell the screens. Anything that loaded the old map before this read —
@@ -969,8 +1017,8 @@ class AdminMasterData {
         // inside a getter is unusual, but the alternative is a one-off wrong
         // number on a safety report.
         _bump();
-        print('$_kScoreTag stored scale was the legacy 5-25 one — rebased to '
-            '$rebased');
+        print('$_kScoreTag stored scale $map could not be shown against /100 '
+            '(top value ${_topOf(map)}) — rebased to $rebased');
         return rebased;
       }
       print('$_kScoreTag loaded $map '
@@ -1017,6 +1065,49 @@ class AdminMasterData {
     // ★ FIX: Push to backend with retry so other devices get the updated risk scores
     _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
         'severity scores', 'pushMasterData', {'severityScores': scores});
+  }
+
+  /// The 0–100 band each canonical severity label may be displayed in.
+  ///
+  /// Inclusive, worst-first, abutting with no gaps so every score maps to exactly
+  /// one label. Not admin-editable: this is the invariant that stops a report
+  /// contradicting itself, not a tuning knob.
+  static const Map<String, ({int min, int max})> severityBands = {
+    'CRITICAL': (min: 80, max: 100),
+    'HIGH': (min: 60, max: 79),
+    'MEDIUM': (min: 35, max: 59),
+    'LOW': (min: 5, max: 34),
+  };
+
+  /// A risk score guaranteed not to contradict the severity label shown next to it.
+  ///
+  /// **Why:** an exported report printed "RISK: CRITICAL" and, fourteen lines
+  /// below, "23 / 100". Both numbers were computed honestly — the label is the
+  /// worst hazard's severity, the score comes from the stored scale — but that
+  /// device's scale was still on the old 5–25 range, so on paper the document
+  /// argued with itself. The reader either dismisses a critical finding or stops
+  /// trusting the report. [_isOutOfRangeScale] repairs the scale going forward;
+  /// this repairs what is ALREADY stored, and what arrives from Apps Script,
+  /// at the last point before display.
+  ///
+  /// **How to apply:** the LABEL wins, always — it is derived from the hazard rows
+  /// the reader is acting on. The score is raised to the band floor if it was too
+  /// low and capped at the ceiling if it was too high ("LOW" printing 95/100 is
+  /// the same defect mirrored), and returned untouched when it already agrees,
+  /// which is the normal case. An unrecognised label is left alone rather than
+  /// guessed at.
+  static int scoreForDisplay(String severity, dynamic score) {
+    final raw =
+        (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
+    final band = severityBands[severity.trim().toUpperCase()];
+    if (band == null) return raw;
+    if (raw >= band.min && raw <= band.max) return raw;
+    final fixed = raw < band.min ? band.min : band.max;
+    // Loud on purpose: this firing means something upstream is on the wrong
+    // scale, and the display is only papering over it at the last moment.
+    print('$_kScoreTag score $raw contradicts severity $severity — shown as '
+        '$fixed to keep the report self-consistent');
+    return fixed;
   }
 
   /// Risk score for a severity label, using the admin-configured scale.

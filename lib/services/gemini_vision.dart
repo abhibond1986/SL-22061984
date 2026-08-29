@@ -1650,6 +1650,57 @@ actions in that one row.
 Two SEPARATE objects (two different unguarded machines) are two hazards — their
 bounding boxes will not overlap. If your boxes overlap, you are describing one
 thing twice: merge it.
+
+═══════════════════════════════════════════════════════
+NAME THE STRUCTURE CORRECTLY BEFORE YOU JUDGE IT
+═══════════════════════════════════════════════════════
+Half the wrong findings in these reports start as a mis-identification. The rest
+of the sentence is then reasonable — about the wrong object.
+• A long enclosed or trussed bridge running between buildings at height, sloping
+  up to a junction house or a stockpile, is a CONVEYOR GALLERY / BELT TRESTLE.
+  It is not a walkway. Its internal maintenance walkway and handrails are INSIDE
+  the truss and cannot be seen from outside, so you cannot say they are missing.
+• A pipe bridge, a duct run and a cable gallery are likewise not walkways.
+• Say "conveyor gallery", "junction house", "stack", "gas holder", "stockpile",
+  "shell", "silo" when that is what it is. If you are not sure what a structure
+  is, say what you can see about it and give the finding LOW severity — do not
+  borrow the name of something you know the rules for.
+
+MACHINE GUARDING (FA 1948 S21) bites where a person can REACH a moving part:
+head and tail pulleys, drive drums, gear trains, couplings, floor-level idlers,
+shear and roller-table nip points. An elevated belt fifteen metres up needs no
+perimeter barrier and its absence is not a finding. Only report missing guarding
+at a nip point you can SEE and that a person on a visible walking surface could
+REACH.
+
+STOCKPILES: fencing is not a stockpile control and asking for it marks the report
+as inexpert. The controls are: maintain the angle of repose, never undercut or
+work the face from below, keep personnel off and out from under the face, control
+dust at the transfer and the face, and bench the pile for machine access. Cite
+material-handling and dust provisions — NOT FA 1948 S32, which is about floors,
+passages and handrails, and reads as a mis-citation to any factory inspector.
+
+═══════════════════════════════════════════════════════
+CLASSES OF HAZARD THESE SCANS KEEP MISSING
+═══════════════════════════════════════════════════════
+Report these when visible. They are usually the most defensible findings in a
+plant photograph, because the evidence is right there in the pixels:
+• HOUSEKEEPING in the working area — scrap, offcuts, discarded parts, coiled hose
+  or cable across a walking route (trip and access obstruction).
+• FUGITIVE DUST — a visible plume at a transfer point, a ground-level cloud, or
+  heavy grey deposits over plant and ground. A dust plume you can see IS evidence.
+• CONVEYOR SPILLAGE — material heaped under the belt line. This is the precursor
+  to cleaning under a running belt, which is how people are killed on conveyors.
+• STRUCTURAL CORROSION — rusted gallery members, perforated cladding, corroded
+  shells, missing floor plates or handrail sections on visible structures.
+• OBSTRUCTED ROAD OR RAIL — a track buried in spillage, a roadway blocked by
+  material, an access route no vehicle could pass.
+• UNCHOCKED CYLINDRICAL LOADS — coils, shells, pipes or drums standing or lying
+  in a yard without chocks or cradles.
+• AN UNIDENTIFIED RELEASE AT GROUND LEVEL — steam, smoke, gas or dust escaping
+  from plant or ground. In an integrated steel works this may be carbon monoxide,
+  which is colourless, odourless and the leading cause of fatal gas exposure, so
+  an unexplained ground-level release is reported, not ignored.
 {{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
 METHODOLOGY — EVIDENCE-BASED INSPECTION
@@ -1764,6 +1815,9 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
   "riskScore": 0-100,
   "confidence": 0-100,
   "people": <count of ACTUALLY visible persons, 0 if none>,
+  "viewType": "CLOSE_UP | WORKING_DISTANCE | GENERAL_VIEW",
+  "inspectable": <true only if you can see individual fittings — a rail, a nip
+                  point, a person's PPE — well enough to judge them>,
   "summary": "<Sentence 1: what is physically visible. Sentence 2: primary safety concern with evidence. Sentence 3: applicable regulation.>",
   "hazards": [
     {
@@ -1802,6 +1856,14 @@ FIELD RULES:
   x1,y1 = source; x2,y2 = person — never swapped. "source" is mandatory.
 • "people" is the count of persons you can actually SEE. If it is 0, every
   "lofZone" must be omitted — an arrow needs a real person at its head.
+• "viewType" / "inspectable" describe THE PHOTOGRAPH, not the site.
+  GENERAL_VIEW = a whole yard, plant or building from a distance; you can see
+  layout and large structures but not fittings. On a GENERAL_VIEW, or whenever
+  "inspectable" is false, cap every severity at MEDIUM and word each finding as
+  an observation to verify. A distant, hazy frame cannot establish that a rail is
+  missing, that a nip point is unguarded, or that anyone was working there — an
+  experienced safety officer would not raise a CRITICAL non-conformance from it,
+  and doing so here discredits the findings that ARE defensible.
 • "description" MUST begin with "Visible: ..." stating what you physically observe.
 • Maximum 7 hazards, and no two describing the same physical condition.
   Quality over quantity.

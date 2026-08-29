@@ -37,6 +37,8 @@ class QualityReport {
     required this.merged,
     required this.absenceDowngraded,
     required this.absenceFlagged,
+    this.boxesWithdrawn = 0,
+    this.viewCapped = 0,
   });
 
   /// Hazards folded into another row.
@@ -48,13 +50,27 @@ class QualityReport {
   /// Absence claims flagged, whether or not the severity moved.
   final int absenceFlagged;
 
+  /// Bounding boxes too large to locate anything, so not drawn. The hazards
+  /// themselves are untouched.
+  final int boxesWithdrawn;
+
+  /// Severities capped because the photograph is a general view that cannot
+  /// support them. The findings themselves are untouched.
+  final int viewCapped;
+
   bool get changedAnything =>
-      merged > 0 || absenceDowngraded > 0 || absenceFlagged > 0;
+      merged > 0 ||
+      absenceDowngraded > 0 ||
+      absenceFlagged > 0 ||
+      boxesWithdrawn > 0 ||
+      viewCapped > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
       'absenceDowngraded: $absenceDowngraded, '
-      'absenceFlagged: $absenceFlagged)';
+      'absenceFlagged: $absenceFlagged, '
+      'boxesWithdrawn: $boxesWithdrawn, '
+      'viewCapped: $viewCapped)';
 }
 
 class HazardQuality {
@@ -112,12 +128,22 @@ class HazardQuality {
 
       var downgraded = 0;
       var flagged = 0;
+      var boxesWithdrawn = 0;
       for (final h in deduped) {
+        // Box precision runs AFTER dedupe on purpose: the boxes are what dedupe
+        // uses to decide that two rows describe the same object, so withdrawing
+        // them first would lose merges.
+        if (auditBoxPrecision(h)) boxesWithdrawn++;
         final verdict = auditAbsenceClaim(h);
         if (verdict == null) continue;
         flagged++;
         if (verdict.severityChanged) downgraded++;
       }
+
+      // Last, because it reads the withdrawn boxes above as its evidence that the
+      // photograph is a general view, and because capping first would make the
+      // absence audit's "downgraded" count meaningless.
+      final viewCapped = capSeverityForView(result, deduped);
 
       result['hazards'] = deduped;
       result[kFlag] = true;
@@ -125,6 +151,8 @@ class HazardQuality {
         merged: mergedCount,
         absenceDowngraded: downgraded,
         absenceFlagged: flagged,
+        boxesWithdrawn: boxesWithdrawn,
+        viewCapped: viewCapped,
       );
     } catch (_) {
       return const QualityReport(
@@ -353,6 +381,145 @@ class HazardQuality {
     final extraName = _str(extra['name']);
     if (extraName.isNotEmpty && !names.contains(extraName)) names.add(extraName);
     keep['mergedFrom'] = names;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  BOX PRECISION
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Fraction of the frame a bounding box may cover and still be a locator.
+  ///
+  /// A box over this is not pointing at anything — it is pointing at the
+  /// photograph. Set from the report that prompted the rule: a stockyard panorama
+  /// whose "Unguarded Elevated Walkway" box spanned about 90% of the frame width
+  /// and a third of its height, i.e. roughly a third of the whole image.
+  static const double _maxBoxArea = 0.30;
+
+  /// A box may also fail on a single dimension: 95% of the width at 20% height is
+  /// only 0.19 of the area, but it is still a stripe across the entire picture and
+  /// tells a reader nothing about WHERE to look.
+  static const double _maxBoxSpan = 0.88;
+
+  /// Demotes a bounding box that is too large to locate anything.
+  ///
+  /// **Why:** a box is a promise — "the thing I am describing is HERE". A box
+  /// covering most of the frame breaks that promise while looking authoritative,
+  /// and it does specific damage: the reader cannot tell which structure was meant,
+  /// and on a printed report the numbered tag sits over unrelated plant. The
+  /// stockyard scan drew one across an entire panorama and labelled it CRITICAL.
+  ///
+  /// **How to apply:** the HAZARD IS KEPT, with its severity and its table row
+  /// untouched — nothing here decides whether a finding is real. Only the drawing
+  /// is withdrawn: the box moves to `bboxRejected` (kept, not deleted, so it can be
+  /// inspected) and `locationUnpinned` / `locationIssue` say why, in the same shape
+  /// the absence audit uses so the screen renders it the same way. Returns true if
+  /// a box was withdrawn.
+  static bool auditBoxPrecision(Map<String, dynamic> hazard) {
+    final box = _bbox(hazard['bbox']);
+    if (box == null) return false;
+    final area = box.w * box.h;
+    final spans = box.w >= _maxBoxSpan || box.h >= _maxBoxSpan;
+    if (area <= _maxBoxArea && !spans) return false;
+
+    hazard['bboxRejected'] = hazard['bbox'];
+    hazard.remove('bbox');
+    hazard['locationUnpinned'] = true;
+    hazard['locationIssue'] =
+        'The marked area covered ${(area * 100).round()}% of the photograph, so '
+        'it could not show which structure this refers to. The box was not drawn '
+        '— identify the exact location on site.';
+    return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  WHAT THE PHOTOGRAPH CAN SUPPORT
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Highest severity a photograph that cannot be inspected may carry.
+  static const String kUninspectableSeverity = 'MEDIUM';
+
+  /// A box small enough that the model was looking AT something rather than at
+  /// the site. One such box anywhere in the frame is enough to treat the
+  /// photograph as inspectable.
+  static const double _closeBoxArea = 0.10;
+
+  /// Written onto the result when the photograph is a general view.
+  static const String kUninspectableFlag = '_viewUninspectable';
+
+  /// Sentence added to the report when that happens. Deliberately about the
+  /// PHOTOGRAPH, not the site: nothing here says the site is safe.
+  static const String kUninspectableCaveat =
+      'General view — observations pending site verification. This photograph '
+      'shows the area from a distance, so nothing in it can be confirmed close '
+      'enough to raise or close out a non-conformance. Re-photograph each item '
+      'at working distance before acting on a severity.';
+
+  /// Whether this photograph is too wide or too distant to inspect anything in.
+  ///
+  /// **Why:** a hazy panorama of a stockyard and agglomeration area, shot from
+  /// perhaps a hundred metres, produced three findings and a CRITICAL banner at
+  /// 23/100. A 30-year safety professional would not write a CRITICAL
+  /// non-conformance from that frame — not because the site looks fine, but
+  /// because the photograph cannot establish access, guarding at a nip point, or
+  /// whether anyone was working there. The finding is worth recording; the
+  /// severity is not earned.
+  ///
+  /// **How to apply:** the model's own answer is believed first if it gave one
+  /// (`viewType` / `inspectable`). Otherwise the boxes are the evidence: if the
+  /// pass had to withdraw a box for covering the frame ([auditBoxPrecision]) and
+  /// no remaining box is tight enough to be looking at a single object, then
+  /// nothing in this image was localised and it is a general view.
+  static bool viewIsUninspectable(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    final declared = _str(result['viewType']).toUpperCase();
+    if (declared.contains('GENERAL') ||
+        declared.contains('DISTANT') ||
+        declared.contains('PANORAM')) {
+      return true;
+    }
+    if (declared.contains('CLOSE') || declared.contains('WORKING')) return false;
+    final inspectable = result['inspectable'];
+    if (inspectable is bool) return !inspectable;
+
+    if (hazards.isEmpty) return false;
+    final withdrew = hazards.any((h) => h['locationUnpinned'] == true);
+    if (!withdrew) return false;
+    final pinned = hazards.any((h) {
+      final b = _bbox(h['bbox']);
+      return b != null && b.w * b.h <= _closeBoxArea;
+    });
+    return !pinned;
+  }
+
+  /// Caps every severity on an uninspectable photograph and labels the report.
+  ///
+  /// The hazards, their text and their corrective actions are untouched — only the
+  /// claim about how bad it is, which is the one claim the photograph cannot
+  /// support. Each capped row keeps `severityBeforeViewCap` so the model's own
+  /// judgement is still on the record. Returns how many rows were capped.
+  static int capSeverityForView(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    if (!viewIsUninspectable(result, hazards)) return 0;
+    result[kUninspectableFlag] = true;
+    result['viewCaveat'] = kUninspectableCaveat;
+    var capped = 0;
+    for (final h in hazards) {
+      final before = _str(h['severity']);
+      if (severityRank(before) <= severityRank(kUninspectableSeverity)) continue;
+      h['severityBeforeViewCap'] = before;
+      h['severity'] = kUninspectableSeverity;
+      capped++;
+    }
+    // The banner is derived from the rows on the screen but stored separately in
+    // the record, so it has to be brought down too or the report contradicts
+    // itself again — a MEDIUM row list under a CRITICAL headline.
+    final overall = _str(result['overallRisk']);
+    if (overall.isNotEmpty &&
+        severityRank(overall) > severityRank(kUninspectableSeverity)) {
+      result['overallRiskBeforeViewCap'] = overall;
+      result['overallRisk'] = kUninspectableSeverity;
+    }
+    return capped;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

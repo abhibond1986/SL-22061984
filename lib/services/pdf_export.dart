@@ -17,6 +17,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
+import 'admin_master_data.dart';
 import 'image_storage.dart';
 import 'line_of_fire.dart';
 import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
@@ -78,7 +79,13 @@ class PdfExport {
 
     final severity   = incident['severity']?.toString() ?? 'MEDIUM';
     final isAiScan   = incident['type']?.toString() == 'AI_SCAN';
-    final riskScore  = incident['riskScore'] ?? 0;
+    // Reconciled ONCE, here, so the banner, the score block and anything added
+    // later all print the same figure. See AdminMasterData.scoreForDisplay for the
+    // "23 / 100 beside RISK: CRITICAL" report that made this necessary — the rule
+    // lives there because the screens have to obey it too, and a stored incident
+    // exported months later still carries the number it was filed with.
+    final riskScore  =
+        AdminMasterData.scoreForDisplay(severity, incident['riskScore'] ?? 0);
     final confidence = incident['confidence'] ?? 0;
 
     pdf.addPage(pw.MultiPage(
@@ -94,6 +101,15 @@ class PdfExport {
       build: (context) {
         final w = <pw.Widget>[];
         w.add(_banner(incident, severity, isAiScan, riskScore, confidence, logoImage));
+        // Immediately under the severity badge, not in a footnote: if the
+        // photograph is a general view, the severity above it is capped and
+        // provisional, and the reader has to know that before reading anything
+        // else. See HazardQuality.capSeverityForView.
+        final viewCaveat = incident['viewCaveat']?.toString().trim() ?? '';
+        if (viewCaveat.isNotEmpty) {
+          w.add(pw.SizedBox(height: 5));
+          w.add(_caveatBar(viewCaveat));
+        }
         w.add(pw.SizedBox(height: 7));
         w.add(_sectionTitle('INCIDENT DETAILS'));
         w.add(pw.SizedBox(height: 3));
@@ -222,6 +238,21 @@ class PdfExport {
   }
 
   // ─── BANNER ──────────────────────────────────────────────────────────────
+  /// A qualification that applies to the whole report, printed directly under the
+  /// banner. Amber, bordered, and in body-size type: it has to compete with a
+  /// coloured severity badge two lines above it, and a caveat nobody reads is the
+  /// same as no caveat.
+  static pw.Widget _caveatBar(String text) => pw.Container(
+    width: double.infinity,
+    padding: const pw.EdgeInsets.fromLTRB(9, 5, 9, 5),
+    decoration: pw.BoxDecoration(
+      color: PdfColor.fromHex('#FFF8E1'),
+      border: pw.Border.all(color: PdfColor.fromHex('#F9A825'), width: 0.8)),
+    child: pw.Text(_safe(text), style: pw.TextStyle(
+      fontSize: 7.5, color: PdfColor.fromHex('#7A4F01'), lineSpacing: 1.2,
+      fontWeight: pw.FontWeight.bold)),
+  );
+
   static pw.Widget _banner(Map<String, dynamic> inc, String sev, bool isAi,
       dynamic score, dynamic conf, pw.MemoryImage? logoImage) {
     final sc = _getSevCol(sev);
@@ -436,6 +467,8 @@ class PdfExport {
     final annotatedPhoto = _buildAnnotatedPhoto(img, hazards, photoW, photoH);
 
     final bboxedCount = hazards.where((h) => h['bbox'] != null).length;
+    final unpinnedCount =
+        hazards.where((h) => h['locationUnpinned'] == true).length;
 
     // The line-of-fire wording used to be printed ON the photograph, in an opaque
     // banner the full width of the image. At the sizes this column actually gets
@@ -492,10 +525,18 @@ class PdfExport {
                 // photo, and the old sentence wrapped to three lines there. The
                 // "see table below" instruction was redundant — the table is
                 // directly beneath under its own heading.
+                // A withdrawn box (HazardQuality.auditBoxPrecision) would
+                // otherwise show up here as a silently smaller "marked on photo"
+                // figure, which reads as the drawing having failed. Say instead
+                // that the location could not be pinned, so the reader knows to
+                // look for it on site rather than on the page.
                 child: pw.Text(
                   bboxedCount > 0
                     ? '$count hazard(s) - $bboxedCount marked on photo'
-                    : '$count hazard(s) identified',
+                        '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'
+                    : unpinnedCount > 0
+                      ? '$count hazard(s) - none locatable in this view'
+                      : '$count hazard(s) identified',
                   textAlign: pw.TextAlign.center,
                   style: pw.TextStyle(fontSize: 6.5, color: _textMed,
                     fontStyle: pw.FontStyle.italic))),
