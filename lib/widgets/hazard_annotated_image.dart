@@ -6,10 +6,13 @@
 // (Gemini Vision format) OR as [x, y, w, h] normalized 0–1.
 //
 // A hazard may also carry `lofZone`, the LINE OF FIRE: the path from a named
-// energy source to the person standing in it. That is drawn as a single arrow
-// with a dot at the source and a ring on the person (see _LineOfFirePainter),
-// with geometry resolved by the shared services/line_of_fire.dart so the screen
-// and the exported PDF cannot disagree.
+// energy source to the person standing in it. Exactly ONE is drawn per image —
+// the most severe one with a real person in it — as an arrow with a dot at the
+// source and a ring on the person (see _LineOfFirePainter). When the source is
+// real but nobody is in the photograph, a dashed exposure ZONE is drawn instead
+// of an arrow. Its wording sits in a legend UNDER the picture rather than on it.
+// Geometry and captions both come from the shared services/line_of_fire.dart so
+// the screen and the exported PDF cannot disagree.
 
 import 'dart:math' as math;
 
@@ -94,6 +97,15 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
                 : 4 / 3; // assume 4:3 until the image decodes
         imageRenderH = containerW / aspect;
 
+        // The line-of-fire caption, if there is one. It is rendered UNDER the
+        // photograph, and its height comes out of the space available to the
+        // photograph — otherwise a caller that gives this widget a bounded height
+        // gets an overflow instead of a legend.
+        final pick = LineOfFireGeometry.pickOne(widget.hazards);
+        final legend =
+            pick == null ? '' : LineOfFireGeometry.caption(pick.index, pick.lof);
+        final legendH = legend.isEmpty ? 0.0 : _legendHeight;
+
         // Respect a bounded height from the caller. Width-driven sizing alone
         // makes a portrait photo taller than its slot — the widget used to
         // overflow instead of letterboxing, so a caller could only ever place it
@@ -102,13 +114,13 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
         // overlay is positioned on the SAME rect the photo is drawn in.
         if (constraints.hasBoundedHeight &&
             constraints.maxHeight.isFinite &&
-            imageRenderH > constraints.maxHeight) {
-          imageRenderH = constraints.maxHeight;
+            imageRenderH > constraints.maxHeight - legendH) {
+          imageRenderH = math.max(1.0, constraints.maxHeight - legendH);
           imageRenderW = imageRenderH * aspect;
           offsetX = (containerW - imageRenderW) / 2;
         }
 
-        return SizedBox(
+        final photo = SizedBox(
           width: containerW,
           height: imageRenderH,
           child: Stack(
@@ -139,9 +151,60 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
             ],
           ),
         );
+
+        if (legend.isEmpty) return photo;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [photo, _legendBar(legend)],
+        );
       },
     );
   }
+
+  /// Reserved height for the legend strip. Fixed rather than measured: the
+  /// caption is one short line by construction (see LineOfFireGeometry.caption)
+  /// and the photograph's height has to be known before the legend is laid out.
+  static const double _legendHeight = 22;
+
+  /// The caption that used to be stamped across the photograph. Down here it can
+  /// be read, and the number ties it to the bounding box above.
+  Widget _legendBar(String text) => Container(
+        height: _legendHeight,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        alignment: Alignment.centerLeft,
+        // Opaque, not a translucent red wash: this strip can sit on the light or
+        // the dark surface, and a translucent fill would put dark-red text on a
+        // near-black background in dark mode.
+        color: const Color(0xFFFDECEA),
+        child: Row(children: [
+          Container(
+            width: 12,
+            height: 3,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE53935),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                // Not a theme colour: the strip carries its own opaque pale-red
+                // fill in both themes, so the pairing is fixed. #B3261E on
+                // #FDECEA is 5.7:1 — above the 4.5:1 AA floor.
+                color: Color(0xFFB3261E),
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ]),
+      );
 }
 
 class _BboxOverlay extends StatelessWidget {
@@ -156,32 +219,28 @@ class _BboxOverlay extends StatelessWidget {
       builder: (context, constraints) {
         final w = constraints.maxWidth;
         final h = constraints.maxHeight;
+        final pick = LineOfFireGeometry.pickOne(hazards);
 
         return Stack(
           clipBehavior: Clip.hardEdge,
           children: [
-            // Line-of-fire paths, rendered BELOW the bounding boxes so a box
-            // outline is never hidden by the corridor shading.
+            // THE line of fire — exactly one, rendered below the bounding boxes
+            // so a box outline is never hidden by it.
             //
-            // Drawn for ANY hazard that resolves to a usable path, not only
-            // those the model happened to type 'Line of Fire': a worker under a
-            // suspended load is in the line of fire whichever label the row got.
-            ...hazards.asMap().entries.map((entry) {
-              final hazard = entry.value;
-              if (hazard is! Map) return const SizedBox.shrink();
-              final lof = LineOfFireGeometry.parse(hazard);
-              if (lof == null) return const SizedBox.shrink();
-              return Positioned.fill(
+            // One, not one per hazard: three arrows across a wide shop-floor
+            // photograph is a tangle nobody reads. The others keep their
+            // numbered boxes and their table rows.
+            if (pick != null)
+              Positioned.fill(
                 child: IgnorePointer(
                   child: CustomPaint(
                     painter: _LineOfFirePainter(
-                      lof: lof,
-                      index: entry.key,
+                      lof: pick.lof,
+                      index: pick.index,
                     ),
                   ),
                 ),
-              );
-            }),
+              ),
             // ✅ Bbox overlays
             ...hazards.asMap().entries.map((entry) {
             final i = entry.key;
@@ -375,13 +434,21 @@ class _LineOfFirePainter extends CustomPainter {
     if (size.width < 8 || size.height < 8) return;
     final plan = LineOfFireGeometry.plan(lof, size.width, size.height);
 
+    // Nobody is actually in the picture. Mark the ZONE a person would be struck
+    // in — dashed, because dashes read as "notional" everywhere from drawings to
+    // road markings — and draw no arrow at all. An arrow asserts a person; this
+    // says "if anyone stands here". See LineOfFire.personVisible for the report
+    // that made this necessary.
+    if (!lof.personVisible) {
+      _drawExposureZone(canvas, size, plan);
+      return;
+    }
+
     // No usable direction: the model put the source and the person on top of
     // each other. Mark the spot honestly rather than drawing a zero-length
     // arrow that would point at nothing in particular.
     if (plan.degenerate) {
       _drawExposureRing(canvas, Offset(plan.personX, plan.personY), 14);
-      _drawLabel(canvas, size, Offset(plan.personX, plan.personY + 24),
-          'LINE OF FIRE ${index + 1}');
       return;
     }
 
@@ -411,24 +478,80 @@ class _LineOfFirePainter extends CustomPainter {
     _drawSourceDot(canvas, source);
     _drawExposureRing(canvas, person, ringR);
 
-    // Caption offset perpendicular to the arrow so it never sits on the shaft,
-    // the head or the person.
-    final mid = _along(plan, plan.length * 0.5);
-    final nx = -math.sin(plan.angle);
-    final ny = math.cos(plan.angle);
-    final labelAnchor = Offset(mid.dx + nx * 15, mid.dy + ny * 15);
-    _drawLabel(canvas, size, labelAnchor, _caption());
+    // NO caption is drawn here. It used to be an opaque plate at the arrow's
+    // midpoint; with several paths on one photograph the plates overlapped each
+    // other and the picture. The wording now lives in the legend under the
+    // image, tied to this arrow by the hazard number on its bounding box.
   }
 
-  /// Short caption: what could strike, and who is in the way. Falls back to the
-  /// bare label when the model named neither.
-  String _caption() {
-    final src = lof.source.trim();
-    final who = lof.exposure.trim();
-    if (src.isNotEmpty && who.isNotEmpty) return '${index + 1}  $src → $who';
-    if (src.isNotEmpty) return '${index + 1}  $src → person';
-    if (who.isNotEmpty) return '${index + 1}  LINE OF FIRE · $who';
-    return 'LINE OF FIRE ${index + 1}';
+  /// The area a person would be struck in, when no person is in the photograph.
+  ///
+  /// A dashed square centred on where the model said someone would be, plus a
+  /// dashed link back to the source so the reader can see WHERE it would come
+  /// from. Nothing solid, nothing filled: every solid mark in this overlay means
+  /// "this is here", and the whole point of the zone is that it is not.
+  void _drawExposureZone(Canvas canvas, Size size, LofPlan plan) {
+    final half = (plan.halfWidth * 0.9).clamp(13.0, 46.0);
+    final centre = Offset(plan.personX, plan.personY);
+    final rect = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: centre, width: half * 2, height: half * 2),
+      const Radius.circular(5),
+    );
+
+    // Halo first, as one solid pass underneath: without it a dashed red outline
+    // disappears completely over rust or red machinery.
+    canvas.drawRRect(rect, Paint()
+      ..color = _halo
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 5.0);
+    _dashRRect(canvas, rect, Paint()
+      ..color = _hot
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2);
+
+    // A short dashed stub toward the source, only when the source is far enough
+    // away to be a different place. It carries no arrowhead — direction without
+    // a person at the end is exactly the claim being avoided.
+    if (plan.length > half * 1.8) {
+      final from = _along(plan, math.min(10.0, plan.length * 0.12));
+      final to = _along(plan, plan.length - half * 1.35);
+      _dashLine(canvas, from, to, Paint()
+        ..color = _halo
+        ..strokeWidth = 4.5
+        ..strokeCap = StrokeCap.round);
+      _dashLine(canvas, from, to, Paint()
+        ..color = _hot.withOpacity(0.85)
+        ..strokeWidth = 1.8
+        ..strokeCap = StrokeCap.round);
+      _drawSourceDot(canvas, Offset(plan.sourceX, plan.sourceY));
+    }
+  }
+
+  static const double _dashOn = 6.0;
+  static const double _dashOff = 4.0;
+
+  void _dashLine(Canvas canvas, Offset a, Offset b, Paint paint) {
+    final total = (b - a).distance;
+    if (total < 1) return;
+    final step = (b - a) / total;
+    var t = 0.0;
+    while (t < total) {
+      final end = math.min(t + _dashOn, total);
+      canvas.drawLine(a + step * t, a + step * end, paint);
+      t = end + _dashOff;
+    }
+  }
+
+  void _dashRRect(Canvas canvas, RRect rrect, Paint paint) {
+    final path = Path()..addRRect(rrect);
+    for (final metric in path.computeMetrics()) {
+      var t = 0.0;
+      while (t < metric.length) {
+        final end = math.min(t + _dashOn, metric.length);
+        canvas.drawPath(metric.extractPath(t, end), paint);
+        t = end + _dashOff;
+      }
+    }
   }
 
   /// A point [distance] pixels along the source→person centre line.
@@ -490,45 +613,16 @@ class _LineOfFirePainter extends CustomPainter {
       ..strokeWidth = 1.4);
   }
 
-  /// Label on an opaque plate. Kept fully inside [size] — a caption clipped at
-  /// the image edge is how "LINE OF FIRE" becomes "LINE OF FI".
-  void _drawLabel(Canvas canvas, Size size, Offset anchor, String text) {
-    final tp = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: const TextStyle(
-          color: Color(0xFFB3261E),
-          fontSize: 10,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.4,
-          height: 1.1,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: math.max(60.0, size.width - 16));
-
-    var left = anchor.dx - tp.width / 2;
-    var top = anchor.dy - tp.height / 2;
-    left = left.clamp(4.0, math.max(4.0, size.width - tp.width - 4));
-    top = top.clamp(4.0, math.max(4.0, size.height - tp.height - 4));
-
-    final plate = RRect.fromRectAndRadius(
-      Rect.fromLTWH(left - 5, top - 3, tp.width + 10, tp.height + 6),
-      const Radius.circular(4),
-    );
-    canvas.drawRRect(plate, Paint()..color = const Color(0xF2FFFFFF));
-    canvas.drawRRect(plate, Paint()
-      ..color = _hot.withOpacity(0.75)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0);
-    tp.paint(canvas, Offset(left, top));
-  }
+  // _drawLabel() was deleted here. It painted the caption on an opaque plate at
+  // the arrow's midpoint. On a report with three paths the three plates were each
+  // as wide as the photograph, overlapped one another and hid the equipment being
+  // described — the caption is now a legend line under the image, built by
+  // LineOfFireGeometry.caption() so the screen and the PDF word it identically.
 
   @override
   bool shouldRepaint(covariant _LineOfFirePainter old) =>
       old.index != index ||
+      old.lof.personVisible != lof.personVisible ||
       old.lof.sourceX != lof.sourceX ||
       old.lof.sourceY != lof.sourceY ||
       old.lof.personX != lof.personX ||

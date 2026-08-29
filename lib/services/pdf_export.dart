@@ -306,24 +306,38 @@ class PdfExport {
   // 4pt -> 3pt vertical padding. There are three of these per report, so it is
   // 6pt of page for no loss of prominence (the blue bar and the fill do the
   // work, not the padding).
+  // Note the _safe() on the title text: callers pass headings like
+  // 'HAZARDS IDENTIFIED — 6 TOTAL' with an em-dash, and this widget used to print
+  // it raw, which put an empty box in the middle of the largest heading on the
+  // page. Every string that reaches a pw.Text must go through _safe().
   static pw.Widget _sectionTitle(String t) => pw.Container(
     padding: const pw.EdgeInsets.fromLTRB(10, 3, 10, 3),
     decoration: pw.BoxDecoration(
       color: _sailLight,
       border: pw.Border(left: pw.BorderSide(color: _sailBlue, width: 3)),
     ),
-    child: pw.Text(t, style: pw.TextStyle(
+    child: pw.Text(_safe(t), style: pw.TextStyle(
       fontSize: 8.5, fontWeight: pw.FontWeight.bold,
       color: _sailBlue, letterSpacing: 0.5)),
   );
 
   /// Replace glyphs the bundled PDF font can't render (em/en-dashes, fancy
-  /// quotes, bullets) so they don't show as tofu boxes in the report.
+  /// quotes, arrows, stars) so they don't show as tofu boxes in the report.
+  ///
+  /// The font is Helvetica's built-in encoding: Latin-1 only. `·` (U+00B7) is in
+  /// it and prints fine; anything above U+00FF does not and comes out as an empty
+  /// rectangle. That is what happened to the line-of-fire captions, which used
+  /// `→` and read "1 crane load [] worker below".
   static String _safe(String s) => s
       .replaceAll(RegExp(r'[‒–—―]'), '-') // ‒–—―  → -
       .replaceAll('‘', "'").replaceAll('’', "'")      // ‘ ’ → '
       .replaceAll('“', '"').replaceAll('”', '"')      // “ ” → "
-      .replaceAll('…', '...');                             // …  → ...
+      .replaceAll('…', '...')                              // …  → ...
+      .replaceAll(RegExp(r'[→⟶➔➜►]'), '->')      // arrows → ASCII
+      .replaceAll(RegExp(r'[★☆✦✱]'), '*')          // stars  → *
+      .replaceAll('✓', 'Y').replaceAll('✗', 'X')      // ticks/crosses
+      .replaceAll('•', '-')                                // bullet → hyphen
+      .replaceAll('≥', '>=').replaceAll('≤', '<=');
 
   static pw.Widget _detailsGrid(Map<String, dynamic> inc, String date,
       String reporter, String pno) {
@@ -423,6 +437,18 @@ class PdfExport {
 
     final bboxedCount = hazards.where((h) => h['bbox'] != null).length;
 
+    // The line-of-fire wording used to be printed ON the photograph, in an opaque
+    // banner the full width of the image. At the sizes this column actually gets
+    // (118-250pt) three of those banners covered the evidence and were still too
+    // small to read. So the same one line goes UNDER the picture, at a font size
+    // that survives printing, and the image is left alone. One entry only —
+    // _buildAnnotatedPhoto draws a single path, the worst one.
+    final lofPick = LineOfFireGeometry.pickOne(hazards);
+    final lofLegend = lofPick == null
+        ? ''
+        : _safe(LineOfFireGeometry.caption(
+            lofPick.index, lofPick.lof, arrow: '->'));
+
     return pw.Container(
       decoration: pw.BoxDecoration(
         border: pw.Border.all(color: _divider, width: 0.6)),
@@ -436,6 +462,28 @@ class PdfExport {
               pw.Container(
                 padding: const pw.EdgeInsets.all(5),
                 child: annotatedPhoto),
+              if (lofLegend.isNotEmpty)
+                pw.Container(
+                  width: double.infinity,
+                  padding: const pw.EdgeInsets.fromLTRB(5, 2.5, 5, 2.5),
+                  // Pale red tint, not the translucent overlay used before: this
+                  // strip is on paper now, so the fill must be opaque and light
+                  // enough for #B3261E text (5.7:1).
+                  color: PdfColor.fromHex('#FDECEA'),
+                  child: pw.Row(children: [
+                    // A short bar in the same red as the shaft on the image, so
+                    // the reader can tie this line to the mark above it without a
+                    // "see the red arrow" instruction.
+                    pw.Container(width: 9, height: 2.4, color: _lofHot),
+                    pw.SizedBox(width: 4),
+                    pw.Expanded(
+                      child: pw.Text(lofLegend,
+                        maxLines: 2,
+                        style: pw.TextStyle(
+                          fontSize: 6.8,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColor.fromHex('#B3261E')))),
+                  ])),
               pw.Container(
                 width: double.infinity,
                 padding: const pw.EdgeInsets.fromLTRB(5, 2, 5, 3),
@@ -546,14 +594,17 @@ class PdfExport {
       if (hazards[i]['bbox'] is Map) bboxed.add(i);
     }
 
-    // Lines of fire, resolved through the shared geometry contract so this page
-    // and the AI Scan screen cannot disagree about where the arrow points.
-    // Indexed so the label can carry the same number as the hazards table.
-    final lofs = <({int index, LineOfFire lof})>[];
-    for (var i = 0; i < hazards.length; i++) {
-      final lof = LineOfFireGeometry.parse(hazards[i]);
-      if (lof != null) lofs.add((index: i, lof: lof));
-    }
+    // THE line of fire — one per photograph, chosen by the shared contract so
+    // this page and the AI Scan screen annotate the same hazard. Its number is
+    // the hazards-table row number.
+    //
+    // It used to draw one per hazard. On a wide plant view with three paths the
+    // result was three arrows and three full-width caption plates crossing a
+    // picture about 60mm wide on the printed page.
+    final pick = LineOfFireGeometry.pickOne(hazards);
+    final lofs = <({int index, LineOfFire lof})>[
+      if (pick != null) (index: pick.index, lof: pick.lof),
+    ];
 
     // Nothing to annotate, or undecodable image → plain image. A hazard can
     // carry a line of fire without a bbox, so the LOF list has to be consulted
@@ -690,22 +741,29 @@ class PdfExport {
           size: PdfPoint(displayedW, displayedH),
           painter: (canvas, size) {
             for (final p in plans) {
-              _paintLof(canvas, p.plan, displayedH);
+              _paintLof(canvas, p.plan, displayedH,
+                  personVisible: p.lof.personVisible);
             }
           },
         ),
       ),
 
-      // Labels are widgets rather than canvas text: drawString needs a font
-      // handle the painter does not get, and a laid-out Container gives the
-      // plate a readable background over a busy photograph.
-      ...plans.map((p) => _lofLabel(p.index, p.lof, p.plan,
-          offsetX, offsetY, displayedW, displayedH)),
+      // No caption is drawn on the image any more — see _lofLegend(), which puts
+      // it in a strip under the photograph where it can be read.
     ];
   }
 
-  static void _paintLof(PdfGraphics canvas, LofPlan plan, double boxH) {
+  static void _paintLof(PdfGraphics canvas, LofPlan plan, double boxH,
+      {bool personVisible = true}) {
     double fy(double v) => boxH - v;
+
+    // Nobody is in the photograph. Mark the ZONE where a person would be struck,
+    // dashed, and draw no arrow: an arrow asserts a person at its head. See
+    // LineOfFire.personVisible.
+    if (!personVisible) {
+      _paintZone(canvas, plan, boxH);
+      return;
+    }
 
     // No usable direction (source and person resolved to the same spot). Mark
     // the place instead of drawing a zero-length arrow that reads as a smudge.
@@ -789,6 +847,58 @@ class PdfExport {
     _ring(canvas, plan.personX, fy(plan.personY), ringR);
   }
 
+  /// The area a person would be struck in, when there is no person to point at.
+  ///
+  /// A dashed square where the model placed the exposure, a dashed stub back
+  /// toward the source, and no arrowhead anywhere. Dashes carry the meaning here:
+  /// every solid mark in this overlay says "this is here", and the point of a
+  /// zone is that nobody is.
+  static void _paintZone(PdfGraphics canvas, LofPlan plan, double boxH) {
+    double fy(double v) => boxH - v;
+    final half = math.max(9.0, math.min(plan.halfWidth * 0.75, 30.0));
+
+    // Solid halo pass first: a dashed red outline vanishes over rust and red
+    // machinery, and this report gets printed.
+    canvas
+      ..setStrokeColor(_lofHalo)
+      ..setLineWidth(3.0)
+      ..setLineDashPattern()
+      ..drawRect(plan.personX - half, fy(plan.personY) - half, half * 2, half * 2)
+      ..strokePath()
+      ..setStrokeColor(_lofHot)
+      ..setLineWidth(1.4)
+      // 3pt on, 2pt off. Any finer and the dashes close up into a solid line at
+      // print resolution, which would make the zone read as a certainty.
+      ..setLineDashPattern(const [3, 2])
+      ..drawRect(plan.personX - half, fy(plan.personY) - half, half * 2, half * 2)
+      ..strokePath();
+
+    if (plan.length > half * 1.8) {
+      final ux = (plan.personX - plan.sourceX) / plan.length;
+      final uy = (plan.personY - plan.sourceY) / plan.length;
+      final fromD = math.min(4.0, plan.length * 0.12);
+      final toD = plan.length - half * 1.3;
+      canvas
+        ..setLineWidth(1.2)
+        ..moveTo(plan.sourceX + ux * fromD, fy(plan.sourceY + uy * fromD))
+        ..lineTo(plan.sourceX + ux * toD, fy(plan.sourceY + uy * toD))
+        ..strokePath();
+      const r = 2.2;
+      canvas
+        ..setLineDashPattern()
+        ..setFillColor(_lofHalo)
+        ..drawEllipse(plan.sourceX, fy(plan.sourceY), r + 1.1, r + 1.1)
+        ..fillPath()
+        ..setFillColor(_lofHot)
+        ..drawEllipse(plan.sourceX, fy(plan.sourceY), r, r)
+        ..fillPath();
+    }
+
+    // Dashes are graphics state: leaving them set would dot every later stroke
+    // on the page, including the table borders.
+    canvas.setLineDashPattern();
+  }
+
   static void _ring(PdfGraphics canvas, double x, double y, double radius) {
     canvas
       ..setStrokeColor(_lofHalo)
@@ -801,69 +911,14 @@ class PdfExport {
       ..strokePath();
   }
 
-  static pw.Widget _lofLabel(
-      int index,
-      LineOfFire lof,
-      LofPlan plan,
-      double offsetX,
-      double offsetY,
-      double displayedW,
-      double displayedH) {
-
-    // Caption says WHAT could strike and WHO is in the way — the two things the
-    // arrow itself cannot spell out. Kept to one short line: a caption longer
-    // than the arrow becomes the thing the eye reads instead of the photograph.
-    final src = lof.source.trim();
-    final who = lof.exposure.trim();
-    final String text;
-    if (src.isNotEmpty && who.isNotEmpty) {
-      text = '${index + 1}  $src → $who';
-    } else if (src.isNotEmpty) {
-      text = '${index + 1}  $src → person';
-    } else if (who.isNotEmpty) {
-      text = '${index + 1}  LINE OF FIRE · $who';
-    } else {
-      text = 'LINE OF FIRE ${index + 1}';
-    }
-
-    // Rough plate size. The pdf package will not clip an overflowing Text, so
-    // the estimate only has to be good enough to keep the plate inside the
-    // photo — 3.6pt per character at 6.5pt is a safe over-estimate for Helvetica.
-    final plateW = math.min(text.length * 3.6 + 8, displayedW);
-    const plateH = 11.0;
-
-    // Sit the plate beside the midpoint, pushed clear of the shaft so it does
-    // not hide the very path it names.
-    final midX = (plan.sourceX + plan.personX) / 2;
-    final midY = (plan.sourceY + plan.personY) / 2;
-    const push = 9.0;
-    var lx = midX - plateW / 2;
-    var ly = midY - push - plateH;
-    if (ly < 0) ly = midY + push;
-
-    lx = lx.clamp(0.0, math.max(0.0, displayedW - plateW));
-    ly = ly.clamp(0.0, math.max(0.0, displayedH - plateH));
-
-    return pw.Positioned(
-      left: offsetX + lx,
-      top: offsetY + ly,
-      child: pw.Container(
-        width: plateW,
-        height: plateH,
-        alignment: pw.Alignment.center,
-        decoration: pw.BoxDecoration(
-          color: _lofHot,
-          border: pw.Border.all(color: PdfColors.white, width: 0.7),
-        ),
-        child: pw.Text(text,
-          maxLines: 1,
-          style: pw.TextStyle(
-            color: PdfColors.white,
-            fontSize: 6.5,
-            fontWeight: pw.FontWeight.bold)),
-      ),
-    );
-  }
+  // _lofLabel() was here: a red plate with white text, drawn on top of the
+  // photograph beside the arrow's midpoint. It is gone deliberately. At the
+  // 118-250pt this column gets, one plate covered a meaningful slice of the
+  // evidence and its 6.5pt text was still hard to read; three of them, which is
+  // what a busy stockyard scan produced, made both the picture and the words
+  // useless. The same sentence — from the one shared LineOfFireGeometry.caption()
+  // — is now printed in an opaque strip immediately BELOW the photo, where it can
+  // be as large as it needs to be and hides nothing. See _buildAnnotatedPhoto.
 
   static double _asDouble(dynamic v) {
     if (v is num) return v.toDouble();
@@ -1017,13 +1072,17 @@ class PdfExport {
       child: pw.Column(
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: items.length <= 1
-          ? [pw.Text(action, style: pw.TextStyle(
+          // _safe(): these come straight from the model, which writes "—" and
+          // "•" freely, and an action the officer is meant to carry out is the
+          // worst place on the page for an unreadable character.
+          ? [pw.Text(_safe(action), style: pw.TextStyle(
               fontSize: 8.5, color: _textDark, lineSpacing: 1.2))]
           : [
               for (var i = 0; i < items.length; i++)
                 pw.Padding(
                   padding: pw.EdgeInsets.only(bottom: i == items.length - 1 ? 0 : 3),
-                  child: pw.Text('${i + 1}.  ${items[i]}', style: pw.TextStyle(
+                  child: pw.Text('${i + 1}.  ${_safe(items[i])}',
+                    style: pw.TextStyle(
                     fontSize: 8.5, color: _textDark, lineSpacing: 1.2))),
             ],
       ));

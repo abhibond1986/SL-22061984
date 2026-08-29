@@ -96,6 +96,17 @@ class HazardQuality {
           if (h is Map) h.cast<String, dynamic>(),
       ];
 
+      // How many people the model could actually SEE in the photograph, copied
+      // down onto every hazard so the renderers do not each have to be handed
+      // the whole result map. Zero means no hazard in this image may draw an
+      // arrow at a person: there is nobody there to draw it at.
+      final seen = _peopleVisible(result);
+      if (seen != null) {
+        for (final h in hazards) {
+          h['_peopleVisible'] = seen;
+        }
+      }
+
       final deduped = dedupe(hazards);
       final mergedCount = hazards.length - deduped.length;
 
@@ -119,6 +130,33 @@ class HazardQuality {
       return const QualityReport(
           merged: 0, absenceDowngraded: 0, absenceFlagged: 0);
     }
+  }
+
+  /// The scan-level count of people visible in the photograph, or null when the
+  /// model did not say. Null is NOT zero — an older report that never had the
+  /// field must not be treated as an empty scene.
+  static int? _peopleVisible(Map<String, dynamic> result) {
+    // 'people' is the field the vision prompt has always asked for — "count of
+    // ACTUALLY visible persons, 0 if none". The crane report answered 0 and then
+    // described three workers, so this number was already there to be believed.
+    for (final key in const [
+      'peopleVisible',
+      'personsVisible',
+      'peopleInFrame',
+      'visiblePeople',
+      'people',
+    ]) {
+      final v = result[key];
+      if (v is num) return v.toInt();
+      if (v is bool) return v ? 1 : 0;
+      if (v is String) {
+        final n = int.tryParse(v.trim());
+        if (n != null) return n;
+        final s = v.trim().toLowerCase();
+        if (s == 'none' || s == 'no' || s == 'nobody') return 0;
+      }
+    }
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

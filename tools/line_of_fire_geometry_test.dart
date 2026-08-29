@@ -204,6 +204,151 @@ void main() {
       }),
       '"rolls" still matches "roll"');
 
+  // ── the invented-person regression ──────────────────────────────────────
+  //
+  // A real report (AI scan of a coke-oven battery and stockyard, a distant wide
+  // view with nobody discernible in it) printed "PEOPLE INVOLVED: 0" and then
+  // drew three arrows labelled "potential worker on platform", "worker near
+  // conveyor" and "worker near pile". The model's own answer already contained
+  // the signal to suppress them. personVisible now carries that signal, and the
+  // renderers draw a danger ZONE instead of an arrow when it is false.
+  print('personVisible');
+
+  Map<String, dynamic> crane(String exposure, {Object? people}) => {
+        'name': 'Unguarded overhead crane',
+        'severity': 'HIGH',
+        'description': 'Visible: overhead crane travelling above the bay.',
+        if (people != null) '_peopleVisible': people,
+        'lofZone': {
+          'source': 'crane load',
+          'exposure': exposure,
+          'x1': 0.30, 'y1': 0.20, 'x2': 0.55, 'y2': 0.62,
+        },
+      };
+
+  ok(LineOfFireGeometry.parse(crane('rigger below load'))!.personVisible,
+      'a named person who can be seen keeps the arrow');
+
+  // The scan-level count wins over any wording: HazardQuality stamps it onto
+  // every hazard as _peopleVisible before the renderers ever run.
+  ok(!LineOfFireGeometry.parse(crane('rigger below load', people: 0))!
+          .personVisible,
+      'people: 0 overrides a confident-sounding exposure -> zone, not arrow');
+  ok(LineOfFireGeometry.parse(crane('rigger below load', people: 2))!
+          .personVisible,
+      'people: 2 leaves the arrow alone');
+
+  // The three wordings from the report itself.
+  for (final e in [
+    'potential worker on platform',
+    'any worker in bay',
+    'personnel could pass',
+    'if a worker walks below',
+    'would be struck',
+    'workers may be present',
+    'no person visible',
+    'nobody',
+    'unoccupied walkway',
+    'n/a',
+  ]) {
+    ok(!LineOfFireGeometry.parse(crane(e))!.personVisible,
+        'speculative exposure "$e" -> zone, not arrow');
+  }
+
+  // An empty exposure is treated as NOT visible on purpose. Nothing is lost:
+  // the zone is drawn in exactly the place the arrow would have pointed, so the
+  // hazard is still marked — only the claim "a person is standing here right
+  // now" is withheld, which is the claim there is no evidence for.
+  ok(!LineOfFireGeometry.parse(crane(''))!.personVisible,
+      'an exposure the model left blank -> zone, not arrow');
+
+  // An explicit flag from the model is honoured above everything else.
+  ok(!LineOfFireGeometry.parse({
+        'name': 'Unguarded overhead crane',
+        'lofZone': {
+          'source': 'crane load',
+          'exposure': 'rigger below load',
+          'personVisible': false,
+          'x1': 0.3, 'y1': 0.2, 'x2': 0.55, 'y2': 0.62,
+        },
+      })!.personVisible,
+      'lofZone.personVisible: false is honoured');
+
+  // The zone must still be drawable — the hazard keeps its geometry.
+  final zoneOnlyLof = LineOfFireGeometry.parse(crane('potential worker'))!;
+  final zonePlan = LineOfFireGeometry.plan(zoneOnlyLof, 400, 300);
+  ok(!zonePlan.degenerate && zonePlan.length > 10,
+      'a no-person path still yields a plan the zone marker can use');
+
+  print('pickOne (exactly one path per photograph)');
+  ok(LineOfFireGeometry.pickOne([]) == null, 'no hazards -> nothing to draw');
+  ok(LineOfFireGeometry.pickOne([
+        {'name': 'Poor housekeeping'},
+        'not a map',
+      ]) == null,
+      'no parseable path -> nothing to draw');
+
+  Map<String, dynamic> path(String sev, String exposure, double y2,
+          {Object? people}) =>
+      {
+        'name': 'Load handling',
+        'severity': sev,
+        'description': 'Visible: suspended load over the bay.',
+        if (people != null) '_peopleVisible': people,
+        'lofZone': {
+          'source': 'suspended load',
+          'exposure': exposure,
+          'x1': 0.2, 'y1': 0.2, 'x2': 0.6, 'y2': y2,
+        },
+      };
+
+  // The crane report's three arrows, with its own "PEOPLE INVOLVED: 0" applied.
+  // One path is drawn, and it is the worst one.
+  final three = [
+    path('MEDIUM', 'potential worker on platform', 0.50, people: 0),
+    path('CRITICAL', 'any worker near conveyor', 0.55, people: 0),
+    path('HIGH', 'worker near pile', 0.60, people: 0),
+  ];
+  final picked = LineOfFireGeometry.pickOne(three)!;
+  ok(picked.index == 1 && !picked.lof.personVisible,
+      'with nobody visible, the CRITICAL path wins and is drawn as a zone');
+
+  // Without that count, wording is all there is to go on: "worker near pile"
+  // reads as an observation, so it is trusted and outranks the two speculative
+  // paths even though one of them is CRITICAL. This is the intended order —
+  // a drawable arrow on a real person tells the reader more than a zone does —
+  // and it is why the scan-level people count matters so much.
+  ok(LineOfFireGeometry.pickOne([
+        path('MEDIUM', 'potential worker on platform', 0.50),
+        path('CRITICAL', 'any worker near conveyor', 0.55),
+        path('HIGH', 'worker near pile', 0.60),
+      ])!.index == 2,
+      'with no count, the one plainly-worded exposure is the one drawn');
+
+  // A path with a real person outranks a more severe speculative one, because a
+  // drawable arrow tells the reader more than a zone on a worse hazard does.
+  final mixed = [
+    path('CRITICAL', 'any worker near conveyor', 0.55),
+    path('MEDIUM', 'rigger below load', 0.60),
+  ];
+  final mixedPick = LineOfFireGeometry.pickOne(mixed)!;
+  ok(mixedPick.index == 1 && mixedPick.lof.personVisible,
+      'a visible person beats a higher severity with nobody in it');
+
+  print('caption (one shared wording for widget and PDF)');
+  final vis = LineOfFireGeometry.parse(crane('rigger below load'))!;
+  ok(LineOfFireGeometry.caption(0, vis) == '1  crane load → rigger below load',
+      'visible: "<n>  <source> -> <who>"');
+  ok(LineOfFireGeometry.caption(2, vis, arrow: '->') ==
+          '3  crane load -> rigger below load',
+      'the PDF gets an ASCII arrow: the bundled font has no glyph for U+2192');
+  final unseen = LineOfFireGeometry.parse(crane('potential worker'))!;
+  ok(LineOfFireGeometry.caption(0, unseen, arrow: '->')
+          .contains('nobody in frame'),
+      'no-person captions say so out loud instead of naming a worker');
+  ok(!LineOfFireGeometry.caption(0, unseen, arrow: '->').contains('worker'),
+      'and never repeat the invented "potential worker" wording');
+
   print('');
   print(fails == 0 ? 'ALL PASS' : '$fails FAILURE(S)');
 }

@@ -1697,6 +1697,25 @@ line of fire to draw.
 ★ ONLY report LOF if you can SEE both the person AND the energy source.
 ★ Do NOT assume LOF if no persons are visible.
 
+★★★ THE PERSON MUST BE A PERSON YOU CAN SEE ★★★
+Count the people in the photograph first and put that number in "people". If it
+is 0, NO hazard in this image may carry a "lofZone". Not one.
+  A distant view of a coke-oven battery, a stacker structure and ore piles was
+  reported with three lines of fire: "potential worker on platform", "worker near
+  conveyor", "worker near pile". Not one human being was visible anywhere in that
+  photograph, and the same report correctly answered "people": 0 two fields
+  earlier. Three confident arrows were printed at three empty patches of ground.
+Therefore:
+  • "exposure" must name a person you can actually point at in the image, and
+    "personVisible" must be true.
+  • These are BANNED in "exposure": "potential worker", "anyone", "any person",
+    "personnel could", "if a worker", "would be", "workers may". They describe a
+    scenario, not a person. If that is all you can say, nobody is there.
+  • A hazard can still be CRITICAL with nobody in frame — an unguarded conveyor
+    is unguarded whether or not someone is standing beside it right now. Report
+    it with a "bbox" and no "lofZone". You lose nothing but a wrong arrow.
+  • Never write a person into a "description" to justify a severity.
+
 Types:
 • Person in path of crane/suspended load → FA 1948 S29
 • Person near moving conveyor/machinery → FA 1948 S21
@@ -1718,7 +1737,10 @@ two ENDS OF THE PATH, in this order and no other:
                 'open ladle of hot metal'. NOT 'walkway', NOT 'height',
                 NOT 'the floor', NOT 'the worker'.>",
     "width": <how wide the danger corridor is at the person, 0.02-0.22>,
-    "exposure": "<max 4 words: who is exposed, e.g. 'rigger below load'>"
+    "exposure": "<max 4 words naming a person you can SEE at x2,y2 —
+                  e.g. 'rigger below load', 'operator at panel'.
+                  NEVER 'potential worker', NEVER 'anyone', NEVER 'personnel'.>",
+    "personVisible": true
   }
 ★ "source" is MANDATORY. A "lofZone" without a named, visible energy source is
   DISCARDED and no arrow is drawn — so an unnamed path loses you the overlay.
@@ -1759,7 +1781,8 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7,
                   "source": "energised 415V panel",
-                  "width": 0.08, "exposure": "operator at panel"}
+                  "width": 0.08, "exposure": "operator at panel",
+                  "personVisible": true}
     }
   ]
 }
@@ -1777,6 +1800,8 @@ FIELD RULES:
   hazard where a visible person stands in the path of a NAMED energy source.
   Omit when nobody is exposed or the source cannot be named.
   x1,y1 = source; x2,y2 = person — never swapped. "source" is mandatory.
+• "people" is the count of persons you can actually SEE. If it is 0, every
+  "lofZone" must be omitted — an arrow needs a real person at its head.
 • "description" MUST begin with "Visible: ..." stating what you physically observe.
 • Maximum 7 hazards, and no two describing the same physical condition.
   Quality over quantity.

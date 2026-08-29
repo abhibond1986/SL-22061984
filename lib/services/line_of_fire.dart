@@ -36,6 +36,7 @@ class LineOfFire {
     required this.degenerate,
     this.exposure = '',
     this.source = '',
+    this.personVisible = true,
   });
 
   /// Centre of the energy source — the crane load, the nip point, the ladle.
@@ -65,6 +66,19 @@ class LineOfFire {
   /// [LineOfFire] that [LineOfFireGeometry.parse] agreed to return: an arrow
   /// whose tail cannot be named points at nothing.
   final String source;
+
+  /// Whether a REAL person can be seen at the far end of this path.
+  ///
+  /// False means the energy source is genuine but nobody is in the picture — the
+  /// model was describing who WOULD be hit. The renderers must then draw the
+  /// exposure ZONE (a dashed marker captioned "no person in frame") and no
+  /// arrow, because an arrow pointing at an empty patch of ground asserts a
+  /// person who is not there.
+  ///
+  /// WHY: a scan of a distant coke-oven battery reported "potential worker on
+  /// platform", "worker near conveyor" and "worker near pile", drew three arrows
+  /// at three empty places, and printed "People involved: 0" in the same report.
+  final bool personVisible;
 
   /// Straight-line distance from source to person, normalised. Only meaningful
   /// as a rough magnitude — see [LineOfFireGeometry.plan] for real geometry,
@@ -246,6 +260,74 @@ class LineOfFireGeometry {
     return true;
   }
 
+  /// Wording that describes a person who might be there rather than one who is.
+  /// "Potential worker on platform" is not a person; it is a scenario.
+  static final RegExp _speculativeExposure = RegExp(
+    r'\b(potential|potentially|possible|possibly|probable|probably|likely|'
+    r'hypothetical|assumed|presumed|notional|theoretical|'
+    r'any ?(?:one|body|worker|person|personnel|operator|employee)|'
+    r'if (?:a |an |the )?(?:worker|person|operator|employee|someone)|'
+    r'if occupied|when occupied|were occupied|'
+    // Any modal at all, not just "would be" / "could be": the report that
+    // prompted this wrote "personnel could pass", which the "could be" form
+    // missed. A modal verb IS the grammar of a scenario — "the rigger could be
+    // struck" is a prediction, "rigger below load" is an observation, and only
+    // the second one earns an arrow.
+    r'would|could|might|may|shall|should|'
+    r'expected|unspecified|unidentified|'
+    r'no (?:person|persons|people|worker|workers|personnel|one)|nobody|'
+    r'none|not visible|no ?t in frame|not in ?the ?frame|unoccupied|'
+    r'empty|unknown|n/a|na)\b',
+    caseSensitive: false,
+  );
+
+  /// Words that name an actual human at the receiving end.
+  static const List<String> _personWords = [
+    'worker', 'workers', 'operator', 'operators', 'person', 'people',
+    'personnel', 'employee', 'employees', 'rigger', 'riggers', 'helper',
+    'fitter', 'welder', 'crew', 'technician', 'driver', 'labourer', 'laborer',
+    'man', 'men', 'woman', 'women', 'staff', 'inspector', 'supervisor',
+    'contractor', 'pedestrian', 'occupant', 'bystander',
+  ];
+
+  /// Whether a person is actually VISIBLE at the exposed end of the path.
+  ///
+  /// Three signals, strongest first:
+  ///   1. `lofZone.personVisible: false` — the model said so outright.
+  ///   2. A scan-level count of visible people of zero (copied onto each hazard
+  ///      as `_peopleVisible` by HazardQuality). If the photograph contains
+  ///      nobody, no hazard in it can have a person in the line of fire.
+  ///   3. The exposure phrase itself. It has to name a human AND not hedge:
+  ///      "rigger below the coil" passes, "potential worker on platform" and
+  ///      "personnel could be struck" do not.
+  ///
+  /// An empty exposure phrase counts as NOT visible. That is deliberate: the
+  /// field's whole purpose is to say who is in the path, and drawing an arrow at
+  /// an unnamed target is the failure this gate exists to stop. Nothing is lost —
+  /// the zone marker is still drawn in the same place, it just stops claiming a
+  /// person is standing in it.
+  static bool personIsVisible(Map hazard) {
+    final zone = hazard['lofZone'];
+    if (zone is Map) {
+      final flag = zone['personVisible'] ?? zone['peopleVisible'];
+      if (flag is bool) return flag;
+      if (flag != null) {
+        final s = flag.toString().trim().toLowerCase();
+        if (s == 'false' || s == 'no' || s == '0') return false;
+        if (s == 'true' || s == 'yes' || s == '1') return true;
+      }
+    }
+
+    final count = _num(hazard['_peopleVisible'] ?? hazard['peopleVisible']);
+    if (count != null && count <= 0) return false;
+
+    final exposure = _lower(
+        (zone is Map ? zone['exposure'] : null) ?? hazard['lofExposure'] ?? '');
+    if (exposure.isEmpty) return false;
+    if (_speculativeExposure.hasMatch(exposure)) return false;
+    return _containsWord(exposure, _personWords);
+  }
+
   /// A best-effort name for the arrow's tail, for the caption.
   static String describeSource(Map hazard) {
     final zone = hazard['lofZone'];
@@ -365,11 +447,90 @@ class LineOfFireGeometry {
             .toString()
             .trim(),
         source: describeSource(hazard),
+        personVisible: personIsVisible(hazard),
       );
     } catch (_) {
       // A drawing overlay is never worth a crash.
       return null;
     }
+  }
+
+  /// THE single line of fire to draw on a photograph, or null when there is
+  /// none.
+  ///
+  /// WHY ONE AND NOT ALL: a wide shot of a coke-oven battery came back with three
+  /// paths. Three arrows crossing a picture that is printed about 60mm wide on A4
+  /// is a tangle, and a tangle is ignored. The other findings keep their numbered
+  /// bounding boxes and their rows in the table, so nothing is hidden — only the
+  /// arrows compete for the same few square centimetres, so only the most severe
+  /// one gets them.
+  ///
+  /// Selection order: a path with a REAL visible person always beats one without
+  /// (an arrow at a person is the more actionable statement), then higher
+  /// severity, then earlier in the list.
+  static ({int index, LineOfFire lof})? pickOne(List hazards) {
+    ({int index, LineOfFire lof})? best;
+    var bestScore = -1;
+    for (var i = 0; i < hazards.length; i++) {
+      final h = hazards[i];
+      if (h is! Map) continue;
+      final lof = parse(h);
+      if (lof == null) continue;
+      // Person-visible dominates severity: 10 per step leaves room for any
+      // severity rank underneath without the two criteria ever tying.
+      final score = (lof.personVisible ? 100 : 0) +
+          _sevRank(h['severity']?.toString() ?? '');
+      if (score > bestScore) {
+        bestScore = score;
+        best = (index: i, lof: lof);
+      }
+    }
+    return best;
+  }
+
+  static int _sevRank(String severity) {
+    switch (severity.trim().toUpperCase()) {
+      case 'CRITICAL':
+        return 4;
+      case 'HIGH':
+        return 3;
+      case 'MEDIUM':
+        return 2;
+      case 'LOW':
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  /// The one-line caption for a line of fire, used by the AI Scan legend, the
+  /// PDF legend and nothing else — it is deliberately NOT drawn on the image any
+  /// more.
+  ///
+  /// WHY IT LEFT THE IMAGE: three of these were printed as opaque banners across
+  /// a photograph of a coke-oven battery, each as wide as the picture, overlapping
+  /// each other and the arrows they described. The photo became unreadable and so
+  /// did the captions. A number on the image and the words underneath it costs
+  /// one glance and keeps both legible.
+  ///
+  /// [arrow] exists because the bundled PDF font has no glyph for '→' and prints
+  /// an empty box instead.
+  static String caption(int index, LineOfFire lof, {String arrow = '→'}) {
+    final src = lof.source.trim();
+    final who = lof.exposure.trim();
+    final head = '${index + 1}  ';
+    if (!lof.personVisible) {
+      // Says out loud that nobody is standing there. The zone is still worth
+      // marking — it is where a person WOULD be struck — but the reader must not
+      // be left thinking a worker was photographed in it.
+      return src.isEmpty
+          ? '${head}danger zone $arrow nobody in frame'
+          : '$head$src $arrow danger zone (nobody in frame)';
+    }
+    if (src.isNotEmpty && who.isNotEmpty) return '$head$src $arrow $who';
+    if (src.isNotEmpty) return '$head$src $arrow person';
+    if (who.isNotEmpty) return '${head}line of fire $arrow $who';
+    return 'line of fire ${index + 1}';
   }
 
   /// Whether this hazard SHOULD have had a path. Used to flag a hazard that

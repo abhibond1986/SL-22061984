@@ -760,7 +760,10 @@ HAZARD CHECKLIST — Check EVERY applicable category
                 "source": "<max 4 words NAMING the visible energy source at
                             x1,y1 — e.g. 'suspended steel coil'>",
                 "width": <corridor width at the person, 0.02-0.22>,
-                "exposure": "<max 4 words: who is exposed>"}
+                "exposure": "<max 4 words naming a person you can SEE at x2,y2 —
+                              e.g. 'rigger below load'. NEVER 'potential
+                              worker', NEVER 'anyone', NEVER 'personnel'>",
+                "personVisible": true}
   (x1,y1) = center of energy source/hazard origin; (x2,y2) = center of exposed person.
   This is rendered as an ARROW from source to person, so the order matters:
   ★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
@@ -782,6 +785,21 @@ HAZARD CHECKLIST — Check EVERY applicable category
     source, whatever type you gave it.
   ★ Omit lofZone when no person is visible in the path, or when you cannot name
     the source.
+
+★★★ THE PERSON AT THE ARROW'S HEAD MUST BE VISIBLE ★★★
+  Count the people you can see and put that number in "people". If it is 0, NO
+  hazard in this image may carry a lofZone — not one.
+  A distant view of a coke-oven battery, a stacker and ore piles came back with
+  three arrows: "potential worker on platform", "worker near conveyor", "worker
+  near pile". There was no human being anywhere in that photograph, and the same
+  answer said "people": 0. Three confident arrows pointed at empty ground.
+  ★ "exposure" must name someone you can point at. BANNED wording: "potential
+    worker", "anyone", "any person", "personnel could", "if a worker",
+    "would be", "workers may" — those describe a scenario, not a person.
+  ★ A hazard is still CRITICAL with nobody in frame. An unguarded conveyor is
+    unguarded whether or not someone stands beside it. Report it with a bbox and
+    no lofZone; you lose nothing but a wrong arrow.
+  ★ Never write a person into a description to justify a severity.
 
 ═══════════════════════════════════════════════════════
 GAS CYLINDER COLOUR CODES (IS 4379:1981)
@@ -873,7 +891,8 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7,
                   "source": "suspended steel coil",
-                  "width": 0.08, "exposure": "rigger below load"}
+                  "width": 0.08, "exposure": "rigger below load",
+                  "personVisible": true}
     }
   ],
   "wsa": ["list of WSA causes ACTUALLY applicable — only those with visual evidence"],
@@ -885,6 +904,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
 
 ★ FINAL CHECK: Before outputting, verify EVERY hazard has a "visualEvidence" field that describes something you can actually SEE. Delete any hazard where you wrote generic text like "not visible but typically..." or "commonly found in...".
 ★ FINAL CHECK 2: Every hazard that says something is missing/absent/inadequate/unguarded/unprotected has an "absenceCheck" naming where you looked. Every "lofZone" has a "source" naming a visible energy source. No two hazards describe the same physical condition.
+★ FINAL CHECK 3: If "people" is 0, NO hazard has a "lofZone". If any hazard does have one, its "exposure" names a person you can point to in the image — not "potential worker", not "anyone", not "personnel".
 
 ''';
   }
