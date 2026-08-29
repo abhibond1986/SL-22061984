@@ -2624,7 +2624,7 @@ class _AIScanTabState extends State<AIScanTab> {
         // exactly like tapping the corresponding box on the image.
         // Also shown when there is a line of fire but no bounding boxes: the
         // arrow would otherwise appear on the image with nothing explaining it.
-        if (hasBbox || _lofCount(hazards) > 0) ...[
+        if (hasBbox || _lofPick(hazards) != null) ...[
           const SizedBox(height: 8),
           _hazardLegendStrip(hazards, sl),
         ],
@@ -3406,22 +3406,25 @@ class _AIScanTabState extends State<AIScanTab> {
             }).toList(),
           ),
         ),
-        // The red arrow needs explaining, or it reads as decoration. Only shown
-        // when something on the image actually carries a line of fire, and it
-        // names the count so a reader can tell how many people are exposed.
-        if (_lofCount(hazards) > 0) ...[
+        // The red mark needs explaining, or it reads as decoration. What it says
+        // depends on WHICH mark was drawn — see the note on _lofPick.
+        if (_lofPick(hazards) != null) ...[
           const SizedBox(height: 7),
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Padding(
               padding: const EdgeInsets.only(top: 1, right: 5),
-              child: Icon(Icons.arrow_outward_rounded,
+              child: Icon(
+                  _lofPick(hazards)!.lof.personVisible
+                      ? Icons.arrow_outward_rounded
+                      : Icons.crop_free_rounded,
                   size: 12, color: sl.redText)),
             Expanded(child: Text(
-              _lofCount(hazards) == 1
+              _lofPick(hazards)!.lof.personVisible
                 ? 'Red arrow = LINE OF FIRE: energy source → the person in its '
-                  'path. 1 person exposed.'
-                : 'Red arrows = LINE OF FIRE: energy source → the person in its '
-                  'path. ${_lofCount(hazards)} exposures marked.',
+                  'path.'
+                : 'Dashed red box = DANGER ZONE: where this energy would strike. '
+                  'No person is visible in this photo, so no arrow is drawn and '
+                  'nobody is being reported as exposed.',
               style: TextStyle(color: sl.redText, fontSize: 9.5, height: 1.35,
                   fontWeight: FontWeight.w600))),
           ]),
@@ -3429,13 +3432,17 @@ class _AIScanTabState extends State<AIScanTab> {
       ]));
   }
 
-  /// How many hazards resolve to a drawable line of fire. Counted through the
-  /// same parser the painter uses, so the caption can never claim an arrow that
-  /// was not drawn.
-  int _lofCount(List hazards) => hazards
-      .whereType<Map>()
-      .where((h) => LineOfFireGeometry.parse(h) != null)
-      .length;
+  /// The one line of fire the painter will draw, or null if it will draw none.
+  ///
+  /// This used to be a COUNT, and the legend read "1 person exposed" off it. That
+  /// was wrong twice over: the image now carries exactly one path however many
+  /// hazards have one, and a path is not a person — a scan of an empty gantry with
+  /// nobody in the frame still produces a path, which is drawn as a danger zone.
+  /// Reading the count as people put "1 person exposed" under a photograph with
+  /// no one in it. Ask the same helper the painter asks, and describe what it
+  /// actually returned.
+  ({int index, LineOfFire lof})? _lofPick(List hazards) =>
+      LineOfFireGeometry.pickOne(hazards);
 
   Widget _infoBox(SL sl) {
     final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;
