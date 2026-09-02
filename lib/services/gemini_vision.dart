@@ -1576,6 +1576,10 @@ HOW TO USE IT:
     return _getHazardPrompt()
         .replaceAll('{{SEVERITIES}}', sevEnum)
         .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
+        // The enum above names the types; this defines them. Without it the
+        // model decides for itself where "unsafe act" stops and "near miss"
+        // begins, and that field is now applied to the near-miss form directly.
+        .replaceAll('{{OBS_TYPE_RULES}}', AdminMasterData.obsTypeGuidance(typeList))
         .replaceAll('{{KB_CONTEXT}}', kbBlock)
         .replaceAll('{{SCENE_CONTEXT}}', sceneContextBlock(sceneContext));
   }
@@ -1806,6 +1810,8 @@ two ENDS OF THE PATH, in this order and no other:
 ★ Omit "lofZone" entirely when no person is visible in the path, or when you
   cannot name the energy source. An invented path draws a confident arrow at
   nobody, and a reader who follows two of those stops following any of them.
+
+{{OBS_TYPE_RULES}}
 
 ═══════════════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)

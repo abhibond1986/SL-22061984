@@ -346,6 +346,8 @@ class GeminiDirectVision {
     return _getComprehensivePrompt()
         .replaceAll('{{SEVERITIES}}', sevEnum)
         .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
+        // Definitions for the enum above — see AdminMasterData.obsTypeGuidance.
+        .replaceAll('{{OBS_TYPE_RULES}}', AdminMasterData.obsTypeGuidance(typeList))
         .replaceAll('{{WSA_CAUSES}}', causeBlock)
         .replaceAll('{{KB_CONTEXT}}', kbBlock)
         .replaceAll('{{SCENE_CONTEXT}}',
@@ -941,6 +943,8 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
   "nearest_standard": "primary IS standard from verified table",
   "section_specific_risks": ["top 3 section-inherent risks that are contextually relevant to what is VISIBLE"]
 }
+
+{{OBS_TYPE_RULES}}
 
 ★ FINAL CHECK: Before outputting, verify EVERY hazard has a "visualEvidence" field that describes something you can actually SEE. Delete any hazard where you wrote generic text like "not visible but typically..." or "commonly found in...".
 ★ FINAL CHECK 2: Every hazard that says something is missing/absent/inadequate/unguarded/unprotected has an "absenceCheck" naming where you looked. Every "lofZone" has a "source" naming a visible energy source. No two hazards describe the same physical condition.

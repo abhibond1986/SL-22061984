@@ -270,6 +270,8 @@ CORRECTIVE ACTION GUIDANCE:
 - Include both immediate action AND preventive measure where applicable
 - Keep it concise (1-2 sentences)
 
+${AdminMasterData.obsTypeGuidance(obsTypes)}
+
 NEAR MISS DEFINITION: An unplanned event that DID NOT result in injury/illness/damage but HAD THE POTENTIAL to do so.
 
 NOT A NEAR MISS: routine observations, planned maintenance, general complaints, requests, or situations with no potential for harm.

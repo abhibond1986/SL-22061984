@@ -1128,6 +1128,20 @@ function getSailPrompt(promptMode) {
     + '  "nearest_standard": "primary IS standard or \\"General safety principles\\""\n'
     + '}\n\n'
 
+    // Definitions for the "type" field above. The client now applies that value
+    // straight to the near-miss form's Observation Type, so a guessed taxonomy
+    // becomes a stored classification. Mirrors
+    // AdminMasterData.obsTypeGuidance in the Dart app — keep the two in step.
+    + 'HOW TO CHOOSE "type":\n'
+    + '  • Unsafe Act — something a PERSON is doing that could cause harm '
+    + '(bypassing a guard, no PPE, not holding the handrail). The hazard is the behaviour.\n'
+    + '  • Unsafe Condition — a physical STATE of the plant or equipment that '
+    + 'could cause harm regardless of who is present (missing guardrail, exposed '
+    + 'conductor, oil on the floor). The hazard is the thing.\n'
+    + '  • Line of Fire — a person is in the path of a released or releasable energy source.\n'
+    + '  A photograph shows a state, not an event, so do NOT type a still image '
+    + '"Near Miss" unless the image itself evidences something that just happened.\n\n'
+
     + 'REMEMBER:\n'
     + '  • QUALITY over QUANTITY — 4-7 specific, well-described hazards beat 10 vague ones.\n'
     + '  • An empty hazards list is acceptable if the image truly shows no hazards.\n'

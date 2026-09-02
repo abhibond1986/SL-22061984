@@ -482,6 +482,58 @@ class AdminMasterData {
     'Unsafe Act', 'Unsafe Condition', 'Near Miss', 'First Aid Case',
   ];
 
+  /// Definitions of the observation types, for inclusion in AI prompts.
+  ///
+  /// Every prompt in the app hands the model the list of type names and nothing
+  /// else, which asks it to guess a taxonomy. The four distinctions matter and
+  /// are routinely conflated: an unsafe ACT is something a person did, an unsafe
+  /// CONDITION is a state of the plant, and a NEAR MISS requires an actual event
+  /// that came close to causing harm. "Someone walked down the stairs without
+  /// holding the handrail" is an unsafe act; it only becomes a near miss if they
+  /// actually slipped and did not fall. Classifying the first as a near miss
+  /// inflates the near-miss count with routine observations and hides the real
+  /// close calls inside it.
+  ///
+  /// Only types actually present in [types] are described, so an admin who
+  /// renames or removes one does not leave the model defining a value it is not
+  /// allowed to return. Returns '' when nothing is recognised.
+  static String obsTypeGuidance(List<String> types) {
+    const defs = <String, String>{
+      'unsafe act':
+          'something a PERSON is doing or has done that could cause harm '
+          '(bypassing a guard, no PPE, not holding the handrail, working '
+          'without a permit). The hazard is the behaviour.',
+      'unsafe condition':
+          'a physical STATE of the plant, equipment or environment that could '
+          'cause harm regardless of who is present (missing guardrail, exposed '
+          'conductor, oil on the floor, blocked exit). The hazard is the thing.',
+      'near miss':
+          'an actual EVENT that happened and came close to causing injury or '
+          'damage but did not — a load that swung past someone, a slip that did '
+          'not become a fall, a spark near a solvent. There must be an event. A '
+          'hazard that is merely present, with nothing having happened, is NOT '
+          'a near miss.',
+      'first aid case':
+          'someone was actually hurt and treated on the spot, with no lost '
+          'time. Use only when an injury has occurred.',
+      'line of fire':
+          'a person is positioned in the path of a released or releasable '
+          'energy source (under a suspended load, in a pinch point, in front of '
+          'a pressurised joint).',
+    };
+    final lines = <String>[];
+    for (final t in types) {
+      final d = defs[t.trim().toLowerCase()];
+      if (d != null) lines.add('  • $t — $d');
+    }
+    if (lines.isEmpty) return '';
+    return 'HOW TO CHOOSE THE TYPE:\n${lines.join('\n')}\n'
+        'Decide from the evidence in front of you. If a person\'s behaviour is '
+        'the problem, it is an act; if the plant\'s state is the problem, it is '
+        'a condition; call it a near miss ONLY if something actually happened '
+        'and harm was narrowly avoided.';
+  }
+
   // ── STORAGE KEYS for custom (user-edited) lists ──────────────────
   static const String _kPlants     = 'admin_master_plants';
   static const String _kDepts      = 'admin_master_departments';

@@ -89,12 +89,51 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   // refuses to file without an explicit choice.
   String _wsaCause = '';
   String _severity = 'MEDIUM';
-  String _obsType  = 'Unsafe Condition';
+  // Deliberately unset. Pre-seeding this with 'Unsafe Condition' meant every
+  // report that nobody touched the dropdown on was filed as an unsafe
+  // condition, which is the same fabricated-data problem the WSA cause default
+  // caused. '' means "not yet classified" and is caught by _submit.
+  String _obsType  = '';
 
   String? _lastSubmissionKey;
   bool _submitting = false;
   String? _submittingAction; // tracks which button: 'save', 'share', 'pdf'
   bool _saved = false; // ★ v31: form has been saved, show "New Report" button
+
+  // The saved record, kept so PDF and Share stay reachable AFTER saving.
+  // Previously the whole Save/Share/PDF row was replaced by "New Report" the
+  // moment _saved flipped true, so a reporter who tapped Save could never
+  // obtain the PDF of the report they had just filed — the only route to one
+  // was to fill the entire form again and tap PDF instead. These hold the
+  // already-persisted incident so the post-save actions export THAT record
+  // rather than submitting a second copy of it.
+  Map<String, dynamic>? _savedIncident;
+  String _savedReporterName = '';
+  String _savedReporterPno = '';
+  Uint8List? _savedImageBytes;
+  bool _postSaveBusy = false;
+
+  // Per-field validation errors, shown on the field itself. Snackbars were the
+  // only feedback: they name the problem but not the place, they are gone in
+  // three seconds, and on a long scrolling form the offending field is usually
+  // off-screen when the message appears. Null means "no error".
+  String? _errLocation;
+  String? _errDescription;
+  String? _errAction;
+  String? _errWsa;
+  String? _errObsType;
+
+  // How the location field got its current value: '' (typed by hand), 'gps'
+  // (device fix) or 'exif' (embedded in the photo). Recorded at each fill site
+  // rather than guessed later — the hint text used to infer EXIF-vs-GPS from
+  // whether the string contained a comma, which mislabels any reverse-geocoded
+  // address that happens to have one.
+  String _locSource = '';
+  bool _locating = false;
+
+  // Set when the AI classified the observation type, so the badge can say so
+  // and the reporter knows what they are overriding.
+  bool _obsTypeFromAi = false;
 
   // ★ v24: AI Description Refinement
   bool _aiRefining = false;
@@ -204,8 +243,11 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         if (!_severities.contains(_severity)) {
           _severity = _severities.isNotEmpty ? _severities.first : '';
         }
-        if (!_obsTypes.contains(_obsType)) {
-          _obsType = _obsTypes.isNotEmpty ? _obsTypes.first : '';
+        // Only rescue a value that is set but stale (e.g. the admin renamed the
+        // type). '' is the intentional "not yet classified" sentinel and must
+        // survive this, or the unset state gets silently filled in again.
+        if (_obsType.isNotEmpty && !_obsTypes.contains(_obsType)) {
+          _obsType = '';
         }
       });
     } catch (_) {}
@@ -778,6 +820,9 @@ If the text is already fine, return it unchanged.''';
       final categoryRule = _obsTypes.isEmpty
           ? '"category": ""'
           : '"category": "one of (exact wording): ${_obsTypes.join(', ')}"';
+      // The list of names alone leaves the model to invent the taxonomy, and
+      // the act/condition/near-miss distinction is the one it gets wrong.
+      final obsGuidance = AdminMasterData.obsTypeGuidance(_obsTypes);
 
       final prompt = '''$kbBlock
 You are analyzing a potential near miss incident reported by a worker at SAIL (Steel Authority of India Limited).
@@ -802,6 +847,8 @@ CORRECTIVE ACTION GUIDANCE:
 - Reference applicable safety measures (barricading, signage, PPE, LOTO, PTW)
 - Include both immediate action AND preventive measure where applicable
 - Keep it concise (1-2 sentences)
+
+$obsGuidance
 
 NEAR MISS DEFINITION: An unplanned event that DID NOT result in injury/illness/damage but HAD THE POTENTIAL to do so. It involves an unexpected hazardous exposure, a close call, or a condition that could lead to an accident.
 
@@ -908,6 +955,12 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     if (_aiSuggestion == null) return;
     final refined = _aiSuggestion!['refined']?.toString() ?? '';
     final correctiveAction = _aiSuggestion!['correctiveAction']?.toString() ?? '';
+    // Both text providers are asked for "category" as one of the admin's
+    // observation types (GroqService.classifyNearMiss and the Apps Script
+    // prompt below both build the rule from the same list), and the answer was
+    // parsed into _aiSuggestion and then never read. Applied here so accepting
+    // the AI's wording also accepts its classification.
+    final aiObsType = _canonicalObsType(_aiSuggestion!['category']?.toString() ?? '');
     if (refined.isNotEmpty) {
       // Generate a 1-2 line summary from the refined text
       final summary = _generateSummary(refined);
@@ -929,6 +982,14 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           'severity':         _severity,
         };
         _aiOriginalSource = _aiSuggestion?['_source']?.toString() ?? 'refinement';
+        // Classification follows the wording it was derived from. Left editable:
+        // the reporter saw the event and the model only read a sentence about
+        // it, so the badge marks this as the AI's answer and any change to the
+        // dropdown clears it.
+        if (aiObsType.isNotEmpty) {
+          _obsType = aiObsType;
+          _obsTypeFromAi = true;
+        }
         _aiSuggestion = null;
       });
     }
@@ -1113,12 +1174,16 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           if (_location.text.isEmpty || _location.text == 'To be confirmed (edit if needed)') {
             final address = GeoService.getDisplayAddress(exifLocation);
             if (address.isNotEmpty) {
-              setState(() => _location.text = address);
+              setState(() { _location.text = address; _locSource = 'exif'; });
             } else {
               // No address but have coords — show coords
-              setState(() => _location.text =
-                '${exifLocation.latitude!.toStringAsFixed(5)}, ${exifLocation.longitude!.toStringAsFixed(5)}');
+              setState(() {
+                _location.text =
+                  '${exifLocation.latitude!.toStringAsFixed(5)}, ${exifLocation.longitude!.toStringAsFixed(5)}';
+                _locSource = 'exif';
+              });
             }
+            if (_errLocation != null) setState(() => _errLocation = null);
           }
           return; // EXIF worked — don't need device GPS
         }
@@ -1126,6 +1191,47 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     }
     // Camera photos or EXIF extraction failed — use device GPS
     _captureGpsInBackground();
+  }
+
+  /// Reporter-initiated GPS fetch from the location field's crosshair button.
+  /// Unlike [_captureGpsInBackground] this one is loud: it OVERWRITES whatever
+  /// is in the field (the reporter asked for it) and reports failure instead of
+  /// swallowing it, because a silent no-op on a deliberate tap reads as a broken
+  /// button.
+  Future<void> _useDeviceGps() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    try {
+      final location = await GeoService.getCurrentLocation().timeout(
+        const Duration(seconds: 12),
+        onTimeout: () => LocationData(error: 'GPS timeout'),
+      );
+      if (!mounted) return;
+      if (location != null && location.isValid) {
+        final address = GeoService.getDisplayAddress(location);
+        setState(() {
+          _capturedLocation = location;
+          _location.text = address.isNotEmpty
+              ? address
+              : '${location.latitude!.toStringAsFixed(5)}, ${location.longitude!.toStringAsFixed(5)}';
+          _locSource = 'gps';
+          _errLocation = null;
+          _locating = false;
+        });
+      } else {
+        setState(() => _locating = false);
+        _snack(
+          location?.error?.isNotEmpty == true
+              ? 'GPS unavailable: ${location!.error} — type the location instead'
+              : 'GPS unavailable — type the location instead',
+          AppColors.amber,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _locating = false);
+      _snack('Could not get GPS — type the location instead', AppColors.amber);
+    }
   }
 
   /// Captures GPS location silently and fills location field with place name
@@ -1142,7 +1248,11 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         if (_location.text.isEmpty || _location.text == 'To be confirmed (edit if needed)') {
           final address = GeoService.getDisplayAddress(location);
           if (address.isNotEmpty) {
-            setState(() => _location.text = address);
+            setState(() {
+              _location.text = address;
+              _locSource = 'gps';
+              _errLocation = null;
+            });
           }
         }
       }
@@ -1151,7 +1261,74 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     }
   }
 
-  Map<String, dynamic> _applyHardenedV15Filters(String name, String desc, String action, String reg, String cause) {
+  /// Resolves whatever the model called the observation type onto a member of
+  /// the admin's own [_obsTypes] list, and returns '' when it cannot.
+  ///
+  /// Both the text and the vision prompts are given the list verbatim, but a
+  /// model still returns 'unsafe-act', 'Unsafe Acts', 'UNSAFE ACT' or a plain
+  /// synonym often enough to matter. Matching case- and punctuation-insensitively
+  /// is the difference between the classification landing in the record and
+  /// being silently dropped in favour of whatever the field was initialised to.
+  String _canonicalObsType(String raw) {
+    final v = raw.trim();
+    if (v.isEmpty) return '';
+    if (_obsTypes.contains(v)) return v;
+
+    String norm(String s) => s
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final target = norm(v);
+    if (target.isEmpty) return '';
+
+    for (final t in _obsTypes) {
+      if (norm(t) == target) return t;
+    }
+    // Plural/possessive slack ('Unsafe Acts' → 'Unsafe Act') and containment,
+    // which also catches 'Near Miss Event'. Accepted ONLY when exactly one type
+    // matches: a bare 'Unsafe' is a prefix of both 'Unsafe Act' and 'Unsafe
+    // Condition', and taking whichever the admin happened to list first would
+    // put a coin-flip in the record while the badge presents it to the reporter
+    // as the AI's considered answer. Ambiguous means unclassified.
+    final prefixHits = <String>[];
+    for (final t in _obsTypes) {
+      final nt = norm(t);
+      if (nt.isEmpty) continue;
+      if (target.startsWith(nt) || nt.startsWith(target)) prefixHits.add(t);
+    }
+    if (prefixHits.length == 1) return prefixHits.first;
+    // Anything else — including 'Line of Fire', which the vision prompts offer
+    // to drive the lofZone overlay but which is not one of the form's own
+    // observation types — is left for the reporter to choose. Mapping it onto
+    // act-or-condition here would be a guess: standing under a suspended load
+    // is an act, the suspended load is a condition, and the model's answer does
+    // not say which it meant.
+    return '';
+  }
+
+  /// Small "AI" chip shown on a field the model filled in, so the reporter can
+  /// see what they are overriding rather than assuming they chose it.
+  Widget _aiSetBadge(SL sl) => Padding(
+    padding: const EdgeInsets.only(right: 6),
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.accent.withOpacity(0.35)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.auto_awesome, size: 11, color: sl.accentText),
+        const SizedBox(width: 3),
+        // 10.5px, not 9: tools/audit_contrast.py fails anything under 10 and
+        // this sits on a shop-floor screen read through a visor.
+        Text('AI',
+          style: TextStyle(color: sl.accentText, fontSize: 10.5, fontWeight: FontWeight.w800)),
+      ]),
+    ),
+  );
+
+  Map<String, dynamic> _applyHardenedV15Filters(String name, String desc, String action, String reg, String cause,
+      [String obsType = '']) {
     final n = name.toLowerCase();
     final d = desc.toLowerCase();
 
@@ -1167,10 +1344,20 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         // Was 'Equipment failure' — off-list, because the WSA-13 member carries
         // a '5. ' prefix. Resolved so it charts as itself.
         'cause': _canonicalWsa('5. Equipment failure'),
-        'obsType': 'Unsafe Condition'
+        // Fixed hardware in a safe configuration: a condition, not an act. Run
+        // through the resolver so a plant that renamed its observation types
+        // still gets a value its own dropdown accepts.
+        'obsType': _canonicalObsType('Unsafe Condition'),
       };
     }
-    return {'name': name, 'desc': desc, 'action': action, 'reg': reg, 'cause': cause, 'obsType': _obsType};
+    // obsType is the model's classification, resolved onto the admin's list.
+    // This used to echo back `_obsType` — the field's own current value — so the
+    // AI's answer was discarded and every photo report inherited the initial
+    // 'Unsafe Condition' unless the reporter changed it by hand.
+    return {
+      'name': name, 'desc': desc, 'action': action, 'reg': reg, 'cause': cause,
+      'obsType': _canonicalObsType(obsType),
+    };
   }
 
   Future<void> _analyzeImage() async {
@@ -1287,8 +1474,13 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       String rawAction = first?['correctiveAction']?.toString() ?? '';
       String rawReg    = first?['regulation']?.toString() ?? '';
       String rawCause  = _mapToWsaCause(first?['category']?.toString() ?? '', rawName);
+      // The vision prompt already asks each hazard for a "type" drawn from the
+      // admin's own observation types (see {{OBS_TYPES}} in gemini_vision.dart),
+      // and this screen simply never read it — so the model's classification was
+      // computed, returned, displayed in the AI Scan tab, and thrown away here.
+      String rawObsType = first?['type']?.toString() ?? '';
 
-      final refinedData = _applyHardenedV15Filters(rawName, rawDesc, rawAction, rawReg, rawCause);
+      final refinedData = _applyHardenedV15Filters(rawName, rawDesc, rawAction, rawReg, rawCause, rawObsType);
 
       final sev        = (first?['severity']?.toString() ?? 'MEDIUM').toUpperCase();
       // HazardValidator scores each hazard individually, and this screen shows
@@ -1343,8 +1535,12 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         if (_location.text.isEmpty || _location.text == 'To be confirmed (edit if needed)') {
           if (_capturedLocation != null && _capturedLocation!.isValid) {
             _location.text = GeoService.getDisplayAddress(_capturedLocation!);
+            // Only claim a source if one was not already recorded by the EXIF
+            // path — this branch cannot tell the two apart on its own.
+            if (_locSource.isEmpty) _locSource = 'gps';
           } else {
             _location.text = 'To be confirmed (edit if needed)';
+            _locSource = '';
           }
         }
         _plant                = plantFromProfile;
@@ -1353,7 +1549,14 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         // rather than land off-list in the root-cause Pareto.
         _wsaCause             = _canonicalWsa(refinedData['cause']?.toString() ?? '');
         _severity             = sev;
-        _obsType              = refinedData['obsType']?.toString() ?? _obsType;
+        // Only overwrite when the model gave something resolvable; an
+        // unrecognisable answer leaves the reporter's own choice alone rather
+        // than blanking a dropdown they may already have set.
+        final aiObsType = refinedData['obsType']?.toString() ?? '';
+        if (aiObsType.isNotEmpty) {
+          _obsType = aiObsType;
+          _obsTypeFromAi = true;
+        }
         _analyzing            = false;
         // ★ Snapshot the AI's suggested values so we can detect user edits.
         _aiOriginalSuggestion = {
@@ -1531,7 +1734,31 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       _additionalActions.clear();
       _aiSummary = null;
       _lastSubmissionKey = null;
+      // Drop the previous record so the post-save PDF/Share actions can never
+      // export the last report while the reporter is filling in the next one.
+      _savedIncident = null;
+      _savedImageBytes = null;
+      _savedReporterName = '';
+      _savedReporterPno = '';
+      _postSaveBusy = false;
+      _clearFieldErrors();
+      _locSource = '';
+      _obsTypeFromAi = false;
+      // The WSA cause and observation type are per-incident judgements, not
+      // sticky preferences: carrying them into the next report is how the
+      // previous one's classification silently becomes the default.
+      _wsaCause = '';
+      _obsType = '';
     });
+  }
+
+  /// Clears every inline validation error. Call inside an existing setState.
+  void _clearFieldErrors() {
+    _errLocation = null;
+    _errDescription = null;
+    _errAction = null;
+    _errWsa = null;
+    _errObsType = null;
   }
 
   /// Save Report only — shows success dialog with share options (no PDF)
@@ -1597,32 +1824,107 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     _submit(exportAfter: true);
   }
 
+  /// Exports the PDF of the report that was ALREADY saved. Deliberately does
+  /// not go through _submit: the record exists, and re-submitting to obtain a
+  /// document would file a second copy of the same near miss.
+  Future<void> _exportSavedPdf() async {
+    final incident = _savedIncident;
+    if (incident == null || _postSaveBusy) return;
+    setState(() => _postSaveBusy = true);
+    try {
+      await PdfExport.downloadOrShareIncident(
+        incident: incident,
+        reporterName: _savedReporterName.isEmpty
+            ? 'SAIL Safety Officer'
+            : _savedReporterName,
+        reporterPno: _savedReporterPno,
+        imageBytes: _savedImageBytes,
+      );
+    } catch (e) {
+      if (mounted) _snack('PDF export failed: $e', AppColors.red);
+    } finally {
+      if (mounted) setState(() => _postSaveBusy = false);
+    }
+  }
+
+  /// Shares the report that was already saved, reusing the same builder the
+  /// success dialog uses so the text cannot drift between the two routes.
+  Future<void> _shareSavedReport() async {
+    final incident = _savedIncident;
+    if (incident == null || _postSaveBusy) return;
+    setState(() => _postSaveBusy = true);
+    try {
+      await _shareViaWhatsApp(incident, _savedImageBytes);
+    } catch (e) {
+      if (mounted) _snack('Share failed: $e', AppColors.red);
+    } finally {
+      if (mounted) setState(() => _postSaveBusy = false);
+    }
+  }
+
   Future<bool> _submit({bool exportAfter = false}) async {
     if (_submitting) return false; // Prevent double-tap
+
+    // Every required field is checked in one pass and each failure is marked on
+    // the field itself. Returning on the first failure with only a snackbar
+    // meant the reporter fixed one field, tapped Save, was refused again for a
+    // different field they could not see, and had no way to know how many more
+    // were waiting. The snackbar is kept as a secondary cue for whatever is
+    // scrolled out of view.
     final loc = _location.text.trim();
-    if (loc.isEmpty || loc == 'To be confirmed (edit if needed)') {
-      _snack('Please enter the actual location', AppColors.red);
-      return false;
-    }
-    // ★ Validate description — must not be empty
     final desc = _description.text.trim();
-    if (desc.isEmpty && _brief.text.trim().isEmpty) {
-      _snack('Please describe the near miss incident', AppColors.red);
-      return false;
-    }
-    // ★ v31: Validate corrective action — at least one must be filled
     final hasAction = _immediateAction.text.trim().isNotEmpty ||
         _additionalActions.any((c) => c.text.trim().isNotEmpty);
-    if (!hasAction) {
-      _snack('Please add at least one corrective action', AppColors.red);
-      return false;
-    }
+
+    final locErr = (loc.isEmpty || loc == 'To be confirmed (edit if needed)')
+        ? 'Enter the actual location'
+        : null;
+    final descErr = (desc.isEmpty && _brief.text.trim().isEmpty)
+        ? 'Describe what happened'
+        : null;
+    final actionErr = hasAction ? null : 'Add at least one corrective action';
     // The observation category is charted as the root-cause Pareto, so it has
     // to be a human judgement rather than whatever the field happened to be
     // initialised to. Guarded here rather than defaulted above on purpose.
-    if (!_wsaCauses.contains(_wsaCause)) {
-      _snack('Please choose an observation category (WSA 13)', AppColors.red);
+    final wsaErr = _wsaCauses.contains(_wsaCause)
+        ? null
+        : 'Choose an observation category';
+    // Same reasoning for the type. The AI fills this in when it can classify
+    // the observation, so in the normal flow the reporter never sees this
+    // error — it only fires when nothing classified it, and act-vs-condition
+    // vs-near-miss is the distinction the whole statistic rests on.
+    final obsTypeErr = _obsTypes.contains(_obsType)
+        ? null
+        : 'Choose the observation type';
+
+    if (locErr != null || descErr != null || actionErr != null ||
+        wsaErr != null || obsTypeErr != null) {
+      setState(() {
+        _errLocation = locErr;
+        _errDescription = descErr;
+        _errAction = actionErr;
+        _errWsa = wsaErr;
+        _errObsType = obsTypeErr;
+        _submittingAction = null;
+      });
+      final missing = <String>[
+        if (locErr != null) 'location',
+        if (descErr != null) 'description',
+        if (actionErr != null) 'corrective action',
+        if (wsaErr != null) 'observation category',
+        if (obsTypeErr != null) 'observation type',
+      ];
+      _snack(
+        missing.length == 1
+            ? 'Please fill the ${missing.first} — marked in red'
+            : 'Please fill ${missing.length} required fields — marked in red',
+        AppColors.red,
+      );
       return false;
+    }
+    if (_errLocation != null || _errDescription != null ||
+        _errAction != null || _errWsa != null || _errObsType != null) {
+      setState(_clearFieldErrors);
     }
     if (await _checkDuplicate()) return false;
     setState(() => _submitting = true);
@@ -1744,6 +2046,12 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           _submitting = false;
           _submittingAction = null;
           _saved = true; // ★ v31: Mark as saved — form content remains visible
+          // Retained so the post-save PDF/Share actions can export THIS record
+          // without re-running _submit, which would file a duplicate.
+          _savedIncident = Map<String, dynamic>.from(incident);
+          _savedReporterName = user?['name']?.toString() ?? 'SAIL Safety Officer';
+          _savedReporterPno = user?['pno']?.toString() ?? '';
+          _savedImageBytes = preservedImageBytes;
         });
         _showSaveSuccessDialog(incident, synced, exportAfter, preservedImageBytes);
       }
@@ -2063,6 +2371,44 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               backgroundColor: Colors.transparent,
               shadowColor: Colors.transparent,
               padding: const EdgeInsets.symmetric(vertical: 15),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)))),
+        ),
+      ),
+    );
+  }
+
+  /// Post-save action button (PDF / Share). Separate from [_submitBtn] because
+  /// nothing is being submitted here — the record is already filed, so the
+  /// label must never read "Saving..." and the busy state is _postSaveBusy.
+  Widget _postSaveBtn({
+    required String label,
+    required IconData icon,
+    required List<Color> colors,
+    required Future<void> Function() onTap,
+    required SL sl,
+  }) {
+    return AbsorbPointer(
+      absorbing: _postSaveBusy,
+      child: Opacity(
+        opacity: _postSaveBusy ? 0.6 : 1.0,
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(colors: colors),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(color: colors.first.withOpacity(0.25), blurRadius: 8, offset: const Offset(0, 3)),
+            ]),
+          child: ElevatedButton.icon(
+            onPressed: () => onTap(),
+            icon: Icon(icon, size: 15, color: Colors.white),
+            label: Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.transparent,
+              shadowColor: Colors.transparent,
+              padding: const EdgeInsets.symmetric(vertical: 13),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)))),
         ),
       ),
@@ -2528,9 +2874,37 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           if (_showOtherDept)
             _buildTextField('Enter Department Name', _deptOther, Icons.edit_outlined, sl),
           _buildLocationField(sl),
-          _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses, (v) => setState(() => _wsaCause = v!), sl,
-              requireChoice: true),
-          _buildDropdownField('Observation Type', _obsType, _obsTypes, (v) => setState(() => _obsType = v!), sl),
+          _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses,
+              (v) => setState(() { _wsaCause = v ?? ''; _errWsa = null; }), sl,
+              requireChoice: true, errorText: _errWsa),
+          // Classified by the AI when it analysed the photo or the spoken
+          // description; the reporter can still override, and the badge says
+          // which of the two is currently in force.
+          _buildDropdownField('Observation Type', _obsType, _obsTypes,
+              (v) => setState(() {
+                _obsType = v ?? '';
+                _obsTypeFromAi = false;
+                _errObsType = null;
+              }), sl,
+              requireChoice: true, errorText: _errObsType,
+              badge: _obsTypeFromAi ? _aiSetBadge(sl) : null),
+          // The dropdown above is never locked. This line exists because a
+          // pre-filled field reads as a decision already taken: whoever saw the
+          // event knows whether anything actually nearly happened, and the model
+          // only had a photo or a sentence.
+          if (_obsTypeFromAi)
+            Padding(
+              padding: const EdgeInsets.only(left: 14, top: 0, bottom: 12),
+              child: Row(children: [
+                Icon(Icons.edit_outlined, size: 11, color: sl.accentText.withOpacity(0.8)),
+                const SizedBox(width: 4),
+                Expanded(child: Text(
+                  'Classified by AI — tap to change it if you disagree',
+                  style: TextStyle(color: sl.accentText.withOpacity(0.9),
+                    fontSize: 10.5, fontStyle: FontStyle.italic),
+                )),
+              ]),
+            ),
           _buildDropdownField('Initial Risk Severity', _severity, _severities, (v) => setState(() => _severity = v!), sl),
           // ★ Reference image now shown in _imageSection at top (via _imageAttachedOnly)
           // ★ AI Summary of Near Miss (shown after AI processes voice/text input)
@@ -2578,14 +2952,28 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 color: sl.text2, fontSize: 12, fontWeight: FontWeight.w700)),
           ),
           _buildTextField('Tap mic → speak in ${_selectedVoiceLang == "hi" ? "Hindi" : "English"} → AI frames it', _description, Icons.description_outlined, sl, maxLines: 3,
-            suffix: _micButton(_description), onChanged: _onDescriptionChanged),
+            suffix: _micButton(_description),
+            required_: true,
+            errorText: _errDescription,
+            onChanged: (v) {
+              if (_errDescription != null) setState(() => _errDescription = null);
+              _onDescriptionChanged(v);
+            }),
           // ★ AI Suggestion Card
           if (_aiRefining)
             _buildAiRefiningIndicator(sl),
           if (_aiSuggestion != null)
             _buildAiSuggestionCard(sl),
           _buildTextField('Corrective Action 1', _immediateAction, Icons.flash_on_outlined, sl, maxLines: 2,
-            suffix: _micButton(_immediateAction)),
+            suffix: _micButton(_immediateAction),
+            required_: true,
+            errorText: _errAction,
+            onChanged: (v) {
+              if (_errAction != null && v.trim().isNotEmpty) {
+                setState(() => _errAction = null);
+              }
+              _onActionChanged(v);
+            }),
           // ★ Additional corrective actions
           ..._additionalActions.asMap().entries.map((entry) {
             final idx = entry.key;
@@ -2972,37 +3360,71 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   }
 
   /// ★ v32: Location field with GPS indicator + edit hint
+  ///
+  /// Three ways in, and the field says which one produced the current value:
+  /// typed by hand, taken from the device GPS (tap the crosshair), or read from
+  /// the photo's EXIF GPS tags when one is attached from the gallery. Manual
+  /// text always wins — nothing here overwrites what the reporter typed.
   Widget _buildLocationField(SL sl) {
     final hasGpsLocation = _capturedLocation != null && _capturedLocation!.isValid;
     final isAutoFilled = hasGpsLocation &&
+        _locSource.isNotEmpty &&
         _location.text.isNotEmpty &&
         _location.text != 'To be confirmed (edit if needed)';
+    final hasErr = _errLocation != null;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         TextField(
           controller: _location,
-          onChanged: _onLocationChanged,
+          onChanged: (v) {
+            // Typing makes the value the reporter's own, so the GPS/EXIF
+            // provenance badge must stop claiming otherwise.
+            // Read the fields directly rather than the captured `hasErr`, which
+            // is only as fresh as the last build.
+            if (_locSource.isNotEmpty || _errLocation != null) {
+              setState(() { _locSource = ''; _errLocation = null; });
+            }
+            _onLocationChanged(v);
+          },
           style: TextStyle(color: sl.text1, fontSize: 13),
           decoration: InputDecoration(
-            labelText: 'Exact Location',
-            labelStyle: TextStyle(color: sl.text3, fontSize: 11.5),
+            label: _requiredLabel('Exact Location', sl, hasErr),
+            errorText: _errLocation,
+            errorStyle: TextStyle(color: sl.redText, fontSize: 10.5),
             prefixIcon: Padding(
               padding: const EdgeInsets.only(left: 12, right: 8),
               child: Icon(Icons.location_on_outlined, size: 18,
-                color: isAutoFilled ? sl.greenText : sl.accentText.withOpacity(0.7))),
+                color: hasErr
+                    ? sl.redText
+                    : (isAutoFilled ? sl.greenText : sl.accentText.withOpacity(0.7)))),
             prefixIconConstraints: const BoxConstraints(minWidth: 40),
             suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
-              if (isAutoFilled)
-                Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Icon(Icons.gps_fixed_rounded, size: 14,
-                    color: sl.greenText.withOpacity(0.7))),
+              // Explicit "use my GPS" action. Device location was previously
+              // only ever fetched as a side effect of attaching a photo, so a
+              // reporter filing without one had no way to ask for it.
+              IconButton(
+                onPressed: _locating ? null : _useDeviceGps,
+                tooltip: 'Use my current GPS location',
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                padding: EdgeInsets.zero,
+                icon: _locating
+                    ? SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2, color: sl.accentText))
+                    : Icon(
+                        isAutoFilled ? Icons.gps_fixed_rounded : Icons.my_location_rounded,
+                        size: 17,
+                        color: isAutoFilled ? sl.greenText : sl.accentText.withOpacity(0.8)),
+              ),
               _micButton(_location),
             ]),
             filled: true,
-            fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+            fillColor: hasErr
+                ? AppColors.red.withOpacity(0.06)
+                : (sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC)),
             contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
@@ -3011,24 +3433,47 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide(
                 color: isAutoFilled ? AppColors.green.withOpacity(0.4) : sl.border.withOpacity(0.5))),
+            errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.red, width: 1.6)),
+            focusedErrorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.red, width: 2)),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: const BorderSide(color: AppColors.accent, width: 2)),
           ),
         ),
+        // The source is recorded at the point of filling, not guessed here. The
+        // old version inferred EXIF from the string containing a comma, which
+        // mislabels every reverse-geocoded street address.
         if (isAutoFilled)
           Padding(
             padding: const EdgeInsets.only(left: 14, top: 4),
             child: Text(
-              '📍 Auto-detected from ${_location.text.contains(',') && _capturedLocation?.address == null ? "image EXIF" : "GPS"} — tap to edit if incorrect',
-              style: TextStyle(color: sl.greenText.withOpacity(0.8), fontSize: 10, fontStyle: FontStyle.italic),
+              _locSource == 'exif'
+                  ? '📍 Read from the photo\'s own GPS tags — tap to edit if incorrect'
+                  : '📍 Taken from this device\'s GPS — tap to edit if incorrect',
+              style: TextStyle(color: sl.greenText.withOpacity(0.8), fontSize: 10.5, fontStyle: FontStyle.italic),
+            ),
+          ),
+        if (!isAutoFilled && !hasErr)
+          Padding(
+            padding: const EdgeInsets.only(left: 14, top: 4),
+            child: Text(
+              'Type the location, or tap ⌖ to use GPS. A gallery photo\'s own GPS tags are used when present.',
+              style: TextStyle(color: sl.text3, fontSize: 10.5, fontStyle: FontStyle.italic),
             ),
           ),
       ]),
     );
   }
 
-  Widget _buildTextField(String label, TextEditingController controller, IconData icon, SL sl, {int maxLines = 1, TextInputType keyboardType = TextInputType.text, Widget? suffix, void Function(String)? onChanged}) {
+  /// [errorText] non-null draws the field in red with the reason underneath.
+  /// [required_] adds a red asterisk to the label so the reporter knows the
+  /// field is mandatory BEFORE being refused at submit time.
+  Widget _buildTextField(String label, TextEditingController controller, IconData icon, SL sl, {int maxLines = 1, TextInputType keyboardType = TextInputType.text, Widget? suffix, void Function(String)? onChanged, String? errorText, bool required_ = false}) {
+    final hasErr = errorText != null;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: TextField(
@@ -3038,15 +3483,22 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         onChanged: onChanged,
         style: TextStyle(color: sl.text1, fontSize: 13),
         decoration: InputDecoration(
-          labelText: label,
-          labelStyle: TextStyle(color: sl.text3, fontSize: 11.5),
+          label: required_ ? _requiredLabel(label, sl, hasErr) : null,
+          labelText: required_ ? null : label,
+          labelStyle: TextStyle(
+            color: hasErr ? sl.redText : sl.text3, fontSize: 11.5),
+          errorText: errorText,
+          errorStyle: TextStyle(color: sl.redText, fontSize: 10.5),
           prefixIcon: Padding(
             padding: const EdgeInsets.only(left: 12, right: 8),
-            child: Icon(icon, size: 18, color: sl.accentText.withOpacity(0.7))),
+            child: Icon(icon, size: 18,
+              color: hasErr ? sl.redText : sl.accentText.withOpacity(0.7))),
           prefixIconConstraints: const BoxConstraints(minWidth: 40),
           suffixIcon: suffix,
           filled: true,
-          fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+          fillColor: hasErr
+              ? AppColors.red.withOpacity(0.06)
+              : (sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC)),
           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
@@ -3057,10 +3509,32 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
             borderSide: const BorderSide(color: AppColors.accent, width: 2)),
+          errorBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.red, width: 1.6)),
+          focusedErrorBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.red, width: 2)),
         ),
       ),
     );
   }
+
+  /// Label with a trailing red asterisk for mandatory fields.
+  Widget _requiredLabel(String label, SL sl, bool hasErr) => RichText(
+    text: TextSpan(
+      text: label,
+      style: TextStyle(
+        color: hasErr ? sl.redText : sl.text3,
+        fontSize: 11.5,
+        fontWeight: hasErr ? FontWeight.w700 : FontWeight.normal,
+      ),
+      children: [
+        TextSpan(text: ' *',
+          style: TextStyle(color: sl.redText, fontSize: 11.5, fontWeight: FontWeight.w700)),
+      ],
+    ),
+  );
 
   /// Department dropdown with "Other" option
   Widget _buildDeptDropdown(SL sl) {
@@ -3128,7 +3602,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   /// complete submits blank, or (worse) validation rejects a field the user can
   /// plainly see is filled in.
   Widget _buildDropdownField(String label, String value, List<String> items, ValueChanged<String?> onChanged, SL sl,
-      {bool requireChoice = false}) {
+      {bool requireChoice = false, String? errorText, Widget? badge}) {
     // The admin may legitimately empty a master list. Render a disabled
     // placeholder rather than crashing on items.first.
     if (items.isEmpty) {
@@ -3157,18 +3631,27 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             ? value
             : (requireChoice ? null : items.first),
         hint: requireChoice
-            ? Text('Select…', style: TextStyle(color: sl.text3, fontSize: 12))
+            ? Text('Select…', style: TextStyle(
+                color: errorText != null ? sl.redText : sl.text3, fontSize: 12))
             : null,
         items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 12)))).toList(),
         onChanged: onChanged,
         dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
         style: TextStyle(color: sl.text1, fontSize: 12),
-        icon: Icon(Icons.keyboard_arrow_down_rounded, color: sl.text3),
+        icon: Icon(Icons.keyboard_arrow_down_rounded,
+          color: errorText != null ? sl.redText : sl.text3),
         decoration: InputDecoration(
-          labelText: label,
-          labelStyle: TextStyle(color: sl.text3, fontSize: 11.5),
+          label: requireChoice ? _requiredLabel(label, sl, errorText != null) : null,
+          labelText: requireChoice ? null : label,
+          labelStyle: TextStyle(
+            color: errorText != null ? sl.redText : sl.text3, fontSize: 11.5),
+          errorText: errorText,
+          errorStyle: TextStyle(color: sl.redText, fontSize: 10.5),
+          suffixIcon: badge,
           filled: true,
-          fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+          fillColor: errorText != null
+              ? AppColors.red.withOpacity(0.06)
+              : (sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC)),
           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
@@ -3176,6 +3659,12 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: sl.border.withOpacity(0.5))),
+          errorBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.red, width: 1.6)),
+          focusedErrorBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.red, width: 2)),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
             borderSide: const BorderSide(color: AppColors.accent, width: 2)),
@@ -3233,11 +3722,36 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                     ]),
                   ),
                   const SizedBox(height: 14),
+                  // PDF and Share stay available AFTER saving. They act on the
+                  // record already persisted (_savedIncident), so neither one
+                  // files a duplicate. Hiding them here meant the only way to
+                  // get the PDF of a report you had just filed was to type the
+                  // whole thing again.
+                  if (_savedIncident != null) ...[
+                    Row(children: [
+                      Expanded(child: _postSaveBtn(
+                        label: 'Download PDF',
+                        icon: Icons.picture_as_pdf_rounded,
+                        colors: const [Color(0xFF4F5BD5), Color(0xFF0EA5B5)],
+                        onTap: _exportSavedPdf,
+                        sl: sl,
+                      )),
+                      const SizedBox(width: 8),
+                      Expanded(child: _postSaveBtn(
+                        label: 'Share',
+                        icon: Icons.share_rounded,
+                        colors: const [Color(0xFFF59E0B), Color(0xFFF97316)],
+                        onTap: _shareSavedReport,
+                        sl: sl,
+                      )),
+                    ]),
+                    const SizedBox(height: 10),
+                  ],
                   // ★ New Report button
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: _resetForm,
+                      onPressed: _postSaveBusy ? null : _resetForm,
                       icon: const Icon(Icons.add_circle_outline_rounded,
                         color: Colors.white, size: 20),
                       label: const Text('New Report',
