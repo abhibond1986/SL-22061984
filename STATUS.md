@@ -160,6 +160,62 @@ human hint is worth more here than any further prompt tuning.
   currently saved. Worth revisiting — a reviewer reading the report later cannot
   see what the observer said the scene was.
 
+**WSA-13 classification fixed 2026-09-02 — NOT yet compiled by anything.** Two
+defects meant the admin panel's "WSA-13 Pareto — Root Causes" chart was measuring
+artefacts rather than judgements.
+
+* **`_wsaCause` no longer defaults to `'5. Equipment failure'`.** Every reporter
+  who never opened that dropdown was filing an equipment failure, and this field
+  is charted as the root-cause Pareto — so the default was steering where safety
+  effort goes. It is now `''` (the sentinel the master-list reconciliation already
+  used) and `_submit` refuses to file without an explicit choice.
+* **Three writers were emitting values that are not WSA-13 members**, which the
+  analytics screens re-attached by fuzzy keyword matching — so the stored and the
+  charted classification were different values. `_mapToWsaCause` returned seven
+  off-list labels, `_applyHardenedV15Filters` returned `'Equipment failure'`
+  (off-list only for want of the `'5. '` prefix), and the text path assigned raw
+  model output. All three now route through a new `_canonicalWsa()` resolver:
+  exact match, then leading number, then label text with the number stripped,
+  else `''`.
+* **`_mapToWsaCause` now maps only housekeeping and returns `''` otherwise, and
+  that is deliberate.** A hazard TYPE is not a CAUSE — "fall from height" does not
+  say whether the cause was a missing procedure, absent supervision or a failed
+  anchor point. Guessing costs nothing visible and silently becomes the Pareto.
+  This trades one dropdown tap for a distribution that means something; if
+  adoption suffers, argue about the tap rather than restoring the guessing.
+* **`_buildDropdownField` gained a `requireChoice` flag, and it is load-bearing.**
+  It did `value: items.contains(value) ? value : items.first`, so blanking the
+  default would have *displayed* '1. Failure to follow procedure' while state held
+  `''` — a form that looks complete submitting blank. With the flag it renders
+  `value: null` and a "Select…" hint. Note the same latent bug still affects
+  plant and department if an admin deletes a currently-selected master value.
+* In `ai_scan_tab.dart` only the `'Multiple causes'` fallback was changed to `''`.
+  The hazard-level `wsaCause` there is **still a free-text controller**, so typos
+  and invented model strings can still reach `wsaCategory`. Constraining it to a
+  dropdown is the real fix and has not been done; `HazardValidator` penalises an
+  off-list value in the confidence score but does not correct it.
+
+A broader occupational-safety review was done the same day and is not yet actioned.
+The headline items: `rootCause` is dead schema (mapped column, i18n strings, zero
+widget references); corrective actions are pipe-joined into one string so they
+carry no owner, due date, completion record or effectiveness check; `VERIFIED` has
+no timestamp, verifier or evidence behind it; one person can report, investigate,
+close and "verify" the same near-miss because `PlantScope.canActOn` is the only
+gate; the hierarchy of control appears nowhere in the scan pipeline (it exists only
+in `local_ai.dart`, which feeds the chatbot); there is no actual-vs-potential
+severity; `SyncStatusBar` is fully built and mounted on no screen; and the
+near-miss form has one `I18n.t` call against 37 hardcoded English strings even
+though the Hindi keys exist and are complete.
+
+Two items from that review are wrong in a way worth fixing early. The
+**"LTI-Free" KPI** (`overview_tab.dart:425`) is computed from
+`severity == 'CRITICAL'` on any record, so rating a near-miss CRITICAL for its
+potential resets the lost-time-injury counter as though someone had been injured,
+and it falls back to a hardcoded `365`. And the **"Statutory Checklist — FA 1948 &
+IS 14489"** (`admin_screen.dart:7220`) is ten hardcoded rows with three hardcoded
+to display compliant regardless of data — a compliance panel that always says
+compliant is worse than no panel.
+
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
 describe what was true *that day*, not what is true now. Superseded notes have
@@ -186,16 +242,19 @@ itself across devices.
 
 ### 2. Run `supabase_visitors_setup.sql` (required for the visitor counter)
 
-**Still open — one-time, takes a minute.** Supabase → SQL Editor → New query →
-paste the whole file → Run. Idempotent, so re-running is safe.
+**DONE — verified live 2026-09-02.** `POST /rest/v1/rpc/get_visitor_stats` returns
+HTTP 200 with real data (61 unique visitors, 13 unique employees, 3 today, 335
+total visits). Nothing further is needed. The security model also verified good:
+a direct `app_visitors` select with the anon key returns `200` with `[]`, so
+aggregates are readable and rows are not enumerable.
 
-Until this is run, the "Unique Visitors" and "Signed-in Staff" cards in BOTH
-admin panels show `—`. They are deliberately never `0`, so "not set up" cannot be
-mistaken for "nobody has used the app". Nothing else breaks: the client swallows
-the missing-function error and startup is unaffected.
+The cards render in the web panel's **Users tab** (last two of the top stat row)
+and in the in-app admin screen's `_moduleOverview` KPI grid. They show `—` rather
+than `0` when the read fails, so `—` now means a client-side problem (stale
+cached `index.html`, blocked network, or an app build predating 2026-08-14) and
+not a missing migration.
 
-Verify with `select public.get_visitor_stats();` — a fresh install returns a JSON
-object of zeros.
+Re-verify at any time with `select public.get_visitor_stats();`.
 
 Note the security model, and don't "fix" it by adding a policy: the table has RLS
 on with **no anon policies at all**, and all access goes through two
@@ -399,6 +458,13 @@ Still open, both mechanical but needing a look on a real device:
 
 Audit total as of 2026-08-14: **230 failures** (84 token + 146 type floor) and
 **191 warnings**.
+
+**Re-measured 2026-09-02: 167 failures / 254 warnings.** The numbers quoted
+throughout the sections above (244/236, 245/235, 245/242) are all stale — re-run
+`python3 tools/audit_contrast.py` rather than quoting any figure in this file. The
+audit also now reports a colour-token section: `accentGlow`, `purple` and `red`
+fail contrast as text in **both** themes, so any text painted in those literal
+tokens is sub-AA everywhere. `admin_screen.dart` holds 136 of the 254 warnings.
 
 The bare `AppColors` status tokens are left deliberately failing as text so the
 audit keeps flagging any reintroduction. They are correct as **fills**.

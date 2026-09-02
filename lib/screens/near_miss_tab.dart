@@ -80,7 +80,14 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   String _plant   = 'SSO Ranchi';
   String _selectedDept = '';          // Currently selected department from dropdown
   bool   _showOtherDept = false;     // Whether "Other" is selected
-  String _wsaCause = '5. Equipment failure';
+  // Deliberately UNSET. This used to default to '5. Equipment failure', which
+  // meant every reporter who never opened the dropdown filed an equipment
+  // failure — and the admin panel charts this field as "WSA-13 Pareto — Root
+  // Causes". A default here is not a convenience, it is a fabricated root cause
+  // that steers where safety effort goes. '' is the established unset sentinel
+  // (see the master-list reconciliation in _loadMasterData) and _submit now
+  // refuses to file without an explicit choice.
+  String _wsaCause = '';
   String _severity = 'MEDIUM';
   String _obsType  = 'Unsafe Condition';
 
@@ -1157,7 +1164,9 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         'desc': 'Small diameter instrumentation line, impulse line, or process tubing tracking along the primary structural bracket alignment. Safe fixed configuration.',
         'action': 'Maintain standard periodic mechanical integrity checks on pipes and structural bracket elements.',
         'reg': 'FA 1948 S39 (Equipment Integrity & Inspection)',
-        'cause': 'Equipment failure',
+        // Was 'Equipment failure' — off-list, because the WSA-13 member carries
+        // a '5. ' prefix. Resolved so it charts as itself.
+        'cause': _canonicalWsa('5. Equipment failure'),
         'obsType': 'Unsafe Condition'
       };
     }
@@ -1339,7 +1348,10 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           }
         }
         _plant                = plantFromProfile;
-        _wsaCause             = refinedData['cause']?.toString() ?? _wsaCause;
+        // Resolved, not trusted: the model is free to invent a category string,
+        // and an unresolvable one must leave the field unset for the reporter
+        // rather than land off-list in the root-cause Pareto.
+        _wsaCause             = _canonicalWsa(refinedData['cause']?.toString() ?? '');
         _severity             = sev;
         _obsType              = refinedData['obsType']?.toString() ?? _obsType;
         _analyzing            = false;
@@ -1373,16 +1385,76 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     }
   }
 
+  /// Resolves any incoming string onto a member of the live [_wsaCauses] master
+  /// list, or returns '' (unset) if it cannot be resolved with confidence.
+  ///
+  /// Every writer of [_wsaCause] that is not the user's own dropdown must go
+  /// through here. Three separate code paths used to write values that were not
+  /// in the WSA-13 list at all — the hazard-type map below, the hardened filter
+  /// (which returned 'Equipment failure' with no number prefix), and the raw
+  /// model output on the text path. The analytics screens then had to re-attach
+  /// the strays by fuzzy keyword matching, so the stored classification and the
+  /// charted classification were different values.
+  ///
+  /// Matching is by exact string, then by leading number ('5.'), then by the
+  /// label text with the number stripped. Deliberately no keyword guessing:
+  /// a wrong cause is worse than an absent one, because an absent one prompts a
+  /// human and a wrong one silently becomes the Pareto.
+  String _canonicalWsa(String raw) {
+    final v = raw.trim();
+    if (v.isEmpty) return '';
+    if (_wsaCauses.contains(v)) return v;
+
+    String stripNum(String s) {
+      final i = s.indexOf('.');
+      final head = i > 0 ? s.substring(0, i) : '';
+      if (head.isNotEmpty && int.tryParse(head) != null) {
+        return s.substring(i + 1).trim().toLowerCase();
+      }
+      return s.trim().toLowerCase();
+    }
+
+    final dot = v.indexOf('.');
+    final lead = dot > 0 ? v.substring(0, dot) : '';
+    if (lead.isNotEmpty && int.tryParse(lead) != null) {
+      for (final c in _wsaCauses) {
+        if (c.startsWith('$lead.')) return c;
+      }
+    }
+
+    final target = stripNum(v);
+    for (final c in _wsaCauses) {
+      if (stripNum(c) == target) return c;
+    }
+    return '';
+  }
+
+  /// Maps an AI hazard category onto a WSA-13 cause, and returns '' when the
+  /// hazard type does not determine a cause.
+  ///
+  /// This deliberately maps far less than it used to. The old version turned
+  /// every hazard into one of seven labels ('Fall from Height', 'Electrical',
+  /// 'Burn / Fire', 'Gas Related', 'Machine / Equipment', 'Slip / Fall',
+  /// 'Other') — none of which were WSA-13 members. Beyond being off-list, the
+  /// mapping was a category error: a hazard TYPE is not a CAUSE. "Fall from
+  /// height" does not tell you whether the cause was a missing procedure, no
+  /// supervision, or a failed anchor point, and picking one on the reporter's
+  /// behalf fabricates the very number the Pareto chart is built from.
+  ///
+  /// So only the near-tautological case is mapped, and everything else is left
+  /// for the human who was standing there. That costs one dropdown tap and buys
+  /// a root-cause distribution that means something.
   String _mapToWsaCause(String category, String name) {
     final c = category.toUpperCase();
     final n = name.toLowerCase();
-    if (c == 'HEIGHT'    || n.contains('fall') || n.contains('height'))  return 'Fall from Height';
-    if (c == 'ELECTRICAL'|| n.contains('electric'))                      return 'Electrical';
-    if (c == 'HOT_WORK'  || n.contains('hot')  || n.contains('weld'))   return 'Burn / Fire';
-    if (c == 'GAS'       || n.contains('gas'))                           return 'Gas Related';
-    if (c == 'MACHINERY' || n.contains('machine') || n.contains('crane'))return 'Machine / Equipment';
-    if (c == 'HOUSEKEEPING'|| n.contains('spill') || n.contains('slip')) return 'Slip / Fall';
-    return 'Other';
+    if (c == 'HOUSEKEEPING' ||
+        n.contains('housekeeping') ||
+        n.contains('spill') ||
+        n.contains('debris') ||
+        n.contains('clutter')) {
+      return _canonicalWsa('8. Poor housekeeping');
+    }
+    return '';
   }
 
   String _buildSubmissionKey() {
@@ -1543,6 +1615,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         _additionalActions.any((c) => c.text.trim().isNotEmpty);
     if (!hasAction) {
       _snack('Please add at least one corrective action', AppColors.red);
+      return false;
+    }
+    // The observation category is charted as the root-cause Pareto, so it has
+    // to be a human judgement rather than whatever the field happened to be
+    // initialised to. Guarded here rather than defaulted above on purpose.
+    if (!_wsaCauses.contains(_wsaCause)) {
+      _snack('Please choose an observation category (WSA 13)', AppColors.red);
       return false;
     }
     if (await _checkDuplicate()) return false;
@@ -2449,7 +2528,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           if (_showOtherDept)
             _buildTextField('Enter Department Name', _deptOther, Icons.edit_outlined, sl),
           _buildLocationField(sl),
-          _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses, (v) => setState(() => _wsaCause = v!), sl),
+          _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses, (v) => setState(() => _wsaCause = v!), sl,
+              requireChoice: true),
           _buildDropdownField('Observation Type', _obsType, _obsTypes, (v) => setState(() => _obsType = v!), sl),
           _buildDropdownField('Initial Risk Severity', _severity, _severities, (v) => setState(() => _severity = v!), sl),
           // ★ Reference image now shown in _imageSection at top (via _imageAttachedOnly)
@@ -3042,7 +3122,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
-  Widget _buildDropdownField(String label, String value, List<String> items, ValueChanged<String?> onChanged, SL sl) {
+  /// [requireChoice] makes an unset value render as a visible "Select…" hint
+  /// instead of silently displaying items.first. Without it the fallback below
+  /// shows the user a value the state does not hold — so a form that looks
+  /// complete submits blank, or (worse) validation rejects a field the user can
+  /// plainly see is filled in.
+  Widget _buildDropdownField(String label, String value, List<String> items, ValueChanged<String?> onChanged, SL sl,
+      {bool requireChoice = false}) {
     // The admin may legitimately empty a master list. Render a disabled
     // placeholder rather than crashing on items.first.
     if (items.isEmpty) {
@@ -3067,7 +3153,12 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: DropdownButtonFormField<String>(
-        value: items.contains(value) ? value : items.first,
+        value: items.contains(value)
+            ? value
+            : (requireChoice ? null : items.first),
+        hint: requireChoice
+            ? Text('Select…', style: TextStyle(color: sl.text3, fontSize: 12))
+            : null,
         items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 12)))).toList(),
         onChanged: onChanged,
         dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,

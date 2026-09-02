@@ -1921,7 +1921,18 @@ class _AIScanTabState extends State<AIScanTab> {
       'sectionCues':     sectionCues,
       'location':        'AI scan result — $detectedSection',
       'severity':        _overallRisk,
-      'wsaCategory':     firstHazardMap['wsaCause']?.toString() ?? 'Multiple causes',
+      // Was `?? 'Multiple causes'`, which is not a member of the WSA-13 master
+      // list, so it landed in the admin panel's "WSA-13 Pareto — Root Causes"
+      // as a stray the analytics screens had to fuzzy-match back. '' means
+      // honestly unclassified, which a chart can show as such.
+      //
+      // NOTE: this only fixes the fallback. The hazard-level `wsaCause` above it
+      // is still a free-text controller (see the editable hazard sheet), so a
+      // typo or an invented model string can still reach this field. Making that
+      // a dropdown constrained to the master list is the real fix and has not
+      // been done — HazardValidator currently penalises an off-list value in the
+      // confidence score but does not correct it.
+      'wsaCategory':     firstHazardMap['wsaCause']?.toString() ?? '',
       'obsType':         'N/A',
       'summary':         _result!['summary']?.toString() ?? '',
       'desc':            _result!['summary']?.toString() ?? '',
