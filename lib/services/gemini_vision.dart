@@ -703,6 +703,13 @@ HOW TO USE IT:
         final groqKey = (prefs.getString('groq_api_key') ?? '').trim();
         if (groqKey.isEmpty) {
           print('GeminiVision: ⏩ Tier 0 skipped — no Groq key on device');
+        } else if (_groqInCooldown) {
+          // Groq's free TPM allowance is a rolling minute, so back-to-back scans
+          // (the "Re-analyse" button is one tap) cannot both fit. Skip rather
+          // than spend an attempt learning that again.
+          print('GeminiVision: ⏩ Tier 0 skipped — Groq rate-limited '
+              '${DateTime.now().difference(_groqRateLimitedAt!).inSeconds}s ago, '
+              'cooling down for ${_kGroqRateLimitCooldown.inSeconds}s');
         } else {
           print('GeminiVision: ▶ Tier 0 Groq $_groqQwenVisionModel...');
           try {
@@ -1495,6 +1502,98 @@ HOW TO USE IT:
   /// Gemini tiers, which is where the interesting failures are.
   static int? _lastGroqStatus;
 
+  // ── GROQ FREE-TIER TOKENS-PER-MINUTE BUDGET ───────────────────────────────
+  //
+  // MEASURED FROM A REAL 413, 2026-09-03, on a live web scan:
+  //   "Request too large for model `qwen/qwen3.6-27b` ... on tokens per minute
+  //    (TPM): Limit 8000, Requested 8995"
+  //
+  // The arithmetic is the whole finding: 8995 - 4096 = 4899. The prompt, the KB
+  // context and the 900px image together are only ~4,900 tokens. The other 4,096
+  // was `max_tokens` — GROQ COUNTS THE COMPLETION RESERVATION AGAINST TPM BEFORE
+  // GENERATING A SINGLE TOKEN. Nearly half of the request that blew the limit was
+  // space that was reserved and never used.
+  //
+  // So this is NOT the ~4MB base64 payload cap the error path below warns about,
+  // and shrinking the image would not have fixed it. Anyone reading a 413 from
+  // Groq should check whether the message says "tokens per minute" before
+  // touching image quality.
+  static const int _kGroqTpmLimit = 8000;
+
+  /// Completion cap for the GROQ call only. OpenRouter stays at 4096.
+  ///
+  /// CALIBRATED, NOT GUESSED — and the calibration says this tier is marginal.
+  /// From the same 413: input was 4,899 tokens. The prompt at that moment was
+  /// ~22,400 chars (17,521-char template + obsTypeGuidance + a 4,290-char KB
+  /// block), and the image was only 3,826 bytes — a small crop — so essentially
+  /// all 4,899 tokens were TEXT, giving ~4.5 chars/token for this prompt.
+  ///
+  /// That leaves 8000 - 4900 = ~3,100 tokens for the image and the completion
+  /// combined. A full-size scan image (900px long edge, quality 72) is ~80-120KB
+  /// rather than 3.8KB and will itself cost roughly 700-1,300 tokens. So 2,000 is
+  /// the largest completion cap that plausibly fits a REAL photo, and even that
+  /// has little margin.
+  ///
+  /// BE CLEAR-EYED: the dominant cost is the 17.5k-char prompt, which is the
+  /// safety design of the feature and is not negotiable. Groq's free 8000 TPM is
+  /// simply a tight fit for this request. Expect Tier 0 to still 413 sometimes on
+  /// large images. That is why the guards below exist and why every failure here
+  /// is swallowed — the durable fixes are Groq's paid Dev Tier or dropping this
+  /// tier, not shaving this number further.
+  ///
+  /// THE TRADE-OFF, stated so nobody has to rediscover it: a scene with many
+  /// hazards can now run out of completion budget on this tier and return
+  /// truncated JSON. That is survivable and not a correctness risk —
+  /// [_parseAIResponse] fails, [_isValidResult] rejects it, and the chain falls
+  /// through to Tier 1 exactly as it did when this tier 413'd. The cost of a
+  /// truncation is one wasted attempt, not a wrong hazard report. Raising this
+  /// back towards 4096 trades that away for guaranteed 413s instead.
+  static const int _kGroqMaxTokens = 2000;
+
+  /// Chars per token for this prompt, derived from the 413 above (~22,400 chars
+  /// ≈ 4,899 tokens). Not the generic 4.0: this prompt is dense structured text
+  /// with heavy repetition, which tokenises better than prose. Using 4.0 here
+  /// would overestimate by ~10% and start skipping requests that do fit.
+  static const double _kGroqCharsPerToken = 4.5;
+
+  /// Estimated cost of the prompt TEXT plus the completion reservation.
+  ///
+  /// DELIBERATELY EXCLUDES THE IMAGE, which makes this an UNDERESTIMATE — and
+  /// that asymmetry is the design, not an oversight. The two ways to be wrong are
+  /// not equally bad: skipping a request that would have succeeded silently loses
+  /// the fastest tier on every scan and is invisible, whereas attempting one that
+  /// fails costs a single fast 413 that is swallowed and then suppressed for a
+  /// minute by [_groqInCooldown]. So this gate only fires when the request cannot
+  /// fit even before the image is counted, and real 413s are left to do the rest.
+  ///
+  /// Image tokens are excluded rather than allowanced because there is exactly ONE
+  /// calibration point and its image was 3,826 bytes — far too small to separate
+  /// an image term from the text term. Inventing a per-pixel constant from that
+  /// would be a guess dressed as a measurement. Groq publishes no figure for this
+  /// model and the sandbox cannot query it without a key.
+  ///
+  /// The base64 length is likewise NOT an input: an image is charged as image
+  /// tokens, not as the length of its encoding.
+  static int _estimateGroqTokens(String prompt) =>
+      (prompt.length / _kGroqCharsPerToken).ceil() + _kGroqMaxTokens;
+
+  /// When Groq last refused for a rate/size reason (413 or 429).
+  ///
+  /// TPM is a ROLLING per-minute budget, so a request that fits still leaves
+  /// room for only about one scan per minute. Without this, tapping "Re-analyse"
+  /// spends an attempt discovering the same refusal every time. A refusal is
+  /// cheap (it returns immediately rather than burning [kAttemptTimeout]), which
+  /// is why the penalty is a short skip and not a longer circuit-break: the cost
+  /// of being wrong here is losing the fastest tier for a minute.
+  static DateTime? _groqRateLimitedAt;
+  static const Duration _kGroqRateLimitCooldown = Duration(seconds: 60);
+
+  static bool get _groqInCooldown {
+    final t = _groqRateLimitedAt;
+    if (t == null) return false;
+    return DateTime.now().difference(t) < _kGroqRateLimitCooldown;
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  TIER 0 — GROQ VISION (api.groq.com, OpenAI-compatible)
   // ══════════════════════════════════════════════════════════════════════════
@@ -1517,9 +1616,28 @@ HOW TO USE IT:
   static Future<Map<String, dynamic>?> _callGroqVision(
       Uint8List bytes, String apiKey, String model,
       {String? kbContext, String sceneContext = ''}) async {
-    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    final base64Image = base64Encode(bytes);
+    final dataUrl = 'data:image/jpeg;base64,$base64Image';
     final String prompt = await resolvedHazardPrompt(
         kbContext: kbContext ?? '', sceneContext: sceneContext);
+
+    // PRE-FLIGHT. A request over the TPM limit is refused whole, so sending it
+    // buys nothing but latency. Returning null here is indistinguishable to the
+    // caller from any other Tier 0 failure, which is the point — the chain
+    // continues to Tier 1 either way.
+    //
+    // The estimate ignores image tokens (see [_estimateGroqTokens]), so tripping
+    // this means the TEXT alone does not fit. The actionable cause is almost
+    // always an oversized Knowledge Bank: it is the only part of this prompt an
+    // admin can grow, which is why the message names it.
+    final estimate = _estimateGroqTokens(prompt);
+    if (estimate > _kGroqTpmLimit) {
+      print('GeminiVision: ⏩ Tier 0 skipped — prompt text alone is ~$estimate '
+          'tokens (${prompt.length} chars + $_kGroqMaxTokens reserved), over the '
+          'Groq TPM limit of $_kGroqTpmLimit before the image is even counted. '
+          'Trim the Knowledge Bank context uploaded in the admin panel.');
+      return null;
+    }
 
     final requestBody = {
       'model': model,
@@ -1532,7 +1650,10 @@ HOW TO USE IT:
           ]
         }
       ],
-      'max_tokens': 4096,
+      // NOT 4096 like the OpenRouter tiers. See [_kGroqMaxTokens] — on Groq this
+      // number is charged against the per-minute budget whether it is used or
+      // not, and 4096 alone was half of the allowance.
+      'max_tokens': _kGroqMaxTokens,
       // Matches the OpenRouter call so the two tiers are comparable in the run
       // log rather than differing by decoding settings as well as by model.
       'temperature': 0,
@@ -1551,6 +1672,12 @@ HOW TO USE IT:
     ).timeout(kAttemptTimeout);
 
     _lastGroqStatus = response.statusCode;
+    // 413 = this request did not fit the per-minute budget. 429 = the budget is
+    // spent by earlier requests. Both mean "not now", and both are worth
+    // remembering for a minute so a rapid Re-analyse does not rediscover them.
+    if (response.statusCode == 413 || response.statusCode == 429) {
+      _groqRateLimitedAt = DateTime.now();
+    }
     if (response.statusCode == 200) {
       final data =
           jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
@@ -1566,9 +1693,12 @@ HOW TO USE IT:
     //   404 model_not_found  → the slug is dead or not on this account's tier.
     //     This is what took out the near-miss text model twice; assume it will
     //     happen here too and check the message before blaming the network.
-    //   413 / 400 too large  → Groq caps base64 image payloads (~4MB). The
-    //     scan path already downscales, but a future change to that could put
-    //     this tier over the line while OpenRouter still accepted the image.
+    //   413 / 400 too large  → READ THE MESSAGE, there are two distinct causes
+    //     and they have opposite fixes. "tokens per minute (TPM)" means the
+    //     per-minute budget, which `max_tokens` is charged against before
+    //     generation — see [_kGroqTpmLimit]; a smaller image does not help.
+    //     Only a message about payload size means the ~4MB base64 cap, which the
+    //     scan path's downscale already stays well under.
     String detail = '';
     try {
       final err = jsonDecode(response.body) as Map<String, dynamic>;

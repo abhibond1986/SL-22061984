@@ -949,6 +949,65 @@ diagnostics (1582 unique `code|message` pairs either side, baseline built by
 the security work is now committed, which accounts for that entry). `node --check
 apps_script_v14.js` passes. No model ID was exercised against a live provider.
 
+## 2026-09-03 — Groq Tier 0 hit the free TPM ceiling, and `max_tokens` was half the bill
+
+The new Tier 0 was live on the web build and failing on every scan. The console
+showed `Groq HTTP 413 on qwen/qwen3.6-27b — Request too large ... on tokens per
+minute (TPM): Limit 8000, Requested 8995`, then `Tier 0 Groq returned no usable
+hazards (HTTP 413) — continuing to Tier 1`, then `[1/2] OpenRouter SUCCESS in
+19021ms`. So the chain degraded exactly as designed and the user still got three
+hazards; what was lost was the tier, not the scan.
+
+**The finding is the arithmetic: 8995 − 4096 = 4899.** The prompt, KB context and
+image together were only ~4,900 tokens. The other 4,096 was `max_tokens` — Groq
+charges the completion reservation against TPM *before generating a single token*.
+Nearly half of the request that blew the limit was space reserved and never used.
+
+This is **not** the ~4MB base64 payload cap that the error-handling comment in
+`_callGroqVision` guessed at, and shrinking the image would not have helped — the
+image in that run was 3,826 bytes. That comment now says to read the message
+first, because the two causes of a 413 have opposite fixes.
+
+Changes, all confined to the Groq tier (`gemini_vision.dart`):
+
+* `_kGroqMaxTokens = 2000`, used only by `_callGroqVision`. OpenRouter stays at
+  4096. Calibrated rather than guessed: input was 4,899 tokens for a ~22,400-char
+  prompt (17,521-char template + `obsTypeGuidance` + a 4,290-char KB block) and a
+  3.8KB image, so essentially all of it was text at **~4.5 chars/token** — not the
+  generic 4.0, which would overestimate by ~10% and start skipping requests that
+  do fit. That leaves ~3,100 tokens for image plus completion, and a real
+  900px/q72 scan photo (~80–120KB, not 3.8KB) will itself cost roughly 700–1,300.
+* A **pre-flight estimate** that returns `null` before the HTTP call when the
+  request cannot fit. It **deliberately excludes image tokens**, making it an
+  underestimate. That asymmetry is the design: a false skip silently loses the
+  fastest tier on every scan and is invisible, whereas a false attempt costs one
+  fast 413 that is swallowed and then suppressed for a minute. Image tokens are
+  excluded rather than allowanced because there is exactly one calibration point
+  and its image was too small to separate an image term from the text term —
+  inventing a per-pixel constant from it would be a guess dressed as a
+  measurement. In practice the gate fires above ~27,000 prompt chars, so the KB
+  context can grow to ~9,000 chars before Tier 0 switches itself off; the log
+  message names the Knowledge Bank because it is the only part of this prompt an
+  admin can grow.
+* A **60s cooldown** recorded on 413/429 and checked in the Tier 0 gate. TPM is a
+  rolling per-minute budget, so a request that fits still leaves room for only
+  about one scan per minute, and "Re-analyse" is one tap.
+
+**Be clear-eyed about what this does not fix.** The dominant cost is the
+17,521-char prompt, which is the safety design of the feature and is not
+negotiable, and the shared-prompt rule forbids giving Tier 0 a trimmed copy.
+Groq's free 8000 TPM is a tight fit for this request, so **Tier 0 will still 413
+sometimes on large images.** The guards make that cheap rather than making it
+stop. The durable options are Groq's paid Dev Tier or dropping Tier 0 and
+returning MiniMax to primary; the admin chose the guards for now, knowing this.
+
+Verified: full-tree analyzer baseline diff is **exactly zero** new and zero
+resolved diagnostics (1,595 unique `code|message` pairs either side, baseline
+built by `git archive HEAD` at `2f48889`; the count rose from 1,582 because the
+model work is now committed). Not compiled, and the 2,000-token cap has not been
+exercised against a live Groq response, so the truncation trade-off above is
+reasoned, not observed.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has
