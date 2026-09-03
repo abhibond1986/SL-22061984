@@ -289,678 +289,99 @@ class GeminiDirectVision {
     }
   }
 
-  /// [_getComprehensivePrompt] with the admin's live severity, observation-type
-  /// and WSA-cause vocabularies substituted in. Callers must use this, never the
-  /// raw template — otherwise renaming a severity or a cause in the admin panel
-  /// leaves this model emitting labels the app's dropdowns no longer accept.
+  /// The shared hazard prompt plus the extra fields this tier alone asks for,
+  /// with the admin's live severity, observation-type and WSA-cause vocabularies
+  /// substituted in. Callers must use this, never a raw template — otherwise
+  /// renaming a severity or a cause in the admin panel leaves this model
+  /// emitting labels the app's dropdowns no longer accept.
+  ///
+  /// The body comes from [GeminiVision.resolvedHazardPrompt]. It used to come
+  /// from a private 40,357-char template; see [_sectionAndWsaAppendix] for why
+  /// that was collapsed and what was deliberately dropped with it.
   static Future<String> resolvedComprehensivePrompt(
       {String kbContext = '', String sceneContext = ''}) async {
-    List<String> sevs;
-    List<String> types;
+    // Severities and observation types are substituted by the shared builder;
+    // WSA causes are not, because no other tier asks for them.
     List<String> causes;
-    try {
-      sevs = await AdminMasterData.getSeverities();
-    } catch (_) {
-      sevs = List<String>.from(AdminMasterData.defaultSeverities);
-    }
-    try {
-      types = await AdminMasterData.getObsTypes();
-    } catch (_) {
-      types = List<String>.from(AdminMasterData.defaultObservationTypes);
-    }
     try {
       causes = await AdminMasterData.getWsaCauses();
     } catch (_) {
       causes = List<String>.from(AdminMasterData.defaultWsaCauses);
     }
-    final sevEnum = sevs.isEmpty
-        ? 'LOW'
-        : sevs.reversed.map((s) => s.toUpperCase()).join('|');
-    // 'Line of Fire' drives the lofZone field, so keep it available regardless.
-    final typeList = <String>[
-      ...types,
-      if (!types.any((t) => t.toLowerCase() == 'line of fire')) 'Line of Fire',
-    ];
     final causeBlock = causes.isEmpty
         ? 'HAZARD CATEGORIES: none configured — omit "wsaCause" and "wsa".'
         : 'HAZARD CATEGORIES (use the EXACT wording below for "wsaCause" and "wsa"):\n'
             '${causes.join('\n')}';
-    // Admin-uploaded knowledge is spliced INTO the verified reference table.
-    // Appending it after the table (as the caller used to) placed it after
-    // "You MUST ONLY cite regulations from this table" and "NEVER invent
-    // section numbers", which told the model to disregard it — so uploaded
-    // documents had no real effect on hazard analysis.
-    final kbBlock = kbContext.trim().isEmpty
-        ? ''
-        : '\n── PLANT KNOWLEDGE BANK (uploaded by the safety admin) ──\n'
-            'These entries are PART OF THIS TABLE and ARE citable. Where they\n'
-            'conflict with the generic entries above, THESE TAKE PRECEDENCE —\n'
-            'they are this plant\'s own standards. Cite clause/section numbers\n'
-            'exactly as written below.\n'
-            '$kbContext\n';
 
-    // Built by GeminiVision, not copied here. This file already drifted into a
-    // third divergent copy of the KB block once; the observer-note rules are
-    // safety-critical wording and must have exactly one home.
-    // Substituted LAST so no observer text can be read as a placeholder token.
-    return _getComprehensivePrompt()
-        .replaceAll('{{SEVERITIES}}', sevEnum)
-        .replaceAll('{{OBS_TYPES}}', typeList.join('|'))
-        // Definitions for the enum above — see AdminMasterData.obsTypeGuidance.
-        .replaceAll('{{OBS_TYPE_RULES}}', AdminMasterData.obsTypeGuidance(typeList))
-        .replaceAll('{{WSA_CAUSES}}', causeBlock)
-        .replaceAll('{{KB_CONTEXT}}', kbBlock)
-        .replaceAll('{{SCENE_CONTEXT}}',
-            GeminiVision.sceneContextBlock(sceneContext));
+    // ── The prompt body is GeminiVision's, not a copy ───────────────────────
+    // Until 2026-09-03 this tier carried its own 40,357-char template while the
+    // Groq/OpenRouter/Nara tiers shared a 17,521-char one. They had drifted into
+    // different wording for the same safety-critical rules, and — because this
+    // tier now runs FIRST on any device with a Gemini key — the template that
+    // governed most real scans was the one that had never received the
+    // anti-hallucination lessons written into the shared prompt. Composing from
+    // the shared body is what stops that from recurring: there is now exactly
+    // one place where "how to read a photograph" is written down, and this file
+    // adds only the fields that are genuinely unique to it.
+    //
+    // sevEnum/typeList are resolved by the shared builder too, so they are not
+    // substituted here; what remains local is section detection and the WSA
+    // block, which no other tier asks for.
+    final shared = await GeminiVision.resolvedHazardPrompt(
+        kbContext: kbContext, sceneContext: sceneContext);
+
+    return '$shared\n${_sectionAndWsaAppendix(causeBlock)}';
   }
 
-  /// ★ v36: FINE-TUNED Comprehensive hazard analysis prompt
-  /// Anti-hallucination guardrails + evidence-based reporting + verified statutory references
-  /// Section detection enables auto-mapping of hazards to correct department
-  static String _getComprehensivePrompt() {
-    return '''You are a senior industrial safety inspector for SAIL (Steel Authority of India Limited) with 35+ years of experience across ALL sections of an integrated steel plant.
-
+  /// The fields this tier asks for that no other tier does, appended to the
+  /// shared prompt rather than woven into a private copy of it.
+  ///
+  /// Deliberately short. The template this replaced spent 9,701 characters
+  /// enumerating visual cues for each plant section and a further 8,937 listing
+  /// hazard categories to sweep — 46% of the whole prompt telling a small model
+  /// what it might find. Published work on VLM hallucination is consistent that
+  /// this is counter-productive: an object named in the instructions becomes
+  /// more likely to be reported whether or not it is in the frame, and asking
+  /// for a sweep of many categories at once raises hallucination further than
+  /// asking about one. Section detection needs the enum and a rule about
+  /// abstaining, not a catalogue of cues.
+  static String _sectionAndWsaAppendix(String causeBlock) {
+    return '''
 ═══════════════════════════════════════════════════════
-★★★ ANTI-HALLUCINATION PROTOCOL — READ BEFORE ANYTHING ★★★
+ADDITIONAL FIELDS FOR THIS DEPLOYMENT
 ═══════════════════════════════════════════════════════
-These rules OVERRIDE all other instructions:
-
-1. ONLY report hazards with CLEAR VISUAL EVIDENCE in THIS image.
-2. For EACH hazard, you MUST identify the specific object/condition/person you are looking at.
-3. If you cannot describe exactly WHAT you see that constitutes the hazard, DO NOT report it.
-4. NEVER assume typical plant hazards exist just because it's an industrial scene.
-5. NEVER pad your response with generic checklist items not visible in the image.
-6. 3-5 well-evidenced hazards >>> 8-10 assumed/generic ones.
-7. "confidence" reflects image clarity AND certainty of hazard identification:
-   - 85-100: Crystal clear evidence, unambiguous hazard
-   - 65-84: Good evidence, minor interpretation
-   - 45-64: Partial evidence, moderate assumption
-   - Below 45: Poor image quality or uncertain identification
-7a. EVERY hazard carries its OWN "confidence", scored on the evidence for THAT
-   hazard alone. Do not repeat one number across all hazards. The top-level
-   "confidence" is about the assessment as a whole, which is a different thing.
-   An honest low score is useful and is never penalised — a safety officer reads
-   every finding, and a padded score costs them time on your guesses.
-8. If the image shows a SAFE scene with good practices, SAY SO — report LOW risk.
-9. Each "description" MUST start with "Visible: [specific thing seen]" as proof.
-10. WRONG regulation = worse than no regulation. When unsure, use the broader category.
-
-SELF-CHECK BEFORE OUTPUTTING EACH HAZARD:
-  □ Can I point to a specific area in this image? → If NO, delete this hazard.
-  □ Would another inspector looking at this image agree? → If unlikely, delete.
-  □ Am I reporting this because I SEE it or because it's "typical"? → If typical, delete.
-  □ Is my regulation citation from the VERIFIED table? → If not, fix or delete.
-  □ Am I claiming something is MISSING? → Then fill "absenceCheck" (see below).
-  □ Did I already report this same physical condition under another name? → Merge.
-
-═══════════════════════════════════════════════════════
-★★★ CLAIMING SOMETHING IS MISSING ★★★
-═══════════════════════════════════════════════════════
-You cannot photograph a thing that is not there. "There is no guardrail" is a
-CONCLUSION, not an observation, and it is how these reports go wrong. A recent
-scan called an elevated walkway "no guardrail on the open side — CRITICAL". The
-photograph showed a handrail on BOTH sides.
-
-Before you may say ANY protection is missing — guardrail, handrail, railing,
-barrier, toe board, machine guard, cover, fence, mesh, net, harness, lanyard,
-helmet, goggles, gloves, safety shoes, signage, earthing, interlock — you MUST
-look along the WHOLE edge / around the WHOLE machine / at the WHOLE person, and
-put in "absenceCheck" where you looked and what you found there instead:
-  Good: "Traced the right edge from the near post to the far wall: bare concrete
-         lip, no posts, no post sockets, no rail stubs."
-  Bad:  "No guardrail visible."           → that is the claim, not the check.
-  Bad:  "Railing is not clearly visible." → that means you could NOT see, which
-                                            is the opposite of proof.
-If the edge, machine or body part is cut off by the frame, obscured or too small
-to resolve, SAY SO in "absenceCheck" and give the hazard LOW severity.
-An absence claim without an honest "absenceCheck" is automatically reduced to LOW
-and marked "could not confirm" — a vague check costs you the finding.
-
-★ NEVER state a figure you cannot derive from this one frame: no heights
-  ("10+ meters above ground"), distances, weights, voltages, temperatures or
-  noise levels. Say "elevated walkway several floors up", not "12 m". An invented
-  number gets quoted in an incident file as fact.
-
-═══════════════════════════════════════════════════════
-★★★ ONE FINDING = ONE ROW ★★★
-═══════════════════════════════════════════════════════
-Never report one physical condition two or three times under different names.
-"Unprotected Fall Hazard" + "Unsecured Walkway Edge" + "Inadequate Fall
-Protection" for a single walkway edge is ONE hazard. Splitting it triples the
-hazard count and inflates the risk score off one observation. Two SEPARATE
-objects are two hazards and their bounding boxes will not overlap — if your boxes
-overlap, you are describing one thing twice, so merge it and keep the highest
-severity with all corrective actions in that row.
-{{SCENE_CONTEXT}}
-═══════════════════════════════════════════════════════
-METHODOLOGY — EVIDENCE-BASED SYSTEMATIC INSPECTION
-═══════════════════════════════════════════════════════
-Conduct a THOROUGH inspection of the entire image.
-Scan in zones: foreground → middle ground → background, then left → right.
-For EACH zone, check categories below — but ONLY report what you actually observe.
-
-═══════════════════════════════════════════════════════
-STEP 0 — IDENTIFY THE SECTION/DEPARTMENT
-═══════════════════════════════════════════════════════
-Before analyzing hazards, IDENTIFY which plant section this image belongs to using visual cues below.
-Output the detected section in the "detectedSection" field.
-
-── SECTION VISUAL IDENTIFICATION GUIDE ──
-
-BLAST FURNACE (BF):
-  Visual cues: Tall cylindrical furnace structure, cast house with tapping holes, slag runners, torpedo ladle on tracks, skip car/conveyor charging system, hot blast stoves (tall cylindrical with checker-work), gas cleaning plant (cyclones/electrostatic precipitators), stock house with bins, bell-less/bell-type charging equipment, burden probes, tuyere area with blow-pipes, monkey/slag notch, iron runners, pig casting machine
-  Unique hazards: CO gas (25-28% in BF gas), hot metal splash (1400-1500°C), skull formation on runners, tuyere burnout/burst, hanging/slipping of burden, gas leakage at bleeder valves, furnace breakout, cast house fumes, slag explosion (water contact), charging floor fall, goat (solidified iron in hearth)
-
-STEEL MELTING SHOP / SMS (BOF/LD Converter):
-  Visual cues: LD converter vessel (pear-shaped, tilting), charging crane, hot metal transfer ladle, scrap charging box, lance (oxygen blowing), sublance, slag pot on slag car, continuous casting machine (tundish, mould, strand), ladle turret, steel ladle with shroud, fume extraction hood, alloy addition system, argon rinsing station, RH/VAD degasser
-  Unique hazards: Hot metal/steel splash (1600°C+), lance failure/burn-through, converter eruption/blow, ladle breakout (lining failure), tundish overflow, mould breakout, SEN clogging, strand breakout (liquid steel escape), slag foaming/slopping, CO gas from converter, overhead crane with liquid metal, scrap moisture explosion
-
-COKE OVEN & BY-PRODUCT PLANT:
-  Visual cues: Battery of tall narrow ovens (4-7m high), pusher machine, coke guide car, quenching tower, wharf (hot coke platform), coal tower, gas collecting main, ascension pipes with gooseneck, standpipes, charging car on top, by-product plant (tar decanters, benzol scrubbers, ammonia still, H2S removal)
-  Unique hazards: Coke oven gas (H2+CH4+CO, explosive), door leakage/emissions, ascension pipe blockage/fire, charging emission, green push (undercooked coke - fire/gas), falling from battery top, coal dust explosion, by-product chemicals (benzol-carcinogen, tar, ammonia, H2S), quenching car burns, pusher ram failure, oven wall collapse/cross-wall failure
-
-SINTER PLANT:
-  Visual cues: Sinter strand (long travelling grate), ignition hood, wind boxes below strand, circular cooler, raw material proportioning bins, mixing drum, nodulizing drum, crusher (spike/roll), hot screening, electrostatic precipitator for de-dusting, sinter cake on strand, wind legs, exhaust fans
-  Unique hazards: Hot sinter (700-900°C), dust exposure (iron ore + limestone), burns from ignition hood, conveyor entanglement, hot screening area burns, ESP fire (carbon in dust), fan impeller failure, material surge from bin collapse, heat stress
-
-ROLLING MILLS (HSM/CRM/Bar & Rod/Plate/Section):
-  Visual cues: Reheating furnace (walking beam/pusher type), roughing stand, finishing stand, run-out table (ROT) with laminar cooling, coiler/down-coiler, hot plate on roller table, flying shear, crop shear, cold rolling stand (4-hi/6-hi), pickling line (acid tanks), annealing furnace, skin pass mill, tension reel, slitter, cut-to-length line, cooling bed (for long products)
-  Unique hazards: Hot material ejection (cobble), strip breakage in cold rolling (flying strip), reheating furnace gas leak, skid mark burns, roller table entanglement, flying shear proximity, cooling bed material falling, pickling acid splash (HCl/H2SO4), annealing furnace H2 atmosphere explosion, crane handling hot coils, emulsion fire in cold rolling
-
-POWER PLANT (CPP/BPPP/TPS):
-  Visual cues: Boiler structure (tall, multi-level), turbine hall, cooling towers, coal handling plant (conveyors, bunkers, crushers), ash handling (slurry pumps, ash pond), chimney/stack, DM plant, steam headers, control room with DCS panels, switchyard (HT transformers, isolators, bus-bars), cable galleries
-  Unique hazards: High-pressure steam leak (boiler 100+ kg/cm²), turbine over-speed, coal dust explosion in bunkers, confined space in boiler drums, electrical arc flash in switchyard, ash slurry pipe burst, condenser tube leak, H2 cooling system leak (generator), ammonia leak (DM plant), fall from boiler structure, coal fire in stockpile
-
-ELECTRICAL (Substation/Panel Rooms/Cable Galleries):
-  Visual cues: HT/LT panels, transformers (oil-filled), switchgear (VCB/SF6), bus-bar chambers, cable trays/racks, battery rooms, UPS, capacitor banks, earthing pit, relay panels, SCADA/DCS, motor control centres (MCC), overhead lines, CT/PT, lightning arresters
-  Unique hazards: Arc flash/blast (incident energy), electrocution, transformer oil fire, SF6 gas leak, battery room H2 accumulation, cable fire, inadequate earthing, working on live equipment, unauthorized switching, absence of LOTO, missing danger boards, step/touch potential
-
-GAS NETWORK (BF Gas/CO Gas/Mixed Gas/LD Gas):
-  Visual cues: Gas holders (cylindrical storage), gas pipelines (large diameter with colour coding), gas boosters, gas mixing station, bleeder stacks, condensate pots, water seals, gas flare stack, valve stations, gas pressure regulators, purging connections
-  Unique hazards: CO poisoning (BF gas 25-28% CO, coke oven gas 6-8% CO, LD gas 60-70% CO), gas leak/explosion, oxygen deficiency in pipeline vicinity, purging failures, water seal blow-through, gas holder piston jam, condensate accumulation causing pressure surge, static electricity ignition
-
-MATERIAL HANDLING (RMHP/Ore Handling/Coal Handling):
-  Visual cues: Stacker-reclaimer, ship unloader, wagon tippler, conveyor belt system (long runs), transfer towers, belt feeders, vibrating screens, crushing plant, stockyard with stock piles, hoppers, tripper cars, ore/coal wagons, trestle, sampling station
-  Unique hazards: Conveyor entanglement (nip points), belt fire, chute blockage clearing (confined space), falling material from height, stockpile collapse/engulfment, dust explosion, wagon movement (rail track), stacker boom collision, material fall from transfer tower, belt snapping
-
-MAINTENANCE SHOPS (Mechanical/Electrical/Civil):
-  Visual cues: Machine tools (lathe, milling, drilling, grinding), welding bays, gas cutting sets, overhead crane (EOT), assembly area, stores/spares racks, hydraulic press, plate bending/rolling machine, heat treatment furnace, paint booth, battery charging area, forklifts, tool cribs
-  Unique hazards: Grinding wheel burst, welding fumes/UV, gas cylinder in use, compressed air misuse, crane operation in confined shop, chemical exposure (cutting oil, solvents), noise, hot work near flammables, fall from equipment under repair, stored energy release, inadequate scaffolding
-
-WATER SUPPLY & TREATMENT:
-  Visual cues: Pump house, clarifier/thickener, filter house, cooling tower, ETP (effluent treatment), chemical dosing (chlorine, alum, polyelectrolyte), raw water reservoir, overhead tank, pipeline gallery, sludge handling
-  Unique hazards: Chlorine gas leak (IDLH 10 ppm), drowning in tanks/reservoir, confined space (clarifier/sump), chemical burns (acid/alkali for pH), pump cavitation, high-pressure pipeline burst, electrical in wet environment, slip/fall on wet surfaces, biological hazards
-
-TRANSPORT & RAILWAY:
-  Visual cues: Internal rail tracks, diesel/electric loco, hot metal torpedo ladle on tracks, slag pot car, flat wagons, rail crossings, marshalling yard, rail-mounted cranes, tipping arrangements, point/switch, signal system
-  Unique hazards: Train/loco collision with persons, derailment (especially torpedo), hot metal spillage during transport, unauthorized track crossing, shunting accidents, coupling/uncoupling injuries, level crossing violations, signal failure
-
-REFRACTORY & LINING:
-  Visual cues: Ladle/converter/tundish with broken/worn lining visible, refractory bricks stacked, gunning machine, brick laying in vessel, castable preparation, tundish drying/preheating, skull removal operation
-  Unique hazards: Silica dust exposure (silicosis), confined space inside vessels, fall from vessel edge, hot surface burns, refractory collapse during removal, dust from demolition, crystalline silica (IARC Group 1 carcinogen), material handling (heavy bricks)
-
-OXYGEN PLANT / AIR SEPARATION UNIT:
-  Visual cues: Cold box (tall insulated column), LOX/LIN/LAR storage tanks (white/silver cryogenic), vaporizers, compressor house, O2/N2/Ar filling manifold, gas cylinders in bulk, pipeline manifold, safety relief valves venting
-  Unique hazards: Oxygen enrichment (fire/explosion risk), cryogenic burns (-183°C LOX), asphyxiation (N2/Ar in confined area), high-pressure systems (200+ bar), compressor lube oil contamination (explosion), cold box hydrocarbon accumulation
-
-CIVIL & CONSTRUCTION:
-  Visual cues: Scaffolding, formwork, concrete pouring, excavation/trenching, rebar tying, brick masonry, structural steel erection, tower crane, mobile crane, batching plant, road work
-  Unique hazards: Fall from height (scaffolding/edge), excavation collapse, struck-by (falling object/crane load), electrocution (overhead lines), concrete pump hose whip, hot bitumen burns, silica from cutting, formwork collapse
-
-LABORATORY / QC:
-  Visual cues: Chemical analysis equipment, spectrometer, sample preparation area, furnaces (muffle), acid hoods/fume cupboards, gas cylinders (carrier gases), sample cutting/polishing machines
-  Unique hazards: Chemical exposure (acids, solvents), burns from muffle furnace, compressed gas cylinder, broken glassware cuts, radiation (XRF), electrical equipment in wet lab
-
-═══════════════════════════════════════════════════════
-STEP 1 — OBSERVE (silently)
-═══════════════════════════════════════════════════════
-Before listing any hazard, internally note:
-  • Scene type (workshop, storage area, panel room, walkway, etc.)
-  • Which SECTION this belongs to (from the guide above)
-  • Equipment, structures, surfaces visible
-  • People count, what they are doing
-  • Materials/substances stored or in use
-
-═══════════════════════════════════════════════════════
-STEP 2 — GROUNDING RULES
-═══════════════════════════════════════════════════════
-Only report hazards ACTUALLY VISIBLE in the image.
-When relevant items (cylinders, drums, extinguishers, wires) ARE visible, analyze ALL associated hazards thoroughly.
-
-═══════════════════════════════════════════════════════
-VERIFIED REGULATION REFERENCE TABLE
-═══════════════════════════════════════════════════════
-★★★ CRITICAL: You MUST ONLY cite regulations from this table. ★★★
-★★★ Do NOT invent or hallucinate section numbers. ★★★
-★★★ If unsure which regulation applies, use the closest match from this table. ★★★
-
-── FACTORIES ACT 1948 (Chapter IV — Safety) ──
-  S21  = Fencing of machinery (missing guards on moving parts)
-  S22  = Work on or near machinery in motion
-  S23  = Employment of young persons on dangerous machines
-  S24  = Striking gear and devices for cutting off power
-  S25  = Self-acting machines
-  S26  = Casing of new machinery
-  S28  = Hoists and lifts
-  S29  = Lifting machines, chains, ropes, lifting tackles
-  S30  = Revolving machinery
-  S31  = Pressure plant
-  S32  = Floors, stairs, means of access (safe access, trip/slip/fall)
-  S33  = Pits, sumps, openings in floors, etc.
-  S34  = Excessive weights
-  S35  = Protection of eyes
-  S36  = Precautions against dangerous fumes/gases (CONFINED SPACE ONLY)
-  S36A = Portable electric light in confined space (24V limit)
-  S37  = Explosive or inflammable dust, gas, etc. (flammables, No Smoking zones)
-  S38  = Precautions in case of fire (extinguishers, exits, fire routes)
-  S39  = Power to require specifications of defective parts or tests of stability
-  S40  = Safety of buildings and machinery (structural safety)
-  S40A = Maintenance of buildings
-  S40B = Safety Officers appointment
-  S41B = Compulsory disclosure of hazard information to workers
-  S41C = Specific responsibility of occupier — PPE provision
-  S45  = First-aid appliances (first-aid box requirement)
-  S87  = Penalty for using false certificate of fitness
-
-── FACTORIES ACT 1948 (Chapter III — Health) ──
-  S11  = Cleanliness
-  S12  = Disposal of wastes and effluents
-  S13  = Ventilation and temperature
-  S14  = Dust and fume
-  S15  = Artificial humidification
-  S16  = Overcrowding
-  S17  = Lighting
-  S18  = Drinking water
-  S19  = Latrines and urinals (DO NOT cite for safety violations)
-  S20  = Spittoons
-
-── FACTORIES ACT 1948 (Chapter IV-A — Hazardous Processes) ──
-  S41A = Constitution of Site Appraisal Committee
-  S41B = Compulsory disclosure of information
-  S41C = Specific responsibility of occupier (health/safety/PPE)
-  S41E = Emergency standards / Disaster management plan
-  S41F = Permissible limits of exposure to chemicals
-  S41G = Workers participation in safety management
-  S41H = Right of workers to warn about imminent danger
-
-── GAS CYLINDER RULES ──
-  SMPV Rules 2016, Rule 10 = Valve protection (caps on idle cylinders)
-  SMPV Rules 2016, Rule 14 = Storage requirements (upright, chained, segregated, ventilated)
-  Gas Cylinder Rules 2004, Rule 14 = Transport and handling
-  IS 4379:1981 = Gas cylinder identification (colour codes)
-  IS 7312:1987 = Storage of gas cylinders
-
-── ELECTRICAL SAFETY ──
-  CEA (Measures relating to Safety & Electricity Supply) Regulations 2010:
-    Reg 36 = Earthing (all equipment must be earthed)
-    Reg 44 = Protection against excess current
-    Reg 45 = Insulation and protection of conductors
-    Reg 46 = Protection against electric shock
-    Reg 47 = Accessibility of bare conductors
-    Reg 50 = Distinction of different circuits
-    Reg 53 = Inspection and testing
-    Reg 67 = Connection with earth (neutral earthing)
-  Indian Electricity Rules 1956:
-    Rule 29 = Overhead lines clearance
-    Rule 44 = Earthing
-    Rule 45 = Protection against lightning
-    Rule 46 = Precautions against leakage
-    Rule 50 = Danger notice on HV equipment
-    Rule 51 = Handling of electric supply lines
-    Rule 61 = Work near live conductors
-    Rule 64 = Precautions for portable apparatus
-
-── FIRE SAFETY ──
-  IS 2190:2010 = Fire extinguisher selection, installation, maintenance
-  IS 15683:2006 = Fire exit signs
-  NBC 2016 Part 4 = Fire protection requirements
-  FA 1948 S37 = Prevention — explosive/inflammable materials
-  FA 1948 S38 = Fire precautions (exits, alarms, drills)
-  Petroleum Rules 2002 = Storage of petroleum products
-
-── PPE STANDARDS ──
-  IS 2925:1984 = Industrial safety helmets
-  IS 15298 (Part 2):2011 = Safety footwear
-  IS 5983:1980 = Eye protectors (goggles)
-  IS 8520:1977 = Face shields
-  IS 4770:1991 = Rubber gloves for electrical work
-  IS 6994 (Part 1):1973 = Leather safety gloves
-  IS 3521:1999 = Industrial safety belts/harness (working at height)
-  IS 9167:1979 = Ear protectors
-  IS 8523:1977 = Industrial safety face shield
-  IS 15748:2007 = Aluminised suit (heat protection)
-  FA 1948 S35 = Protection of eyes (employer duty)
-  FA 1948 S41C = PPE provision (employer duty)
-
-── WORKING AT HEIGHT ──
-  FA 1948 S32 = Safe means of access (employer to provide safe access)
-  IS 3521:1999 = Industrial safety belts and harnesses
-  IS 3696 (Part 1):1987 = Scaffolds — safety requirements
-  IS 4014:1967 = Steel tubular scaffolding
-  IS 11057:1984 = Safety nets
-
-── PRESSURE VESSELS & BOILERS ──
-  FA 1948 S31 = Pressure plant (joint must be kept in repair)
-  SMPV Rules 2016 = Manufacture, storage, use of pressure vessels
-  Indian Boiler Regulations 1950 = Boiler operation, testing, certification
-  IS 2825:1969 = Code for unfired pressure vessels
-
-── CHEMICAL SAFETY ──
-  MSIHC Rules 1989 = Manufacture, Storage & Import of Hazardous Chemicals
-  HW(M&TBM) Rules 2016 = Hazardous Waste Management & Transboundary Movement
-  FA 1948 S41F = Permissible limits of chemical exposure
-
-── HOUSEKEEPING & ACCESS ──
-  FA 1948 S32 = Floors, stairs and means of access
-  FA 1948 S33 = Pits, sumps, openings in floors
-
-── STRUCTURAL INTEGRITY / EQUIPMENT CONDITION ──
-  FA 1948 S39 = Testing of defective parts/stability
-  FA 1948 S40 = Safety of buildings and machinery
-  FA 1948 S40A = Maintenance of buildings
-
-── CRANE & LIFTING ──
-  FA 1948 S28 = Hoists and lifts
-  FA 1948 S29 = Lifting machines, chains, ropes, lifting tackles
-  IS 807:2006 = Crane design and manufacture
-  IS 13367:1992 = Safe use of cranes
-  IS 3177:1999 = Lifting chain slings
-
-── NOISE & ENVIRONMENT ──
-  FA 1948 S14 = Dust and fume (workplace air quality)
-  IS 9876 (Part 1):1981 = Permissible noise exposure
-  Noise Pollution Rules 2000 = Ambient noise limits
-
-── MINING (only if mine/quarry scene) ──
-  Mines Act 1952, S18 = Mining safety supervision
-  Mines Rules 1955 = Mining safety requirements
-  DGMS Circular = Technical directives
-{{KB_CONTEXT}}
-═══════════════════════════════════════════════════════
-HAZARD CHECKLIST — Check EVERY applicable category
-═══════════════════════════════════════════════════════
-
-── GAS CYLINDER STORAGE (if any cylinders visible) ──
-  • Cylinders not chained/secured → SMPV Rules 2016, Rule 14
-  • Full and empty not segregated → SMPV Rules 2016, Rule 14
-  • Oxidizers and fuel gases not separated by 6m/firewall → IS 7312:1987
-  • Valve protection caps missing → SMPV Rules 2016, Rule 10
-  • Cylinders not stored upright → SMPV Rules 2016, Rule 14
-  • Contents not identified/labelled → IS 4379:1981
-  • No ventilated storage area → SMPV Rules 2016, Rule 14
-  • Combustibles stored near cylinders → FA 1948 S37
-  • No "No Smoking" signage → FA 1948 S37
-  • Exposed to heat sources → SMPV Rules 2016, Rule 14
-
-── FIRE SAFETY (if extinguishers, drums, flammables visible) ──
-  • Extinguishers obstructed/inaccessible → IS 2190:2010
-  • Access path blocked by materials → FA 1948 S38
-  • Flammable materials near ignition sources → FA 1948 S37
-  • No fire exit/emergency route signage → FA 1948 S38
-  • Missing/expired extinguisher inspection tags → IS 2190:2010
-  • Wrong extinguisher type for hazard class → IS 2190:2010
-
-── HOUSEKEEPING & ACCESS ──
-  • Trip hazards (hoses, cables, materials on floor) → FA 1948 S32
-  • Congested storage blocking emergency access → FA 1948 S32
-  • Spills creating slip hazard → FA 1948 S32
-  • Walkways/aisles obstructed → FA 1948 S32
-  • Open pits/floor holes without covers/barriers → FA 1948 S33
-
-── ELECTRICAL (if panels, wires, equipment visible) ──
-  • Exposed/damaged wiring → CEA Regulations 2010, Reg 45
-  • Open/uncovered electrical panels → CEA Regulations 2010, Reg 46
-  • Missing DANGER signs on HV apparatus → Indian Electricity Rules 1956, Rule 50
-  • Missing insulating mats → IS 4770:1991
-  • Inadequate clearance before switchboards → CEA Regulations 2010, Reg 47
-
-── SIGNAGE & LABELLING ──
-  • Missing hazard warning signs → FA 1948 S41B
-  • No "No Smoking" in hazardous area → FA 1948 S37
-  • Unlabelled containers/drums → MSIHC Rules 1989
-  • No emergency information posted → FA 1948 S41E
-
-── STORAGE & CHEMICAL ──
-  • Incompatible materials stored together → MSIHC Rules 1989
-  • Chemicals without secondary containment → MSIHC Rules 1989
-  • Drums without proper labelling → MSIHC Rules 1989
-
-── EQUIPMENT / STRUCTURAL INTEGRITY ──
-  • Corroded structural elements → FA 1948 S40
-  • Damaged equipment condition → FA 1948 S39
-  • Missing safety guards on machinery → FA 1948 S21
-  • Visible cracks, deformation, or leaks → FA 1948 S39
-
-── WORKER-RELATED (only if workers ACTUALLY visible) ──
-  • Missing helmet → IS 2925:1984, FA 1948 S41C
-  • Missing safety footwear → IS 15298:2011, FA 1948 S41C
-  • Missing eye protection → IS 5983:1980, FA 1948 S35
-  • Missing gloves → IS 6994:1973, FA 1948 S41C
-  • Worker at height without harness → IS 3521:1999, FA 1948 S32
-  • Unsafe body positioning → FA 1948 S22
-
-── LINE OF FIRE (only if workers visible near energy sources) ──
-  • Person in path of crane/suspended load → FA 1948 S29
-  • Person near moving machinery → FA 1948 S22
-  • Person near hot metal/slag → FA 1948 S41C
-  • Person in vehicle swing radius → FA 1948 S32
-  • Person below work at height → FA 1948 S33
-  • Person near pressurized lines → FA 1948 S31
-
-── SECTION-SPECIFIC LINE OF FIRE (check based on detected section) ──
-  BF: Person in torpedo ladle path, person below skip car, person near tapping hole splash radius, person in cast house runner path
-  SMS: Person in converter blow zone, person near ladle tilting radius, person in strand withdrawal zone, person below charging crane with scrap
-  COKE OVEN: Person in pusher ram path, person on battery top near open charging hole, person in coke guide car movement zone, person near quenching car steam
-  ROLLING MILL: Person in roller table run, person in cobble ejection path, person near flying shear, person in coiler wrap zone
-  POWER PLANT: Person near steam header flange, person below coal conveyor, person in turbine oil spray zone
-  GAS NETWORK: Person downstream of bleeder without CO detector, person near valve under pressure
-
-── LOF ZONE (the path drawn on the photograph) ──
-  lofZone defines the DANGER PATH from energy source to person:
-    "lofZone": {"x1": <SOURCE x 0-1>, "y1": <SOURCE y 0-1>,
-                "x2": <PERSON x 0-1>, "y2": <PERSON y 0-1>,
-                "source": "<max 4 words NAMING the visible energy source at
-                            x1,y1 — e.g. 'suspended steel coil'>",
-                "width": <corridor width at the person, 0.02-0.22>,
-                "exposure": "<max 4 words naming a person you can SEE at x2,y2 —
-                              e.g. 'rigger below load'. NEVER 'potential
-                              worker', NEVER 'anyone', NEVER 'personnel'>",
-                "personVisible": true}
-  (x1,y1) = center of energy source/hazard origin; (x2,y2) = center of exposed person.
-  This is rendered as an ARROW from source to person, so the order matters:
-  ★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
-    person is above or to the left of it. Never reorder to make numbers ascend —
-    the arrow would point at the machine instead of the worker.
-  ★ "source" is MANDATORY and must name something you can SEE: a suspended or
-    hoisted load, a vehicle or mobile equipment, a moving/rotating machine part,
-    a pressurised or hot release point, an energised electrical part, or an
-    unstable stack/coil. A lofZone with no named source is DISCARDED and no arrow
-    is drawn.
-  ★ These get a bbox ONLY and NEVER a lofZone: falls from height and open edges
-    (the hazard is the drop, not a projectile), missing or wrong PPE,
-    housekeeping/spills/clutter, and signage or training gaps.
-    A recent report drew an arrow down an empty walkway from a worker to bare
-    deck, labelled "worker on walkway" — nothing was at either end, and it told
-    the reader to look at nothing.
-  ★ Include lofZone for EVERY hazard typed "Line of Fire", AND for any other
-    hazard where a person you can SEE stands in the path of a NAMED energy
-    source, whatever type you gave it.
-  ★ Omit lofZone when no person is visible in the path, or when you cannot name
-    the source.
-
-★★★ THE PERSON AT THE ARROW'S HEAD MUST BE VISIBLE ★★★
-  Count the people you can see and put that number in "people". If it is 0, NO
-  hazard in this image may carry a lofZone — not one.
-  A distant view of a coke-oven battery, a stacker and ore piles came back with
-  three arrows: "potential worker on platform", "worker near conveyor", "worker
-  near pile". There was no human being anywhere in that photograph, and the same
-  answer said "people": 0. Three confident arrows pointed at empty ground.
-  ★ "exposure" must name someone you can point at. BANNED wording: "potential
-    worker", "anyone", "any person", "personnel could", "if a worker",
-    "would be", "workers may" — those describe a scenario, not a person.
-  ★ A hazard is still CRITICAL with nobody in frame. An unguarded conveyor is
-    unguarded whether or not someone stands beside it. Report it with a bbox and
-    no lofZone; you lose nothing but a wrong arrow.
-  ★ Never write a person into a description to justify a severity.
-
-═══════════════════════════════════════════════════════
-GAS CYLINDER COLOUR CODES (IS 4379:1981)
-═══════════════════════════════════════════════════════
-  Oxygen = Black body / White neck
-  Acetylene = Maroon
-  Nitrogen = Grey body / Black neck
-  Hydrogen = Red
-  Argon = Peacock Blue
-  CO₂ = Aluminium/Silver
-  LPG = Dark Red/Silver
-  Chlorine = Golden Yellow
-
-═══════════════════════════════════════════════════════
-PIPE vs WIRE DIFFERENTIATION
-═══════════════════════════════════════════════════════
-  Brackets/clamps/pipe supports → PIPE (IS 2379:1963 colour codes)
-  PVC insulation/cable trays/conduit/junction boxes → WIRE/CABLE
-
-═══════════════════════════════════════════════════════
-CRITICAL RULES — ACCURACY OVER VOLUME
-═══════════════════════════════════════════════════════
-1. MAXIMUM 7 hazards. Quality over quantity. Each must have visual proof.
-2. ONLY cite regulations from the VERIFIED TABLE above. NEVER invent section numbers.
-3. Working at height → FA 1948 S32. Confined space → FA 1948 S36. Never confuse these.
-4. S19 is "Latrines & urinals" — NEVER cite it for safety violations.
-5. S21 = machinery fencing ONLY. NEVER for gas cylinders, access, or PPE.
-6. IS 14489:2018 is an AUDIT standard — do NOT cite it for individual hazards.
-7. Every corrective action MUST start with an action verb and be SPECIFIC.
-8. Bounding box values: normalized 0.0–1.0.
-9. If image is too blurry/dark, return: overallRisk "LOW", confidence <30, and 0-1 hazards.
-10. NEVER report "missing PPE" if no workers are visible in the image.
-11. NEVER report "Line of Fire" if no persons are visible near the energy source.
-12. If a scene looks generally safe/well-maintained, acknowledge it — don't force-find problems.
-
-═══════════════════════════════════════════════════════
-COMMON FALSE POSITIVE TRAPS — AVOID THESE
-═══════════════════════════════════════════════════════
-• Reporting "no safety signage visible" when signage may exist outside camera frame
-• Reporting "missing fire extinguisher" when it may be just out of view
-• Reporting PPE violations when workers are too far/small to assess PPE
-• Citing S21 (machinery fencing) for non-machinery issues
-• Reporting "inadequate lighting" from a photo taken with flash/poor camera
-• Assuming gas cylinders are "not separated" when you can't see the full storage area
-• Reporting housekeeping issues in areas that are actually work-in-progress
-• Calling a CONVEYOR GALLERY / BELT TRESTLE a "walkway". A long trussed bridge
-  between buildings, or one sloping up to a junction house or stockpile, carries a
-  belt. Its maintenance walkway and handrails are INSIDE the truss and invisible
-  from outside, so you cannot report them missing. The same goes for pipe bridges,
-  duct runs and cable galleries.
-• Reporting missing machine guarding (S21) on a part nobody can reach. Guarding
-  bites at REACHABLE moving parts — head and tail pulleys, drive drums, gear
-  trains, couplings, floor-level idlers, shear and roller-table nip points. An
-  elevated belt needs no perimeter barrier.
-• Recommending "fencing around material piles". That is not a stockpile control
-  and it marks the report as inexpert. The controls are angle of repose, no
-  undercutting or working the face from below, keeping people off and out from
-  under the face, dust control at the face and transfer points, and benching for
-  machine access. Do not cite FA 1948 S32 (floors, passages, handrails) for a
-  stockpile — that reads as a mis-citation.
-
-═══════════════════════════════════════════════════════
-CLASSES OF HAZARD THESE SCANS KEEP MISSING
-═══════════════════════════════════════════════════════
-Look for these before you reach for guarding or fall protection. In a plant
-photograph they are usually the most defensible findings, because the evidence is
-in the pixels:
-• Housekeeping in the working area — scrap, offcuts, coiled hose or cable across a
-  walking route.
-• Fugitive dust — a visible plume at a transfer point, a ground-level cloud, heavy
-  grey deposits over plant and ground.
-• Conveyor spillage heaped under the belt line — the precursor to cleaning under a
-  running belt, which is how people are killed on conveyors.
-• Structural corrosion — rusted gallery members, perforated cladding, corroded
-  shells, missing floor plates or handrail sections.
-• Obstructed road or rail — a track buried in spillage, a roadway blocked by
-  material.
-• Unchocked cylindrical loads — coils, shells, pipes or drums in a yard with no
-  chocks or cradles.
-• An unidentified release at ground level — steam, smoke, gas or dust from plant or
-  ground. In an integrated steel works this may be carbon monoxide, colourless and
-  odourless and the leading cause of fatal gas exposure, so report it.
-
-═══════════════════════════════════════════════════════
-SECTION-SPECIFIC HAZARD PRIORITIES
-═══════════════════════════════════════════════════════
-Once you identify the section, apply these PRIORITY checks (but ONLY report what is VISIBLE):
-
-BLAST FURNACE → Check: CO gas exposure, hot metal splash guards, cast house ventilation, tuyere area barricading, torpedo ladle track clearance, burden material fall, gas leak at bleeders, skip car movement
-SMS/BOF → Check: Converter mouth clearance, lance integrity, ladle condition, strand breakout indicators, crane with molten metal, scrap moisture, slag pot overflow, emergency tilt mechanism
-COKE OVEN → Check: Door emission, battery top fall protection, ascension pipe condition, pushing emission, quenching safety, by-product chemical exposure, coal dust control, coke guide alignment
-SINTER PLANT → Check: Hot sinter fall protection, ignition hood clearance, ESP fire indicators, dust mask usage, conveyor guards, heat stress indicators
-ROLLING MILLS → Check: Cobble guards, reheating furnace gas system, roller table nip points, flying shear barricade, pickling line PPE, H2 safety in annealing, cooling bed side guards, crane hot coil handling
-POWER PLANT → Check: Steam leak indicators, boiler access, coal dust accumulation, ash handling confined space, switchyard clearance, turbine area oil leaks, cable gallery fire protection
-ELECTRICAL → Check: Arc flash boundaries, LOTO compliance, danger boards, earthing, insulating mats, cable condition, panel door condition, HT clearance, battery room ventilation
-GAS NETWORK → Check: CO detector presence, gas leak indicators (dead birds/vegetation), pipeline colour code, valve station access, purging procedure display, emergency isolation knowledge, wind sock/direction
-MAINTENANCE → Check: Grinding guards, welding screens, gas cylinder security, crane operation, chemical storage, housekeeping, fall protection for equipment repair, stored energy isolation
-
-═══════════════════════════════════════════════════════
-{{WSA_CAUSES}}
-
-═══════════════════════════════════════════════════════
-OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
-═══════════════════════════════════════════════════════
-{
-  "overallRisk": "{{SEVERITIES}}",
-  "riskScore": 0-100,
-  "confidence": 0-100 (reflects YOUR certainty based on image clarity + evidence strength),
-  "people": <integer count of ACTUALLY VISIBLE persons, 0 if none>,
-  "viewType": "CLOSE_UP|WORKING_DISTANCE|GENERAL_VIEW",
-  "inspectable": <true ONLY if individual fittings — a rail, a nip point, a
-                  person's PPE — are resolved well enough to judge them>,
-  "detectedSection": "BLAST FURNACE|SMS|COKE OVEN|SINTER PLANT|ROLLING MILL|POWER PLANT|ELECTRICAL|GAS NETWORK|MATERIAL HANDLING|MAINTENANCE|WATER TREATMENT|TRANSPORT|REFRACTORY|OXYGEN PLANT|CIVIL|LABORATORY|GENERAL",
-  "sectionConfidence": 0-100,
-  "sectionCues": "brief list of visual cues that led to section identification",
-  "summary": "Sentence 1: what is physically visible and which section. Sentence 2: highest-priority concern with SPECIFIC visual evidence. Sentence 3: applicable regulation.",
-  "hazards": [
-    {
-      "name": "max 5 words describing what is VISIBLE",
-      "severity": "{{SEVERITIES}}",
-      "description": "MUST START WITH 'Visible: [specific object/condition seen].' Then: why dangerous, potential consequence in THIS SECTION.",
-      "visualEvidence": "What specific object/condition/person in the image PROVES this hazard exists (1 sentence)",
-      "absenceCheck": "ONLY if this hazard claims something is missing: where you looked along the edge/machine/person and what you found there instead. Omit for hazards that are not absence claims.",
-      "regulation": "MUST be from verified table above e.g. FA 1948 S37",
-      "correctiveAction": "starts with action verb; specific measurable steps relevant to this section",
-      "type": "{{OBS_TYPES}}",
-      "confidence": 0-100 (YOUR certainty about THIS hazard specifically — required),
-      "wsaCause": "EXACT wording from the hazard category list below",
-      "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
-      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.5, "y2": 0.7,
-                  "source": "suspended steel coil",
-                  "width": 0.08, "exposure": "rigger below load",
-                  "personVisible": true}
-    }
-  ],
-  "wsa": ["list of WSA causes ACTUALLY applicable — only those with visual evidence"],
-  "preventive": ["long-term measure with IS standard from table above — SECTION-SPECIFIC"],
-  "ptw_required": "PTW types needed based on VISIBLE work activities or \\"None\\"",
-  "nearest_standard": "primary IS standard from verified table",
-  "section_specific_risks": ["top 3 section-inherent risks that are contextually relevant to what is VISIBLE"]
-}
-
-{{OBS_TYPE_RULES}}
-
-★ FINAL CHECK: Before outputting, verify EVERY hazard has a "visualEvidence" field that describes something you can actually SEE. Delete any hazard where you wrote generic text like "not visible but typically..." or "commonly found in...".
-★ FINAL CHECK 2: Every hazard that says something is missing/absent/inadequate/unguarded/unprotected has an "absenceCheck" naming where you looked. Every "lofZone" has a "source" naming a visible energy source. No two hazards describe the same physical condition.
-★ FINAL CHECK 3: If "people" is 0, NO hazard has a "lofZone". If any hazard does have one, its "exposure" names a person you can point to in the image — not "potential worker", not "anyone", not "personnel".
-★ FINAL CHECK 4: "viewType"/"inspectable" describe THE PHOTOGRAPH, not the site.
-  GENERAL_VIEW = a whole yard, plant or building seen from a distance: layout and
-  large structures readable, fittings not. On a GENERAL_VIEW, or when
-  "inspectable" is false, cap EVERY severity at MEDIUM and word each finding as an
-  observation to be verified on site. A hazy long shot cannot establish that a
-  handrail is missing, that a nip point is unguarded, or that anyone was working
-  there. Raising a CRITICAL from such a frame is the single fastest way to lose a
-  safety officer's trust in the whole report — including the findings that are
-  defensible.
-
-''';
+The JSON object specified above gains the keys below. Everything already stated
+about evidence, absence claims, inventory-gating and specificity applies to them
+unchanged — these are extra fields, not a different task.
+
+Top level, alongside "overallRisk":
+  "detectedSection": "BLAST FURNACE|SMS|COKE OVEN|SINTER PLANT|ROLLING MILL|POWER PLANT|ELECTRICAL|GAS NETWORK|MATERIAL HANDLING|MAINTENANCE|WATER TREATMENT|TRANSPORT|REFRACTORY|OXYGEN PLANT|CIVIL|LABORATORY|GENERAL"
+  "sectionConfidence": 0-100
+  "sectionCues": "<the visible things that identify the section — plant named in
+                   your sceneInventory, signage you can read, characteristic
+                   equipment. If nothing in the frame identifies the section,
+                   answer GENERAL with a low sectionConfidence and say so here.
+                   GENERAL is a correct answer, not a failure.>"
+  "wsa": [<only categories with visual evidence — may be empty>]
+  "preventive": [<long-term measures, each citing a standard from the table>]
+  "ptw_required": "<permit types implied by work you can SEE in progress, or 'None'>"
+  "nearest_standard": "<primary standard from the verified table>"
+  "section_specific_risks": [<at most 3, and ONLY risks bearing on something in
+                              your sceneInventory. This field is the one most
+                              often filled from general knowledge of a steel
+                              plant; if the frame does not support any, return
+                              an empty list.>]
+
+Inside each hazard, alongside "type":
+  "wsaCause": "<EXACT wording from the category list below>"
+
+$causeBlock
+
+★ Do not let "detectedSection" change what you report. Knowing a frame is a coke
+  oven is a reason to describe what is in it precisely; it is never evidence that
+  a coke-oven hazard is present. Report the photograph, not the section.''';
   }
+
 
   /// Parse the AI text response into structured hazard data
   /// ★ v33: Added JSON repair for truncated responses
@@ -999,6 +420,11 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
     if (parsed['confidence'] == null) parsed['confidence'] = 0;
     if (parsed['people'] == null) parsed['people'] = 0;
     if (parsed['summary'] == null) parsed['summary'] = 'Analysis complete.';
+    // Left ABSENT rather than defaulted to '' when the model did not supply one.
+    // HazardValidator treats a missing inventory as "grounding not checked"; an
+    // empty string would be indistinguishable from that, but writing the key
+    // makes the difference explicit to anyone reading a stored report.
+    if (parsed['sceneInventory'] == null) parsed['sceneInventory'] = '';
     if (parsed['detectedSection'] == null) parsed['detectedSection'] = 'GENERAL';
     if (parsed['sectionConfidence'] == null) parsed['sectionConfidence'] = 0;
     if (parsed['sectionCues'] == null) parsed['sectionCues'] = '';
@@ -1106,6 +532,13 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       final confMatch = RegExp(r'"confidence"\s*:\s*(\d+)').firstMatch(json);
       final peopleMatch = RegExp(r'"people"\s*:\s*(\d+)').firstMatch(json);
       final summaryMatch = RegExp(r'"summary"\s*:\s*"([^"]+)"').firstMatch(json);
+      // The inventory is the FIRST key the prompt asks for, so in a response cut
+      // short it is the field most likely to have survived intact — and it is
+      // what the grounding check in HazardValidator runs against. Dropping it
+      // here would silently disable that check on exactly the responses (partial,
+      // repaired) where a hazard is most likely to have been half-invented.
+      final inventoryMatch =
+          RegExp(r'"sceneInventory"\s*:\s*"([^"]*)"').firstMatch(json);
 
       if (riskMatch == null && scoreMatch == null) return null;
 
@@ -1122,6 +555,7 @@ OUTPUT FORMAT — valid JSON ONLY, no markdown, no preamble
       if (hazardObjects.isEmpty && riskMatch == null) return null;
 
       final result = <String, dynamic>{
+        'sceneInventory': inventoryMatch?.group(1) ?? '',
         'overallRisk': riskMatch?.group(1) ?? 'UNKNOWN',
         'riskScore': int.tryParse(scoreMatch?.group(1) ?? '0') ?? 0,
         'confidence': int.tryParse(confMatch?.group(1) ?? '0') ?? 0,

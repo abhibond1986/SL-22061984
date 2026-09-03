@@ -49,6 +49,79 @@ class HazardValidator {
     caseSensitive: false,
   );
 
+  /// Wording that could be pasted onto any steel-plant photograph without
+  /// changing a word. Distinct from [_genericEvidence], which catches hedging
+  /// ("typically", "commonly") — this catches a finding that is not hedged at
+  /// all, simply empty. "PPE not worn — risk of injury" asserts something
+  /// definite about nothing in particular, and a safety officer cannot act on it
+  /// because it names no object, no place and no deviation.
+  ///
+  /// Matched against name + description ONLY, never against the evidence field:
+  /// a hazard may legitimately be *called* "Missing guardrail" as long as the
+  /// description and evidence locate it.
+  static final RegExp _boilerplateFinding = RegExp(
+    r'\b(?:ppe (?:not|non).?(?:worn|compliance)|unsafe (?:condition|act) '
+    r'(?:observed|noted|present)|safety (?:violation|hazard) (?:observed|noted)|'
+    r'improper (?:use|handling)|lack of (?:safety|proper) \w+|'
+    r'general housekeeping issue|potential (?:risk|hazard) (?:of|to) \w+|'
+    r'risk of (?:injury|accident|harm)\.?$|not following (?:safety )?procedure)\b',
+    caseSensitive: false,
+  );
+
+  /// Words carried by [_inventoryTokens] that say nothing about what is in a
+  /// photograph, so their presence in both fields is not corroboration.
+  static const Set<String> _stopWords = {
+    'the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'is', 'are',
+    'was', 'were', 'be', 'being', 'been', 'with', 'without', 'for', 'from',
+    'this', 'that', 'these', 'those', 'it', 'its', 'as', 'by', 'near', 'no',
+    'not', 'has', 'have', 'there', 'visible', 'seen', 'see', 'image', 'photo',
+    'photograph', 'frame', 'view', 'shows', 'showing', 'left', 'right',
+    'centre', 'center', 'foreground', 'background', 'middle', 'front', 'behind',
+    'side', 'area', 'zone', 'region', 'part', 'which', 'while', 'where',
+  };
+
+  /// Content words of [text], lowercased and crudely de-pluralised.
+  ///
+  /// Crude on purpose. This feeds a check that only fires on ZERO overlap (see
+  /// [_evidenceUngrounded]), so over-matching costs nothing and under-matching
+  /// would produce false accusations against correct findings.
+  static Set<String> _inventoryTokens(String text) {
+    final out = <String>{};
+    for (final raw in text.toLowerCase().split(RegExp(r'[^a-z]+'))) {
+      if (raw.length < 4 || _stopWords.contains(raw)) continue;
+      out.add(raw.endsWith('s') && raw.length > 4
+          ? raw.substring(0, raw.length - 1)
+          : raw);
+    }
+    return out;
+  }
+
+  /// True when a hazard's stated visual evidence names nothing that appears in
+  /// the model's own scene inventory.
+  ///
+  /// WHY THIS IS WORTH CHECKING
+  /// The prompt now asks the model to write what it can see BEFORE judging any
+  /// of it, and to report only hazards concerning something it inventoried. That
+  /// gives the app a self-consistency check inside a single response, at no
+  /// extra cost and with no second call: evidence citing an object the model
+  /// never listed is the signature of a hazard recalled from training data
+  /// rather than read off this photograph.
+  ///
+  /// It is deliberately the weakest possible form of the test. It fires only
+  /// when the overlap is EMPTY and the evidence carried at least three content
+  /// words to begin with. A partial mismatch — evidence naming one object that
+  /// was inventoried and one that was not — does not fire, because a model
+  /// describing a real hazard often names a part ("chin strap") whose parent
+  /// ("worker") is what it inventoried. Returns null when the model gave no
+  /// inventory at all, which is the honest answer for a tier or a build that
+  /// never asked for one; a missing inventory must not read as a failed check.
+  static bool? _evidenceUngrounded(String evidence, Set<String>? inventory) {
+    if (inventory == null || inventory.isEmpty) return null;
+    final cited = _inventoryTokens(evidence);
+    if (cited.length < 3) return null;
+    return cited.intersection(inventory).isEmpty;
+  }
+
   /// Validates every hazard in [result] in place and returns the same map.
   ///
   /// Hazards are NEVER removed, however poorly they score. A false positive
@@ -73,6 +146,13 @@ class HazardValidator {
       }
 
       final reportConfidence = _asInt(result['confidence']);
+
+      // Tokenised once for the whole report rather than per hazard. Null when
+      // the model returned no inventory, which disables the grounding check
+      // rather than failing it — see [_evidenceUngrounded].
+      final inventoryText = _str(result['sceneInventory']);
+      final Set<String>? inventory =
+          inventoryText.trim().length < 12 ? null : _inventoryTokens(inventoryText);
 
       // Master data, each independently guarded: an admin list failing to load
       // must not turn every hazard into a vocabulary complaint.
@@ -160,6 +240,12 @@ class HazardValidator {
         final type = _str(h['type']);
         final wsaCause = _str(h['wsaCause']);
 
+        // Self-consistency against the model's own scene inventory, and the
+        // vagueness test. Both are computed here so they land in the same
+        // itemised confidence reasons as every other signal.
+        final ungrounded = _evidenceUngrounded(evidence, inventory);
+        final boilerplate = _boilerplateFinding.hasMatch('$name $description');
+
         final signals = HazardSignals(
           modelConfidence: _asInt(h['confidence']),
           reportConfidence: reportConfidence,
@@ -180,6 +266,8 @@ class HazardValidator {
               ? null
               : wsaSet.contains(_norm(_stripLeadingNumber(wsaCause))),
           hasUsableBbox: _hasUsableBbox(h['bbox']),
+          evidenceUngrounded: ungrounded,
+          findingIsBoilerplate: boilerplate,
         );
 
         final outcome = HazardConfidence.score(signals);

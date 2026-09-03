@@ -3442,6 +3442,106 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
+  /// Fill colour for an observation-type pill.
+  ///
+  /// WHY THESE HUES AND NOT THE OBVIOUS ONES
+  /// Red, amber and green are spoken for: this app uses them for CRITICAL/HIGH,
+  /// MEDIUM and safe-or-closed, and the severity chip sits a few lines below
+  /// this pill inside the same card. A red "Unsafe Act" pill would read as a
+  /// severity claim about the act, which is a different statement entirely and
+  /// not one the model made here. So the type palette is drawn only from hues
+  /// that carry no safety meaning in this interface.
+  ///
+  /// The fills are OPAQUE and paired with white text rather than tinted over the
+  /// card. That is deliberate: the confidence badge above had to fall back to a
+  /// near-white base in light mode because a 15% tint over the card's lavender
+  /// fill dropped its text under AA. An opaque pill has the same contrast on
+  /// every surface and in both themes, so it cannot be broken by a later change
+  /// to the card colour. Measured against white with tools/audit_contrast.py's
+  /// formula: teal 5.47:1, indigo 7.88:1, violet 7.10:1, rose 6.04:1, slate
+  /// 7.58:1 — all above AA. Changing any hex means re-measuring.
+  ///
+  /// Anything unrecognised — including 'Line of Fire' — gets the neutral slate
+  /// rather than a colour invented on the spot. Line of Fire is arguably the
+  /// gravest type, but every hue that would say so is a severity colour, and
+  /// implying a severity the model did not report would be worse than leaving it
+  /// neutral.
+  static Color _obsTypeColor(String type) {
+    switch (type.trim().toLowerCase()) {
+      case 'unsafe act':
+        return const Color(0xFF0F766E); // teal-700 — a behaviour
+      case 'unsafe condition':
+        return const Color(0xFF3B45B0); // indigo-700 — a physical state
+      case 'near miss':
+        return const Color(0xFF6D28D9); // violet-700 — an event that happened
+      case 'first aid case':
+        return const Color(0xFFBE185D); // rose-700 — someone was hurt
+      default:
+        return const Color(0xFF475569); // slate-600 — no claim made
+    }
+  }
+
+  /// Foreground for an observation-type label drawn on a TINTED chip rather than
+  /// on an opaque pill.
+  ///
+  /// Needed for the same reason `sl.redText`/`sl.accentText` exist: no single hex
+  /// works as text in both themes. The fills from [_obsTypeColor] are chosen to
+  /// be legible under white, which makes them too dark to read on the outline
+  /// chips in dark mode, where the chip is only a 10% wash of the tint over the
+  /// card. So each type carries a dark ink for light mode and a light one for
+  /// dark, measured against the real chip fill in each theme (white-over-lavender
+  /// #FCFDFF, and the 10% wash over #171F2C):
+  ///
+  ///   Unsafe Act       5.38:1 light / 7.31:1 dark
+  ///   Unsafe Condition 7.74:1 light / 4.78:1 dark
+  ///   Near Miss        6.98:1 light / 5.19:1 dark
+  ///   First Aid Case   5.93:1 light / 5.35:1 dark
+  ///   other            7.45:1 light / 5.47:1 dark
+  ///
+  /// The dark-mode Unsafe Condition figure is the tightest at 4.78:1, so it is
+  /// the one that breaks first: raising the chip's tint opacity, darkening the
+  /// card, or nudging any of these hexes means re-measuring THAT pair before the
+  /// others. audit_contrast.py scores tokens against the two global backgrounds
+  /// and cannot see a local card fill, so this cannot be delegated to it.
+  static Color _obsTypeInk(String type, bool isDark) {
+    switch (type.trim().toLowerCase()) {
+      case 'unsafe act':
+        return isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E);
+      case 'unsafe condition':
+        return isDark ? const Color(0xFF818CF8) : const Color(0xFF3B45B0);
+      case 'near miss':
+        return isDark ? const Color(0xFFA78BFA) : const Color(0xFF6D28D9);
+      case 'first aid case':
+        return isDark ? const Color(0xFFFB7185) : const Color(0xFFBE185D);
+      default:
+        return isDark ? const Color(0xFF94A3B8) : const Color(0xFF475569);
+    }
+  }
+
+  /// The observation type as a filled pill, for use inside the AI card.
+  Widget _obsTypePill(String type) {
+    final fill = _obsTypeColor(type);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: BorderRadius.circular(20),
+        // A hairline lift of the same hue, so the pill still has an edge when it
+        // lands on a card fill close to its own colour.
+        border: Border.all(color: Colors.white.withOpacity(0.25)),
+      ),
+      child: Text(
+        type,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+
   /// The AI's reading of the typed or dictated description.
   ///
   /// This card used to be a gate. The model was asked "is this a near miss?",
@@ -3539,16 +3639,34 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                   size: 20, color: accentTx),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    hasHazard
-                        ? (aiObsType.isNotEmpty
-                            ? 'AI reads this as: $aiObsType'
-                            : 'AI has rephrased your description')
-                        : 'Could not find a safety hazard in this text',
-                    style: TextStyle(
-                      color: accentTx,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800)),
+                  // The observation type is lifted out of the sentence and onto
+                  // a filled pill, because it is the one thing on this card that
+                  // the reporter must actually agree or disagree with — it
+                  // decides which register the observation is filed in, and
+                  // "Unsafe Act" against "Unsafe Condition" is a one-word
+                  // difference that reads past easily in a run of plain text.
+                  child: hasHazard && aiObsType.isNotEmpty
+                      ? Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            Text('AI reads this as:',
+                                style: TextStyle(
+                                    color: accentTx,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w800)),
+                            _obsTypePill(aiObsType),
+                          ],
+                        )
+                      : Text(
+                          hasHazard
+                              ? 'AI has rephrased your description'
+                              : 'Could not find a safety hazard in this text',
+                          style: TextStyle(
+                              color: accentTx,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800)),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -3811,9 +3929,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     }
 
     return <Widget>[
+      // Tinted per TYPE, not a flat indigo for every classification. The header
+      // pill above already colours this exact value, and one value wearing two
+      // colours inside one card is the same self-contradiction the severity chip
+      // below exists to avoid — just quieter, and therefore easier to ship.
       if (obsType.isNotEmpty)
         chip(Icons.category_outlined, 'Type: $obsType',
-            AppColors.accent, sl.accentText),
+            _obsTypeColor(obsType), _obsTypeInk(obsType, sl.isDark)),
       if (wsa.isNotEmpty)
         chip(Icons.account_tree_outlined, 'Category: $wsa',
             AppColors.cyan, sl.cyanText),

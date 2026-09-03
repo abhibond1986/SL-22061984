@@ -1620,7 +1620,7 @@ HOW TO USE IT:
   /// the largest completion cap that plausibly fits a REAL photo, and even that
   /// has little margin.
   ///
-  /// BE CLEAR-EYED: the dominant cost is the 17.5k-char prompt, which is the
+  /// BE CLEAR-EYED: the dominant cost is the ~21k-char prompt, which is the
   /// safety design of the feature and is not negotiable. Groq's free 8000 TPM is
   /// simply a tight fit for this request. Expect Tier 0 to still 413 sometimes on
   /// large images. That is why the guards below exist and why every failure here
@@ -1637,8 +1637,11 @@ HOW TO USE IT:
   static const int _kGroqMaxTokens = 2000;
 
   /// Chars per token for this prompt, solved from run 1's 413: the prompt was
-  /// ~23,811 chars (17,521-char template + `obsTypeGuidance` + a 4,290-char KB
-  /// block + the enums) and input was 4,899 tokens, i.e. **4.86 chars/token**. Not
+  /// ~23,811 chars (the template as it then stood, 17,521 chars, plus
+  /// `obsTypeGuidance`, a 4,290-char KB block and the enums) and input was 4,899
+  /// tokens, i.e. **4.86 chars/token**. The template has since grown to ~20,834
+  /// chars, so the TOTALS quoted here are historical; the RATE is what is being
+  /// derived and a longer prompt of the same kind of text does not change it. Not
   /// the generic 4.0 — this prompt is dense structured text with heavy repetition,
   /// which tokenises better than prose, and 4.0 would overestimate by ~20%.
   ///
@@ -2285,8 +2288,17 @@ passages and handrails, and reads as a mis-citation to any factory inspector.
 ═══════════════════════════════════════════════════════
 CLASSES OF HAZARD THESE SCANS KEEP MISSING
 ═══════════════════════════════════════════════════════
-Report these when visible. They are usually the most defensible findings in a
-plant photograph, because the evidence is right there in the pixels:
+★ READ THIS AS A PROMPT TO LOOK, NEVER AS A LIST TO FILL IN. ★
+Every item below is a thing that has been MISSED in the past when it was
+genuinely in the frame. None of them is expected in any given photograph, and a
+photograph containing none of them is a normal photograph. Naming a hazard here
+does not make it more likely to be present — check each against your own
+"sceneInventory" and drop it immediately if the object is not there. Reporting
+one of these because it appears on this list, rather than because you can see
+it, is the exact failure this section was written to prevent.
+
+When one IS visible, it is usually among the most defensible findings in a plant
+photograph, because the evidence is right there in the pixels:
 • HOUSEKEEPING in the working area — scrap, offcuts, discarded parts, coiled hose
   or cable across a walking route (trip and access obstruction).
 • FUGITIVE DUST — a visible plume at a transfer point, a ground-level cloud, or
@@ -2305,14 +2317,29 @@ plant photograph, because the evidence is right there in the pixels:
   an unexplained ground-level release is reported, not ignored.
 {{SCENE_CONTEXT}}
 ═══════════════════════════════════════════════════════
-METHODOLOGY — EVIDENCE-BASED INSPECTION
+METHODOLOGY — INVENTORY FIRST, THEN JUDGE
 ═══════════════════════════════════════════════════════
-1. OBSERVE: What objects/people/equipment are VISIBLE? List them mentally.
-2. ASSESS: For each visible item, is there a safety violation you can PROVE from the image?
-3. CITE: Match ONLY to regulations from the table below. Never invent citations.
-4. DESCRIBE: State what you SEE, not what you assume.
+1. INVENTORY: Write down what is ACTUALLY VISIBLE, before you think about
+   hazards at all. This goes in the "sceneInventory" field and it is written
+   FIRST, before "hazards". Name objects, people, equipment and surfaces in
+   plain words — "conveyor gallery, two workers in blue overalls, steel walkway
+   with handrail both sides, hose coiled on the floor". Do NOT judge anything
+   at this stage. Do NOT list what is absent. An inventory of things that are
+   not there is not an inventory.
+2. ASSESS: Work down YOUR OWN inventory, item by item. For each item you
+   listed, is there a safety violation you can PROVE from the image?
+3. GATE: Every hazard you report must concern something that appears in your
+   own "sceneInventory". If you find yourself reporting a hazard about an
+   object you did not inventory, you are describing a plant you have seen
+   before, not this photograph. Delete it.
+4. CITE: Match ONLY to regulations from the table below. Never invent citations.
+5. DESCRIBE: State what you SEE, not what you assume.
 
 Scan order: foreground → middle → background, left → right.
+
+Writing the inventory first is not a formality — it is what stops a fluent
+description of a typical steel plant from being returned as an observation of
+THIS one.
 
 ═══════════════════════════════════════════════════════
 REGULATION REFERENCE TABLE — CITE ONLY FROM HERE
@@ -2369,15 +2396,13 @@ Therefore:
     it with a "bbox" and no "lofZone". You lose nothing but a wrong arrow.
   • Never write a person into a "description" to justify a severity.
 
-Types:
-• Person in path of crane/suspended load → FA 1948 S29
-• Person near moving conveyor/machinery → FA 1948 S21
-• Person near hot metal/slag/ladle → FA 1948 S41C
-• Person below work at height → FA 1948 S33
-• Person near pressurized lines → FA 1948 S31
-• Person near rotating equipment → FA 1948 S21
-• Person near gas cylinders during use → SMPV Rules 2016 Rule 14
-• Person near electrical panel → CEA Regulations 2010 Reg 46
+Cite the LOF finding from the regulation table like any other hazard — match the
+energy source you actually named to the provision that governs it. (A list of
+eight worked "person near X → section Y" pairs used to sit here. It was removed
+on purpose: each pair is a ready-made scenario, and a scenario offered in the
+prompt is one the model is measurably more likely to report whether or not the
+frame contains it. The table above carries the same citations without suggesting
+a situation to find.)
 
 MARKING THE PATH — "lofZone"
 The path is drawn on the photograph as an arrow, so the two ends must be the
@@ -2415,6 +2440,11 @@ two ENDS OF THE PATH, in this order and no other:
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 ═══════════════════════════════════════════════════════
 {
+  "sceneInventory": "<FIRST, before anything else: what is physically visible in
+                      this frame, in plain words. Objects, people, equipment,
+                      surfaces, materials, and where they are. NO judgements, NO
+                      hazards, NO absences. 30-80 words. Every hazard below must
+                      concern something named here.>",
   "overallRisk": "{{SEVERITIES}}",
   "riskScore": 0-100,
   "confidence": 0-100,
@@ -2446,6 +2476,25 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 }
 
 FIELD RULES:
+• "sceneInventory" is REQUIRED and is written BEFORE the hazards array. It is a
+  plain description of what is in the frame, with no judgement in it. Every
+  object named in any "visualEvidence" must also appear in "sceneInventory" —
+  the app checks this, and a hazard whose evidence cites an object you did not
+  inventory is flagged to the safety officer as unverified.
+• At most 6 hazards. If you believe there are more, report the 6 best-evidenced.
+  A long list is read as padding and the weakest rows discredit the strongest.
+• "name" and "description" must be specific to THIS frame. The test: could this
+  sentence be pasted onto a different steel-plant photograph without changing a
+  word? If yes, it is too generic to act on — rewrite it with the object, its
+  location in the frame, and the actual deviation.
+    Too generic: "PPE not worn — worker is not wearing required PPE, risk of
+                  injury."
+    Specific:    "Worker at the tundish platform, centre-left of frame, is
+                  bare-headed — hair and ears visible, no shell or chin strap —
+                  while standing within 2 m of the ladle transfer path."
+    Too generic: "Unsafe condition observed in the working area."
+    Specific:    "Air hose coiled across the walkway at the foot of the stairs,
+                  foreground right, spanning the full width of the tread."
 • "visualEvidence" is REQUIRED for every hazard — proves you actually see it.
 • per-hazard "confidence" is REQUIRED. The top-level "confidence" is your
   certainty about the ASSESSMENT AS A WHOLE (image quality, coverage), which is

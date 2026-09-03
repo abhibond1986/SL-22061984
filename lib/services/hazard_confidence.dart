@@ -60,6 +60,8 @@ class HazardSignals {
     this.typeKnown = true,
     this.wsaCauseKnown,
     this.hasUsableBbox = true,
+    this.evidenceUngrounded,
+    this.findingIsBoilerplate = false,
   });
 
   /// The model's own per-hazard figure, if it supplied one.
@@ -106,6 +108,25 @@ class HazardSignals {
   final bool? wsaCauseKnown;
 
   final bool hasUsableBbox;
+
+  /// The hazard's stated visual evidence names nothing that appears in the
+  /// model's own scene inventory — the one self-consistency check available
+  /// inside a single response. Null when the model returned no inventory, which
+  /// must score as "not checked" rather than as a pass or a failure.
+  ///
+  /// Treated as a strong negative signal rather than a disqualifying one. The
+  /// check is crude word overlap, and a hazard can be real while described in
+  /// vocabulary that misses the inventory entirely; what it cannot be is
+  /// something a safety officer should read without being told.
+  final bool? evidenceUngrounded;
+
+  /// The finding would fit any steel-plant photograph — it names no object, no
+  /// location and no specific deviation. Scored separately from
+  /// [evidenceLooksGeneric] because the failure is different: hedged evidence
+  /// admits its own weakness, whereas boilerplate states a definite-sounding
+  /// conclusion about nothing in particular, and reads as a real finding until
+  /// someone tries to act on it.
+  final bool findingIsBoilerplate;
 }
 
 class HazardConfidence {
@@ -210,6 +231,27 @@ class HazardConfidence {
       apply('Description does not open with what is visible', -3);
     }
 
+    // ── Grounding against the model's own scene inventory ──────────────────
+    // Only meaningful when an inventory came back; null is silent rather than
+    // neutral-with-a-reason, because a line saying "not checked" on every
+    // hazard from a tier that never returns one is noise a safety officer has
+    // to read past on every report.
+    if (s.evidenceUngrounded == true) {
+      apply('Evidence names nothing the model itself listed as visible', -22,
+          severe: true);
+    } else if (s.evidenceUngrounded == false) {
+      apply('Evidence matches the model\'s own list of what is visible', 5);
+    }
+
+    // ── Specificity ────────────────────────────────────────────────────────
+    // Kept separate from the evidence checks: a boilerplate finding can arrive
+    // with a perfectly concrete evidence string attached, and the finding is
+    // still unusable because the name and description name nothing.
+    if (s.findingIsBoilerplate) {
+      apply('Finding is generic enough to fit any plant photograph', -20,
+          severe: true);
+    }
+
     // ── Independent corroboration ──────────────────────────────────────────
     if (s.kbCorroborated) {
       apply('Corroborated by the plant knowledge base', 6);
@@ -232,6 +274,22 @@ class HazardConfidence {
       cap = defectCeiling;
       capLabel = 'Capped: a hazard without specific visual evidence cannot be '
           'rated highly';
+    } else if (s.findingIsBoilerplate) {
+      // Capped rather than only penalised, for the same reason as missing
+      // evidence: a model asserting 95 on "PPE not worn — risk of injury"
+      // otherwise still lands in the seventies and presents itself as a finding
+      // that needs no checking. The text is the defect, whatever the model
+      // thinks of it.
+      cap = defectCeiling;
+      capLabel = 'Capped: the finding names no object, place or specific '
+          'deviation';
+    } else if (s.evidenceUngrounded == true) {
+      // Softer than [defectCeiling]: the check is word overlap on two short
+      // strings, so it is capable of being wrong about a real hazard. It still
+      // must not sit above the review line.
+      cap = unverifiedCitationCeiling;
+      capLabel = 'Capped: evidence does not match what the model said it could '
+          'see';
     } else if (s.citationBanned || s.citationMisapplied) {
       cap = defectCeiling;
       capLabel = 'Capped: the regulation cited is wrong for this hazard';
@@ -261,6 +319,8 @@ class HazardConfidence {
       s.citationMisapplied ||
       !s.hasVisualEvidence ||
       s.evidenceLooksGeneric ||
+      s.findingIsBoilerplate ||
+      s.evidenceUngrounded == true ||
       (s.citationPresent &&
           !s.citationInCatalogue &&
           !s.citationInKnowledgeBase);

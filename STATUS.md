@@ -1142,6 +1142,137 @@ either side, baseline `git archive HEAD` at `78856fc`), and `grep` confirms no
 runtime** — the ~7s Gemini figure is derived by subtraction from scan A's 47,876ms
 total, not measured directly, so the expected improvement is inferred.
 
+## 2026-09-03 (last) — two hazard prompts were quietly fighting each other
+
+The reported symptoms were three: scans miss obvious hazards, invent hazards that
+are not in the frame, and describe what they do find too vaguely to act on. The
+cause of all three turned out to be structural rather than a matter of wording.
+
+**The app had TWO hazard prompts, and the wrong one was in charge.**
+`gemini_vision.dart` carried the shared 17,521-char template that every
+anti-hallucination lesson in this file had been written into, and it served Groq,
+the OpenRouter chain and Nara. `gemini_direct_vision.dart` carried its own
+**40,357-char** `_getComprehensivePrompt`, which served Tier 1 Direct Gemini — the
+tier promoted to the front of the chain earlier the same day, and therefore the
+tier that now answers most real scans. That template had never received any of the
+lessons. Worse, **46% of its length enumerated things to go and find** (a 9,701-char
+section-cue block, a 7,120-char "check EVERY applicable category" hazard checklist,
+1,817 chars of section-specific priorities) against **1,994 chars** of
+anti-hallucination protocol. The strongest prompt was governing the tiers that
+mattered least.
+
+`_getComprehensivePrompt` is **deleted**. `resolvedComprehensivePrompt` now composes
+`GeminiVision.resolvedHazardPrompt` plus a 2,040-char appendix holding only the keys
+that are genuinely unique to this tier — `detectedSection`, `sectionConfidence`,
+`sectionCues`, `wsa`, `preventive`, `ptw_required`, `nearest_standard`,
+`section_specific_risks`, and per-hazard `wsaCause`. The tier's template went
+40,357 → 22,804 chars, WSA classification became available on **every** tier rather
+than one, and the two prompts can no longer drift apart, because there is now one.
+
+**Why the enumerations were the problem and not the cure.** Long lists of hazard
+categories read to a vision model as a set of things it is expected to report;
+POPE (arXiv:2305.10355) and the multi-object hallucination work (arXiv:2407.06192)
+both show naming an object in the instruction raises the rate at which the model
+claims to see it. Prompt length then suppresses the restraint: IFScale
+(arXiv:2507.11538) and Lost in the Middle (arXiv:2307.03172) show instructions
+placed later lose force as the prompt grows, and the anti-hallucination rules sat
+later. So the old Tier 1 prompt was, in effect, a seed list for invention with the
+brakes filed down — which is exactly what "hallucinated hazards" and "too vague"
+look like from the outside.
+
+**Missing hazards and invented hazards are ONE failure, not two.** Worth recording
+because it changes what to fix: the construction-hazard study (arXiv:2506.07436,
+IEEE Access) measures zero-shot recall 0.29–0.38 *alongside* precision 0.25–0.42,
+i.e. the model is guessing from priors rather than trading sensitivity for
+caution. There is no precision/recall dial to tune below ~0.55 precision; one
+grounding intervention should move both. It also reports F1 0.314 zero-shot →
+0.537 few-shot → **0.636** with chain-of-thought, which is why the change is a
+reasoning scaffold and not more rules.
+
+**The scaffold: inventory first, then judge.** The shared prompt's METHODOLOGY
+section now requires `sceneInventory` as the FIRST key of the response — what is
+physically visible, in plain words, no judgements and explicitly no absences —
+before the hazards array exists. Every hazard must then concern something the
+model itself inventoried. The "classes of hazard these scans keep missing" section
+survives but is reframed so it cannot act as a checklist ("read this as a prompt to
+look, never as a list to fill in… a photograph containing none of them is a normal
+photograph"), and the Line-of-Fire section's eight ready-made
+scenario→citation pairs were removed outright: each one handed the model a
+situation to find, and the regulation table already carries the same citations
+without doing that.
+
+**What this buys that a prompt rule cannot: a free deterministic check.**
+`HazardValidator` now tokenises the inventory once per report and flags any hazard
+whose `visualEvidence` shares **no** content word with it — the signature of a
+finding recalled from training data rather than read off this photograph. It also
+flags boilerplate findings ("PPE not worn — risk of injury") by matching name and
+description against a pattern of wording that would fit any plant photograph.
+Both feed `HazardConfidence` as itemised reasons (−22 and −20) **and as caps**, 75
+and 55 respectively, because a model asserting 95 can out-shout a subtraction but
+not a ceiling. Both also force `needsReview`. No hazard is deleted, per the
+standing rule.
+
+**The grounding check is deliberately the weakest form of itself.** It fires only
+on EMPTY overlap and only when the evidence carried at least three content words;
+a partial mismatch does not fire, because a real hazard is often described through
+a part ("chin strap") whose parent ("worker") is what got inventoried. A missing
+inventory returns null and **disables** the check rather than failing it — a tier
+or a cached report that never produced one must not be scored as though it failed.
+That is why `evidenceUngrounded` is `bool?` and why null adds no reason line: a
+"not checked" note on every hazard from a tier that never returns an inventory is
+noise a safety officer has to read past on every report.
+
+`sceneInventory` was traced through every exit: the shared `_parseAIResponse`
+returns the decoded map whole, `HazardQuality.apply` mutates in place and strips no
+top-level key, the consistency cache stores every key, and `_validateAndReturn`
+now defaults it. It is also **recovered by regex in the partial-JSON repair path**,
+which matters more than it sounds — it is the first key in the schema, so in a
+truncated response it is the field most likely to have survived, and dropping it
+there would silently disable the grounding check on precisely the responses where
+a hazard is most likely to be half-invented.
+
+**An honest correction to a worry raised mid-session.** Growing the shared template
+17,521 → 20,834 chars looked like it would push Tier 0 over its Groq pre-flight
+gate on text alone. Measured, it does not: resolved with default master data the
+prompt is **21,879 chars** (≈6,511 tokens including the 2,000 reserved for the
+completion), and with a 4,290-char KB block **26,169** (≈7,396). Both fit 8000 TPM,
+so there is no text-only skip. What did shrink is the image headroom — from ~839
+tokens to ~604 with a KB block, i.e. roughly 0.2MP at the learned rate. Tier 0 was
+already skipping real scan images before this change, so nothing practical was
+lost, but its margin is now thinner and it will skip a slightly smaller crop than
+before. The 4.85 chars/token constant is unaffected; the stale totals in its doc
+comment and in the `_kGroqMaxTokens` banner were updated to say so.
+
+**Also in this pass, unrelated to the prompt:** the near-miss AI card's
+classification is now a coloured pill rather than a word inside a sentence
+(`_obsTypeColor`, `_obsTypeInk`, `_obsTypePill` in `near_miss_tab.dart`), and the
+"Type:" chip below it takes the same hue so one value cannot wear two colours in
+one card. The palette avoids red, amber and green on purpose — those mean
+CRITICAL/HIGH, MEDIUM and safe here, and the severity chip sits inside the same
+card, so a red "Unsafe Act" would read as a severity claim the model never made.
+Line of Fire falls to the neutral slate for the same reason: every hue that would
+mark it as grave is a severity colour. Contrast for each type was measured against
+the real chip fill in both themes and is recorded above `_obsTypeInk`; dark-mode
+Unsafe Condition at 4.78:1 is the pair that breaks first.
+
+**Not done, and each defensible on its own:** switching Groq Tier 0 from
+`qwen/qwen3.6-27b` to `qwen/qwen3.8-27b` (better on every published vision metric
+and the only Groq vision model supporting strict `json_schema`); adopting Gemini
+`responseSchema`; reordering the OpenRouter free chain by JSON survival. Also
+open, and a question for the user rather than a decision: **whether Tier 0 Groq is
+worth keeping at all**, given it cannot fit this prompt plus a real photograph
+inside the free 8000 TPM.
+
+Verified: the diff touches five files and nothing else (`git status` clean
+otherwise), `grep` confirms no surviving reference to `_getComprehensivePrompt`,
+and the resolved prompt sizes above were measured by substituting the template
+directly. **NOT verified: the analyzer.** Unlike the earlier entries in this file
+this pass could not run the baseline diff — no Dart SDK was present in this
+sandbox at all — so the usual "zero new, zero resolved" claim is absent on
+purpose rather than assumed. Nothing has been compiled, and **no part of this has
+been put in front of a live provider**, so the whole improvement is reasoned from
+the literature and the code, not observed. The first real test is a scan.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has
