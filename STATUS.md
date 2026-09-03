@@ -1008,6 +1008,63 @@ model work is now committed). Not compiled, and the 2,000-token cap has not been
 exercised against a live Groq response, so the truncation trade-off above is
 reasoned, not observed.
 
+## 2026-09-03 (later) — the image is charged too, and Tier 0 now learns its own cost
+
+The cap above was deployed and Tier 0 still 413'd: `Limit 8000, Requested 9371`.
+The bundle had genuinely rebuilt — the Dart log line moved from `main.dart.js:55161`
+to `:55170` — so `9371 − 2000 = 7371` tokens of input. Text is ~4,900 (run 1
+confirms it: a 3,826-byte crop gave input 4,899, so 23,811 prompt chars ÷ 4,899 =
+**4.86 chars/token**), which leaves **~2,400 tokens for the image**.
+
+**The previous entry's claim that "shrinking the image would not have fixed it"
+was wrong in general.** It was true only of run 1, whose image was small enough
+that its token cost vanished into the rounding. Image tokens count against TPM
+like any others; on a real photo the image is the second-largest line item. The
+comment in `_callGroqVision` has been corrected rather than quietly left.
+
+With ~4,900 text and ~2,400 image, `max_tokens` would have to fall to ~600 to fit
+8000, which cannot hold the hazard JSON. So the free tier cannot serve a full-size
+scan, and the admin chose to gate the tier by image size rather than degrade the
+image (see the trade-off note at the end).
+
+* `_kGroqCharsPerToken` 4.5 → **4.85**, from the measurement above. Precision now
+  matters: when the gate only caught a text-only overrun, pessimism was free, but
+  it now decides how many tokens remain for the image, so an inflated figure
+  directly shrinks the largest image Tier 0 will attempt.
+* `_jpegDimensions` reads width/height from the **JPEG SOF marker without
+  decoding** — a full decode would cost real time on web every scan to obtain two
+  integers sitting in the header. Verified against real 900×675, 1024×1024 and
+  37×900 JPEGs, and returns null on empty input, PNG magic and random bytes.
+* **The image cost is learned from Groq, not guessed.** A 413 body states
+  `Requested N`, and every other term is known exactly, so
+  `image tokens = N − text tokens − max_tokens` is solved and divided by the
+  image's megapixels. The result is persisted in `groq_vision_tokens_per_mp`, so
+  each device pays for the lesson once rather than once per scan. Bounds
+  (`>0`, `50..20000` per MP) reject an implausible figure, because a bad learned
+  value would switch the tier off permanently — worse than not learning. This is
+  why the 413 path is no longer merely logged: a provider error containing a
+  number we can solve for is data.
+* The pre-flight now blocks on `text + image > 8000`. When the dimensions cannot
+  be read it does **not** block, on the principle that a request is never refused
+  on an estimate that could not be made.
+
+**What this actually means in practice, stated plainly.** Text takes 6,909 of the
+8,000 (prompt + the 2,000 reservation), leaving ~1,091 for the image. At the
+provisional 3,000 tokens/MP that caps Tier 0 at ~0.36MP (~600px square); once the
+first 413 teaches it the real figure (~4,050 tokens/MP if run 2's image was
+900×675) it falls to ~0.28MP (~520px square). **The scan path produces 900px long
+edge, ~0.6MP, so Tier 0 will normally SKIP.** Groq will serve small crops and step
+aside otherwise. That is the honest consequence of not degrading the image: the
+tier is mostly dormant. If Groq is to actually carry scans, the options remain its
+paid Dev Tier or accepting a smaller image for the tier that runs first and wins —
+and on a hazard detector, quietly judging every scan on a blurrier image to fit a
+free quota is the wrong trade.
+
+Verified: full-tree analyzer baseline diff **zero** new and zero resolved (1,595
+either side, baseline `git archive HEAD` at `933b3c3`). The JPEG parser is the only
+part exercised for real. Not compiled; the learning path has never seen a live
+Groq 413, so the regex and the arithmetic are reasoned, not observed.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has

@@ -1514,10 +1514,23 @@ HOW TO USE IT:
   // GENERATING A SINGLE TOKEN. Nearly half of the request that blew the limit was
   // space that was reserved and never used.
   //
-  // So this is NOT the ~4MB base64 payload cap the error path below warns about,
-  // and shrinking the image would not have fixed it. Anyone reading a 413 from
-  // Groq should check whether the message says "tokens per minute" before
-  // touching image quality.
+  // So this is NOT the ~4MB base64 payload cap the error path below warns about.
+  // Anyone reading a 413 from Groq should check whether the message says "tokens
+  // per minute" before touching image quality.
+  //
+  // CORRECTION, same day, second 413: "Limit 8000, Requested 9371" — this time
+  // with the 2000-token cap already deployed, so input alone was 7,371. The text
+  // is ~4,900 (confirmed by run 1, whose image was a 3.8KB crop costing ~nothing),
+  // which leaves ~2,400 tokens for the IMAGE. Image tokens are charged against
+  // TPM too; run 1 simply had an image small enough to hide that. So the earlier
+  // note that "shrinking the image would not have fixed it" was true only of run
+  // 1's crop, and is wrong in general — on a real photo the image is the second
+  // biggest line item after the prompt.
+  //
+  // With ~4,900 text + ~2,400 image, `max_tokens` would have to fall to ~600 to
+  // fit 8000, which cannot hold the hazard JSON. THE FREE TIER CANNOT SERVE A
+  // FULL-SIZE SCAN. Tier 0 is therefore now gated on a per-image estimate: it
+  // runs for small images and steps aside for large ones.
   static const int _kGroqTpmLimit = 8000;
 
   /// Completion cap for the GROQ call only. OpenRouter stays at 4096.
@@ -1550,32 +1563,90 @@ HOW TO USE IT:
   /// back towards 4096 trades that away for guaranteed 413s instead.
   static const int _kGroqMaxTokens = 2000;
 
-  /// Chars per token for this prompt, derived from the 413 above (~22,400 chars
-  /// ≈ 4,899 tokens). Not the generic 4.0: this prompt is dense structured text
-  /// with heavy repetition, which tokenises better than prose. Using 4.0 here
-  /// would overestimate by ~10% and start skipping requests that do fit.
-  static const double _kGroqCharsPerToken = 4.5;
+  /// Chars per token for this prompt, solved from run 1's 413: the prompt was
+  /// ~23,811 chars (17,521-char template + `obsTypeGuidance` + a 4,290-char KB
+  /// block + the enums) and input was 4,899 tokens, i.e. **4.86 chars/token**. Not
+  /// the generic 4.0 — this prompt is dense structured text with heavy repetition,
+  /// which tokenises better than prose, and 4.0 would overestimate by ~20%.
+  ///
+  /// PRECISION MATTERS HERE NOW. When this only gated a text-only overrun, being
+  /// pessimistic was free. It now sets how many tokens are left for the image, so
+  /// an inflated figure directly shrinks the largest image Tier 0 will attempt.
+  /// 4.85 is a hair under the measured 4.86, which leaves the estimate marginally
+  /// conservative without throwing away headroom.
+  static const double _kGroqCharsPerToken = 4.85;
 
   /// Estimated cost of the prompt TEXT plus the completion reservation.
   ///
-  /// DELIBERATELY EXCLUDES THE IMAGE, which makes this an UNDERESTIMATE — and
-  /// that asymmetry is the design, not an oversight. The two ways to be wrong are
-  /// not equally bad: skipping a request that would have succeeded silently loses
-  /// the fastest tier on every scan and is invisible, whereas attempting one that
-  /// fails costs a single fast 413 that is swallowed and then suppressed for a
-  /// minute by [_groqInCooldown]. So this gate only fires when the request cannot
-  /// fit even before the image is counted, and real 413s are left to do the rest.
-  ///
-  /// Image tokens are excluded rather than allowanced because there is exactly ONE
-  /// calibration point and its image was 3,826 bytes — far too small to separate
-  /// an image term from the text term. Inventing a per-pixel constant from that
-  /// would be a guess dressed as a measurement. Groq publishes no figure for this
-  /// model and the sandbox cannot query it without a key.
-  ///
-  /// The base64 length is likewise NOT an input: an image is charged as image
-  /// tokens, not as the length of its encoding.
-  static int _estimateGroqTokens(String prompt) =>
+  /// The base64 length is NOT an input anywhere in here: an image is charged as
+  /// image tokens, not as the length of its encoding.
+  static int _estimateGroqTextTokens(String prompt) =>
       (prompt.length / _kGroqCharsPerToken).ceil() + _kGroqMaxTokens;
+
+  // ── IMAGE TOKEN COST: LEARNED FROM GROQ, NOT GUESSED ──────────────────────
+  //
+  // Groq publishes no per-pixel token cost for this model, and the sandbox cannot
+  // query it without a key. Rather than invent a constant and dress it up as a
+  // measurement, this asks the provider: a 413 body states "Requested N", and
+  //
+  //     image tokens = N - text tokens - max_tokens
+  //
+  // is then solved from values we already know exactly. Divide by the image's
+  // megapixels and the result generalises to other image sizes. It is persisted,
+  // so the fleet pays for this lesson once per device rather than once per scan.
+  //
+  // This is why the 413 path below is not merely logged. A provider error that
+  // contains a number we can learn from is data, not just a failure.
+  static const String _kGroqTokensPerMpPref = 'groq_vision_tokens_per_mp';
+
+  /// Starting figure, used only until a real 413 replaces it.
+  ///
+  /// Derived from the 2026-09-03 second 413 (~2,400 image tokens) assuming that
+  /// image was near the scan path's 900px long-edge ceiling, i.e. roughly 0.8MP.
+  /// It is a ONE-POINT estimate and its own dimensions were never logged, so treat
+  /// it as provisional: it exists to make the first attempt sensible, not to be
+  /// correct. The learned value supersedes it after the first refusal.
+  static const double _kGroqDefaultTokensPerMp = 3000;
+
+  /// Reads JPEG pixel dimensions from the SOF marker, WITHOUT decoding the image.
+  ///
+  /// A full decode would cost real time on web for every scan, to obtain two
+  /// integers that sit in the header. Returns `[width, height]`, or null if the
+  /// bytes are not a JPEG whose size can be read — in which case the caller must
+  /// not block the attempt on an estimate it cannot make.
+  static List<int>? _jpegDimensions(Uint8List b) {
+    if (b.length < 4 || b[0] != 0xFF || b[1] != 0xD8) return null;
+    var i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] != 0xFF) {
+        i++;
+        continue;
+      }
+      final marker = b[i + 1];
+      // Standalone markers carry no length field.
+      if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) {
+        i += 2;
+        continue;
+      }
+      final segLen = (b[i + 2] << 8) | b[i + 3];
+      // SOF0..SOF15 hold the frame size. C4 (DHT), C8 (JPG) and CC (DAC) share
+      // the range but are not frame headers.
+      final isSof = marker >= 0xC0 &&
+          marker <= 0xCF &&
+          marker != 0xC4 &&
+          marker != 0xC8 &&
+          marker != 0xCC;
+      if (isSof) {
+        final h = (b[i + 5] << 8) | b[i + 6];
+        final w = (b[i + 7] << 8) | b[i + 8];
+        if (w <= 0 || h <= 0) return null;
+        return [w, h];
+      }
+      if (segLen < 2) return null;
+      i += 2 + segLen;
+    }
+    return null;
+  }
 
   /// When Groq last refused for a rate/size reason (413 or 429).
   ///
@@ -1626,16 +1697,31 @@ HOW TO USE IT:
     // caller from any other Tier 0 failure, which is the point — the chain
     // continues to Tier 1 either way.
     //
-    // The estimate ignores image tokens (see [_estimateGroqTokens]), so tripping
-    // this means the TEXT alone does not fit. The actionable cause is almost
-    // always an oversized Knowledge Bank: it is the only part of this prompt an
-    // admin can grow, which is why the message names it.
-    final estimate = _estimateGroqTokens(prompt);
+    final textTokens = _estimateGroqTextTokens(prompt);
+
+    // Image cost, using whatever this device has learned from a previous 413.
+    final dims = _jpegDimensions(bytes);
+    final prefs = await SharedPreferences.getInstance();
+    final tokensPerMp =
+        prefs.getDouble(_kGroqTokensPerMpPref) ?? _kGroqDefaultTokensPerMp;
+    double megapixels = 0;
+    int imageTokens = 0;
+    if (dims != null) {
+      megapixels = (dims[0] * dims[1]) / 1000000.0;
+      imageTokens = (megapixels * tokensPerMp).ceil();
+    }
+
+    final estimate = textTokens + imageTokens;
+    // When the dimensions could not be read, `imageTokens` is 0 and this gate can
+    // only catch a text-only overrun. That is deliberate: a request is never
+    // blocked on an estimate that could not be made. The 413 path still learns.
     if (estimate > _kGroqTpmLimit) {
-      print('GeminiVision: ⏩ Tier 0 skipped — prompt text alone is ~$estimate '
-          'tokens (${prompt.length} chars + $_kGroqMaxTokens reserved), over the '
-          'Groq TPM limit of $_kGroqTpmLimit before the image is even counted. '
-          'Trim the Knowledge Bank context uploaded in the admin panel.');
+      print('GeminiVision: ⏩ Tier 0 skipped — estimated $estimate tokens '
+          '(text ~$textTokens incl. $_kGroqMaxTokens reserved, image ~$imageTokens '
+          'for ${megapixels.toStringAsFixed(2)}MP at '
+          '${tokensPerMp.round()} tokens/MP) over the Groq free TPM limit of '
+          '$_kGroqTpmLimit. Groq cannot serve an image this large on the free '
+          'tier — continuing to Tier 1.');
       return null;
     }
 
@@ -1706,6 +1792,34 @@ HOW TO USE IT:
     } catch (_) {}
     print('GeminiVision: ⚠ Groq HTTP ${response.statusCode} on $model'
         '${detail.isEmpty ? '' : ' — $detail'}');
+
+    // LEARN THE IMAGE COST FROM THE REFUSAL. The body carries "Requested N", and
+    // every other term in that sum is known exactly, so the image cost falls out.
+    // Persisting tokens-per-megapixel means the pre-flight above can skip the
+    // next oversized image instead of rediscovering this.
+    if (response.statusCode == 413 && megapixels > 0) {
+      final m = RegExp(r'Requested\s+(\d+)').firstMatch(detail);
+      final requested = m == null ? null : int.tryParse(m.group(1)!);
+      if (requested != null) {
+        final observedImageTokens = requested - textTokens;
+        final perMp = observedImageTokens / megapixels;
+        // Sanity bounds. A negative or absurd figure means the assumption behind
+        // this arithmetic is wrong — most likely _kGroqCharsPerToken having
+        // drifted from the real prompt — and a bad learned value would switch
+        // this tier off permanently, which is worse than not learning at all.
+        if (observedImageTokens > 0 && perMp > 50 && perMp < 20000) {
+          await prefs.setDouble(_kGroqTokensPerMpPref, perMp);
+          print('GeminiVision: ↻ learned Groq image cost — requested $requested, '
+              'text ~$textTokens, so image ≈ $observedImageTokens for '
+              '${megapixels.toStringAsFixed(2)}MP = ${perMp.round()} tokens/MP '
+              '(was ${tokensPerMp.round()}); saved for future pre-flight checks');
+        } else {
+          print('GeminiVision: ⚠ ignoring implausible Groq calibration '
+              '($observedImageTokens image tokens, ${perMp.round()}/MP) — check '
+              '_kGroqCharsPerToken against the real prompt length');
+        }
+      }
+    }
     return null;
   }
 
