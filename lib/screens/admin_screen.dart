@@ -2676,7 +2676,16 @@ class _AdminScreenState extends State<AdminScreen>
       setState(() {
         _groqConfigured = key.isNotEmpty && key.startsWith('gsk_');
         _groqKeyCtrl.text = key;
-        _groqSelectedModel = model;
+        // Clamped for exactly the same reason as the two fields below, which
+        // already had it: this value is what "Update Model Selection" writes
+        // back. A saved ID outside availableModels — a Groq-decommissioned
+        // model, or a stale backend record seeding the pref — would otherwise
+        // display as a fallback while this held the dead ID, so the admin would
+        // see a live model name and save the dead one. The Groq 404
+        // `model_not_found` errors came in through this gap.
+        _groqSelectedModel = GroqService.isSupportedModel(model)
+            ? model
+            : GroqService.defaultModel;
         _groqVisionModel = visionModel;
         _geminiVisionConfigured = gemKey.isNotEmpty && gemKey.length > 20;
         _geminiVisionKeyCtrl.text = gemKey;
@@ -6171,17 +6180,52 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   void _adjustScore(String level, int delta) {
-    setState(() {
-      final current = _severityScores[level] ??
-          AdminMasterData.defaultSeverityScores[level] ??
-          AdminMasterData.scoreFromMap(_severityScores, level);
-      _severityScores[level] = (current + delta).clamp(0, 100);
-    });
+    // Clamped to the level's own BAND, not to 0-100.
+    //
+    // Two reasons, and the first is a bug this replaces. `clamp(0, 100)` let an
+    // admin walk LOW down to 0 with the "−" button. AdminMasterData repairs a
+    // zeroed canonical level on save (a LOW report scoring 0/100 dragged plant
+    // averages down as though it were a hazard-free record), but the repair
+    // returns a corrected copy — so the tile went on showing 0, the audit entry
+    // recorded 0, and 20 was what actually got stored and pushed to every
+    // device. Three different numbers for one tap, and no way for the admin to
+    // see which one was real.
+    //
+    // Second, AdminMasterData.severityBands is already the invariant every
+    // display path enforces: scoreForDisplay silently lifts or caps a score that
+    // contradicts its label. So a score outside its band was never reachable on
+    // screen anyway — the panel was offering a setting the app would overrule.
+    // Clamping here makes the tile, the stored value and the audit agree.
+    //
+    // A level the admin invented has no band; those keep the full range,
+    // including 0, which for a non-canonical level is a legitimate
+    // "does not count".
+    final band = AdminMasterData.severityBands[level.trim().toUpperCase()];
+    final current = _severityScores[level] ??
+        AdminMasterData.defaultSeverityScores[level] ??
+        AdminMasterData.scoreFromMap(_severityScores, level);
+    final clamped = band == null
+        ? (current + delta).clamp(0, 100)
+        : (current + delta).clamp(band.min, band.max);
+
+    // The tap hit the end of the band. Say so — a button that silently does
+    // nothing reads as broken, and the admin has no other way to learn the
+    // range exists.
+    if (clamped == current) {
+      if (band != null) {
+        _toast('$level stays within ${band.min}–${band.max} so its score cannot '
+            'contradict the label', AppColors.amber);
+      }
+      return;
+    }
+
+    setState(() => _severityScores[level] = clamped);
     AdminMasterData.saveSeverityScores(_severityScores);
+    // Logs the value that was actually stored.
     AdminAudit.log(
       action: 'scoring_updated',
       actor: _currentActor,
-      meta: {'level': level, 'newScore': _severityScores[level]});
+      meta: {'level': level, 'newScore': clamped});
   }
 
   void _resetScoresToDefault() {

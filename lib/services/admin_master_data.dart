@@ -729,11 +729,46 @@ class AdminMasterData {
         // numbers and nothing would ever correct them again. Rebasing at the
         // point of import — and writing the result back so other devices and the
         // next pull agree — closes that loop.
-        if (_isOutOfRangeScale(scores)) {
+        // Both repairs are applied BEFORE anything is pushed, and then pushed
+        // ONCE.
+        //
+        // Doing a push inside each branch looked equivalent and was not.
+        // `_pushWithRetry` is fire-and-forget (void, never awaited), so a scale
+        // that needed both repairs — e.g. {CRITICAL:25, HIGH:15, MEDIUM:10,
+        // LOW:0}, which is out of range AND has a zeroed level, and is not
+        // _isLegacyScale because LOW is 0 rather than 5 — fired two concurrent
+        // pushes with different payloads in undefined order. If the rebase one
+        // landed second the backend kept LOW:0; worse, a failed first push is
+        // queued by _enqueueMasterData and replayed later, re-poisoning the
+        // backend after the repair had already succeeded.
+        final rebased = _isOutOfRangeScale(scores);
+        if (rebased) {
           scores = _normaliseScale(scores);
           await prefs.setBool(_kScoresRebased, true);
-          _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
-              'severity scores (rebased)', 'pushMasterData',
+        }
+        // Repair a missing or zeroed canonical level HERE too, not only on read.
+        // Reading alone would be enough to make the app display the right number,
+        // but the broken row would stay in the backend and be re-imported by
+        // every device on every launch — and the admin panel would keep showing
+        // the zero. Pushing the repair back is what actually ends it.
+        //
+        // _normaliseScale deliberately leaves `<= 0` alone (a level an admin
+        // invented and zeroed means "does not count"), so this pass is what
+        // catches a zeroed CANONICAL level, which is a different thing: LOW is
+        // still a hazard.
+        final withLevels = _withCanonicalLevels(scores);
+        final levelsRepaired = !_sameScale(withLevels, scores);
+        scores = withLevels;
+        // One push, carrying the fully repaired map. Conditional, so a healthy
+        // scale does not generate a backend write on every launch.
+        if (rebased || levelsRepaired) {
+          final reasons = <String>[
+            if (rebased) 'rebased',
+            if (levelsRepaired) 'canonical levels repaired',
+          ].join(', ');
+          _pushWithRetry(
+              () => SyncService.pushMasterData(severityScores: scores),
+              'severity scores ($reasons)', 'pushMasterData',
               {'severityScores': scores});
         }
         await prefs.setString(_kSeverityScores, jsonEncode(scores));
@@ -1003,6 +1038,16 @@ class AdminMasterData {
   static int _topOf(Map<String, int> m) =>
       m.values.fold<int>(0, (a, b) => b > a ? b : a);
 
+  /// Whether two scales are the same map, so a repair that changed nothing does
+  /// not trigger a backend write on every launch.
+  static bool _sameScale(Map<String, int> a, Map<String, int> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      if (b[e.key] != e.value) return false;
+    }
+    return true;
+  }
+
   /// Whether [m] is on a range the app cannot display honestly.
   ///
   /// **Why a shape test rather than an exact match:** [_isLegacyScale] only
@@ -1102,21 +1147,69 @@ class AdminMasterData {
     final missing = defaultSeverityScores.keys
         .where((k) => !stored.containsKey(k))
         .toList(growable: false);
-    if (missing.isEmpty) return stored;
+    // A canonical level that is PRESENT but non-positive is the same defect
+    // wearing a disguise, and it is the one that actually shipped: the console
+    // showed `LOW: 0`, so a LOW report printed "0 / 100" and pulled the plant
+    // average down as though it were a hazard-free record.
+    //
+    // It slipped past all three existing guards, which is why a fourth is
+    // needed here rather than a tweak to one of them:
+    //   * _isOutOfRangeScale judges the TOP of the scale, and the top was a
+    //     healthy 90 — a single broken level does not move it;
+    //   * _normaliseScale deliberately leaves <= 0 alone as "does not count",
+    //     which is a reasonable rule for a level an admin invented and a wrong
+    //     one for the four canonical levels, where LOW still means a hazard;
+    //   * the `missing` test above only fires when the KEY is absent.
+    //
+    // The likeliest origin is the parse: every read of this map does
+    // `int.tryParse(v.toString()) ?? 0`, so an empty, null or non-numeric
+    // backend cell silently becomes 0 rather than an absent key. Repairing the
+    // value here means neither that parse nor a hand-edited row can put a zero
+    // on a safety report.
+    final nonPositive = defaultSeverityScores.keys
+        .where((k) => stored.containsKey(k) && (stored[k] ?? 0) <= 0)
+        .toList(growable: false);
+    if (missing.isEmpty && nonPositive.isEmpty) return stored;
     final filled = Map<String, int>.from(defaultSeverityScores)..addAll(stored);
-    print('$_kScoreTag stored scale was MISSING $missing — filled from '
-        'defaults, giving $filled. A missing level would otherwise be scored as '
-        'MEDIUM, which under-rates the worst finding on the report.');
+    for (final k in nonPositive) {
+      filled[k] = defaultSeverityScores[k]!;
+    }
+    if (missing.isNotEmpty) {
+      print('$_kScoreTag stored scale was MISSING $missing — filled from '
+          'defaults, giving $filled. A missing level would otherwise be scored '
+          'as MEDIUM, which under-rates the worst finding on the report.');
+    }
+    if (nonPositive.isNotEmpty) {
+      print('$_kScoreTag stored scale scored $nonPositive at zero or below — '
+          'restored to the built-in values, giving $filled. A canonical level '
+          'is never worth 0; a LOW report is still a hazard, and 0 would print '
+          'as "0 / 100" and drag the plant average down.');
+    }
     return filled;
   }
 
-  static Future<void> saveSeverityScores(Map<String, int> scores) async {
+  /// Persists [rawScores] and returns the map that was ACTUALLY stored.
+  ///
+  /// The return value matters: a canonical level at or below zero is repaired on
+  /// the way in, so what is stored can differ from what the caller passed. A UI
+  /// that keeps rendering its own copy will then disagree with the stored value
+  /// and with what was pushed to other devices. Callers that hold the map in
+  /// state must adopt this result — or, better, refuse the invalid value before
+  /// getting here, which is what the admin panel's band clamp now does.
+  static Future<Map<String, int>> saveSeverityScores(
+      Map<String, int> rawScores) async {
+    // Repaired on the way IN as well as on the way out. An empty box in the
+    // admin panel parses to 0, and the previous behaviour was to store that and
+    // push it to every device — which is one plausible route by which `LOW: 0`
+    // reached the backend in the first place.
+    final scores = _withCanonicalLevels(rawScores);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSeverityScores, jsonEncode(scores));
     _bump();
     // ★ FIX: Push to backend with retry so other devices get the updated risk scores
     _pushWithRetry(() => SyncService.pushMasterData(severityScores: scores),
         'severity scores', 'pushMasterData', {'severityScores': scores});
+    return scores;
   }
 
   /// The 0–100 band each canonical severity label may be displayed in.
@@ -1182,7 +1275,27 @@ class AdminMasterData {
   static int scoreFromMap(Map<String, int> scores, String severity) {
     final key = severity.trim().toUpperCase();
     final exact = scores[key];
-    if (exact != null) return exact;
+    // `> 0`, not just `!= null`. A stored 0 for a canonical level is repaired in
+    // _withCanonicalLevels, but this method is also handed maps that never went
+    // through it — a screen holding a map loaded before the repair landed, or a
+    // caller that built one itself — and returning 0 for a real severity label
+    // files a hazard as harmless. Belt and braces on the same defect, at the one
+    // point every score in the app passes through.
+    if (exact != null && (exact > 0 || !defaultSeverityScores.containsKey(key))) {
+      return exact;
+    }
+    if (exact != null) {
+      // Canonical key, non-positive value. Return the built-in score directly
+      // rather than falling through: the "NO ENTRY" path below would print a
+      // message saying the key is absent, which it is not, and would send the
+      // reader looking for the wrong fault.
+      if (_warnedKeys.add('ZERO:$key')) {
+        print('$_kScoreTag "$key" was scored $exact in the map handed to '
+            'scoreFromMap — using the built-in ${defaultSeverityScores[key]} '
+            'instead. A canonical severity is never worth zero.');
+      }
+      return defaultSeverityScores[key]!;
+    }
 
     // A miss is the single most likely cause of "the number on the scan matches
     // nothing in the admin panel", so say so — once per label, because this runs

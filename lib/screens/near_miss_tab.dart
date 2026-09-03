@@ -14,7 +14,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+// package:http is deliberately NOT imported here. This screen has no business
+// making raw HTTP calls — every network hop belongs in a service under
+// lib/services/, which is where the backend URL override lives. The one direct
+// call this file used to make (_callAiTextFallback) hardcoded the URL and so
+// ignored that override.
 import 'package:image_picker/image_picker.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
@@ -35,6 +39,7 @@ import '../widgets/hazard_annotated_image.dart';
 import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
+import '../services/near_miss_prompt.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
 
@@ -808,12 +813,7 @@ Correct this text for:
 Respond with ONLY the corrected text — no quotes, no explanation, no JSON. Just the improved text.
 If the text is already fine, return it unchanged.''';
 
-      Map<String, dynamic>? body = await SyncService.callAiText(prompt);
-      var viaDirectFallback = false;
-      if (body == null) {
-        body = await _callAiTextFallback(prompt);
-        viaDirectFallback = true;
-      }
+      final body = await SyncService.callAiText(prompt);
       if (!mounted || body == null) return;
 
       String? aiText;
@@ -822,8 +822,7 @@ If the text is already fine, return it unchanged.''';
 
       if (aiText != null && aiText.trim().isNotEmpty) {
         fieldOk = true;
-        fieldProvider =
-            viaDirectFallback ? 'apps_script_direct' : 'apps_script';
+        fieldProvider = 'apps_script';
         String cleaned = aiText.trim();
         if (cleaned.startsWith('```')) cleaned = cleaned.replaceAll(RegExp(r'^```\w*\n?'), '').replaceAll('```', '');
         if (cleaned.startsWith('"') && cleaned.endsWith('"')) cleaned = cleaned.substring(1, cleaned.length - 1);
@@ -912,97 +911,24 @@ If the text is already fine, return it unchanged.''';
 
       if (!mounted) return;
 
-      // ★ FALLBACK: Apps Script (Gemini) if Groq fails
-      final langInstruction = _detectedLang == 'en'
-          ? 'Respond with the "reason", "refined", and "correctiveAction" fields in English.'
-          : 'IMPORTANT: The worker spoke in $_detectedLangName. You MUST write the "reason", "refined", and "correctiveAction" fields in $_detectedLangName language (using native script). Do NOT translate to English.';
+      // ★ FALLBACK: Apps Script (Gemini) if Groq fails.
+      // The prompt is built by NearMissPrompt, the single definition shared with
+      // GroqService — so both providers are asked exactly the same question and
+      // answer against the same master lists. The ~50 lines that used to sit
+      // inline here were a hand-maintained copy that had already drifted.
+      // The master lists come from this screen's own state, which is what the
+      // dropdowns are built from, so a value the AI returns is a value the form
+      // can actually accept.
+      final prompt = NearMissPrompt.build(
+        text: rawText,
+        languageName: _detectedLangName,
+        kbContext: kbContext,
+        obsTypes: _obsTypes,
+        wsaCauses: _wsaCauses,
+        severities: _severities,
+      );
 
-      // Frame the knowledge bank as authoritative, and drive "category" from
-      // the admin's own observation types. This prompt previously dumped the KB
-      // in unlabelled and hardcoded five categories ("Unsafe Act, Unsafe
-      // Condition, Near Miss, Equipment Failure, Process Deviation") that do
-      // not match this form's own dropdown — so the AI could suggest a category
-      // the form then refused to accept.
-      final kbTrimmed = kbContext.trim();
-      final kbBlock = kbTrimmed.isEmpty
-          ? ''
-          : 'PLANT SAFETY KNOWLEDGE (uploaded by this plant\'s safety admin — '
-              'AUTHORITATIVE. Where it conflicts with your general knowledge, '
-              'follow it, and cite clause/section numbers exactly as written):\n'
-              '$kbTrimmed\n\n';
-      final categoryRule = _obsTypes.isEmpty
-          ? '"category": ""'
-          : '"category": "one of (exact wording): ${_obsTypes.join(', ')}"';
-      // The list of names alone leaves the model to invent the taxonomy, and
-      // the act/condition/near-miss distinction is the one it gets wrong.
-      final obsGuidance = AdminMasterData.obsTypeGuidance(_obsTypes);
-      // The remaining two dropdowns, driven from the admin's own lists for the
-      // same reason as the types: a value this form cannot accept is worse than
-      // no value, because the reporter sees a filled card and an empty field.
-      final wsaRule = _wsaCauses.isEmpty
-          ? '"wsaCause": ""'
-          : '"wsaCause": "one of (exact wording, keep the leading number): '
-              '${_wsaCauses.join(', ')}"';
-      final severityRule = _severities.isEmpty
-          ? '"severity": ""'
-          : '"severity": "one of (exact wording): ${_severities.join(', ')}"';
-
-      final prompt = '''$kbBlock
-You are classifying a safety observation reported by a worker at SAIL (Steel Authority of India Limited).
-
-WORKER'S INPUT: "$rawText"
-
-$langInstruction
-
-Analyze this and respond in STRICT JSON format:
-{
-  "hasHazard": true/false,
-  $categoryRule,
-  "confidence": 0-100,
-  "reason": "one sentence saying WHY it is that category, quoting the words in the worker's input that decide it (in the same language as worker's input)",
-  "refined": "the worker's report rewritten in clear professional safety language — correct grammar, proper terminology, states what was observed, where, and what could have happened (in the same language as worker's input, NOT translated)",
-  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in the same language as worker's input)",
-  $wsaRule,
-  $severityRule,
-  "detectedLanguage": "the language the worker spoke in (English/Hindi)"
-}
-
-YOUR JOB IS TO CLASSIFY, NOT TO REJECT. This form records unsafe acts and
-unsafe conditions as well as near misses, and all of them are valuable reports.
-A description that is not a near miss is almost always a perfectly valid unsafe
-act or unsafe condition — say which it is in "category" and carry on. Do NOT
-refuse the report, do NOT ask the worker to rewrite it, and ALWAYS return
-"refined" and "correctiveAction" whatever the category turns out to be.
-
-Set "hasHazard": false ONLY when the text describes no safety hazard at all —
-it is empty, unintelligible, a maintenance request, or plainly unrelated to
-safety. Being "not a near miss" is NOT a reason to set it false.
-
-$obsGuidance
-
-SEVERITY means the POTENTIAL consequence if the situation had continued or
-worsened, not what actually happened. A slippery walkway nobody fell on can
-still be HIGH if the fall would be onto machinery.
-
-CORRECTIVE ACTION GUIDANCE:
-- Be specific and actionable (e.g., "Install guardrail at platform edge" not just "Fix the issue")
-- Reference applicable safety measures (barricading, signage, PPE, LOTO, PTW)
-- Include both immediate action AND preventive measure where applicable
-- Keep it concise (1-2 sentences)
-
-WORKED EXAMPLE — "one person was walking and there was a slippery surface":
-this is an Unsafe Condition (the hazard is the state of the floor; no event has
-happened, so it is not a near miss), hasHazard is true, and it gets a refined
-description and a corrective action like any other report.
-
-Respond ONLY with the JSON — no explanations outside JSON.''';
-
-      Map<String, dynamic>? body = await SyncService.callAiText(prompt);
-      var viaDirectFallback = false;
-      if (body == null) {
-        body = await _callAiTextFallback(prompt);
-        viaDirectFallback = true;
-      }
+      final body = await SyncService.callAiText(prompt);
       if (!mounted) return;
 
       if (body != null) {
@@ -1023,8 +949,7 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
           try {
             final parsed = jsonDecode(jsonStr) as Map<String, dynamic>;
             refineOk = true;
-            refineProvider =
-                viaDirectFallback ? 'apps_script_direct' : 'apps_script';
+            refineProvider = 'apps_script';
             if (mounted) {
               setState(() {
                 _aiSuggestion = parsed;
@@ -1058,37 +983,16 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     }
   }
 
-  /// ★ v25: Fallback AI text call using GeminiVision's backend directly
-  Future<Map<String, dynamic>?> _callAiTextFallback(String prompt) async {
-    try {
-      const backendUrl = 'https://script.google.com/macros/s/AKfycbzDiT4OSvlDUxvcM9DYJ_-SiB1HyDrgXtYflGfmqJRH9wnZZusj5GqX9frCx64rkd61Rg/exec';
-      final body = jsonEncode({'action': 'gemini', 'prompt': prompt});
-      final resp = await http.post(
-        Uri.parse(backendUrl),
-        body: body,
-        headers: {'Content-Type': 'text/plain;charset=utf-8'},
-      ).timeout(const Duration(seconds: 30));
-      if (resp.statusCode == 200) {
-        // ★ v29 FIX: Force UTF-8 decode for non-English text
-        final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-        if (decoded is Map<String, dynamic>) return decoded;
-      }
-      // Handle redirect (mobile)
-      if (resp.statusCode == 302 || resp.statusCode == 301) {
-        final redirectUrl = resp.headers['location'];
-        if (redirectUrl != null) {
-          final getResp = await http.get(Uri.parse(redirectUrl)).timeout(const Duration(seconds: 15));
-          if (getResp.statusCode == 200) {
-            final decoded = jsonDecode(utf8.decode(getResp.bodyBytes));
-            if (decoded is Map<String, dynamic>) return decoded;
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('AI fallback error: $e');
-    }
-    return null;
-  }
+  // REMOVED: `_callAiTextFallback`. It re-posted the same {action:'gemini'}
+  // payload, with the same text/plain content type, to the same Apps Script
+  // deployment that `SyncService.callAiText` had just failed on — except it
+  // pinned the URL as a compile-time constant instead of reading the
+  // `sync_backend_url` prefs override, so on any deployment other than the
+  // hardcoded one it was guaranteed to fail. It therefore added no fallback
+  // value at all, only a second 30s timeout on top of the first: exactly the
+  // CORS/ERR_FAILED pair and the 30s TimeoutException seen in the console.
+  // If a genuine second text provider is ever wanted, add it as a distinct
+  // service, not as a copy of the call that just failed.
 
   /// Applies the AI's answer to the form.
   ///
@@ -3581,13 +3485,29 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     final fills = _aiFillChips(sl, aiObsType, aiWsa, aiSeverity, correctiveAction);
     final canApply = refined.isNotEmpty || fills.isNotEmpty;
 
-    // Amber, not green or red. Green read as "your report passed", which invited
-    // the reporter to treat the AI as the authority on their own observation;
-    // red read as rejection. This is information awaiting a decision.
-    final accent = hasHazard ? AppColors.amber : AppColors.red;
-    final accentTx = hasHazard ? sl.amberText : sl.redText;
+    // Indigo, not amber, green or red.
+    //
+    // Green read as "your report passed", which invited the reporter to treat
+    // the AI as the authority on their own observation; red read as rejection.
+    // Amber avoided both but collided with the app's own meaning for amber —
+    // MEDIUM severity — so a card about a LOW hazard was framed in the colour of
+    // a medium one, and it sat two fields away from a severity dropdown using
+    // the same hue for something else entirely.
+    //
+    // Indigo (AppColors.accent) is the app's primary and carries no safety
+    // meaning, so it reads as "the assistant is talking" rather than as a
+    // verdict. It also matches the ✨ AI badge in _aiSetBadge, which is what
+    // marks the fields this card fills — one colour now means one thing across
+    // the whole interaction. The no-hazard path stays red: there the card is
+    // reporting that it found nothing to work with.
+    //
+    // Both fills are contrast-checked against every foreground used below —
+    // sl.accentText measures 5.24:1 on the dark fill and 4.89:1 on the light
+    // one. Changing either hex means re-running tools/audit_contrast.py.
+    final accent = hasHazard ? AppColors.accent : AppColors.red;
+    final accentTx = hasHazard ? sl.accentText : sl.redText;
     final cardColor = hasHazard
-        ? (sl.isDark ? const Color(0xFF32290F) : const Color(0xFFFFF8E1))
+        ? (sl.isDark ? const Color(0xFF1D2140) : const Color(0xFFEEF0FF))
         : (sl.isDark ? const Color(0xFF3A1B1B) : const Color(0xFFFFEBEE));
 
     Color confidenceColor;
@@ -3633,7 +3553,19 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: confidenceColor.withOpacity(0.15),
+                    // Near-white in light mode rather than a wash of the
+                    // confidence colour over the card. The card fill moved from
+                    // amber-cream (#FFF8E1) to indigo-lavender (#EEF0FF) in the
+                    // recolour, and lavender is darker: the same 15% tint took
+                    // greenText and redText from 4.52/4.55:1 down to 4.27:1,
+                    // under AA. On white they measure above 5:1. This badge is
+                    // the one the reporter reads to decide how much to trust the
+                    // card, so it is not a place to lose legibility.
+                    // audit_contrast.py cannot catch this — it scores tokens
+                    // against the two global backgrounds, not a local card fill.
+                    color: sl.isDark
+                        ? confidenceColor.withOpacity(0.15)
+                        : Colors.white.withOpacity(0.9),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: confidenceColor.withOpacity(0.5)),
                   ),
@@ -3674,14 +3606,26 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 width: double.infinity,
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: sl.isDark ? Colors.black26 : Colors.white.withOpacity(0.7),
+                  // Inset panel: darker than the card on dark, lighter on light,
+                  // so the AI's words are visibly a quotation rather than more
+                  // card copy. Tinted with the card's own indigo instead of a
+                  // neutral, which is what stopped it reading as a grey box
+                  // dropped onto a coloured card.
+                  color: sl.isDark
+                      ? const Color(0xFF141733)
+                      : Colors.white.withOpacity(0.85),
                   borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: accent.withOpacity(0.22)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('AI Refined Description:',
-                      style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w600)),
+                    Row(children: [
+                      Icon(Icons.auto_awesome, size: 12, color: accentTx),
+                      const SizedBox(width: 5),
+                      Text('AI Refined Description:',
+                        style: TextStyle(color: accentTx, fontSize: 10.5, fontWeight: FontWeight.w700)),
+                    ]),
                     const SizedBox(height: 4),
                     Text(refined,
                       style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4)),
@@ -3803,30 +3747,83 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   /// One chip per field the AI answer will populate, so the reporter can see
   /// the whole effect of "Use AI Version" before tapping it. Only fields that
   /// resolved to a real member of the admin's lists appear.
+  /// Each chip is tinted by the MEANING of the field it fills, not decoratively:
+  /// indigo for the classification, cyan for the WSA-13 cause, the severity's own
+  /// signage colour for severity, green for the corrective action. The severity
+  /// chip in particular has to agree with the colour the same value gets in the
+  /// dropdown and on the dashboard — a chip promising "Severity: CRITICAL" in
+  /// neutral grey while the field below turns red is the report contradicting
+  /// itself in miniature.
+  ///
+  /// All foregrounds are `sl.*Text` getters, never the bare AppColors tokens:
+  /// tools/audit_contrast.py fails `amber`/`green`/`red`/`accent` as TEXT in one
+  /// theme or the other, and passes them as fills. The chip fill is kept near
+  /// white in light mode rather than taking the card's lavender, because
+  /// amberLight measures only 4.43:1 on that lavender and 5.02:1 on white.
   List<Widget> _aiFillChips(SL sl, String obsType, String wsa, String severity,
       String correctiveAction) {
-    Widget chip(IconData ic, String label) => Container(
+    Widget chip(IconData ic, String label, Color tint, Color tx) => Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       decoration: BoxDecoration(
-        color: sl.isDark ? Colors.white10 : Colors.white.withOpacity(0.8),
+        // 0.10, not 0.16, on dark. The tint lightens the fill, and the WSA
+        // chip's cyan is the weakest of the five foregrounds: at 0.16 it
+        // measured 4.16:1 and missed AA, at 0.10 it is 4.58:1. Raising this
+        // means re-measuring the cyan chip specifically — it fails first.
+        color: sl.isDark
+            ? tint.withOpacity(0.10)
+            : Colors.white.withOpacity(0.85),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: sl.border.withOpacity(0.6)),
+        border: Border.all(color: tint.withOpacity(sl.isDark ? 0.45 : 0.40)),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(ic, size: 11, color: sl.text3),
+        Icon(ic, size: 11, color: tx),
         const SizedBox(width: 4),
         Text(label,
-          style: TextStyle(color: sl.text2, fontSize: 10.5, fontWeight: FontWeight.w600)),
+          style: TextStyle(color: tx, fontSize: 10.5, fontWeight: FontWeight.w700)),
       ]),
     );
+
+    // The severity chip borrows the plant's signage convention: red for the two
+    // levels that stop work, amber for medium, green for low.
+    //
+    // An unrecognised label falls back to the card's own indigo, NOT to green.
+    // Severity levels are admin-editable master data, and `severity` is only
+    // checked for membership of that list — so a plant that renames HIGH to
+    // "SEVERE" or "MAJOR" would otherwise get a green chip reading
+    // "Severity: SEVERE", which is the exact self-contradiction this colouring
+    // exists to prevent, and worse than no colour at all. Indigo carries no
+    // safety meaning, so it reads as "unclassified" rather than as "safe".
+    final sev = severity.trim().toUpperCase();
+    final Color sevTint;
+    final Color sevTx;
+    if (sev == 'CRITICAL' || sev == 'HIGH') {
+      sevTint = AppColors.red;
+      sevTx = sl.redText;
+    } else if (sev == 'MEDIUM') {
+      sevTint = AppColors.amber;
+      sevTx = sl.amberText;
+    } else if (sev == 'LOW') {
+      sevTint = AppColors.green;
+      sevTx = sl.greenText;
+    } else {
+      sevTint = AppColors.accent;
+      sevTx = sl.accentText;
+    }
+
     return <Widget>[
-      if (obsType.isNotEmpty) chip(Icons.category_outlined, 'Type: $obsType'),
-      if (wsa.isNotEmpty) chip(Icons.account_tree_outlined, 'Category: $wsa'),
-      if (severity.isNotEmpty) chip(Icons.speed_rounded, 'Severity: $severity'),
+      if (obsType.isNotEmpty)
+        chip(Icons.category_outlined, 'Type: $obsType',
+            AppColors.accent, sl.accentText),
+      if (wsa.isNotEmpty)
+        chip(Icons.account_tree_outlined, 'Category: $wsa',
+            AppColors.cyan, sl.cyanText),
+      if (severity.isNotEmpty)
+        chip(Icons.speed_rounded, 'Severity: $severity', sevTint, sevTx),
       // Only advertised when it will actually be written: the existing rule is
       // that a corrective action already typed is never overwritten.
       if (correctiveAction.isNotEmpty && _immediateAction.text.trim().isEmpty)
-        chip(Icons.build_circle_outlined, 'Corrective Action 1'),
+        chip(Icons.build_circle_outlined, 'Corrective Action 1',
+            AppColors.green, sl.greenText),
     ];
   }
 

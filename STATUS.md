@@ -617,6 +617,144 @@ is to shorten that one label to "SOP" and put all six back to 10px — not to
 shrink further. This moved the audit from 244 failures / 236 warnings to
 **245 / 235**: the same line, reclassified from warning to failure.
 
+## 2026-09-03 — AI text route simplified, console errors, AI card recoloured
+
+Uncommitted and uncompiled, on top of the same day's near-miss card rework.
+Prompted by a browser console screenshot from safetylens.in showing five error
+classes, and by "make the AI analysing route simpler".
+
+**The route had three hops and the third was a strictly worse copy of the
+second.** `_callAiTextFallback` in `near_miss_tab.dart` re-posted the same
+`{action:'gemini'}` body, with the same `text/plain;charset=utf-8` content type,
+to the same Apps Script deployment `SyncService.callAiText` had just failed on —
+except it pinned the deployment URL as a compile-time constant and so ignored the
+`sync_backend_url` prefs override. It could therefore never succeed where the
+call before it had failed; it only added a second 30s timeout. Deleted, along
+with both `if (body == null)` retries, the `viaDirectFallback` locals and the
+`'apps_script_direct'` telemetry provider string (no consumer anywhere in `lib/`).
+`package:http` is no longer imported by that screen at all — a comment in the
+import block says why it must not come back: every network hop belongs in a
+service, which is where the URL override lives.
+
+That accounts for two of the five console errors — the CORS/`ERR_FAILED` pair and
+the 30s `TimeoutException`. Note a correction to an earlier diagnosis: Dart web's
+`BrowserClient` surfaces a CORS rejection as an immediate `ClientException`, not a
+hang, so the 30s wait was the *second* attempt, not the blocked one. Removing the
+duplicate hop is what removes the wait; there was never a CORS fix to make.
+
+**One prompt, one definition.** New `lib/services/near_miss_prompt.dart`. The
+classification prompt existed in three hand-synchronised copies — a ~50-line
+inline string in `_refineWithAI`, a near-duplicate in
+`GroqService.classifyNearMiss`, and `getSailPrompt` in `apps_script_v14.js` — and
+they had already drifted: one hardcoded five observation categories the app's own
+dropdown does not offer, one still said "English" in the `"refined"` description
+and so quietly regressed the Hindi path. Both Dart callers now build from
+`NearMissPrompt.build` (master lists passed in) or `buildFromMasterData` (lists
+fetched, each falling back to its shipped default rather than to an empty list,
+because an empty list silently *removes* the constraint). The Apps Script copy
+cannot import Dart and stays separate — keep its `HOW TO CHOOSE "type"` block in
+step with `AdminMasterData.obsTypeGuidance`.
+
+**Groq 404 `model_not_found`.** `availableModels` still offered `gemma2-9b-it` and
+`mixtral-8x7b-32768`, both decommissioned, so an admin could pick a model that
+could only ever 404 — and `complete()` returned `null` on any non-200 without
+logging status or body, which is how a fleet-wide failure looked like a slow
+backend. Now: those two removed, a `_retiredModels` migration map that `getModel()`
+rewrites *and persists* through (changing `defaultModel` alone never reaches a
+device that already saved a dead ID), `_logHttpFailure` decoding Groq's `error`
+object and naming the model, an `isSupportedModel` predicate, and the same clamp
+`admin_screen.dart` already applied to the Gemini and Nara dropdown seeds now
+applied to the Groq one at `_loadGroqConfig`. That clamp also closes a crash:
+`DropdownButtonFormField` asserts on a `value` absent from its items, so shrinking
+`availableModels` with a retired ID still in prefs would have thrown.
+**Anything removed from `availableModels` must be added to `_retiredModels` in the
+same edit.** Still open, pre-existing: the adjacent `value: _groqVisionModel`
+against `GeminiVision.groqVisionModels` is the one dropdown of this shape with no
+clamp.
+
+**`LOW: 0`.** A real data-corrupting bug, and the interesting part is how it
+passed three guards. `_isOutOfRangeScale` judges the TOP of the scale, which was a
+healthy 90 — one broken level does not move it. `_normaliseScale` deliberately
+leaves `<= 0` alone as a "does not count", which is right for a level an admin
+invented and wrong for the canonical four, where LOW is still a hazard. And
+`_withCanonicalLevels` only tested whether the KEY was absent, which it was not.
+The likeliest origin is the parse itself: every read does
+`int.tryParse(v.toString()) ?? 0`, so an empty or non-numeric backend cell becomes
+0 rather than an absent key. Now repaired in four places — `_withCanonicalLevels`
+(non-positive canonical values restored, logged separately from missing ones),
+`scoreFromMap` (`> 0` rather than `!= null`, returning the built-in directly so the
+"NO ENTRY" message does not misreport an absent key), the master-data import
+(pushed back, or the broken row is re-imported by every device forever), and
+`saveSeverityScores`. A stored 0 rendered "0 / 100" on a LOW report and pulled the
+plant average down as though it were a hazard-free record.
+
+Two follow-ups from review of the above, both worth keeping in mind:
+
+* The import path originally pushed inside *each* repair branch. `_pushWithRetry`
+  is fire-and-forget, so a scale needing both repairs — `{CRITICAL:25, HIGH:15,
+  MEDIUM:10, LOW:0}` is out of range AND zeroed, and is not `_isLegacyScale`
+  because LOW is 0 not 5 — fired two concurrent pushes with different payloads in
+  undefined order, and a failed first push is queued and replayed later,
+  re-poisoning the backend after the repair succeeded. Both repairs now apply
+  before a single push.
+* `saveSeverityScores` repairing its input meant the admin panel's `_adjustScore`
+  produced three different numbers from one tap: the tile kept showing 0, the
+  audit entry recorded 0, and 20 was stored and pushed. Fixed at the source —
+  `_adjustScore` now clamps to `AdminMasterData.severityBands`, which is already
+  the invariant every display path enforces (`scoreForDisplay` silently lifts or
+  caps a score contradicting its label), so the panel was previously offering a
+  setting the app would overrule. A tap at the end of the band now toasts instead
+  of appearing dead. `saveSeverityScores` also returns the map it actually stored,
+  so a future caller holding state can adopt it.
+
+**The AI card is indigo, not amber.** Amber avoided the two traps green and red
+fell into — green read as "your report passed", inviting the reporter to treat the
+AI as the authority on their own observation, red read as rejection — but it
+collided with the app's own meaning for amber, MEDIUM severity, two fields above a
+severity dropdown using the same hue for something else. `AppColors.accent` is the
+primary and carries no safety meaning, and it matches the ✨ AI badge that marks
+the fields this card fills, so one colour now means one thing across the whole
+interaction. The no-hazard path stays red. Fill chips are tinted by the meaning of
+the field each fills: indigo for the classification, cyan for the WSA-13 cause,
+the severity's own signage colour for severity, green for the corrective action.
+
+Three contrast findings from this, none of which `tools/audit_contrast.py` can
+catch, because it scores tokens against the two global backgrounds and not against
+a local card fill:
+
+* The dark chip tint had to come down from 0.16 to 0.10. The tint lightens the
+  fill and the cyan WSA chip is the weakest of the five foregrounds: 4.16:1 at
+  0.16, 4.58:1 at 0.10. Raising it means re-measuring that chip specifically.
+* The confidence badge takes a near-white fill in light mode now. The card fill
+  moved from amber-cream `#FFF8E1` to lavender `#EEF0FF`, which is darker, and the
+  same 15% wash took `greenText`/`redText` from 4.52/4.55:1 to 4.27:1.
+* Chips keep a near-white fill in light mode rather than the card's lavender,
+  because `amberLight` measures 4.43:1 on lavender and 5.02:1 on white.
+
+An unrecognised severity label now falls back to indigo, not green. Severity
+levels are admin-editable and only checked for list membership, so a plant that
+renames HIGH to "SEVERE" would have got a green chip reading "Severity: SEVERE" —
+the exact self-contradiction the chip colouring exists to prevent.
+
+**Not from this app:** the `VideoFrame` console warnings. Zero matches for
+`VideoFrame`, `getUserMedia` or `MediaStream` anywhere in the repo, no
+camera/scanner/webrtc plugin in `pubspec.yaml`, and `image_picker_for_web` uses a
+hidden file input that never opens a MediaStream. Almost certainly a browser
+extension; confirm in an extensions-off incognito window. There is no app fix.
+
+Verified: analyzer baseline diff clean — the only new `code|message` pairs name
+Flutter framework symbols (`FocusNode`, `GlobalKey`, `Color`, `AnimatedContainer`,
+`Flexible`, `Focus`, `KeyedSubtree`, `ScrollController`, `Wrap`, `debugPrint`),
+which are unresolvable in the sandbox and new only because the diff newly *uses*
+them. No diagnostic names any symbol the change introduced. Contrast audit
+unmoved at **167 failures / 262 warnings**.
+
+**Still unactioned, awaiting a decision:** the Apps Script key exposure. The
+public `getMasterData` action returns every plaintext AI key, the deployment URL is
+a tracked compile-time constant, keys are org-wide, and `action:'gemini'` is an
+open billable proxy. A Gemini key and two OpenRouter keys are recoverable from git
+history and need rotating regardless of what is done about the design.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has

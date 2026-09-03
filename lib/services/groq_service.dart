@@ -11,9 +11,10 @@
 //   - gemma2-9b-it (good multilingual support)
 
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'admin_master_data.dart';
+import 'near_miss_prompt.dart';
 
 class GroqService {
   static const String _kGroqApiKey = 'groq_api_key';
@@ -48,10 +49,40 @@ class GroqService {
     await _prefs!.setString(_kGroqApiKey, key.trim());
   }
 
-  /// Get current model
+  /// Retired Groq model IDs → their current replacement.
+  ///
+  /// Why this map is essential and not cosmetic: the selected model is persisted
+  /// per device in SharedPreferences. Groq decommissioned `mixtral-8x7b-32768`
+  /// and `gemma2-9b-it`, and every install that had one saved kept posting it
+  /// forever — Groq answers 404 `model_not_found`, `complete()` returned null
+  /// without logging why, and the near-miss card silently fell through to the
+  /// slower Apps Script path. Changing [defaultModel] alone does not reach those
+  /// devices; [getModel] rewriting through this map is what makes them self-heal.
+  static const Map<String, String> _retiredModels = {
+    'mixtral-8x7b-32768': 'llama-3.3-70b-versatile',
+    'gemma2-9b-it': 'llama-3.3-70b-versatile',
+    'llama2-70b-4096': 'llama-3.3-70b-versatile',
+    'llama-3.1-70b-versatile': 'llama-3.3-70b-versatile',
+    'llama3-70b-8192': 'llama-3.3-70b-versatile',
+    'llama3-8b-8192': 'llama-3.1-8b-instant',
+  };
+
+  /// Get current model, transparently upgrading a retired saved ID.
+  ///
+  /// The rewrite is persisted so the admin panel dropdown also stops offering a
+  /// dead model, and so this costs one write rather than a lookup per request.
   static Future<String> getModel() async {
     await _ensurePrefs();
-    return _prefs!.getString(_kGroqModel) ?? defaultModel;
+    final saved = _prefs!.getString(_kGroqModel);
+    if (saved == null || saved.trim().isEmpty) return defaultModel;
+    final replacement = _retiredModels[saved.trim()];
+    if (replacement != null) {
+      debugPrint('GroqService: ⚙ Saved model "$saved" was decommissioned by '
+          'Groq — migrating to "$replacement"');
+      await _prefs!.setString(_kGroqModel, replacement);
+      return replacement;
+    }
+    return saved.trim();
   }
 
   /// Set model preference
@@ -60,13 +91,21 @@ class GroqService {
     await _prefs!.setString(_kGroqModel, model);
   }
 
-  /// Available models for the dropdown
+  /// Available models for the dropdown.
+  ///
+  /// Only IDs Groq still serves. `gemma2-9b-it` and `mixtral-8x7b-32768` were
+  /// listed here long after Groq decommissioned them, so an admin could pick a
+  /// model that could only ever return 404. Anything removed from this list must
+  /// be added to [_retiredModels] in the same edit, or devices that already
+  /// saved it are stranded.
   static const List<Map<String, String>> availableModels = [
     {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B (Best quality)'},
     {'id': 'llama-3.1-8b-instant', 'name': 'Llama 3.1 8B (Fastest)'},
-    {'id': 'gemma2-9b-it', 'name': 'Gemma 2 9B (Good multilingual)'},
-    {'id': 'mixtral-8x7b-32768', 'name': 'Mixtral 8x7B (Balanced)'},
   ];
+
+  /// True if [model] is one this build is willing to send.
+  static bool isSupportedModel(String model) =>
+      availableModels.any((m) => m['id'] == model.trim());
 
   /// Call Groq API for text completion
   /// Returns the AI response text, or null on failure.
@@ -107,16 +146,46 @@ class GroqService {
           final message = choices[0]['message'] as Map<String, dynamic>?;
           return message?['content']?.toString();
         }
-      } else if (response.statusCode == 429) {
-        // Rate limited — caller should fallback
-        return null;
+        debugPrint('GroqService: 200 but no choices in response');
       } else {
-        return null;
+        // This branch used to `return null` with no logging at all, which is how
+        // a fleet-wide 404 `model_not_found` stayed invisible: the console showed
+        // only the bare network 404 and the near-miss card looked like a slow
+        // backend. Groq puts the actionable detail in the body, so log it.
+        _logHttpFailure(response.statusCode, response.bodyBytes, model);
       }
     } catch (e) {
+      debugPrint('GroqService: request failed — $e');
       return null;
     }
     return null;
+  }
+
+  /// Logs a non-200 from Groq with the part that says what is actually wrong.
+  static void _logHttpFailure(int status, List<int> bodyBytes, String model) {
+    String detail;
+    try {
+      final decoded = jsonDecode(utf8.decode(bodyBytes));
+      if (decoded is Map && decoded['error'] is Map) {
+        final err = decoded['error'] as Map;
+        detail = '${err['code'] ?? ''} ${err['message'] ?? ''}'.trim();
+      } else {
+        detail = utf8.decode(bodyBytes);
+      }
+    } catch (_) {
+      detail = '<unreadable body>';
+    }
+    if (detail.length > 400) detail = '${detail.substring(0, 400)}…';
+    if (status == 429) {
+      debugPrint('GroqService: 429 rate limited (model "$model") — $detail');
+    } else if (status == 404) {
+      debugPrint('GroqService: 404 for model "$model" — $detail. If this names '
+          'the model, add it to _retiredModels so saved prefs migrate.');
+    } else if (status == 401 || status == 403) {
+      debugPrint('GroqService: $status — API key rejected. $detail');
+    } else {
+      debugPrint('GroqService: HTTP $status (model "$model") — $detail');
+    }
   }
 
   /// ★ FIX: Multi-turn chat with conversation history.
@@ -218,100 +287,14 @@ Rules:
     required String language,
     String? kbContext,
   }) async {
-    // Observation types come from the admin panel. This used to be a
-    // hardcoded five-value enum that didn't match the app's own dropdown, so
-    // the AI could return a category the form then rejected.
-    List<String> obsTypes;
-    try {
-      obsTypes = await AdminMasterData.getObsTypes();
-    } catch (_) {
-      obsTypes = List<String>.from(AdminMasterData.defaultObservationTypes);
-    }
-    final categoryRule = obsTypes.isEmpty
-        ? '"category": ""'
-        : '"category": "one of (exact wording): ${obsTypes.join(', ')}"';
-
-    // The WSA cause and severity lists, for the same reason: the near-miss form
-    // fills those two dropdowns from this answer, and a value that is not a
-    // member of the admin's list is discarded by the caller's resolvers — which
-    // leaves the reporter looking at a filled AI card above an empty field.
-    List<String> wsaCauses;
-    List<String> severities;
-    try {
-      wsaCauses = await AdminMasterData.getWsaCauses();
-    } catch (_) {
-      wsaCauses = List<String>.from(AdminMasterData.defaultWsaCauses);
-    }
-    try {
-      severities = await AdminMasterData.getSeverities();
-    } catch (_) {
-      severities = List<String>.from(AdminMasterData.defaultSeverities);
-    }
-    final wsaRule = wsaCauses.isEmpty
-        ? '"wsaCause": ""'
-        : '"wsaCause": "one of (exact wording, keep the leading number): '
-            '${wsaCauses.join(', ')}"';
-    final severityRule = severities.isEmpty
-        ? '"severity": ""'
-        : '"severity": "one of (exact wording): ${severities.join(', ')}"';
-
-    final langInstruction = language == 'English'
-        ? 'Respond with "reason", "refined", and "correctiveAction" fields in English.'
-        : 'IMPORTANT: The worker spoke in $language. Write "reason", "refined", and "correctiveAction" in $language (native script). Do NOT translate to English.';
-
-    // The knowledge bank block is explicitly framed as authoritative. It used
-    // to be dumped in unlabelled, so the model had no reason to prefer the
-    // plant's own uploaded standards over its general training.
-    final kb = (kbContext ?? '').trim();
-    final kbBlock = kb.isEmpty
-        ? ''
-        : 'PLANT SAFETY KNOWLEDGE (uploaded by this plant\'s safety admin — '
-            'AUTHORITATIVE. Where it conflicts with your general knowledge, '
-            'follow it, and cite clause/section numbers exactly as written):\n'
-            '$kb\n\n';
-
-    final prompt = '''$kbBlock
-You are classifying a safety observation reported by a worker at SAIL (Steel Authority of India Limited).
-
-WORKER'S INPUT: "$text"
-
-$langInstruction
-
-Respond in STRICT JSON format:
-{
-  "hasHazard": true/false,
-  $categoryRule,
-  "confidence": 0-100,
-  "reason": "one sentence saying WHY it is that category, quoting the deciding words from the input (in worker's language)",
-  "refined": "the report rewritten in clear professional safety language — correct grammar, proper terminology, what was observed, where, and what could have happened (in worker's language, NOT translated)",
-  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in worker's language)",
-  $wsaRule,
-  $severityRule,
-  "detectedLanguage": "English/Hindi"
-}
-
-YOUR JOB IS TO CLASSIFY, NOT TO REJECT. This form records unsafe acts and
-unsafe conditions as well as near misses, and all of them are valuable reports.
-A description that is not a near miss is almost always a valid unsafe act or
-unsafe condition — say which in "category" and carry on. ALWAYS return "refined"
-and "correctiveAction" whatever the category is.
-
-Set "hasHazard": false ONLY when the text describes no safety hazard at all
-(empty, unintelligible, a maintenance request, unrelated to safety). Being "not
-a near miss" is NOT a reason to set it false.
-
-${AdminMasterData.obsTypeGuidance(obsTypes)}
-
-SEVERITY means the POTENTIAL consequence if the situation had continued or
-worsened, not what actually happened.
-
-CORRECTIVE ACTION GUIDANCE:
-- Be specific and actionable (e.g., "Install guardrail at platform edge" not just "Fix the issue")
-- Reference applicable safety measures (barricading, signage, PPE, LOTO, PTW)
-- Include both immediate action AND preventive measure where applicable
-- Keep it concise (1-2 sentences)
-
-Respond ONLY with JSON — nothing else.''';
+    // The prompt itself lives in NearMissPrompt — see that file for why. This
+    // method used to carry a near-duplicate that had already drifted from the
+    // copy in near_miss_tab.dart.
+    final prompt = await NearMissPrompt.buildFromMasterData(
+      text: text,
+      languageName: language,
+      kbContext: kbContext ?? '',
+    );
 
     final result = await complete(prompt, temperature: 0.2);
     if (result == null) return null;
@@ -323,7 +306,7 @@ Respond ONLY with JSON — nothing else.''';
       if (jsonMatch != null) jsonStr = jsonMatch.group(0)!;
       return jsonDecode(jsonStr) as Map<String, dynamic>;
     } catch (e) {
-      print('Groq: JSON parse error: $e');
+      debugPrint('Groq: JSON parse error: $e');
       return null;
     }
   }
