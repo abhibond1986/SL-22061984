@@ -749,11 +749,114 @@ which are unresolvable in the sandbox and new only because the diff newly *uses*
 them. No diagnostic names any symbol the change introduced. Contrast audit
 unmoved at **167 failures / 262 warnings**.
 
-**Still unactioned, awaiting a decision:** the Apps Script key exposure. The
-public `getMasterData` action returns every plaintext AI key, the deployment URL is
-a tracked compile-time constant, keys are org-wide, and `action:'gemini'` is an
-open billable proxy. A Gemini key and two OpenRouter keys are recoverable from git
-history and need rotating regardless of what is done about the design.
+**The Apps Script key exposure named here as unactioned was acted on the same
+day** — see the next section. The rotation of the three keys recoverable from git
+history is still owed and is not something code can do.
+
+## 2026-09-03 — Apps Script key exposure closed at the edge (step 1 of 3)
+
+Uncommitted and uncompiled. Scope was chosen deliberately as "close the
+internet-facing hole now"; the real fix is step 3 and is not done.
+
+**What was open.** `getMasterData` was in `publicActions` and injected all five
+vendor keys from Script Properties into its reply, so an unauthenticated POST of
+`{"action":"getMasterData"}` returned every key in plaintext — to a deployment URL
+that is a compile-time constant in a public repository. Two more public actions
+spent money with no caller anywhere in `lib/`: `diagnose` fired one paid inference
+per model in `GOOGLE_MODELS` on every request, and `analyzeUrl` proxied an image
+URL. `upsertUser` was a public write to the user table.
+
+**What was done.** Keys left `getMasterData` entirely (its read path now filters
+`SECRET_MASTERDATA_KEYS`; `MASTERDATA_KEYS` is untouched so the admin panel can
+still *write* them) and moved to a new `getAiKeys`, which — with `gemini`, the
+billable proxy — is gated on a shared `APP_SECRET` script property matched against
+an `_appSecret` the app sends from `String.fromEnvironment('SL_APP_SECRET')`.
+`diagnose` and `analyzeUrl` were deleted; `upsertUser` left `publicActions`.
+
+Four things about this are easy to get wrong later:
+
+* **`appSecretOk` fails closed.** No `APP_SECRET` property set means the gated
+  actions are refused, not allowed. A fallback-to-allow version would be
+  indistinguishable from having no check at all. Consequence: **set the property
+  BEFORE redeploying**, or AI stops working the moment the new deployment goes
+  live.
+* **This gate is not a secret.** On web the value is compiled into the JavaScript
+  the browser downloads, and `main.dart:65` fetches master data before `runApp`,
+  so keys reach `SharedPreferences` before the login screen even paints. The gate
+  moves exposure from "the entire internet" to "anyone holding the build". That is
+  a real reduction and it is not a fix. `lib/services/app_secret.dart` says so in
+  its own doc comment and carries a deletion date.
+* **Moving an action out of `publicActions` does not authenticate it — it
+  disables it.** The token gate behind that list has never once succeeded in
+  production: sessions are only written by `createSession`, called only from the
+  Apps Script `login` action, which `AuthService.signIn` never reaches; the client
+  carries a device-generated token from `_issueLocalToken`; and `createSession`
+  stores `username` while the client sends `pno`. The only gated action the live
+  app reaches is `saveMasterData`, from three admin helpers that send no auth
+  fields and swallow the reply with `catch (_) {}` — which is why nobody noticed.
+  Do not "tidy" a working action out of that list.
+* **`collectAiKeys` also returns `geminiModel` and `naraModel`.** Those two are
+  not secrets, but they are absent from the Supabase `master_data` mapping and the
+  masterdata sheet is their only source. Switching the key fetch from
+  `getMasterData` to `getAiKeys` without carrying them would have silently sent
+  every device to `NaraVision.defaultModel`, the costliest option, with no error
+  anywhere.
+
+**Two files had to be rerouted to make the gate possible at all.**
+`chat_tab.dart` and `pdf_kb_extractor_web.dart` each called `action:'gemini'` with
+a raw `http.post` to their own pinned copy of the deployment URL, so neither could
+attach `_appSecret`; both now go through `SyncService.callAiText`. A side effect
+worth knowing: `chat_tab`'s raw post never UTF-8 decoded the body, so Hindi
+answers were being mangled. `_appSecret` is attached in `_postWithRedirect` for
+**every** request rather than per call site, because per-call-site auth decisions
+are exactly how those three `saveMasterData` helpers ended up sending nothing.
+Pinned URLs still exist in `drive_sync.dart`, `network_checker.dart`,
+`nara_vision.dart` and `admin_screen.dart`, but they only use ungated actions
+(`uploadPdfToDrive`, `analyzeImageNara`, `health`), so they keep working.
+
+**Why the keys cannot simply be withheld from the client.** Nine paths call
+vendor APIs straight from the device with a key out of `SharedPreferences` —
+`groq_service.dart`, `gemini_vision.dart`, `gemini_direct_vision.dart` (key in the
+query string), `nara_vision.dart` on mobile, four paths in `sop_ocr_service.dart`,
+and `ai_audit_service.dart`. Only `doc_qa_service.dart` does it correctly, through
+`DocQaProxy.gs`. Until those nine are proxied, gating alone would kill AI app-wide.
+That is step 3, and it is the only step that actually closes this.
+
+**Manual steps only a human can do, in this order.** Set the `APP_SECRET` script
+property; add `SL_APP_SECRET` as a repository secret with the same value; **then
+redeploy the Apps Script** (saving the editor changes does nothing — the `/exec`
+URL serves the last *deployment*); then rotate all five vendor keys, since
+anything issued before today should be assumed public. A Gemini key and two
+OpenRouter keys are recoverable from git history and must be revoked, not just
+replaced. Worth doing while in the consoles: set a spend cap per vendor and an
+HTTP-referrer restriction on the Gemini key. Rotating `APP_SECRET` later has no
+grace period — both sides change together, so redeploy and rebuild in one go.
+
+**Found on the way, and separate: the Supabase anon key exposes every user's
+`password_hash` and `salt`.** Login reads the custom `app_users` table rather than
+using Supabase Auth — a deliberate choice, because the app must log in offline on
+a plant floor — and the anon key is a compile-time constant in the public build.
+`supabase_app_users_hardening.sql` is the fix, written but **not applied**:
+sections 1 and 2 are additive and safe to run now, section 3 closes the read and
+**breaks login on every device until Dart calls `verify_login`**, including any old
+APK still in someone's hand. The file lists the exact Dart changes required first.
+Still open after all three sections, and arguably worse than the read: the `UPDATE`
+policy is `using (true)`, so anyone with the anon key can overwrite any
+`password_hash`, and `INSERT` lets anyone create an `is_admin = true` account.
+Neither is fixable by policy alone — the app has no server-verifiable identity.
+
+Also still unauthenticated, unchanged by this pass and documented rather than
+fixed: `addIncident`, `updateIncident`, `updateIncidentStatus`, `listIncidents`,
+`addKnowledge`, `listKnowledge`, `uploadPdfToDrive` and the sheet-format actions
+are open reads and writes of plant incident data.
+
+Verified: `node --check apps_script_v14.js` passes; both workflow YAMLs parse
+under PyYAML `safe_load`; analyzer baseline diff (`git archive HEAD` tree vs the
+working tree) yields exactly one new `code|message` pair,
+`UNDEFINED_METHOD … 'debugPrint' … type 'SyncService'`, which is sandbox noise of
+the same class as the other 1457 unresolved-Flutter entries — the precedent
+`import 'package:flutter/foundation.dart' show debugPrint;` is already committed at
+`groq_service.dart:14`. Nothing here has been run against the live deployment.
 
 ## Verification limits
 

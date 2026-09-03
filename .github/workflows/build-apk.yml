@@ -80,9 +80,16 @@ jobs:
 
       # ✅ Build RELEASE APK (much smaller than debug — faster install)
       - name: Build release APK
+        # SL_APP_SECRET (added 2026-09-03) must match the APP_SECRET script
+        # property on the Apps Script deployment, or the backend refuses
+        # `getAiKeys` and `gemini` and every AI feature quietly falls back to
+        # offline analysis. Repository secret: Settings → Secrets and variables
+        # → Actions. An APK hides this better than the web build does, but not
+        # well — treat it as a gate against anonymous requests, not a secret.
         run: |
           flutter build apk --release \
             --no-tree-shake-icons \
+            --dart-define=SL_APP_SECRET=${{ secrets.SL_APP_SECRET }} \
             --build-number=${{ steps.version.outputs.code }} \
             --build-name=${{ steps.version.outputs.version }}
 

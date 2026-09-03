@@ -13,7 +13,9 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+// No `package:http` import: this screen must make no raw network calls. Its one
+// backend call goes through SyncService.callAiText, which owns the deployment
+// URL, the prefs override and the app secret. See the note at _backendUrl below.
 import '../main.dart';
 import '../services/local_ai.dart';
 import '../services/groq_service.dart';
@@ -56,8 +58,12 @@ class _ChatTabState extends State<ChatTab> {
   bool _aiLoading  = false;
 
   // ── Apps Script backend URL ──────────────────────────────────────
-  static const String _backendUrl =
-      'https://script.google.com/macros/s/AKfycbzDiT4OSvlDUxvcM9DYJ_-SiB1HyDrgXtYflGfmqJRH9wnZZusj5GqX9frCx64rkd61Rg/exec';
+  // REMOVED 2026-09-03: a pinned `_backendUrl` constant plus a raw http.post.
+  // It ignored the `sync_backend_url` prefs override, so pointing the app at a
+  // different deployment silently left this screen talking to the old one — the
+  // same defect that made near_miss_tab's third AI hop unfixable. It also could
+  // not attach the `_appSecret` the `gemini` action now requires. Both are
+  // handled by SyncService.callAiText().
 
   // ── Suraksha Saathi system prompt ────────────────────────────────
   // ★ v35: Enhanced with section-specific deep knowledge
@@ -425,19 +431,12 @@ class _ChatTabState extends State<ChatTab> {
           'Give ONLY the specific answer to THIS question. '
           'Do NOT dump all related knowledge. Be like a senior colleague giving a quick answer at site.';
 
-      final body = jsonEncode({
-        'action': 'gemini',
-        'prompt': fullPrompt,
-      });
-
-      final response = await http.post(
-        Uri.parse(_backendUrl),
-        body: body,
-        headers: {'Content-Type': 'text/plain;charset=utf-8'},
-      ).timeout(const Duration(seconds: 30));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      // callAiText posts the same {action:'gemini', prompt} body, but through
+      // the one place that reads the backend-URL override and attaches the
+      // app secret. It also UTF-8 decodes the response, which the raw post here
+      // did not — Hindi answers were being mangled.
+      final data = await SyncService.callAiText(fullPrompt);
+      if (data != null) {
         final result = data['result']?.toString() ?? '';
         if (result.isNotEmpty && result.length > 20) return result;
       }

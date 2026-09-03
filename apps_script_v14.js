@@ -27,9 +27,34 @@
 //   ✅ Structured logging: [AI] / [PARALLEL] / [CACHE] prefixes
 //   ✅ parseGoogleResponse / parseOpenRouterResponse extracted for reuse
 //
+// CHANGES FROM v25 (2026-09-03 — SECURITY):
+//   ✅ getMasterData() NO LONGER returns any API key. It was in publicActions,
+//      so an unauthenticated POST of {"action":"getMasterData"} to this URL —
+//      and the URL is a compile-time constant in a PUBLIC repo — returned every
+//      vendor key in plaintext to anyone on the internet.
+//   ✅ Keys moved to a new getAiKeys action, gated on a shared APP_SECRET that
+//      the app sends as _appSecret. FAILS CLOSED: no APP_SECRET property set
+//      means getAiKeys returns nothing, so set the property BEFORE redeploying.
+//   ✅ 'gemini' now also requires _appSecret. It calls a paid vendor API on the
+//      script owner's keys and was open to the world.
+//   ✅ DELETED 'analyzeUrl' and 'diagnose'. Both were public and billable, and
+//      neither had a single caller in the Flutter app. 'diagnose' ran one paid
+//      inference per model in GOOGLE_MODELS per request — the cheapest possible
+//      way for a stranger to burn the quota.
+//   ✅ 'upsertUser' removed from publicActions. An unauthenticated POST could
+//      create or modify any user row. Nothing in the app calls it.
+//   ⚠ NOT fixed here, still open: addIncident / updateIncident / listIncidents /
+//      addKnowledge / uploadPdfToDrive / formatSheet remain unauthenticated
+//      reads and writes of plant data, and validateAuthToken has never actually
+//      succeeded in production (see the comment above publicActions).
+//
 // REQUIRED SCRIPT PROPERTIES:
 //   GOOGLE_AI_KEY = AIza... (from https://aistudio.google.com/apikey)
 //   GROQ_API_KEY = gsk_... (from https://console.groq.com/keys) — for near-miss text AI
+//   APP_SECRET = any long random string. Must match the SL_APP_SECRET that the
+//     app is built with (--dart-define). Without it, getAiKeys and gemini are
+//     both refused and the app loses AI entirely. Rotate it by changing both
+//     sides; there is no grace period, so redeploy and rebuild together.
 //
 // OPTIONAL SCRIPT PROPERTY:
 //   AI_PRIMARY_PROVIDER = 'google' (default) | 'openrouter' | 'google_only'
@@ -39,11 +64,12 @@
 //
 // OPTIONAL — EXTRA IMAGE-SCAN ALLOWANCE (added 2026-08-17):
 //   NARA_API_KEY = sk-nry-... (from https://router.bynara.id)
-//   Served to the app as 'naraApiKey' so every device picks it up on launch.
-//   The app tries it AFTER the OpenRouter vision models and BEFORE Gemini.
+//   Served to the app as 'naraApiKey' — since v26 by getAiKeys, NOT by
+//   getMasterData. The app tries it AFTER the OpenRouter vision models and
+//   BEFORE Gemini.
 //   ⚠ Adding the property is not enough on its own — this script must be
-//   REDEPLOYED, otherwise getMasterData() still runs the old code and the app
-//   never sees the field.
+//   REDEPLOYED, otherwise the old code keeps running and the app never sees
+//   the field.
 // ============================================================
 
 const CLOUDINARY_CLOUD_NAME    = 'dzt1vxsdg';
@@ -124,16 +150,47 @@ function handle(e) {
     const action = params.action || 'health';
     let result;
 
+    // ★ v26 (2026-09-03): SHARED-SECRET GATE — checked BEFORE the token gate.
+    // These two actions either hand out secrets or spend money on the script
+    // owner's vendor keys, so they must not be reachable with just the URL.
+    // They stay in publicActions on purpose: the secret is the gate, and the
+    // SESSION-TOKEN GATE BELOW CANNOT CURRENTLY SUCCEED (see its note), so
+    // routing them through validateAuthToken would refuse every real request.
+    var secretActions = ['getAiKeys', 'gemini'];
+    if (secretActions.indexOf(action) >= 0 && !appSecretOk(params._appSecret)) {
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          ok: false,
+          error: 'Forbidden: bad or missing _appSecret',
+          hint: 'Set the APP_SECRET script property and build the app with '
+              + '--dart-define=SL_APP_SECRET=<same value>.'
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // ★ v25: API Authentication — validate token for sensitive actions
     // NOTE: addIncident, updateIncident, listIncidents, addFeedback, uploadPdfToDrive
     // are semi-public (require reportedBy in payload but not session tokens)
     // to support offline-first sync where token may have expired.
+    //
+    // ⚠ 2026-09-03 — READ THIS BEFORE RELYING ON THIS GATE. It has never
+    // succeeded in production. Sessions are only written by createSession(),
+    // which only the 'login' action calls, and 'login' is unreachable in a live
+    // build: AuthService.signIn always returns from its Supabase branch. The
+    // token the app does send is generated ON THE DEVICE by
+    // AuthTokenService.generateToken, so validateAuthToken can only ever answer
+    // 'Token not found'. There is also an identity mismatch — createSession
+    // stores `username`, the app sends `pno` as _authUser. Consequence: moving
+    // an action OUT of publicActions does not authenticate it, it DISABLES it.
+    // That is the intended effect for 'upsertUser' (open user-row write, no
+    // caller in the app). Do not move a live action out without first wiring
+    // token issuance to the Supabase login path.
     var publicActions = ['health', 'ping', 'login', 'register', 'getApiKeys', 'getMasterData',
-      'gemini', 'analyzeUrl', 'diagnose',
+      'getAiKeys', 'gemini',
       'addIncident', 'updateIncident', 'updateIncidentStatus', 'listIncidents',
       'addFeedback', 'listFeedback', 'uploadPdfToDrive',
       'addKnowledge', 'listKnowledge', 'formatSheet', 'formatIncidentsSheet',
-      'upsertUser', 'fireAlert', 'registerDevice', 'unregisterDevice', 'syncAlertRules'];
+      'fireAlert', 'registerDevice', 'unregisterDevice', 'syncAlertRules'];
     if (publicActions.indexOf(action) < 0) {
       var authResult = validateAuthToken(params._authToken, params._authUser);
       if (!authResult.valid) {
@@ -157,6 +214,19 @@ function handle(e) {
         };
         break;
 
+      // ★ v26: the ONLY action that returns keys, and it is gated on
+      // _appSecret by secretActions above. Split out of getMasterData so that
+      // the master-data pull — which the app does pre-login, before runApp —
+      // carries no secrets at all.
+      //
+      // This is a stopgap, not a fix. On web, any key delivered to the client
+      // is readable in DevTools by anyone who can log in. The real fix is to
+      // proxy the vendor calls server-side (see DocQaProxy.gs / the
+      // 'gemini' case for the pattern) and stop shipping keys entirely.
+      case 'getAiKeys':
+        result = { ok: true, data: collectAiKeys() };
+        break;
+
       // ★ v21: API keys are NEVER sent to client (security fix)
       case 'getApiKeys':
         result = {
@@ -166,73 +236,16 @@ function handle(e) {
         };
         break;
 
-      case 'diagnose': {
-        // ★ v20: Enhanced diagnostics — tests every model with latency
-        var diag = { google: {}, openrouter: {}, recommended: '', timestamp: new Date().toISOString() };
-        var gKey = getGoogleKey();
-        var bestModel = '';
-        var bestLatency = 999999;
-
-        if (gKey) {
-          for (var di = 0; di < GOOGLE_MODELS.length; di++) {
-            var dModel = GOOGLE_MODELS[di];
-            try {
-              var dStart = new Date().getTime();
-              var dUrl = 'https://generativelanguage.googleapis.com/v1beta/models/'
-                + dModel + ':generateContent?key=' + encodeURIComponent(gKey);
-              var dResp = UrlFetchApp.fetch(dUrl, {
-                method: 'post', contentType: 'application/json',
-                payload: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Say OK' }] }], generationConfig: { maxOutputTokens: 10 } }),
-                muteHttpExceptions: true
-              });
-              var dCode = dResp.getResponseCode();
-              var dLatency = new Date().getTime() - dStart;
-              diag.google[dModel] = { status: dCode, latency_ms: dLatency };
-              if (dCode === 200 && dLatency < bestLatency) {
-                bestLatency = dLatency;
-                bestModel = dModel;
-              }
-            } catch (de) {
-              diag.google[dModel] = { status: 'ERROR', error: de.toString().substring(0, 100) };
-            }
-          }
-        } else {
-          diag.google = 'NO_KEY';
-        }
-
-        var oKey = getOpenRouterKey();
-        if (oKey) {
-          try {
-            var oStart = new Date().getTime();
-            var oResp = UrlFetchApp.fetch('https://openrouter.ai/api/v1/chat/completions', {
-              method: 'post', contentType: 'application/json',
-              headers: { 'Authorization': 'Bearer ' + oKey, 'HTTP-Referer': 'https://abhibond1986.github.io/SL-22061984/', 'X-Title': 'SAIL Safety Lens' },
-              payload: JSON.stringify({ model: OPENROUTER_MODEL, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 10 }),
-              muteHttpExceptions: true
-            });
-            var oCode = oResp.getResponseCode();
-            var oLatency = new Date().getTime() - oStart;
-            diag.openrouter = { status: oCode, latency_ms: oLatency, model: OPENROUTER_MODEL };
-          } catch (oe) {
-            diag.openrouter = { status: 'ERROR', error: oe.toString().substring(0, 100) };
-          }
-        } else {
-          diag.openrouter = 'NO_KEY';
-        }
-
-        diag.recommended = bestModel || 'openrouter';
-        result = diag;
-        break;
-      }
-
-      // ★ v15: reads prompt from app if provided; accepts fallback base64
-      case 'analyzeUrl': {
-        const prompt = (params.prompt && params.prompt.length > 100)
-          ? params.prompt
-          : getSailPrompt('sail_full');
-        result = analyzeImageUrl(params.imageUrl || '', prompt, params.imageBase64 || '');
-        break;
-      }
+      // ★ v26 (2026-09-03): 'diagnose' and 'analyzeUrl' DELETED — both were in
+      // publicActions and both spent money on the owner's vendor keys, and
+      // neither had a single caller anywhere in lib/. 'diagnose' fired one paid
+      // inference per model in GOOGLE_MODELS per request, plus one OpenRouter
+      // call, with no auth and no rate limit; it was the cheapest way for a
+      // stranger to exhaust the quota. If diagnostics are wanted again, run
+      // them from the Apps Script editor (a function, not a web action) or put
+      // them behind secretActions with a CacheService cooldown.
+      // analyzeImageUrl() is now unreferenced by the dispatcher — left in place
+      // because analyzeImage() shares helpers with it, but it is dead code.
       case 'gemini': {
         const hasImage = params.imageBase64 && params.imageBase64.length > 10;
         if (hasImage) {
@@ -344,6 +357,85 @@ function handle(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 }
+
+
+// ============================================================
+//  ★ v26: SHARED-SECRET GATE (2026-09-03)
+// ============================================================
+// Guards the two actions that hand out secrets or spend money. Deliberately
+// FAILS CLOSED: an unset or blank APP_SECRET property refuses everything rather
+// than falling back to "allow", because the fallback-to-allow version of this
+// check is indistinguishable from no check at all and would have shipped as a
+// no-op. Set the property FIRST, then redeploy.
+//
+// What this does and does not buy: it stops an anonymous `curl` against the
+// deployment URL, which is the actual exposure — the URL is a compile-time
+// constant in a public repo. It does NOT hide the secret from a determined
+// user of the web build, because the secret is compiled into the JavaScript
+// that the browser downloads. That is unavoidable for any client-held
+// credential and is the reason the real fix is a server-side proxy.
+function getAppSecret() {
+  return (PropertiesService.getScriptProperties().getProperty('APP_SECRET') || '').trim();
+}
+
+function appSecretOk(supplied) {
+  var expected = getAppSecret();
+  if (!expected) {
+    Logger.log('[SEC] APP_SECRET property is not set — refusing gated action.');
+    return false;
+  }
+  var got = (supplied === null || supplied === undefined) ? '' : String(supplied).trim();
+  if (got.length !== expected.length) return false;
+  // Length-equal compare with no early return, so a wrong secret takes the same
+  // time as a right one. Apps Script latency swamps this anyway, but a timing
+  // oracle on a secret is a silly thing to leave lying around.
+  var diff = 0;
+  for (var i = 0; i < expected.length; i++) {
+    diff |= (expected.charCodeAt(i) ^ got.charCodeAt(i));
+  }
+  return diff === 0;
+}
+
+// The five keys the app currently needs on-device, in one place so there is a
+// single thing to delete when the proxy work lands. Returns only what is set;
+// an absent key means the app skips that provider tier.
+function collectAiKeys() {
+  var out = {};
+  var gk = getGoogleKey();          if (gk)  out['geminiApiKey'] = gk;
+  var ork = getOpenRouterKey();     if (ork) out['openRouterApiKey'] = ork;
+  var ork2 = getOpenRouterKey2();
+  // Skip a duplicate: the client dedupes anyway, but sending the same key twice
+  // implies to an admin reading the payload that failover is active when it is
+  // really one key and one quota.
+  if (ork2 && ork2 !== ork) out['openRouterApiKey2'] = ork2;
+  var grk = getGroqKey();           if (grk) out['groqApiKey'] = grk;
+  var nrk = getNaraKey();           if (nrk) out['naraApiKey'] = nrk;
+
+  // 'geminiModel' and 'naraModel' are NOT secrets, but the app used to receive
+  // them in the same payload as the keys and the masterdata sheet is their only
+  // source (they are absent from the Supabase master_data mapping). Carried
+  // here so this stays ONE round trip instead of two on a call that runs
+  // pre-launch and again every 5 minutes from BackgroundSync. Dropping them
+  // would silently send every device back to NaraVision.defaultModel — the
+  // costliest option — however carefully the admin picked a cheap one.
+  try {
+    var cfg = getMasterData();
+    if (cfg && cfg.data) {
+      if (cfg.data['geminiModel']) out['geminiModel'] = cfg.data['geminiModel'];
+      if (cfg.data['naraModel'])   out['naraModel']   = cfg.data['naraModel'];
+    }
+  } catch (e) {
+    Logger.log('[SEC] collectAiKeys: model lookup failed — ' + e.toString());
+  }
+  return out;
+}
+
+// Key names that must never appear in a getMasterData response. Kept separate
+// from MASTERDATA_KEYS because saveMasterData still needs to WRITE them (the
+// admin panel pushes keys into the sheet) — it is only the read path that has
+// to stay clean.
+var SECRET_MASTERDATA_KEYS = ['geminiApiKey', 'groqApiKey', 'openRouterApiKey',
+  'openRouterApiKey2', 'naraApiKey'];
 
 
 // ============================================================
@@ -2153,23 +2245,17 @@ function saveMasterData(params) {
 }
 
 function getMasterData() {
+  // ★ v26 (2026-09-03): returns CONFIG ONLY — never a key. The five *ApiKey
+  // fields this used to inject from Script Properties moved to the
+  // secret-gated 'getAiKeys' action. This action stays public because the app
+  // pulls it pre-login (main.dart, before runApp) to populate the plant
+  // dropdown on the login screen, so anything it returns is effectively
+  // world-readable. Do not add a secret to it — add it to collectAiKeys().
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(SHEET_MASTERDATA);
   if (!sheet) {
-    // No master data saved yet — return empty (clients will use defaults)
-    // ★ v25: Still inject API keys from Script Properties so client always has them
-    var emptyResult = {};
-    var gk = getGoogleKey();
-    if (gk) emptyResult['geminiApiKey'] = gk;
-    var ork = getOpenRouterKey();
-    if (ork) emptyResult['openRouterApiKey'] = ork;
-    var ork2 = getOpenRouterKey2();
-    if (ork2 && ork2 !== ork) emptyResult['openRouterApiKey2'] = ork2;
-    var grk = getGroqKey();
-    if (grk) emptyResult['groqApiKey'] = grk;
-    var nrk = getNaraKey();
-    if (nrk) emptyResult['naraApiKey'] = nrk;
-    return { ok: true, data: emptyResult, isEmpty: true };
+    // No master data saved yet — clients fall back to their shipped defaults.
+    return { ok: true, data: {}, isEmpty: true };
   }
 
   var data = sheet.getDataRange().getValues();
@@ -2179,7 +2265,11 @@ function getMasterData() {
     var key = data[r][0];
     var val = data[r][1];
     var ts  = data[r][2];
-    if (key && MASTERDATA_KEYS.indexOf(key) >= 0) {
+    // Second condition is the load-bearing one: saveMasterData still WRITES
+    // keys into this sheet (the admin panel pushes them), so rows for them can
+    // exist and must be filtered out of the read.
+    if (key && MASTERDATA_KEYS.indexOf(key) >= 0 &&
+        SECRET_MASTERDATA_KEYS.indexOf(key) < 0) {
       try {
         result[key] = JSON.parse(val);
       } catch (_) {
@@ -2187,37 +2277,6 @@ function getMasterData() {
       }
       if (ts && ts > updatedAt) updatedAt = ts;
     }
-  }
-
-  // ★ v25: ALWAYS inject API keys from Script Properties (permanent source of truth)
-  // This ensures client gets keys on every startup even if masterdata sheet row is empty/missing
-  // and survives web app redeployments that wipe localStorage/SharedPreferences
-  var gKey = getGoogleKey();
-  if (gKey && (!result['geminiApiKey'] || result['geminiApiKey'].length < 10)) {
-    result['geminiApiKey'] = gKey;
-  }
-  var orKey = getOpenRouterKey();
-  if (orKey && (!result['openRouterApiKey'] || result['openRouterApiKey'].length < 10)) {
-    result['openRouterApiKey'] = orKey;
-  }
-  var orKey2 = getOpenRouterKey2();
-  // Skip if identical to the primary: the client dedupes anyway, but sending it
-  // twice would imply to an admin reading the payload that failover is active
-  // when it is really the same key (and the same quota) twice over.
-  if (orKey2 && orKey2 !== (result['openRouterApiKey'] || '') &&
-      (!result['openRouterApiKey2'] || result['openRouterApiKey2'].length < 10)) {
-    result['openRouterApiKey2'] = orKey2;
-  }
-  var grKey = getGroqKey();
-  if (grKey && (!result['groqApiKey'] || result['groqApiKey'].length < 10)) {
-    result['groqApiKey'] = grKey;
-  }
-  // Fills the gap only — a valid key already saved in the sheet is left alone,
-  // exactly like the keys above. The Script Property is the fallback that
-  // survives a redeployment wiping client storage.
-  var nrKey = getNaraKey();
-  if (nrKey && (!result['naraApiKey'] || result['naraApiKey'].length < 10)) {
-    result['naraApiKey'] = nrKey;
   }
 
   return { ok: true, data: result, updatedAt: updatedAt };

@@ -1,10 +1,11 @@
 import 'dart:async' show Completer;
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db.dart';
+import 'app_secret.dart';
 import 'auth_token_service.dart';
 import 'app_logger.dart';
 import 'admin_alerts.dart';
@@ -79,6 +80,15 @@ class SyncService {
         body['_authToken'] = authHeaders['X-Auth-Token'] ?? '';
         body['_authUser'] = authHeaders['X-User-Id'] ?? '';
       }
+
+      // ★ 2026-09-03: the shared app secret, for the server's `secretActions`
+      // ('getAiKeys' and 'gemini'). Attached to EVERY request rather than only
+      // those two, because the gate lives on the server and a caller here
+      // should not have to know which actions are gated — the previous
+      // arrangement, where each call site decided what auth to send, is exactly
+      // how three admin helpers ended up posting `saveMasterData` with no auth
+      // fields at all and swallowing the Unauthorized reply.
+      AppSecret.apply(body);
 
       // ✅ FIX: Always ensure _authUser is present — fall back to current
       // logged-in user's identity if auth token is missing/expired.
@@ -231,6 +241,13 @@ class SyncService {
 
   /// Send a text prompt to the backend AI (Gemini) and return the response body.
   /// Used for near-miss description refinement, not image analysis.
+  ///
+  /// ★ 2026-09-03: the `gemini` action now requires `_appSecret`. It runs paid
+  /// inference on the script owner's keys and was previously in the server's
+  /// `publicActions`, i.e. an open billable proxy for anyone who read the
+  /// deployment URL out of this repo. Every other caller of the `gemini` action
+  /// (chat_tab.dart, pdf_kb_extractor_web.dart) goes through `_postWithRedirect`
+  /// too, which is why the secret is attached there rather than here.
   static Future<Map<String, dynamic>?> callAiText(String prompt) async {
     if (!await isConfigured) return null;
     try {
@@ -569,22 +586,42 @@ class SyncService {
     }
   }
 
-  /// Fetch ONLY the AI API keys from Apps Script (getMasterData injects them
-  /// from Script Properties). Used when Supabase is the primary backend but the
-  /// keys still need to come from the Apps Script AI proxy. Returns the raw
-  /// `data` map (with openRouterApiKey, openRouterApiKey2, geminiApiKey,
-  /// groqApiKey, geminiModel) or null on any failure.
+  /// Fetch ONLY the AI API keys from Apps Script. Used when Supabase is the
+  /// primary backend but the keys still live in the Apps Script Script
+  /// Properties. Returns the raw `data` map (openRouterApiKey,
+  /// openRouterApiKey2, geminiApiKey, groqApiKey, naraApiKey, plus geminiModel
+  /// and naraModel) or null on any failure.
+  ///
+  /// ★ 2026-09-03: the action is now `getAiKeys`, NOT `getMasterData`.
+  /// `getMasterData` used to inject the keys, and it is in the server's
+  /// `publicActions`, so an anonymous POST to the deployment URL — a
+  /// compile-time constant in a public repo — returned every key in plaintext.
+  /// `getAiKeys` is gated on `_appSecret`; see `AppSecret` for what that gate is
+  /// and is not worth.
+  ///
+  /// A build with no `SL_APP_SECRET` define gets `Forbidden` here and therefore
+  /// no keys, which degrades to the same behaviour as an unreachable backend
+  /// (offline analysis) rather than a crash. The distinct log line below is the
+  /// only way to tell those two apart, so do not quieten it.
   static Future<Map<String, dynamic>?> _fetchApiKeysFromAppsScript() async {
     try {
       final url = await getBackendUrl();
       if (url.isEmpty || !url.startsWith('https://')) return null;
-      final resp = await _postWithRedirect(url, {'action': 'getMasterData'});
+      final body = <String, dynamic>{'action': 'getAiKeys'};
+      AppSecret.apply(body);
+      final resp = await _postWithRedirect(url, body);
       if (resp != null && resp.statusCode == 200) {
         final bodyText = resp.body.trim();
         if (bodyText.startsWith('<') || bodyText.startsWith('<!')) return null;
         final parsed = jsonDecode(bodyText);
         if (parsed['ok'] == true && parsed['data'] != null) {
           return Map<String, dynamic>.from(parsed['data'] as Map);
+        }
+        if (parsed is Map && parsed['error'] != null) {
+          debugPrint('SyncService: getAiKeys refused — ${parsed['error']}. '
+              'Build with --dart-define=SL_APP_SECRET=<value> matching the '
+              "Apps Script APP_SECRET property. Secret compiled in: "
+              '${AppSecret.isSet}');
         }
       }
       return null;

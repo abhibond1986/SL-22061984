@@ -9,16 +9,19 @@
 // ignore_for_file: avoid_web_libraries_in_flutter
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
 // dart:js_util removed — using only dart:js for consistent interop
 import 'dart:typed_data';
-import 'package:http/http.dart' as http;
+// No package:http and no dart:convert: the one backend call here goes through
+// SyncService.callAiText, which owns the URL, the prefs override, the app secret
+// and the JSON/UTF-8 handling.
+import 'sync_service.dart';
 
 class PdfKbExtractor {
-  static const String _appsScriptUrl =
-      'https://script.google.com/macros/s/AKfycbzDiT4OSvlDUxvcM9DYJ_-SiB1HyDrgXtYflGfmqJRH9wnZZusj5GqX9frCx64rkd61Rg/exec';
+  // REMOVED 2026-09-03: a pinned `_appsScriptUrl` constant. It ignored the
+  // `sync_backend_url` override and could not carry the `_appSecret` the
+  // `gemini` action now requires.
 
   static const int _chunkSize = 3000;
   static bool _pdfJsLoaded = false;
@@ -153,17 +156,13 @@ class PdfKbExtractor {
         '- If no safety content: output: // No safety content found in this chunk\n\n'
         'Text:\n---\n$chunk\n---';
     try {
-      final response = await http.post(
-        Uri.parse(_appsScriptUrl),
-        headers: {'Content-Type': 'text/plain'},
-        body: jsonEncode({'action': 'gemini', 'prompt': prompt}),
-      ).timeout(const Duration(seconds: 30));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        if (data['success'] == true) return data['result']?.toString() ?? '// No result';
-        return '// Gemini error: ${data['error']}';
-      }
-      return '// HTTP ${response.statusCode}';
+      // 2026-09-03: was a raw http.post to a pinned _appsScriptUrl. Routed
+      // through SyncService so it picks up the `sync_backend_url` override and
+      // the `_appSecret` that the `gemini` action now requires.
+      final data = await SyncService.callAiText(prompt);
+      if (data == null) return '// Backend unreachable or refused';
+      if (data['success'] == true) return data['result']?.toString() ?? '// No result';
+      return '// Gemini error: ${data['error']}';
     } catch (e) {
       return '// Exception: $e';
     }

@@ -75,7 +75,20 @@ jobs:
         # compiler can see. If a dynamic icon is ever added, tree-shaking will
         # render empty boxes at runtime with NO build error — restore
         # --no-tree-shake-icons if that ever appears.
-        run: flutter build web --release --base-href "/"
+        #
+        # SL_APP_SECRET (added 2026-09-03) must match the APP_SECRET script
+        # property on the Apps Script deployment. Without it the backend refuses
+        # `getAiKeys` and `gemini`, so the build succeeds and then every AI
+        # feature silently degrades to offline analysis — check the browser
+        # console for "getAiKeys refused" if that happens. Set the repository
+        # secret at Settings → Secrets and variables → Actions.
+        # NOTE: this value is compiled into the JavaScript the browser
+        # downloads, so it is not a secret from a logged-in user; it only stops
+        # anonymous requests against the deployment URL, which is itself a
+        # constant in this public repo.
+        run: |
+          flutter build web --release --base-href "/" \
+            --dart-define=SL_APP_SECRET=${{ secrets.SL_APP_SECRET }}
 
       - name: List web output
         run: ls -la build/web/
