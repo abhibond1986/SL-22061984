@@ -5,10 +5,17 @@
 // Used as PRIMARY AI for near-miss text correction.
 // Falls back to Apps Script (Gemini) if Groq fails.
 //
-// Models available on free tier:
-//   - llama-3.1-8b-instant (fastest, good for text correction)
-//   - llama-3.3-70b-versatile (best quality, slightly slower)
-//   - gemma2-9b-it (good multilingual support)
+// Model: openai/gpt-oss-20b (set 2026-09-03 by admin request).
+//
+// It replaced llama-3.3-70b-versatile, which had started returning 404
+// model_not_found — the same decommissioning that previously took out
+// mixtral-8x7b-32768 and gemma2-9b-it. There is now ONE model in
+// [availableModels] by explicit choice; see the note there before adding another.
+//
+// Do not maintain a list of "models available on the free tier" in this comment.
+// The three IDs that used to be listed here were all dead by the time anyone
+// read them, and a stale comment is how a decommissioned ID gets picked. The
+// live list is https://console.groq.com/docs/models.
 
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -21,8 +28,9 @@ class GroqService {
   static const String _kGroqModel = 'groq_model';
   static const String _apiUrl = 'https://api.groq.com/openai/v1/chat/completions';
 
-  // Default model — fast and good for text correction
-  static const String defaultModel = 'llama-3.3-70b-versatile';
+  // Default model for near-miss text classification and rephrasing.
+  // Changed 2026-09-03: llama-3.3-70b-versatile → openai/gpt-oss-20b.
+  static const String defaultModel = 'openai/gpt-oss-20b';
 
   static SharedPreferences? _prefs;
 
@@ -58,13 +66,25 @@ class GroqService {
   /// without logging why, and the near-miss card silently fell through to the
   /// slower Apps Script path. Changing [defaultModel] alone does not reach those
   /// devices; [getModel] rewriting through this map is what makes them self-heal.
+  ///
+  /// Every value is [defaultModel] rather than a repeated literal, so the next
+  /// decommissioning is a one-line change instead of six. That matters here:
+  /// on 2026-09-03 `llama-3.3-70b-versatile` — which had been the replacement
+  /// target for five of these entries — started 404ing itself, so the map was
+  /// quietly redirecting dead IDs to another dead ID.
   static const Map<String, String> _retiredModels = {
-    'mixtral-8x7b-32768': 'llama-3.3-70b-versatile',
-    'gemma2-9b-it': 'llama-3.3-70b-versatile',
-    'llama2-70b-4096': 'llama-3.3-70b-versatile',
-    'llama-3.1-70b-versatile': 'llama-3.3-70b-versatile',
-    'llama3-70b-8192': 'llama-3.3-70b-versatile',
-    'llama3-8b-8192': 'llama-3.1-8b-instant',
+    'mixtral-8x7b-32768': defaultModel,
+    'gemma2-9b-it': defaultModel,
+    'llama2-70b-4096': defaultModel,
+    'llama-3.1-70b-versatile': defaultModel,
+    'llama3-70b-8192': defaultModel,
+    'llama3-8b-8192': defaultModel,
+    // Retired 2026-09-03. 70b-versatile began returning 404 model_not_found;
+    // 8b-instant still resolves but was dropped from the offered list by admin
+    // decision, and anything absent from [availableModels] must appear here or
+    // devices holding it are stranded on a model the build no longer supports.
+    'llama-3.3-70b-versatile': defaultModel,
+    'llama-3.1-8b-instant': defaultModel,
   };
 
   /// Get current model, transparently upgrading a retired saved ID.
@@ -98,9 +118,15 @@ class GroqService {
   /// model that could only ever return 404. Anything removed from this list must
   /// be added to [_retiredModels] in the same edit, or devices that already
   /// saved it are stranded.
+  ///
+  /// ONE ENTRY, deliberately (admin decision 2026-09-03). The consequence to
+  /// understand: there is no longer a model to switch to from the admin panel if
+  /// this ID is wrong or gets decommissioned — the near-miss card would fall
+  /// through to the slower Apps Script path on every observation until a rebuild.
+  /// Adding a second entry here is the whole fix if that happens; the dropdown,
+  /// the clamp in admin_screen and [isSupportedModel] all read from this list.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B (Best quality)'},
-    {'id': 'llama-3.1-8b-instant', 'name': 'Llama 3.1 8B (Fastest)'},
+    {'id': defaultModel, 'name': 'GPT-OSS 20B (default)'},
   ];
 
   /// True if [model] is one this build is willing to send.

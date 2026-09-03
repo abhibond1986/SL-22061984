@@ -858,6 +858,97 @@ the same class as the other 1457 unresolved-Flutter entries — the precedent
 `import 'package:flutter/foundation.dart' show debugPrint;` is already committed at
 `groq_service.dart:14`. Nothing here has been run against the live deployment.
 
+## 2026-09-03 — model switch, and a dead primary vision model found
+
+Uncommitted and uncompiled. Requested: drop the 404ing Groq text model, use
+`openai/gpt-oss-20b` for near-miss text, and put `qwen/qwen3.6-27b` first for
+hazard analysis with `minimax/minimax-m3:free` second.
+
+**The find that matters more than the request.**
+`nvidia/nemotron-nano-12b-v2-vl:free` — position 1 of the hazard chain, labelled
+"fastest free image model" — **no longer exists on OpenRouter.** A check of
+`/api/v1/models` (424 entries) found neither that slug nor any nemotron nano VL
+variant. Every hazard scan was therefore spending its first attempt on a model
+that could only fail, then quietly succeeding on the 30B fallback, which is
+precisely why nobody noticed: a chain that degrades to its fallback still returns
+hazards. The same slug was **the only** OCR model in `sop_ocr_service.dart`
+(`_ocrModel`, no chain behind it), so SOP page scanning was failing outright, and
+it also sat at position 2 of that file's `_textModels`. All three are repaired;
+`apps_script_v14.js` had a stale comment recommending it that never matched the
+constant underneath.
+
+Lesson worth keeping: **verify model slugs against the provider's live listing
+before tuning anything else.** The 40s Tier 1 budget and the 20s attempt timeout
+were both sized from a measurement taken while position 1 was dead, so part of
+what those constants were compensating for was a 404, not latency.
+
+**Chain now:** Groq `qwen/qwen3.6-27b` → OpenRouter `minimax/minimax-m3:free` →
+OpenRouter Nemotron 30B Omni → direct Gemini → Nara → offline. Both new
+OpenRouter-side slugs were verified that day as `input_modalities` including
+`image` at price 0.
+
+**Groq is a new tier, not a new list entry.** `qwen/qwen3.6-27b` is served free by
+Groq; the same slug on OpenRouter exists only as a **paid** model. So it needed a
+real `_callGroqVision` against `api.groq.com` rather than a string added to the
+existing chain — sending it down the OpenRouter path would silently bill credits.
+Four things about that tier:
+
+* **The pin is now resolved once, before Tier 0, and it selects a TIER.**
+  Previously `vision_model_pinned` was read inside the OpenRouter block and could
+  only mean "this OpenRouter model". A Groq pin read there would have gone to
+  OpenRouter as a paid request. Two reads could disagree, so there is one.
+* **A pin disables the whole fallback chain** — that was already true and is now
+  dangerous, because a device pinned to the removed Nano VL would fail *every*
+  scan and land on the offline fallback, which reports "no hazards found". On a
+  shop floor that reads as "this scene is safe". Hence `_retiredVisionPins` and
+  `_migrateRetiredVisionPin`, which clears such a pin before analysis runs rather
+  than only when an admin happens to open the settings screen.
+* **Tier 0 is not billed against `_kTier1Budget`.** That budget bounds how long
+  we shop for a *free OpenRouter* model; Groq is a different account with a
+  different allowance. It is bounded by `kAttemptTimeout`, so the worst case grew
+  by one 20s attempt, not without limit.
+* **Every failure in Tier 0 is swallowed.** A new first tier must not be able to
+  break a chain that worked without it.
+* **The key sync condition had to widen.** It fired only when no OpenRouter key
+  was usable, so a device that already had one would never have synced a Groq
+  key — the new "primary" would have been skipped silently forever.
+
+**Groq text model.** `defaultModel` is `openai/gpt-oss-20b`;
+`llama-3.3-70b-versatile` (now 404ing) and `llama-3.1-8b-instant` both moved into
+`_retiredModels`, whose values are now all `defaultModel` rather than repeated
+literals — five entries had been redirecting dead IDs *to another dead ID*.
+`availableModels` is deliberately a single entry (admin decision), so understand
+the consequence: if that ID is wrong there is no model to switch to from the
+panel, and near-miss text falls through to the slower Apps Script path until a
+rebuild. Adding a second entry is the whole fix.
+
+**Both admin dropdowns are now clamped.** `DropdownButtonFormField` asserts when
+`value` is absent from `items`, and both lists shrank in this change, so the
+vision dropdown — flagged in the 2026-08 write-up as the last one of its shape
+without a clamp — would have thrown on open. The `_groqVisionModel` field is
+clamped too, not just the widget, because the field is what "Update Model
+Selection" writes back: a widget-only clamp shows "Auto" while saving the dead
+slug.
+
+**Cannot be verified from here, and should be checked on a real scan.** Groq's
+model list requires a key, so `qwen/qwen3.6-27b` and `openai/gpt-oss-20b` were
+taken on trust from the admin's screenshot — both are plausible Groq IDs and
+neither was confirmed. A wrong one shows up as Groq HTTP 404 `model_not_found`,
+which `_callGroqVision` now logs with the provider's own message. `minimax-m3`
+is also unverified as *non-reasoning*, which matters only for `_ocrModel`: if SOP
+OCR starts returning truncated page text, suspect thinking tokens eating the
+4096-token budget and try `google/gemma-4-31b-it:free`.
+
+Untouched by request: Gemini, Nara and the `ai_audit_service` models. Note the
+audit path's Groq default (`llama-4-scout-17b-16e`) was not checked and may be
+dead too; it is overridable from the `groq_audit_model` pref without a rebuild.
+
+Verified: analyzer baseline diff is **exactly zero** new and zero resolved
+diagnostics (1582 unique `code|message` pairs either side, baseline built by
+`git archive HEAD` at `a62b225` — the previous session's 1581 became 1582 because
+the security work is now committed, which accounts for that entry). `node --check
+apps_script_v14.js` passes. No model ID was exercised against a live provider.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has

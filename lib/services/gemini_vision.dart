@@ -2,16 +2,23 @@
 // ★ v25 MAXIMUM RELIABILITY — layered providers, NEVER fails
 //
 // PRIORITY CHAIN (stops at first success) — FASTEST FIRST, see _kTier1Budget:
+//   TIER 0 — Groq, qwen/qwen3.6-27b. First provider as of 2026-09-03 (admin
+//            request). Skipped silently if no Groq key is configured, which is
+//            also how it behaves on a fresh install before the key sync lands.
+//            Separate account, separate allowance — an OpenRouter 429 cannot
+//            touch it. Bounded by kAttemptTimeout like every other attempt.
 //   TIER 1 — OpenRouter free vision models, in order:
-//     1. Nemotron Nano 12B VL   — fastest free image model
+//     1. MiniMax M3 (:free)     — lead model as of 2026-09-03
 //     2. Nemotron 30B Omni      — highest capacity, but a REASONING model
 //                                 and by far the slowest; demoted from first
 //                                 place on 2026-08-17 after it cost a measured
 //                                 45s timeout on a live scan
-//     (Gemma 4 26B and Dots3-Note Preview were removed from the runtime chain
-//      on 2026-08-17 — still pinnable from the admin dropdown, see
-//      groqVisionModels. They are valid image models; they were simply
-//      unreachable inside the 40s Tier 1 budget.)
+//     (Nemotron Nano 12B VL held position 1 until 2026-09-03, when it was found
+//      to have been REMOVED from OpenRouter entirely — see _orMinimaxModel.
+//      Gemma 4 26B and Dots3-Note Preview left the runtime chain on 2026-08-17
+//      and are still pinnable from the admin dropdown, see groqVisionModels.
+//      Those two are valid image models; they were simply unreachable inside the
+//      40s Tier 1 budget.)
 //   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
 //            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
 //   TIER 3 — NaraRouter (NaraVision). A separate account with its own 10M-token
@@ -75,11 +82,32 @@ import 'gemini_direct_vision.dart';
 import 'nara_vision.dart';
 
 class GeminiVision {
-  // OpenRouter vision models (free tier), tried in order.
-  // Nano 12B VL is the lightest/fastest free image model (hybrid
-  // Transformer-Mamba, built for low latency); the 30B Omni is a
-  // higher-capacity fallback if Nano is unavailable or too slow.
-  static const String _orNanoVlModel   = 'nvidia/nemotron-nano-12b-v2-vl:free';
+  // ── TIER 0 — GROQ ──────────────────────────────────────────────────────────
+  // Groq's free multimodal model, made the FIRST hazard provider on 2026-09-03
+  // by admin request. Groq is a separate account with a separate allowance, so
+  // this tier survives the OpenRouter 429 that takes every ':free' model down at
+  // once — the same reason Tier 2 and Tier 3 exist, but faster than both.
+  //
+  // NOTE the ID carries no ':free' suffix: that is OpenRouter's convention, not
+  // Groq's. `qwen/qwen3.6-27b` also exists ON OpenRouter, but only as a PAID
+  // model, so sending this slug with an OpenRouter key would bill credits.
+  // It must go to api.groq.com with a Groq key. See _callGroqVision.
+  static const String _groqQwenVisionModel = 'qwen/qwen3.6-27b';
+
+  // ── TIER 1 — OPENROUTER free vision models, tried in order ─────────────────
+  // MiniMax M3 leads as of 2026-09-03 (admin request). Verified against
+  // OpenRouter /api/v1/models the same day: input_modalities
+  // ['text','image','video'], prompt price 0.
+  static const String _orMinimaxModel  = 'minimax/minimax-m3:free';
+  // REMOVED 2026-09-03: `_orNanoVlModel` = 'nvidia/nemotron-nano-12b-v2-vl:free'.
+  // It was the PRIMARY model and it no longer exists — a check of OpenRouter's
+  // /api/v1/models listing (424 models) returned no match for that slug, nor for
+  // any nemotron nano VL variant. So every scan was spending its first attempt on
+  // a model that could only fail before the 30B answered. The header comment
+  // above still described it as "fastest free image model", which is how a dead
+  // primary went unnoticed: the chain degraded silently to its fallback and still
+  // produced hazards. If a scan ever seems slower than it should be, check the
+  // slugs against the live listing before tuning a timeout.
   // NOTE the '-reasoning' in the name (the suffix is ':free' like every other
   // model here) — this model emits a chain of thinking tokens
   // BEFORE the JSON, inside the same 4096 max_tokens. That is why it is no
@@ -577,13 +605,23 @@ HOW TO USE IT:
         }
       }
 
-      // Ensure the OpenRouter key is on device (auto-sync from server).
+      // Ensure the provider keys are on device (auto-sync from server).
       {
         final p = await SharedPreferences.getInstance();
-        // Sync only when NO key at all is usable. A device holding just the
-        // secondary key is still workable, so don't force a network round trip.
-        if (_configuredOpenRouterKeys(p).isEmpty) {
-          print('GeminiVision: OpenRouter key missing — syncing from backend...');
+        // Sync only when a key the chain NEEDS is missing. A device holding just
+        // the secondary OpenRouter key is still workable, so don't force a
+        // network round trip for that.
+        //
+        // The Groq key joined this condition on 2026-09-03, when Groq became
+        // Tier 0. Without it, a device that already had an OpenRouter key would
+        // never sync a Groq key — the tier would be skipped silently on every
+        // scan and the "primary" model would simply never run. One sync covers
+        // both, so this costs nothing in the common case where both are present.
+        final needsGroq = (p.getString('groq_api_key') ?? '').trim().isEmpty;
+        if (_configuredOpenRouterKeys(p).isEmpty || needsGroq) {
+          print('GeminiVision: provider key missing '
+              '(openrouter=${_configuredOpenRouterKeys(p).isEmpty}, '
+              'groq=$needsGroq) — syncing from backend...');
           try {
             await AdminMasterData.syncFromBackend()
                 .timeout(const Duration(seconds: 8), onTimeout: () => false);
@@ -627,11 +665,83 @@ HOW TO USE IT:
         }
       }
 
+      final prefs = await SharedPreferences.getInstance();
+
+      // ══════════════════════════════════════════════════════════════════════
+      // MODEL PIN — resolved ONCE, here, because it now decides which TIER runs
+      // ══════════════════════════════════════════════════════════════════════
+      //
+      // Before Tier 0 existed, the pin was read inside the OpenRouter block and
+      // could only ever mean "use this OpenRouter model". It cannot mean that
+      // any more: `qwen/qwen3.6-27b` also exists on OpenRouter as a PAID model,
+      // so sending a Groq pin down the OpenRouter path would silently bill
+      // credits against the account instead of using Groq's free allowance.
+      // Hence the pin is classified once and routed, rather than being read by
+      // whichever block happens to reach it first.
+      await _migrateRetiredVisionPin(prefs);
+      final String pinned = (prefs.getString(_kVisionModelPin) ?? '').trim();
+      final bool pinIsGroq = pinned == _groqQwenVisionModel;
+      // Any other non-empty pin is an OpenRouter slug — every entry in
+      // [groqVisionModels] except 'auto' and the Groq one is an OpenRouter model.
+      final bool pinIsOpenRouter = pinned.isNotEmpty && !pinIsGroq;
+
+      // ══════════════════════════════════════════════════════════════════════
+      // TIER 0 — GROQ (qwen/qwen3.6-27b). First provider since 2026-09-03.
+      // ══════════════════════════════════════════════════════════════════════
+      //
+      // Skipped without complaint when no Groq key is on the device: that is the
+      // state of a fresh install whose key sync has not landed yet, and a scan
+      // must still work. Also skipped when the admin pinned an OpenRouter model,
+      // because a pin means "only this one".
+      //
+      // Not billed against [_kTier1Budget] — that budget bounds how long we are
+      // willing to shop for a FREE OpenRouter model, and Groq is a different
+      // account with a different allowance. This attempt is bounded by
+      // [kAttemptTimeout] like every other single call, so the worst case grows
+      // by one attempt (20s), not without limit.
+      if (!pinIsOpenRouter) {
+        final groqKey = (prefs.getString('groq_api_key') ?? '').trim();
+        if (groqKey.isEmpty) {
+          print('GeminiVision: ⏩ Tier 0 skipped — no Groq key on device');
+        } else {
+          print('GeminiVision: ▶ Tier 0 Groq $_groqQwenVisionModel...');
+          try {
+            final groqResult = await _callGroqVision(bytes, groqKey,
+                _groqQwenVisionModel,
+                kbContext: kbContext, sceneContext: sceneContext);
+            if (_isValidResult(groqResult)) {
+              print('GeminiVision: ✓ Tier 0 Groq SUCCESS in '
+                  '${stopwatch.elapsedMilliseconds}ms');
+              groqResult!['_source'] = 'groq_client';
+              groqResult['_model'] = _groqQwenVisionModel;
+              groqResult['_isOnline'] = true;
+              _lastCallTime = DateTime.now();
+              _isAnalyzing = false;
+              await _writeCachedResult(imgHash, groqResult);
+              return await logged(groqResult,
+                  outcome: AiRunLog.outcomeSuccess,
+                  model: _groqQwenVisionModel,
+                  imageHash: imgHash);
+            }
+            print('GeminiVision: ✗ Tier 0 Groq returned no usable hazards '
+                '(HTTP $_lastGroqStatus) — continuing to Tier 1');
+          } catch (e) {
+            // Swallowed on purpose. A new first tier must not be able to take
+            // down a chain that worked without it, so ANY failure here — a
+            // timeout, a 400 on an unsupported body field, a dead slug — costs
+            // one attempt and nothing else.
+            print('GeminiVision: ✗ Tier 0 Groq error: $e — continuing to Tier 1');
+          }
+        }
+      }
+
       // ══════════════════════════════════════════════════════════════════════
       // TIER 1 — OPENROUTER free vision chain, fastest model first.
       // ══════════════════════════════════════════════════════════════════════
-      final prefs = await SharedPreferences.getInstance();
-      final orKeys = _configuredOpenRouterKeys(prefs);
+      // Skipped entirely when the pin names the Groq model: a pin disables the
+      // chain, and this tier has nothing to offer for that slug except a paid
+      // request.
+      final orKeys = pinIsGroq ? const <String>[] : _configuredOpenRouterKeys(prefs);
       // Remembered so the offline message can name the REAL cause. Reading
       // _lastOrStatus after the loop is not enough: it holds only the final
       // attempt's status, so an early 429 followed by a 500 on the last model
@@ -641,9 +751,11 @@ HOW TO USE IT:
       bool orRefusedUnknown = false; // 429 that named no counter — cause unclear
       bool orKeyRejected = false; // 401/402/403 — key invalid, unpaid, blocked
       if (orKeys.isNotEmpty) {
-        // If an admin pinned a model, use only that one; else walk the chain.
-        final pinned = prefs.getString(_kVisionModelPin);
-        final List<List<String>> attempts = (pinned != null && pinned.isNotEmpty)
+        // If an admin pinned an OpenRouter model, use only that one; else walk
+        // the chain. `pinned` is resolved above, before Tier 0 — it is not read
+        // again here, because the pin decides which TIER runs and two reads
+        // could disagree.
+        final List<List<String>> attempts = pinIsOpenRouter
             ? [[pinned, 'pinned model']]
             // ORDER = FASTEST FIRST. Superseded the 2026-08-15 admin request
             // that put Nemotron 30B Omni first, on measured evidence: a live
@@ -665,6 +777,12 @@ HOW TO USE IT:
             // order. Ordering only changes which model answers a scan, and how
             // fast, while quota remains. The 429 remedy is Tier 2 (Gemini key)
             // or credits.
+            // LEAD MODEL CHANGED 2026-09-03 (admin request): MiniMax M3 :free
+            // took position 1 from Nemotron Nano 12B VL, which was removed at
+            // the same time because OpenRouter no longer lists it at all. So
+            // this is both a preference change and a dead-slug repair — before
+            // it, position 1 could only ever fail.
+            //
             // TWO models, not four (admin request 2026-08-17). Gemma 4 26B and
             // Dots3-Note Preview were removed from the runtime chain — both are
             // still valid image-input models on OpenRouter (re-verified against
@@ -678,7 +796,7 @@ HOW TO USE IT:
             // They remain in [groqVisionModels] so an admin can still pin either
             // one explicitly if a future outage makes that useful.
             : const [
-                [_orNanoVlModel,   'Nemotron Nano 12B VL (primary, fastest free image model)'],
+                [_orMinimaxModel,  'MiniMax M3 (primary, free)'],
                 [_orNemotronModel, 'Nemotron 30B Omni (fallback — highest capacity, slowest)'],
               ];
         // Tier 1 spend is timed separately from the run stopwatch. See
@@ -1059,9 +1177,19 @@ HOW TO USE IT:
   static const String _kVisionModelPin = 'vision_model_pinned';
 
   /// Vision models offered in the Admin panel dropdown (id → label).
+  ///
+  /// ⚠ Anything REMOVED from this list must be added to [_retiredVisionPins], or
+  /// a device that already pinned it keeps sending a dead slug forever — and
+  /// because a pin disables the fallback chain, that device gets no hazards at
+  /// all rather than a slower answer. This is the same trap [GroqService]
+  /// documents for its text models, with a worse failure mode.
   static const List<Map<String, String>> groqVisionModels = [
-    {'id': 'auto', 'name': 'Auto (Nano VL → Nemotron 30B → Gemini) — recommended'},
-    {'id': _orNanoVlModel,   'name': 'Nemotron Nano 12B VL (primary, fastest ~11s)'},
+    {'id': 'auto', 'name': 'Auto (Groq Qwen → MiniMax M3 → Nemotron 30B → Gemini) — recommended'},
+    // Tier 0. Pinning it means Groq ONLY — no OpenRouter, no Gemini, no Nara —
+    // so a Groq outage becomes a total loss of hazard analysis. 'auto' is the
+    // right answer for almost everyone.
+    {'id': _groqQwenVisionModel, 'name': 'Qwen 3.6 27B on Groq (primary, separate quota)'},
+    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter primary)'},
     {'id': _orGemmaModel,    'name': 'Gemma 4 26B (free, slower)'},
     {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
     // Listed last and labelled honestly: pinning this one makes every scan wait
@@ -1071,18 +1199,70 @@ HOW TO USE IT:
     {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (highest capacity, SLOW — often times out)'},
   ];
 
+  /// Pinned vision model IDs that no longer exist → what to do instead.
+  ///
+  /// 'auto' means "clear the pin and use the chain", which is the honest answer
+  /// for a model that is simply gone: there is no equivalent to substitute, and
+  /// silently pinning a DIFFERENT model would misreport what the admin chose.
+  ///
+  /// Why this map has to exist at all: a pin bypasses the whole fallback chain,
+  /// so a device pinned to a removed slug does not degrade — it fails every
+  /// scan, and the offline fallback then reports "no hazards found", which on a
+  /// shop floor reads as "this scene is safe". That is the worst failure this
+  /// file can produce, and it would have been invisible.
+  static const Map<String, String> _retiredVisionPins = {
+    // Removed from OpenRouter entirely; confirmed absent from /api/v1/models
+    // on 2026-09-03. Was the default primary, so a pin on it was plausible.
+    'nvidia/nemotron-nano-12b-v2-vl:free': 'auto',
+  };
+
   /// Admin-selected preferred vision model ('auto' = try the chain in order).
   ///
   /// NOTE a pin also disables the fallback chain — only that one model is tried
   /// before Tier 2. Pinning a slow model therefore costs the full attempt
   /// timeout on every failed scan with no faster sibling to rescue it.
+  ///
+  /// A pin on a retired model is cleared here and the clearing is PERSISTED, so
+  /// the admin dropdown stops showing a dead selection and the analysis path
+  /// (which reads the pref directly) sees the repair too.
   static Future<String> getGroqVisionModel() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_kVisionModelPin) ?? 'auto';
+    final saved = prefs.getString(_kVisionModelPin);
+    if (saved == null || saved.trim().isEmpty) return 'auto';
+    final replacement = _retiredVisionPins[saved.trim()];
+    if (replacement != null) {
+      print('GeminiVision: ⚙ Pinned vision model "$saved" no longer exists — '
+          'falling back to "$replacement"');
+      await setGroqVisionModel(replacement);
+      return replacement;
+    }
+    return saved.trim();
+  }
+
+  /// Clears a stale pin from SharedPreferences before any analysis runs.
+  ///
+  /// [getGroqVisionModel] only repairs the pref when something ASKS for the
+  /// value, and the analysis path does not — it reads `_kVisionModelPin`
+  /// directly inside analyseImageBytes so a pin can override the chain. Without
+  /// this call the repair would only happen when an admin happened to open the
+  /// settings screen. Cheap enough to run on every scan: one prefs read, and a
+  /// write only in the broken case.
+  static Future<void> _migrateRetiredVisionPin(SharedPreferences prefs) async {
+    final saved = (prefs.getString(_kVisionModelPin) ?? '').trim();
+    if (saved.isEmpty) return;
+    final replacement = _retiredVisionPins[saved];
+    if (replacement == null) return;
+    print('GeminiVision: ⚙ Clearing pin on retired model "$saved"');
+    if (replacement == 'auto') {
+      await prefs.remove(_kVisionModelPin);
+    } else {
+      await prefs.setString(_kVisionModelPin, replacement);
+    }
   }
 
   /// Save the admin's preferred vision model. 'auto' clears the pin so the
-  /// chain (Nano VL → Gemma → Dots3 → Nemotron 30B) is tried in order.
+  /// chain (Groq Qwen → MiniMax M3 → Nemotron 30B → Gemini → Nara) is tried in
+  /// order.
   static Future<void> setGroqVisionModel(String model) async {
     final prefs = await SharedPreferences.getInstance();
     if (model == 'auto' || model.isEmpty) {
@@ -1306,6 +1486,99 @@ HOW TO USE IT:
   // ══════════════════════════════════════════════════════════════════════════
   //  OPENROUTER (client) — multimodal vision, model chosen by caller
   // ══════════════════════════════════════════════════════════════════════════
+  /// HTTP status of the last Groq vision attempt, for logging only.
+  ///
+  /// Deliberately NOT wired into the offline-message logic the way
+  /// [_lastOrStatus] is. Groq is one model on a separate account, so there is no
+  /// key-wide/model-wide distinction to draw and no second Groq model to abandon
+  /// in favour of. The user-facing cause still comes from the OpenRouter and
+  /// Gemini tiers, which is where the interesting failures are.
+  static int? _lastGroqStatus;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  TIER 0 — GROQ VISION (api.groq.com, OpenAI-compatible)
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // Same wire format as OpenRouter — that is why the body below looks like a
+  // copy — but a DIFFERENT host, key and quota, which is the entire reason this
+  // tier exists. Two deliberate differences from [_callOpenRouterVision]:
+  //
+  //  • No `reasoning` field. That opt-out is an OpenRouter extension. Groq would
+  //    either ignore it or 400, and a 400 on the FIRST tier of a chain is
+  //    exactly the kind of failure that must not be introduced casually.
+  //  • No `HTTP-Referer`/`X-Title` headers — also OpenRouter attribution
+  //    extensions, meaningless here.
+  //
+  // The prompt and the parser are shared with every other tier
+  // ([resolvedHazardPrompt], [_parseAIResponse]). That is not tidiness: a
+  // separate prompt copy is how gemini_direct_vision.dart drifted, and a
+  // separate parser would mean hazards from this tier reaching the validator in
+  // a shape the de-duplication and confidence scoring never sees elsewhere.
+  static Future<Map<String, dynamic>?> _callGroqVision(
+      Uint8List bytes, String apiKey, String model,
+      {String? kbContext, String sceneContext = ''}) async {
+    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    final String prompt = await resolvedHazardPrompt(
+        kbContext: kbContext ?? '', sceneContext: sceneContext);
+
+    final requestBody = {
+      'model': model,
+      'messages': [
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': prompt},
+            {'type': 'image_url', 'image_url': {'url': dataUrl}},
+          ]
+        }
+      ],
+      'max_tokens': 4096,
+      // Matches the OpenRouter call so the two tiers are comparable in the run
+      // log rather than differing by decoding settings as well as by model.
+      'temperature': 0,
+      'top_p': 1,
+      'seed': 42,
+    };
+
+    _lastGroqStatus = null;
+    final response = await http.post(
+      Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $apiKey',
+      },
+      body: jsonEncode(requestBody),
+    ).timeout(kAttemptTimeout);
+
+    _lastGroqStatus = response.statusCode;
+    if (response.statusCode == 200) {
+      final data =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final choices = data['choices'] as List?;
+      if (choices == null || choices.isEmpty) return null;
+      final content = choices[0]['message']?['content']?.toString() ?? '';
+      return _parseAIResponse(content);
+    }
+
+    // Groq's error body is `{error: {message, type, code}}`. Logged in full
+    // because the two failures worth telling apart both arrive as a status code
+    // that means nothing on its own:
+    //   404 model_not_found  → the slug is dead or not on this account's tier.
+    //     This is what took out the near-miss text model twice; assume it will
+    //     happen here too and check the message before blaming the network.
+    //   413 / 400 too large  → Groq caps base64 image payloads (~4MB). The
+    //     scan path already downscales, but a future change to that could put
+    //     this tier over the line while OpenRouter still accepted the image.
+    String detail = '';
+    try {
+      final err = jsonDecode(response.body) as Map<String, dynamic>;
+      detail = (err['error']?['message'] ?? '').toString();
+    } catch (_) {}
+    print('GeminiVision: ⚠ Groq HTTP ${response.statusCode} on $model'
+        '${detail.isEmpty ? '' : ' — $detail'}');
+    return null;
+  }
+
   static Future<Map<String, dynamic>?> _callOpenRouterVision(
       Uint8List bytes, String apiKey, String model,
       {String? kbContext, String sceneContext = ''}) async {

@@ -2686,7 +2686,17 @@ class _AdminScreenState extends State<AdminScreen>
         _groqSelectedModel = GroqService.isSupportedModel(model)
             ? model
             : GroqService.defaultModel;
-        _groqVisionModel = visionModel;
+        // Clamped for the same reason as the three fields around it, and it was
+        // the last one of this shape left unclamped. getGroqVisionModel already
+        // migrates the pins listed in GeminiVision._retiredVisionPins, so this
+        // catches the remaining case: a slug that is simply not offered any more
+        // and was never added to that map. Without it, the widget would show
+        // "Auto" while this field held the unlisted slug, and "Update Model
+        // Selection" would write the unlisted slug straight back.
+        _groqVisionModel = GeminiVision.groqVisionModels
+                .any((m) => m['id'] == visionModel)
+            ? visionModel
+            : 'auto';
         _geminiVisionConfigured = gemKey.isNotEmpty && gemKey.length > 20;
         _geminiVisionKeyCtrl.text = gemKey;
         // Normalise here, not just in the widget: this field is what the
@@ -2762,9 +2772,19 @@ class _AdminScreenState extends State<AdminScreen>
           ),
         ),
         const SizedBox(height: 10),
-        // Vision model — AI hazard image scans run on OpenRouter.
+        // Vision model — Groq (Tier 0) then OpenRouter.
         DropdownButtonFormField<String>(
-          value: _groqVisionModel,
+          // CLAMPED 2026-09-03. DropdownButtonFormField ASSERTS when `value` is
+          // absent from `items`, so a saved pin on a model since removed from
+          // [GeminiVision.groqVisionModels] — Nemotron Nano 12B VL was removed
+          // that day — would have thrown on opening this panel. The pin itself
+          // is repaired by GeminiVision's own retired-pin migration; this clamp
+          // only guarantees the widget can always render, including in the gap
+          // before that migration has run on this device.
+          value: GeminiVision.groqVisionModels
+                  .any((m) => m['id'] == _groqVisionModel)
+              ? _groqVisionModel
+              : 'auto',
           isExpanded: true,
           items: GeminiVision.groqVisionModels.map((m) => DropdownMenuItem(
             value: m['id'],
@@ -2775,7 +2795,7 @@ class _AdminScreenState extends State<AdminScreen>
           dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
           style: TextStyle(color: sl.text1, fontSize: 11),
           decoration: InputDecoration(
-            labelText: 'Vision Model — image scans (OpenRouter)',
+            labelText: 'Vision Model — image scans (Groq → OpenRouter)',
             labelStyle: TextStyle(color: sl.text3, fontSize: 10),
             filled: true,
             fillColor: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
@@ -2785,10 +2805,12 @@ class _AdminScreenState extends State<AdminScreen>
           ),
         ),
         const SizedBox(height: 6),
-        Text('Image hazard scans run on OpenRouter. “Auto” tries the fast '
-             'Nano 12B VL first, then 30B Omni. Free models can queue when '
-             'busy; use a paid model for consistent speed. '
-             '(Groq key above is for near-miss text, not image scans.)',
+        Text('“Auto” tries Qwen 3.6 27B on Groq first, then MiniMax M3 and '
+             '30B Omni on OpenRouter, then Gemini. Free models can queue when '
+             'busy. Pinning ONE model switches off every fallback — leave it on '
+             'Auto unless you are diagnosing a specific model. '
+             '(The Groq key above now serves BOTH near-miss text and image '
+             'scans.)',
           style: TextStyle(color: sl.text4, fontSize: 9)),
         const SizedBox(height: 12),
         // ★ v26: Key is now auto-saved from the dialog. This button only updates model selection.

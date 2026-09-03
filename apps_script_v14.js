@@ -88,7 +88,10 @@ const GOOGLE_MODELS    = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-fl
 const GOOGLE_MODEL     = 'gemini-2.0-flash';  // free tier — most reliable primary
 // ★ v22: Use a DIFFERENT provider on OpenRouter so it's a true fallback
 // when Google Gemini quota is exhausted.
-// nvidia/nemotron-nano-12b-v2-vl:free — NVIDIA free vision model (NOT Google, avoids shared quota)
+// NOTE this comment used to recommend nvidia/nemotron-nano-12b-v2-vl:free, which
+// (a) was never the value of OPENROUTER_MODEL below and (b) no longer exists on
+// OpenRouter as of 2026-09-03. Left as a warning: the constant is the truth, the
+// comment beside it was not.
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash'; // best free-tier vision via OpenRouter
 const OPENROUTER_MODEL_PAID = 'anthropic/claude-sonnet-4'; // paid fallback if free fails
 

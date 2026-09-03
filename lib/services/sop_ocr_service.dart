@@ -181,10 +181,25 @@ class SopOcrService {
   /// it. Prefer [textAttemptTimeout]; this is now only an outer sanity bound.
   static const Duration summaryTimeout = Duration(seconds: 45);
 
-  /// Vision model for OCR. The fast small model is the right pick: transcription
-  /// needs no reasoning, and a reasoning model would emit thinking tokens out of
-  /// the same output budget the page text has to fit into.
-  static const String _ocrModel = 'nvidia/nemotron-nano-12b-v2-vl:free';
+  /// Vision model for OCR.
+  ///
+  /// ⚠ CHANGED 2026-09-03 OUT OF NECESSITY, NOT PREFERENCE. This was
+  /// `nvidia/nemotron-nano-12b-v2-vl:free`, which has been REMOVED from
+  /// OpenRouter — a check of /api/v1/models (424 entries) that day found no such
+  /// slug and no nemotron nano VL variant at all. Since this is the ONLY OCR
+  /// model, with no chain behind it, every SOP page scan was failing outright.
+  ///
+  /// The reasoning below still holds and still wants a small fast transcription
+  /// model; `minimax/minimax-m3:free` is verified image-capable and free, but it
+  /// is NOT verified as non-reasoning, and no page has been transcribed with it.
+  /// If OCR starts returning truncated page text, that is the first thing to
+  /// suspect — thinking tokens competing for the same output budget — and
+  /// `google/gemma-4-31b-it:free` is the next candidate to try.
+  ///
+  /// Original reasoning, unchanged: the fast small model is the right pick.
+  /// Transcription needs no reasoning, and a reasoning model would emit thinking
+  /// tokens out of the same output budget the page text has to fit into.
+  static const String _ocrModel = 'minimax/minimax-m3:free';
 
   /// Model chain for the TEXT-only passes (structuring, safety analysis).
   ///
@@ -200,9 +215,16 @@ class SopOcrService {
   ///   ABSENT. It is not a spare — it emits thinking tokens from the same 4096
   ///   `max_tokens` the JSON has to fit inside, so it returns truncated JSON, and
   ///   gemini_vision.dart demoted it for exactly that.
+  /// * The middle entry was `nvidia/nemotron-nano-12b-v2-vl:free` until
+  ///   2026-09-03, when it was found to have been removed from OpenRouter
+  ///   entirely. Replaced with `google/gemma-4-31b-it:free` — same family as the
+  ///   lead, so it is the closest thing to a known quantity here, and confirmed
+  ///   present and free in the same /api/v1/models check. Note that a dead slug
+  ///   in a chain like this one degrades quietly: the pass still succeeded via
+  ///   position 3, so nothing surfaced.
   static const List<String> _textModels = [
     'google/gemma-4-26b-a4b-it:free',
-    'nvidia/nemotron-nano-12b-v2-vl:free',
+    'google/gemma-4-31b-it:free',
     'dots-studio/dots-3-note-preview:free',
   ];
 
