@@ -121,7 +121,7 @@ class NaraVision {
   /// purpose (it is the strongest model on the account's free plan), so 10.4s in
   /// step 3 is the expected case, not the bad case.
   ///
-  /// Note that this tier is NOT inside `_kTier1Budget` (that clock is checked
+  /// Note that this tier is NOT inside `_kOrChainBudget` (that clock is checked
   /// only inside the OpenRouter loop), so a stall here is paid in full. Since the
   /// 2026-08-19 reorder it runs LAST of the online providers, so the only thing
   /// it now delays is the offline fallback — the cost of a stall is much lower

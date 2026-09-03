@@ -1,13 +1,21 @@
 // lib/services/gemini_vision.dart
 // ★ v25 MAXIMUM RELIABILITY — layered providers, NEVER fails
 //
-// PRIORITY CHAIN (stops at first success) — FASTEST FIRST, see _kTier1Budget:
-//   TIER 0 — Groq, qwen/qwen3.6-27b. First provider as of 2026-09-03 (admin
-//            request). Skipped silently if no Groq key is configured, which is
-//            also how it behaves on a fresh install before the key sync lands.
-//            Separate account, separate allowance — an OpenRouter 429 cannot
-//            touch it. Bounded by kAttemptTimeout like every other attempt.
-//   TIER 1 — OpenRouter free vision models, in order:
+// PRIORITY CHAIN (stops at first success) — FASTEST FIRST, see _kOrChainBudget:
+//   TIER 0 — Groq, qwen/qwen3.6-27b. Skipped silently if no Groq key is
+//            configured, which is also how it behaves on a fresh install before
+//            the key sync lands. ALSO SELF-SKIPS, in about a millisecond, when the
+//            request cannot fit Groq's free 8000 tokens/minute — which is every
+//            normal-sized scan image, because the prompt alone is ~5,200 tokens.
+//            See _kGroqTpmLimit. It stays in front because a skip is free and it
+//            can still win on a small crop; do not read its position as a claim
+//            that it usually runs.
+//   TIER 1 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
+//            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
+//            PROMOTED FROM TIER 2 on 2026-09-03: measured ~7s against MiniMax's
+//            best of ~19s, and on one scan it was the only tier that answered.
+//            Full evidence at its banner in analyseImageBytes.
+//   TIER 2 — OpenRouter free vision models, in order:
 //     1. MiniMax M3 (:free)     — lead model as of 2026-09-03
 //     2. Nemotron 30B Omni      — highest capacity, but a REASONING model
 //                                 and by far the slowest; demoted from first
@@ -18,9 +26,10 @@
 //      Gemma 4 26B and Dots3-Note Preview left the runtime chain on 2026-08-17
 //      and are still pinnable from the admin dropdown, see groqVisionModels.
 //      Those two are valid image models; they were simply unreachable inside the
-//      40s Tier 1 budget.)
-//   TIER 2 — Direct Google Gemini (GeminiDirectVision), if a key is configured.
-//            Chain leads with gemini-3.1-flash-lite (highest quota, fastest).
+//      40s chain budget.)
+//            DEMOTED FROM TIER 1 on 2026-09-03. Its role is now the one Gemini
+//            used to have: a different account that can still answer when the
+//            tier ahead of it is out of daily allowance.
 //   TIER 3 — NaraRouter (NaraVision). A separate account with its own 10M-token
 //            daily allowance, so it survives an OpenRouter 429 — insurance
 //            rather than throughput. Model is admin-selectable; default
@@ -32,16 +41,17 @@
 //            its banner in analyseImageBytes.
 //   TIER 4 — Offline fallback: reports the failure, returns NO hazards
 //
-// LATENCY: each attempt is capped at kAttemptTimeout and the whole Tier 1
-// chain at _kTier1Budget. Both were sized from real measurements — read their
+// LATENCY: each attempt is capped at kAttemptTimeout and the whole OpenRouter
+// chain at _kOrChainBudget. Both were sized from real measurements — read their
 // comments before changing either.
 //
-// IMPORTANT — why Tier 2 is not optional in practice:
+// IMPORTANT — why a Gemini key is not optional in practice:
 //   Every OpenRouter ':free' model draws on ONE account-wide daily allowance.
-//   When that cap is hit, every Tier 1 model returns HTTP 429 together, so
+//   When that cap is hit, every model in Tier 2 returns HTTP 429 together, so
 //   switching between free models cannot help. A Gemini key bills against
-//   Google instead, making Tier 2 the only path that still analyses the image.
-//   Set it in Admin → System Health → Gemini Vision.
+//   Google instead, so it is the only path that still analyses the image — and
+//   since 2026-09-03 it is also the FASTEST, so without it every scan begins on
+//   the slower shared free pool. Set it in Admin → System Health → Gemini Vision.
 //
 // All model IDs above were verified against OpenRouter's /api/v1/models
 // listing as accepting image input — do not add one without checking.
@@ -86,7 +96,14 @@ class GeminiVision {
   // Groq's free multimodal model, made the FIRST hazard provider on 2026-09-03
   // by admin request. Groq is a separate account with a separate allowance, so
   // this tier survives the OpenRouter 429 that takes every ':free' model down at
-  // once — the same reason Tier 2 and Tier 3 exist, but faster than both.
+  // once — the same reason Tiers 1 and 3 exist on their own accounts too.
+  //
+  // It was placed first for SPEED, and that claim has since been overtaken: the
+  // 8000 TPM pre-flight below means Tier 0 normally skips a real scan image in
+  // about a millisecond, and the fastest tier that actually runs is Tier 1
+  // (Direct Gemini, ~7s measured). Tier 0 is kept in front because when it does
+  // fit — a small crop, a re-analysis of a thumbnail — it is genuinely the
+  // cheapest and quickest answer available, and skipping costs nothing.
   //
   // NOTE the ID carries no ':free' suffix: that is OpenRouter's convention, not
   // Groq's. `qwen/qwen3.6-27b` also exists ON OpenRouter, but only as a PAID
@@ -156,29 +173,35 @@ class GeminiVision {
   // the whole point is that the ceiling tracks real response times.
   static const Duration kAttemptTimeout = Duration(seconds: 20);
 
-  // _kTier1Budget — ceiling on time spent INSIDE the OpenRouter chain, checked
+  // _kOrChainBudget — ceiling on time spent INSIDE the OpenRouter chain, checked
   // before each attempt.
   //
-  // WHY THIS IS NOT OPTIONAL: cutting the per-attempt timeout alone makes the
-  // worst case WORSE in theory, not better. Every model that stalls costs a
-  // further 20s with Tier 2 (Gemini) not yet tried — whereas the old flow at
-  // least abandoned a key wholesale on a 429. This budget restores a hard bound:
-  // once ~40s is gone, stop shopping for a free model and give the remaining
-  // time to Tier 2, which is the tier that can actually still answer when the
-  // free allowance is spent.
+  // WHY IT STILL MATTERS AFTER THE 2026-09-03 REORDER. It was originally here to
+  // protect a *downstream* Gemini attempt: stop shopping for a free model while
+  // there is still time left for the tier that can actually answer. Gemini now
+  // runs BEFORE this chain, so that rationale is gone — by the time we are here,
+  // Gemini has already been tried and has failed or is unconfigured. What the
+  // budget now bounds is the user's total wait before the Nara/offline fallback.
+  // Without it, two stalled free models cost 40s on top of whatever Gemini
+  // already spent, and a scan that is going to end in the offline fallback
+  // anyway takes over a minute to say so. So the number is unchanged but its
+  // job is different: it is no longer "leave time for a better tier", it is
+  // "fail fast enough that the operator gets an answer, even a degraded one".
   //
   // It also survives the chain being lengthened again: any model added to
   // `attempts` is automatically bounded by this, so a future addition cannot
   // reintroduce an unbounded wait.
   //
-  // MEASURED FROM THE FIRST TIER 1 ATTEMPT, NOT FROM METHOD ENTRY. The run
+  // MEASURED FROM THE FIRST OPENROUTER ATTEMPT, NOT FROM METHOD ENTRY. The run
   // stopwatch starts before the rate-limit sleep (2s), the key sync (8s) and the
   // KB context fetch (8s), so up to ~18s of setup can precede the first attempt.
   // Billing that setup to this budget would silently shrink it — on a slow first
   // launch it would allow only ONE model attempt, or with the key sync and KB
   // fetch both timing out, none at all. The budget is about how long we are
   // willing to shop for a free model, so it must not be consumed by work that
-  // happened before the shopping started.
+  // happened before the shopping started. Since the reorder, Gemini's own leg
+  // (~7s measured) also precedes the first attempt and is likewise excluded, for
+  // the same reason — it is not shopping time either.
   //
   // Sized so two full stalled attempts fit (2x20s = 40s) — the 2026-08-17
   // measurement showed the SECOND model was the one that answered, so cutting
@@ -186,9 +209,8 @@ class GeminiVision {
   // With the chain now two models long this exactly covers both; if either is
   // restored to four, positions 3+ are only reached when earlier ones fail FAST
   // (an error or refusal, not a stall). That is the honest tradeoff for a
-  // bounded wait: a hazard report arriving in 40s from Gemini beats a better one
-  // at 80s from a further free model.
-  static const Duration _kTier1Budget = Duration(seconds: 40);
+  // bounded wait: a hazard report arriving in 40s beats a better one at 80s.
+  static const Duration _kOrChainBudget = Duration(seconds: 40);
 
   // ── CONSISTENCY CACHE ──────────────────────────────────────────────────────
   // Keyed by image content hash so a repeat scan of the SAME photo returns the
@@ -694,7 +716,7 @@ HOW TO USE IT:
       // must still work. Also skipped when the admin pinned an OpenRouter model,
       // because a pin means "only this one".
       //
-      // Not billed against [_kTier1Budget] — that budget bounds how long we are
+      // Not billed against [_kOrChainBudget] — that budget bounds how long we are
       // willing to shop for a FREE OpenRouter model, and Groq is a different
       // account with a different allowance. This attempt is bounded by
       // [kAttemptTimeout] like every other single call, so the worst case grows
@@ -743,7 +765,96 @@ HOW TO USE IT:
       }
 
       // ══════════════════════════════════════════════════════════════════════
-      // TIER 1 — OPENROUTER free vision chain, fastest model first.
+      // TIER 1 — DIRECT GOOGLE GEMINI (gemini-3.1-flash-lite first)
+      //
+      // PROMOTED AHEAD OF OPENROUTER 2026-09-03, from Tier 2, by admin decision,
+      // on evidence from two live web scans rather than a preference:
+      //
+      //   scan A: Groq 413 (~1s) → MiniMax timeout 20s → Nemotron timeout 20s →
+      //           Direct Gemini SUCCESS at 47,876ms, so Gemini's own leg was ~7s.
+      //   scan B: MiniMax succeeded, but took 19,021ms; a later run took 20,720ms.
+      //
+      // Gemini Flash-Lite answered in roughly a THIRD of MiniMax's best time, and
+      // in scan A it was the only tier that answered at all — after 41 seconds had
+      // already been spent reaching it. Every OpenRouter ':free' model shares one
+      // pool of capacity, which is why two consecutive models stalled for 20s
+      // each: that is queueing, not model speed, and no reordering WITHIN the free
+      // chain can fix it. Checked the same day: of OpenRouter's 424 models only 11
+      // are both free and image-capable, four are already in the chain below, and
+      // the rest are a music model, a safety classifier and one untested VLM — so
+      // there was nothing faster to add there either.
+      //
+      // THE COST, stated because it is the reason the old order existed: Gemini's
+      // free allowance is a per-day request count, and putting free OpenRouter
+      // models first deliberately spent shared capacity to protect it. Running
+      // Gemini first spends it faster and a busy site could hit the daily ceiling
+      // in the afternoon. That is survivable BECAUSE this is a chain — a quota
+      // refusal falls straight through to OpenRouter below, which is exactly the
+      // relationship the two tiers had before, only reversed. Flash-Lite is
+      // deliberately the model at the head of GeminiDirectVision's own chain: it
+      // has the largest free quota of the Gemini family as well as the lowest
+      // latency, so it is the right one to spend first.
+      //
+      // Kept AFTER Groq: Tier 0 now self-skips in about a millisecond for any
+      // normal-sized image, so it costs nothing to leave in front, and it can
+      // still win outright on a small crop.
+      //
+      // NO QUOTA GUARD IS ADDED HERE, because one already exists one level down:
+      // [GeminiDirectVision.analyzeImage] sets `_quotaExhausted` on a 429/403,
+      // bails immediately instead of walking its remaining models (they share the
+      // key, so they would all fail identically), and then skips the whole tier
+      // for 60s. Promoting this tier made that guard MORE load-bearing, not less
+      // — it is what keeps a spent daily allowance from adding a full attempt to
+      // the front of every scan. A second guard here would only duplicate it.
+      // ══════════════════════════════════════════════════════════════════════
+      if (await GeminiDirectVision.isConfigured) {
+        print('GeminiVision: ▶ Tier 1 Direct Gemini (fastest measured tier)...');
+        try {
+          final gemResult = await GeminiDirectVision.analyzeImage(bytes,
+              kbContext: kbContext, sceneContext: sceneContext);
+          if (_isValidResult(gemResult)) {
+            print('GeminiVision: ✓ Tier 1 Direct Gemini SUCCESS in '
+                '${stopwatch.elapsedMilliseconds}ms');
+            // analyzeImage walks its own chain and stamps the model that
+            // actually answered. Prefer that over the merely *selected* model,
+            // otherwise the AI dashboard attributes latency to the wrong one.
+            final model = (gemResult!['_model'] ?? '').toString().isNotEmpty
+                ? gemResult['_model'].toString()
+                : await GeminiDirectVision.getModel();
+            gemResult['_source'] = 'gemini_direct';
+            gemResult['_model'] = model;
+            gemResult['_isOnline'] = true;
+            _lastCallTime = DateTime.now();
+            _isAnalyzing = false;
+            await _writeCachedResult(imgHash, gemResult);
+            return await logged(gemResult,
+                outcome: AiRunLog.outcomeSuccess,
+                model: model,
+                imageHash: imgHash);
+          }
+          // Falls through to OpenRouter. A quota refusal, an invalid key and a
+          // model that simply returned nothing usable all land here, and all
+          // three want the same response: try the next provider. The distinction
+          // matters only for the offline message, which is built from the
+          // OpenRouter and Nara counters further down.
+          print('GeminiVision: ✗ Tier 1 Direct Gemini returned no usable result '
+              '— continuing to Tier 2 (OpenRouter)');
+        } catch (e) {
+          print('GeminiVision: ✗ Tier 1 Direct Gemini exception: $e '
+              '— continuing to Tier 2 (OpenRouter)');
+        }
+      } else {
+        print('GeminiVision: ⏭ Tier 1 Direct Gemini skipped (no key configured '
+            '— set one in Admin → System Health; it is now the FASTEST tier, so '
+            'without it every scan starts on the slower shared free models)');
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // TIER 2 — OPENROUTER free vision chain, fastest model first.
+      //
+      // DEMOTED from Tier 1 on 2026-09-03 — see the Gemini banner above. Its role
+      // is now the one Gemini used to have: the provider on a DIFFERENT account
+      // that can still answer when the tier before it is out of allowance.
       // ══════════════════════════════════════════════════════════════════════
       // Skipped entirely when the pin names the Groq model: a pin disables the
       // chain, and this tier has nothing to offer for that slug except a paid
@@ -782,8 +893,9 @@ HOW TO USE IT:
             // allowance is counted per ACCOUNT per DAY and shared across every
             // ':free' model, so once it is spent both fail regardless of
             // order. Ordering only changes which model answers a scan, and how
-            // fast, while quota remains. The 429 remedy is Tier 2 (Gemini key)
-            // or credits.
+            // fast, while quota remains. The 429 remedy is a Gemini key (Tier 1,
+            // which since the 2026-09-03 reorder has already run before this
+            // chain) or OpenRouter credits.
             // LEAD MODEL CHANGED 2026-09-03 (admin request): MiniMax M3 :free
             // took position 1 from Nemotron Nano 12B VL, which was removed at
             // the same time because OpenRouter no longer lists it at all. So
@@ -796,7 +908,7 @@ HOW TO USE IT:
             // /api/v1/models on 2026-08-17), so this is not a correctness fix.
             //
             // The reason is that they were mostly unreachable anyway: with
-            // kAttemptTimeout at 20s and _kTier1Budget at 40s, two stalled
+            // kAttemptTimeout at 20s and _kOrChainBudget at 40s, two stalled
             // attempts exhaust the budget before a third ever starts. Positions
             // 3 and 4 were paying maintenance cost — stale labels, slug
             // verification, quota accounting — for slots that almost never ran.
@@ -806,9 +918,10 @@ HOW TO USE IT:
                 [_orMinimaxModel,  'MiniMax M3 (primary, free)'],
                 [_orNemotronModel, 'Nemotron 30B Omni (fallback — highest capacity, slowest)'],
               ];
-        // Tier 1 spend is timed separately from the run stopwatch. See
-        // [_kTier1Budget] for why setup time must not count against it.
-        final tier1Clock = Stopwatch()..start();
+        // OpenRouter spend is timed separately from the run stopwatch. See
+        // [_kOrChainBudget] for why setup time — including Tier 1's Gemini leg —
+        // must not count against it.
+        final orClock = Stopwatch()..start();
         // Outer loop over KEYS, inner loop over MODELS. See
         // [_configuredOpenRouterKeys] for what a second key does and does not
         // buy you.
@@ -824,16 +937,20 @@ HOW TO USE IT:
             // wastes the spend AND the wait. This only declines to START an
             // attempt that could not finish inside the budget.
             //
-            // Leaving Tier 1 here is not giving up — Tier 2 (Gemini, separate
-            // quota) is tried immediately after and is the tier most likely to
-            // answer at this point, since a Tier 1 chain that has burned 40s
-            // without a result is usually rate-limited or degraded across the
-            // whole free tier.
-            if (tier1Clock.elapsed >= _kTier1Budget) {
-              print('GeminiVision: ⏱ Tier 1 budget spent '
-                  '(${tier1Clock.elapsedMilliseconds}ms >= '
-                  '${_kTier1Budget.inMilliseconds}ms) — skipping remaining '
-                  '${attempts.length - i} model(s), moving to Tier 2');
+            // Leaving the chain here IS giving up on an online answer, and that
+            // is a real change from before the 2026-09-03 reorder. Gemini used
+            // to sit downstream, so this gate handed the remaining time to a
+            // tier that could still answer; now Gemini has already run. What
+            // follows is Tier 3 (Nara) and then the offline fallback. The gate
+            // is kept anyway because a free chain that has burned 40s without a
+            // result is degraded across the whole tier, and an operator waiting
+            // on a shop floor is better served by a fast degraded answer than by
+            // a third stalled request.
+            if (orClock.elapsed >= _kOrChainBudget) {
+              print('GeminiVision: ⏱ Tier 2 OpenRouter budget spent '
+                  '(${orClock.elapsedMilliseconds}ms >= '
+                  '${_kOrChainBudget.inMilliseconds}ms) — skipping remaining '
+                  '${attempts.length - i} model(s), moving to Tier 3');
               break keyLoop;
             }
             print('GeminiVision: ▶ [${i + 1}/${attempts.length}]$keyTag OpenRouter $label...');
@@ -893,7 +1010,7 @@ HOW TO USE IT:
                   continue keyLoop;
                 }
                 print('GeminiVision: ⏹$keyTag blocked (HTTP $_lastOrStatus) and '
-                    'no further keys — leaving Tier 1');
+                    'no further keys — leaving Tier 2');
                 break keyLoop;
               }
             } catch (e) {
@@ -903,55 +1020,6 @@ HOW TO USE IT:
         }
       } else {
         print('GeminiVision: ⏭ OpenRouter skipped (no key)');
-      }
-
-      // ══════════════════════════════════════════════════════════════════════
-      // TIER 2 — DIRECT GEMINI (separate quota from OpenRouter)
-      //
-      // Now runs BEFORE NaraRouter (moved 2026-08-19) — see that tier's banner
-      // below for the latency measurements behind the reorder.
-      //
-      // Why this exists: every OpenRouter ':free' model draws on ONE
-      // account-wide daily allowance, so once that cap is hit the 429 applies
-      // to all of them and extending the chain above cannot help. A Gemini key
-      // is billed against Google, not OpenRouter, so it is the only tier that
-      // can still analyse the image.
-      //
-      // This service was fully implemented and exposed in Admin → System
-      // Health, but nothing ever invoked it: setting a Gemini key had no
-      // effect whatsoever on scanning. That is fixed here.
-      // ══════════════════════════════════════════════════════════════════════
-      if (await GeminiDirectVision.isConfigured) {
-        print('GeminiVision: ▶ Direct Gemini Vision (separate quota)...');
-        try {
-          final gemResult = await GeminiDirectVision.analyzeImage(bytes,
-              kbContext: kbContext, sceneContext: sceneContext);
-          if (_isValidResult(gemResult)) {
-            print('GeminiVision: ✓ Direct Gemini SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
-            // analyzeImage walks its own chain and stamps the model that
-            // actually answered. Prefer that over the merely *selected* model,
-            // otherwise the AI dashboard attributes latency to the wrong one.
-            final model = (gemResult!['_model'] ?? '').toString().isNotEmpty
-                ? gemResult['_model'].toString()
-                : await GeminiDirectVision.getModel();
-            gemResult['_source'] = 'gemini_direct';
-            gemResult['_model'] = model;
-            gemResult['_isOnline'] = true;
-            _lastCallTime = DateTime.now();
-            _isAnalyzing = false;
-            await _writeCachedResult(imgHash, gemResult);
-            return await logged(gemResult,
-                outcome: AiRunLog.outcomeSuccess,
-                model: model,
-                imageHash: imgHash);
-          }
-          print('GeminiVision: ✗ Direct Gemini returned no usable result');
-        } catch (e) {
-          print('GeminiVision: ✗ Direct Gemini exception: $e');
-        }
-      } else {
-        print('GeminiVision: ⏭ Direct Gemini skipped (no key configured — '
-            'set one in Admin → System Health to survive OpenRouter 429s)');
       }
 
       // ══════════════════════════════════════════════════════════════════════
@@ -1176,8 +1244,10 @@ HOW TO USE IT:
 
   // ══════════════════════════════════════════════════════════════════════════
   //  VISION MODEL SELECTION (OpenRouter)
-  //  Admin can pin a specific model, or leave 'auto' to walk the Tier 1 chain
-  //  in the order listed below, then fall through to direct Gemini.
+  //  Admin can pin a specific model, or leave 'auto' to walk the Tier 2 chain
+  //  in the order listed below. Since 2026-09-03 direct Gemini runs BEFORE this
+  //  chain, not after it, so reaching these models already means Gemini failed
+  //  or is unconfigured.
   //  Keep this order matching the `attempts` list in analyseImageBytes
   //  (fastest first — both lists were reordered together on 2026-08-17).
   // ══════════════════════════════════════════════════════════════════════════
@@ -1226,8 +1296,9 @@ HOW TO USE IT:
   /// Admin-selected preferred vision model ('auto' = try the chain in order).
   ///
   /// NOTE a pin also disables the fallback chain — only that one model is tried
-  /// before Tier 2. Pinning a slow model therefore costs the full attempt
-  /// timeout on every failed scan with no faster sibling to rescue it.
+  /// before the chain moves on to Tier 3. Pinning a slow model therefore costs
+  /// the full attempt timeout on every failed scan with no faster sibling to
+  /// rescue it.
   ///
   /// A pin on a retired model is cleared here and the clearing is PERSISTED, so
   /// the admin dropdown stops showing a dead selection and the analysis path
@@ -1294,7 +1365,9 @@ HOW TO USE IT:
   ///   • a paid/org account as backup once the personal free tier is spent.
   /// The real fix for repeated 429s is credits on the primary account (10 USD
   /// raises free-model requests from ~50/day to 1000/day) or a Gemini key for
-  /// Tier 2, which is metered by Google entirely separately.
+  /// Tier 1, which is metered by Google entirely separately — and since
+  /// 2026-09-03 runs first, so a working Gemini key means these keys are rarely
+  /// reached at all.
   ///
   /// Duplicates are dropped because pasting the same key into both admin fields
   /// is an easy mistake and would otherwise double every failed scan's latency.
@@ -1574,6 +1647,14 @@ HOW TO USE IT:
   /// an inflated figure directly shrinks the largest image Tier 0 will attempt.
   /// 4.85 is a hair under the measured 4.86, which leaves the estimate marginally
   /// conservative without throwing away headroom.
+  ///
+  /// THE 23,811 ABOVE IS A FLOOR, NOT THE TYPICAL SIZE. A live log on 2026-09-03
+  /// reported `text ~7161 incl. 2000 reserved`, i.e. 5,161 text tokens ≈ **25,031
+  /// chars** — 1,220 more than run 1, because the KB block and the master-data
+  /// enums grow with the admin's own content. The RATE is unaffected (it is
+  /// chars-per-token, not a total), but do not treat 23,811 as a budget: the
+  /// prompt is variable-length by design and the pre-flight measures the real
+  /// string every time rather than assuming any of these numbers.
   static const double _kGroqCharsPerToken = 4.85;
 
   /// Estimated cost of the prompt TEXT plus the completion reservation.

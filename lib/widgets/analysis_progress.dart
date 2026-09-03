@@ -10,10 +10,18 @@
 // through a request it is — so there is no measured fraction to display. What we
 // do have is a measured *shape*: gemini_vision.dart records a real web scan at
 // 56,950ms total, with a 20s per-attempt ceiling (kAttemptTimeout) and a 40s
-// ceiling on the whole free-model tier (_kTier1Budget), after which it falls to
-// Gemini. Those numbers are the tier boundaries this widget animates against, so
-// the phase captions track what is actually happening in the chain rather than
-// being decorative.
+// ceiling on the whole free OpenRouter tier (_kOrChainBudget). Those numbers are
+// the tier boundaries this widget animates against, so the phase captions track
+// what is actually happening in the chain rather than being decorative.
+//
+// THE SHAPE MOVED ON 2026-09-03 and this widget has not been re-measured. Direct
+// Gemini was promoted ahead of the free OpenRouter models, and its measured leg
+// is ~7s, so a scan on a device with a Gemini key should now finish well inside
+// the 22s `expected` default. That makes the bar PESSIMISTIC, not wrong: it
+// under-reports progress and finishes early, which is the safe direction and
+// still obeys rule 1 below. Do not retune `expected` downward until there are
+// real timings from the new order — a bar tuned to 8s that then waits out a
+// 40s OpenRouter fallback breaks rule 2, which is the more damaging failure.
 //
 // Because it is a prediction, two rules apply and must not be relaxed:
 //

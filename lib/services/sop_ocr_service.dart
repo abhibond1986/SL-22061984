@@ -165,7 +165,7 @@ class SopOcrService {
   /// the safety pass is a second call through this same method.
   static Duration get textAttemptTimeout => GeminiVision.kAttemptTimeout;
 
-  /// Whole-of-OpenRouter budget for one text call, mirroring `_kTier1Budget` in
+  /// Whole-of-OpenRouter budget for one text call, mirroring `_kOrChainBudget` in
   /// gemini_vision.dart. Without it, `models × keys` attempts multiply: three
   /// models against two keys at 20s each is two minutes of spinner before Gemini
   /// is even tried, and the tier that can actually answer is the one that gets

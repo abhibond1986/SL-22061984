@@ -1065,6 +1065,83 @@ either side, baseline `git archive HEAD` at `933b3c3`). The JPEG parser is the o
 part exercised for real. Not compiled; the learning path has never seen a live
 Groq 413, so the regex and the arithmetic are reasoned, not observed.
 
+## 2026-09-03 (later still) — Gemini Flash-Lite promoted to Tier 1, ahead of the free OpenRouter chain
+
+The question that started this was "suggest a fast and free AI model". The answer
+turned out not to be a new model. Of OpenRouter's 424 listed models only **11** are
+both free and image-capable; four were already in the chain, and of the remainder
+one is a music model, one a safety classifier, and one an untested VLM. There was
+nothing faster to add. The fast model was already configured and running **fourth**.
+
+Evidence from two live web scans:
+
+| scan | what happened | Gemini's own leg |
+|---|---|---|
+| A | Groq 413 (~1s) → MiniMax timeout 20s → Nemotron timeout 20s → Direct Gemini SUCCESS at 47,876ms | ~7s |
+| B | MiniMax answered, but in 19,021ms; a later run took 20,720ms | — |
+
+Flash-Lite answered in roughly a **third** of MiniMax's best time, and in scan A it
+was the only tier that answered at all — after 41 seconds had already been spent
+reaching it. The two consecutive 20s stalls are the important detail: every
+OpenRouter `:free` model draws on one shared pool of capacity, so that is
+**queueing, not model speed**, and no reordering *within* the free chain can fix
+it. So the chain was reordered instead:
+
+**Tier 0** Groq → **Tier 1** Direct Gemini `gemini-3.1-flash-lite` → **Tier 2**
+OpenRouter free chain → **Tier 3** Nara → **Tier 4** offline.
+
+**The cost, stated plainly, because it is why the old order existed.** Gemini's
+free allowance is a per-day request count, and putting free OpenRouter models first
+deliberately spent shared capacity to protect it. Running Gemini first spends it
+faster, and a busy site could reach the daily ceiling in the afternoon. That is
+survivable *because this is a chain* — a quota refusal falls straight through to
+OpenRouter, which is exactly the relationship the two tiers already had, reversed.
+
+No new quota guard was written: `GeminiDirectVision.analyzeImage` already sets
+`_quotaExhausted` on a 429/403, bails without walking its remaining models (they
+share the key, so they would fail identically), and skips the tier for 60s.
+Promoting the tier made that guard *more* load-bearing, not redundant — it is what
+stops a spent allowance from adding a full attempt to the front of every scan.
+
+`_kTier1Budget` was renamed **`_kOrChainBudget`**, and this was not cosmetic: its
+documented rationale inverted. It used to read "once ~40s is gone, stop shopping for
+a free model and give the remaining time to Tier 2, which is the tier that can
+actually still answer" — but Gemini now runs *before* the chain, so by the time the
+gate fires Gemini has already been tried. The budget no longer protects a better
+downstream tier; what it now bounds is the wait before Nara and the offline
+fallback. Same 40s, different job: no longer "leave time for a better tier" but
+"fail fast enough that the operator gets an answer, even a degraded one". The
+comment says so. Cross-file references in `nara_vision.dart`,
+`sop_ocr_service.dart` and `analysis_progress.dart` were updated too.
+
+`analysis_progress.dart` is now **pessimistic by ~14s** on a device with a Gemini
+key: its `expected` default of 22s was measured under the old order. This was left
+alone on purpose. A pessimistic bar under-reports progress and finishes early,
+which is the safe direction; a bar retuned to 8s that then has to wait out a 40s
+OpenRouter fallback would break the widget's own rule 2 (when it overruns, it says
+so), and that is the more damaging failure. Retune it from real timings, not from
+this estimate.
+
+Also corrected here: the earlier entry's "the hazard prompt is 23,811 chars" is a
+**floor, not the typical size**. A live log reported `text ~7161 incl. 2000
+reserved`, i.e. 5,161 text tokens ≈ **25,031 chars** — 1,220 more, because the KB
+block and the master-data enums grow with the admin's own content. The 4.85
+chars/token constant is unaffected (it is a rate, not a total), and the pre-flight
+measures the real string every scan rather than trusting any of these numbers.
+
+One more honest correction, in the Tier 0 banner: Groq was placed first *for speed*,
+and that claim has been overtaken by its own TPM pre-flight. Tier 0 now skips a real
+scan image in about a millisecond, so the fastest tier that actually runs is Tier 1.
+Groq stays in front only because skipping is free and it still wins outright on a
+small crop — its position must not be read as a claim that it usually runs.
+
+Verified: full-tree analyzer baseline diff **zero** new and zero resolved (1,595
+either side, baseline `git archive HEAD` at `78856fc`), and `grep` confirms no
+`_kTier1Budget`/`tier1Clock` references survive outside the orphaned
+`.fuse_hidden0000000400000001`. Not compiled. **The reordering itself is untested at
+runtime** — the ~7s Gemini figure is derived by subtraction from scan A's 47,876ms
+total, not measured directly, so the expected improvement is inferred.
+
 ## Verification limits
 
 There is no Flutter SDK in the agent sandbox, so **no change made by an agent has
