@@ -123,6 +123,20 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   String? _errWsa;
   String? _errObsType;
 
+  // Marking a field in red only helps if the reporter can see it, and this form
+  // is several screens long: a failed submit is usually triggered from the
+  // button at the bottom while the empty location field sits far above the fold.
+  // The keys are attached at the call sites via KeyedSubtree so the field
+  // builders stay generic, and the scroll controller is the form's own —
+  // Scrollable.ensureVisible finds the enclosing viewport from the context, but
+  // the controller is what keeps that viewport addressable across rebuilds.
+  final ScrollController _formScroll = ScrollController();
+  final GlobalKey _keyLocation    = GlobalKey();
+  final GlobalKey _keyDescription = GlobalKey();
+  final GlobalKey _keyAction      = GlobalKey();
+  final GlobalKey _keyWsa         = GlobalKey();
+  final GlobalKey _keyObsType     = GlobalKey();
+
   // How the location field got its current value: '' (typed by hand), 'gps'
   // (device fix) or 'exif' (embedded in the photo). Recorded at each fill site
   // rather than guessed later — the hint text used to infer EXIF-vs-GPS from
@@ -131,13 +145,48 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   String _locSource = '';
   bool _locating = false;
 
-  // Set when the AI classified the observation type, so the badge can say so
-  // and the reporter knows what they are overriding.
-  bool _obsTypeFromAi = false;
+  // Set when the AI filled the field, so the badge can say so and the reporter
+  // knows what they are overriding. Each is cleared by that field's own
+  // onChanged: once the reporter has touched it, the value is theirs and
+  // labelling it as the AI's would misattribute their judgement.
+  bool _obsTypeFromAi  = false;
+  bool _wsaFromAi      = false;
+  bool _severityFromAi = false;
+  bool _actionFromAi   = false;
+
+  /// The refined description the reporter last accepted, verbatim.
+  ///
+  /// Guards against the AI analysing its own prose. `_onDescriptionChanged`
+  /// re-runs the classifier on any text over ten characters, and "Edit It"
+  /// deliberately puts the caret in the description straight after accepting —
+  /// so the very first keystroke used to send the AI's own rewording back for
+  /// rewording, and the card would reappear grading itself while the previous
+  /// `_aiSummary` still sat above it. Cleared once the reporter has changed
+  /// enough of the text that it is theirs again, at which point re-analysis is
+  /// wanted and resumes.
+  String _acceptedAiText = '';
+
+  // Which numbered step card the reporter is currently in, so it can be tinted.
+  // Derived from descendant focus via a Focus wrapper per card rather than
+  // tracked field by field: a FocusNode reports hasFocus for its whole subtree,
+  // so any field added to a section later joins the group for free and there is
+  // no per-field bookkeeping to forget. 0 means nothing on the form has focus
+  // (the keyboard is closed), and then nothing is tinted — leaving the last
+  // card lit would point the reporter at a place they have already left.
+  int _activeStep = 0;
+
+  // Held only so "Edit AI version" can put the caret in the description after
+  // replacing its text. Without it the reporter is told they may edit and then
+  // has to find and tap the field themselves.
+  final FocusNode _fnDescription = FocusNode();
 
   // ★ v24: AI Description Refinement
   bool _aiRefining = false;
-  Map<String, dynamic>? _aiSuggestion; // {refined, isNearMiss, reason, confidence}
+  // {hasHazard, category, refined, correctiveAction, wsaCause, severity,
+  // reason, confidence, detectedLanguage}. `isNearMiss` used to be the field
+  // this turned on; it is gone, because the question was never whether the
+  // report was a near miss but what kind of observation it is.
+  Map<String, dynamic>? _aiSuggestion;
   String? _aiSummary; // ★ Summary of Near Miss shown above description
   // ★ AI correction feedback loop: pristine snapshot of what the AI suggested
   // (description/summary, corrective action, severity) so we can diff it
@@ -236,21 +285,52 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         // Clear selections the admin has since deleted, so the form can't
         // submit a value that no longer exists in the master list.
         if (!_plants.contains(_plant)) _plant = '';
-        if (!_wsaCauses.contains(_wsaCause)) _wsaCause = '';
+        // Each of these three also drops its AI badge. This method is wired to
+        // AdminMasterData.revision, so it can run mid-form: an admin edit that
+        // blanks the value the AI chose would otherwise leave an "AI" chip
+        // sitting on an empty dropdown, or — worse — on a fallback value the AI
+        // never proposed. A badge that outlives the value it describes is the
+        // one failure mode the badges were added to prevent.
+        if (!_wsaCauses.contains(_wsaCause)) {
+          _wsaCause = '';
+          _wsaFromAi = false;
+        }
         if (_selectedDept.isNotEmpty && !_departments.contains(_selectedDept)) {
           _selectedDept = '';
         }
         if (!_severities.contains(_severity)) {
           _severity = _severities.isNotEmpty ? _severities.first : '';
+          _severityFromAi = false;
         }
         // Only rescue a value that is set but stale (e.g. the admin renamed the
         // type). '' is the intentional "not yet classified" sentinel and must
         // survive this, or the unset state gets silently filled in again.
         if (_obsType.isNotEmpty && !_obsTypes.contains(_obsType)) {
           _obsType = '';
+          _obsTypeFromAi = false;
         }
       });
     } catch (_) {}
+  }
+
+  /// Reacts to a write that did NOT come from the keyboard.
+  ///
+  /// Setting `controller.text` in code does not fire the field's `onChanged`, so
+  /// the badge-clearing and error-clearing that live there are skipped. The
+  /// visible consequence: a reporter taps the mic and dictates over the AI's
+  /// suggested corrective action, and their own words keep the "AI" chip —
+  /// misattributing the reporter's judgement to the model, which is exactly
+  /// backwards from what the chip is for. Call this from every programmatic
+  /// write. Must be called inside a setState (all current callers are).
+  void _noteProgrammaticWrite(TextEditingController field) {
+    if (field == _immediateAction) {
+      _actionFromAi = false;
+      if (field.text.trim().isNotEmpty) _errAction = null;
+    } else if (field == _description) {
+      if (field.text.trim().isNotEmpty) _errDescription = null;
+    } else if (field == _location) {
+      if (field.text.trim().isNotEmpty) _errLocation = null;
+    }
   }
 
   /// Get the effective department value (from dropdown or "Other" text field)
@@ -440,6 +520,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
             field.text      = appended;
             field.selection = TextSelection.fromPosition(
                 TextPosition(offset: field.text.length));
+            _noteProgrammaticWrite(field);
           });
           // ★ v25: Detect language from recognized words
           _detectLanguageFromText(result.recognizedWords);
@@ -608,6 +689,11 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     }
     // ★ v29: Proper Timer debounce — cancels previous, only fires once
     _descDebounce?.cancel();
+    // Don't hand the AI its own words back. See _acceptedAiText.
+    if (_acceptedAiText.isNotEmpty) {
+      if (_stillSubstantiallyAiText(text)) return;
+      _acceptedAiText = '';
+    }
     if (text.trim().length >= 10) {
       _descDebounce = Timer(_aiRefineDelay, () {
         if (!mounted) return;
@@ -616,6 +702,31 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
         }
       });
     }
+  }
+
+  /// Whether [text] is still recognisably the AI wording in [_acceptedAiText].
+  ///
+  /// Measured as the share of the accepted text that survives untouched at the
+  /// head and tail, which is what fixing one clause in the middle leaves behind.
+  /// Above 70% retained, this is the reporter correcting a detail and there is
+  /// nothing new for the classifier to read. Below it, they have rewritten the
+  /// observation and a fresh reading is the point.
+  bool _stillSubstantiallyAiText(String text) {
+    final ai = _acceptedAiText.trim();
+    if (ai.isEmpty) return false;
+    final t = text.trim();
+    if (t == ai) return true;
+    var head = 0;
+    while (head < t.length && head < ai.length && t[head] == ai[head]) {
+      head++;
+    }
+    var tail = 0;
+    while (tail < t.length - head &&
+        tail < ai.length - head &&
+        t[t.length - 1 - tail] == ai[ai.length - 1 - tail]) {
+      tail++;
+    }
+    return (head + tail) >= ai.length * 0.7;
   }
 
   void _onLocationChanged(String text) {
@@ -667,6 +778,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
           setState(() {
             field.text = groqResult;
             field.selection = TextSelection.fromPosition(TextPosition(offset: groqResult.length));
+            _noteProgrammaticWrite(field);
           });
         }
         return;
@@ -721,6 +833,7 @@ If the text is already fine, return it unchanged.''';
           setState(() {
             field.text = cleaned;
             field.selection = TextSelection.fromPosition(TextPosition(offset: cleaned.length));
+            _noteProgrammaticWrite(field);
           });
         }
       } else {
@@ -823,9 +936,19 @@ If the text is already fine, return it unchanged.''';
       // The list of names alone leaves the model to invent the taxonomy, and
       // the act/condition/near-miss distinction is the one it gets wrong.
       final obsGuidance = AdminMasterData.obsTypeGuidance(_obsTypes);
+      // The remaining two dropdowns, driven from the admin's own lists for the
+      // same reason as the types: a value this form cannot accept is worse than
+      // no value, because the reporter sees a filled card and an empty field.
+      final wsaRule = _wsaCauses.isEmpty
+          ? '"wsaCause": ""'
+          : '"wsaCause": "one of (exact wording, keep the leading number): '
+              '${_wsaCauses.join(', ')}"';
+      final severityRule = _severities.isEmpty
+          ? '"severity": ""'
+          : '"severity": "one of (exact wording): ${_severities.join(', ')}"';
 
       final prompt = '''$kbBlock
-You are analyzing a potential near miss incident reported by a worker at SAIL (Steel Authority of India Limited).
+You are classifying a safety observation reported by a worker at SAIL (Steel Authority of India Limited).
 
 WORKER'S INPUT: "$rawText"
 
@@ -833,14 +956,33 @@ $langInstruction
 
 Analyze this and respond in STRICT JSON format:
 {
-  "isNearMiss": true/false,
-  "confidence": 0-100,
-  "reason": "brief explanation why this is or is not a near miss (in the same language as worker's input)",
-  "refined": "rewritten professional near-miss description with proper safety terminology, clear grammar, and structured format (in the same language as worker's input)",
-  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in the same language as worker's input)",
+  "hasHazard": true/false,
   $categoryRule,
+  "confidence": 0-100,
+  "reason": "one sentence saying WHY it is that category, quoting the words in the worker's input that decide it (in the same language as worker's input)",
+  "refined": "the worker's report rewritten in clear professional safety language — correct grammar, proper terminology, states what was observed, where, and what could have happened (in the same language as worker's input, NOT translated)",
+  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in the same language as worker's input)",
+  $wsaRule,
+  $severityRule,
   "detectedLanguage": "the language the worker spoke in (English/Hindi)"
 }
+
+YOUR JOB IS TO CLASSIFY, NOT TO REJECT. This form records unsafe acts and
+unsafe conditions as well as near misses, and all of them are valuable reports.
+A description that is not a near miss is almost always a perfectly valid unsafe
+act or unsafe condition — say which it is in "category" and carry on. Do NOT
+refuse the report, do NOT ask the worker to rewrite it, and ALWAYS return
+"refined" and "correctiveAction" whatever the category turns out to be.
+
+Set "hasHazard": false ONLY when the text describes no safety hazard at all —
+it is empty, unintelligible, a maintenance request, or plainly unrelated to
+safety. Being "not a near miss" is NOT a reason to set it false.
+
+$obsGuidance
+
+SEVERITY means the POTENTIAL consequence if the situation had continued or
+worsened, not what actually happened. A slippery walkway nobody fell on can
+still be HIGH if the fall would be onto machinery.
 
 CORRECTIVE ACTION GUIDANCE:
 - Be specific and actionable (e.g., "Install guardrail at platform edge" not just "Fix the issue")
@@ -848,13 +990,10 @@ CORRECTIVE ACTION GUIDANCE:
 - Include both immediate action AND preventive measure where applicable
 - Keep it concise (1-2 sentences)
 
-$obsGuidance
-
-NEAR MISS DEFINITION: An unplanned event that DID NOT result in injury/illness/damage but HAD THE POTENTIAL to do so. It involves an unexpected hazardous exposure, a close call, or a condition that could lead to an accident.
-
-NOT A NEAR MISS: routine observations, planned maintenance, general complaints, requests, work orders, or situations with no potential for harm.
-
-If the input does NOT qualify as a near miss, set isNearMiss=false and clearly explain in "reason" (in the worker's language) why their description does not match the definition of a near miss.
+WORKED EXAMPLE — "one person was walking and there was a slippery surface":
+this is an Unsafe Condition (the hazard is the state of the floor; no event has
+happened, so it is not a near miss), hasHazard is true, and it gets a refined
+description and a corrective action like any other report.
 
 Respond ONLY with the JSON — no explanations outside JSON.''';
 
@@ -951,7 +1090,19 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     return null;
   }
 
-  void _acceptAiRefinement() {
+  /// Applies the AI's answer to the form.
+  ///
+  /// Every value is put through the resolver for its own field first, so an
+  /// off-list answer becomes '' and leaves the field alone rather than storing
+  /// a category no dropdown offers. Each field it does set is flagged
+  /// `*FromAi`, which draws the "AI" chip and is cleared the moment the reporter
+  /// touches that field: the badge exists so nobody mistakes the model's guess
+  /// for their own judgement, and a stale badge would do the reverse.
+  ///
+  /// With [thenEdit] the description keeps focus and the caret so the reporter
+  /// can fix a clause immediately — the "Edit It" path, for the common case
+  /// where the rephrasing is nearly right.
+  void _acceptAiRefinement({bool thenEdit = false}) {
     if (_aiSuggestion == null) return;
     final refined = _aiSuggestion!['refined']?.toString() ?? '';
     final correctiveAction = _aiSuggestion!['correctiveAction']?.toString() ?? '';
@@ -961,37 +1112,86 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     // parsed into _aiSuggestion and then never read. Applied here so accepting
     // the AI's wording also accepts its classification.
     final aiObsType = _canonicalObsType(_aiSuggestion!['category']?.toString() ?? '');
-    if (refined.isNotEmpty) {
-      // Generate a 1-2 line summary from the refined text
-      final summary = _generateSummary(refined);
-      setState(() {
+    // The WSA cause goes through the same resolver the vision path uses, which
+    // returns '' for anything that is not a member of the admin's list. This
+    // field is charted as the root-cause Pareto, so an invented value would not
+    // merely be wrong, it would be counted.
+    final aiWsa = _canonicalWsa(_aiSuggestion!['wsaCause']?.toString() ?? '');
+    // Severity has no resolver because it needs none: the list is four fixed
+    // words, so exact membership after upper-casing is the whole test.
+    final rawSeverity = _aiSuggestion!['severity']?.toString().trim().toUpperCase() ?? '';
+    final aiSeverity = _severities.contains(rawSeverity) ? rawSeverity : '';
+    // The rephrasing and the classification are applied independently. They used
+    // to share one `if (refined.isNotEmpty)` gate, so a model that classified
+    // the observation but returned no rewording dropped the category, the WSA
+    // cause, the severity and the corrective action on the floor — while the
+    // card above had already listed all four under "Accepting will also set:".
+    // The reporter would tap accept, watch nothing happen, and have no way to
+    // tell the difference between that and the app ignoring them.
+    final applyText = refined.isNotEmpty;
+    setState(() {
+      if (applyText) {
         _description.text = refined;
         _description.selection = TextSelection.fromPosition(
             TextPosition(offset: refined.length));
-        _aiSummary = summary;
-        // ★ v35: Also populate corrective action if AI suggested one
-        if (correctiveAction.isNotEmpty && _immediateAction.text.trim().isEmpty) {
-          _immediateAction.text = correctiveAction;
-          _immediateAction.selection = TextSelection.fromPosition(
-              TextPosition(offset: correctiveAction.length));
-        }
-        // ★ Snapshot AI's refinement so later user edits can be detected.
+        _aiSummary = _generateSummary(refined);
+        _errDescription = null;
+      }
+      // ★ v35: Also populate corrective action if AI suggested one.
+      // Never overwrites: whatever the reporter has already typed here is
+      // their own remedy and outranks the model's.
+      if (correctiveAction.isNotEmpty && _immediateAction.text.trim().isEmpty) {
+        _immediateAction.text = correctiveAction;
+        _immediateAction.selection = TextSelection.fromPosition(
+            TextPosition(offset: correctiveAction.length));
+        _actionFromAi = true;
+        _errAction = null;
+      }
+      // Classification follows the wording it was derived from. All three are
+      // left editable: the reporter saw the event and the model only read a
+      // sentence about it, so the badge marks each as the AI's answer and any
+      // change to that dropdown clears it. Applied BEFORE the snapshot below,
+      // which has to record what the AI actually set — snapshotting `_severity`
+      // first would store the pre-AI value and then read every later
+      // comparison as an edit the reporter never made.
+      if (aiObsType.isNotEmpty) {
+        _obsType = aiObsType;
+        _obsTypeFromAi = true;
+        _errObsType = null;
+      }
+      if (aiWsa.isNotEmpty) {
+        _wsaCause = aiWsa;
+        _wsaFromAi = true;
+        _errWsa = null;
+      }
+      if (aiSeverity.isNotEmpty) {
+        _severity = aiSeverity;
+        _severityFromAi = true;
+      }
+      // ★ Snapshot AI's refinement so later user edits can be detected.
+      // Only when text was actually applied: `summary` is compared against
+      // `_description` to decide whether the reporter reworded the AI, and
+      // recording '' here would mark their own untouched text as an AI edit.
+      if (applyText) {
         _aiOriginalSuggestion = {
           'summary':          refined,
           'correctiveAction': correctiveAction,
           'severity':         _severity,
         };
         _aiOriginalSource = _aiSuggestion?['_source']?.toString() ?? 'refinement';
-        // Classification follows the wording it was derived from. Left editable:
-        // the reporter saw the event and the model only read a sentence about
-        // it, so the badge marks this as the AI's answer and any change to the
-        // dropdown clears it.
-        if (aiObsType.isNotEmpty) {
-          _obsType = aiObsType;
-          _obsTypeFromAi = true;
-        }
-        _aiSuggestion = null;
-      });
+        // Suppresses the debounced re-analysis that the next keystroke would
+        // otherwise trigger. See _acceptedAiText.
+        _acceptedAiText = refined;
+      }
+      _aiSuggestion = null;
+    });
+    if (thenEdit) {
+      // Caret at the end rather than selecting the whole text: this is a
+      // "fix one clause" affordance, and a select-all means the first
+      // keystroke silently destroys the rephrasing they just accepted.
+      _fnDescription.requestFocus();
+      _description.selection = TextSelection.fromPosition(
+          TextPosition(offset: _description.text.length));
     }
   }
 
@@ -1087,6 +1287,8 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
     _micPulseCtrl.dispose();
     _speech.cancel();
     AdminMasterData.revision.removeListener(_loadMasterData);
+    _formScroll.dispose();
+    _fnDescription.dispose();
     _brief.dispose(); _deptOther.dispose(); _location.dispose();
     _description.dispose(); _immediateAction.dispose();
     for (final c in _additionalActions) { c.dispose(); }
@@ -1548,7 +1750,23 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         // and an unresolvable one must leave the field unset for the reporter
         // rather than land off-list in the root-cause Pareto.
         _wsaCause             = _canonicalWsa(refinedData['cause']?.toString() ?? '');
-        _severity             = sev;
+        // Membership-checked against the admin's list for the same reason the
+        // text path checks it. `sev` is `severity ?? 'MEDIUM'` straight off the
+        // model, so an off-list answer used to be assigned here and then
+        // displayed as _severities.first by the dropdown's fallback — the
+        // reporter saw one value, the record carried another.
+        final aiSeverity = _severities.contains(sev) ? sev : '';
+        if (aiSeverity.isNotEmpty) _severity = aiSeverity;
+        // Badged for the same reason as the text path: these came from a photo
+        // the model read, not from the reporter, and the chip is what tells them
+        // apart. Only claimed when a value actually landed — badging an empty or
+        // reporter-chosen field as AI-filled is a false claim in the direction
+        // that matters, since the badge is what licenses a reviewer to doubt it.
+        _wsaFromAi            = _wsaCause.isNotEmpty;
+        _severityFromAi       = aiSeverity.isNotEmpty;
+        // The photo path fills corrective action 1 above (`_immediateAction`),
+        // so it owes the same badge the text path gives it.
+        _actionFromAi         = _immediateAction.text.trim().isNotEmpty;
         // Only overwrite when the model gave something resolvable; an
         // unrecognisable answer leaves the reporter's own choice alone rather
         // than blanking a dropdown they may already have set.
@@ -1562,9 +1780,17 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
         _aiOriginalSuggestion = {
           'summary':          refinedData['desc']?.toString() ?? '',
           'correctiveAction': refinedData['action']?.toString() ?? '',
-          'severity':         sev,
+          // The value actually applied, not the raw model answer: this snapshot
+          // is compared against `_severity` later to decide whether the reporter
+          // overrode the AI, and recording an off-list `sev` that was never
+          // applied would read every submission as an override.
+          'severity':         _severity,
         };
         _aiOriginalSource = (result?['_source'] ?? (isOnline ? 'online' : 'offline')).toString();
+        // Same guard as the accept path: the description filled above was
+        // written by the vision model, so the text classifier must not be handed
+        // it straight back the moment the reporter adjusts a word of it.
+        _acceptedAiText = _description.text;
       });
     } catch (e) {
       setState(() {
@@ -1744,11 +1970,66 @@ Respond ONLY with the JSON — no explanations outside JSON.''';
       _clearFieldErrors();
       _locSource = '';
       _obsTypeFromAi = false;
+      _wsaFromAi = false;
+      _severityFromAi = false;
+      _actionFromAi = false;
+      _acceptedAiText = '';
+      _activeStep = 0;
+      // The suggestion card and its snapshot belonged to the report that was
+      // just filed. Left standing, the next report opens with the previous
+      // one's AI reading on screen.
+      _aiSuggestion = null;
+      _aiOriginalSuggestion = null;
+      _aiOriginalSource = null;
       // The WSA cause and observation type are per-incident judgements, not
       // sticky preferences: carrying them into the next report is how the
       // previous one's classification silently becomes the default.
       _wsaCause = '';
       _obsType = '';
+    });
+  }
+
+  /// Brings the first field carrying a validation error into view.
+  ///
+  /// The inline errors are useless on their own on a form this long: the Save
+  /// button sits at the bottom, so an empty location field two screens up is
+  /// marked in red where nobody can see it, and the snackbar this replaced had
+  /// exactly the same blind spot. Ordered to match the visual order of the
+  /// fields, not the order they are validated in.
+  ///
+  /// Posted to the next frame because the errors are set in the same setState
+  /// that calls this: the red [errorText] rows do not exist yet, so the offsets
+  /// measured now would be the pre-error layout's. A null currentContext is
+  /// normal rather than exceptional — the field may be inside a collapsed
+  /// section — so it is skipped rather than asserted on.
+  void _scrollToFirstError() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final targets = <GlobalKey>[
+        // Location sits ABOVE both dropdowns in _detailsSection (plant, dept,
+        // location, WSA, obs type, severity). Listing the dropdowns first meant
+        // a blank-form submit — where all five errors fire at once, the common
+        // case — scrolled to WSA and left the location error off-screen above
+        // it, which is the precise blind spot this function exists to close.
+        if (_errLocation != null) _keyLocation,
+        if (_errWsa != null) _keyWsa,
+        if (_errObsType != null) _keyObsType,
+        if (_errDescription != null) _keyDescription,
+        if (_errAction != null) _keyAction,
+      ];
+      for (final k in targets) {
+        final ctx = k.currentContext;
+        if (ctx == null) continue;
+        Scrollable.ensureVisible(
+          ctx,
+          // Not 0.0: flush against the top edge puts the field under the app
+          // bar's shadow and hides the label above it.
+          alignment: 0.15,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+        );
+        return;
+      }
     });
   }
 
@@ -1907,6 +2188,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         _errObsType = obsTypeErr;
         _submittingAction = null;
       });
+      _scrollToFirstError();
       final missing = <String>[
         if (locErr != null) 'location',
         if (descErr != null) 'description',
@@ -2441,23 +2723,24 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     ]));
 
   Widget _imageSection(SL sl) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      margin: const EdgeInsets.only(bottom: 14),
-      decoration: BoxDecoration(
-        color: sl.card,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(sl.isDark ? 0.2 : 0.06), blurRadius: 12, offset: const Offset(0, 3)),
-        ]),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _stepLabel('1', 'Image Evidence (Optional)', sl),
-        const SizedBox(height: 12),
-        if (_imageBytes == null && !_analyzing) _emptyImage(sl),
-        if (_analyzing) _analyzingImage(),
-        if (_imageBytes != null && !_analyzing && _aiBrief != null) _imageWithBrief(sl),
-        if (_imageBytes != null && !_analyzing && _aiBrief == null) _imageAttachedOnly(sl),
-      ]));
+    // The margin stays outside _stepCard: the card's own decoration animates,
+    // and an animating container that also owns the gap between cards makes the
+    // whole column shift when the highlight moves.
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: _stepCard(
+        step: 1,
+        sl: sl,
+        children: [
+          _stepLabel('1', 'Image Evidence (Optional)', sl),
+          const SizedBox(height: 12),
+          if (_imageBytes == null && !_analyzing) _emptyImage(sl),
+          if (_analyzing) _analyzingImage(),
+          if (_imageBytes != null && !_analyzing && _aiBrief != null) _imageWithBrief(sl),
+          if (_imageBytes != null && !_analyzing && _aiBrief == null) _imageAttachedOnly(sl),
+        ],
+      ),
+    );
   }
 
   /// Shows image with correct aspect ratio when user chose "Just Attach" (no AI scan)
@@ -2855,176 +3138,269 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   // ═══════════════════════════════════════════════════════════════
   //  DETAILS FORM SECTION — with voice mic buttons
   // ═══════════════════════════════════════════════════════════════
-  Widget _detailsSection(SL sl) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: sl.card,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(sl.isDark ? 0.2 : 0.06), blurRadius: 12, offset: const Offset(0, 3)),
-        ]),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _stepLabel('2', 'Observation Particulars', sl),
-          const SizedBox(height: 14),
-          _buildDropdownField('Plant/Unit', _plant, _plants, (v) => setState(() => _plant = v!), sl),
-          _buildDeptDropdown(sl),
-          if (_showOtherDept)
-            _buildTextField('Enter Department Name', _deptOther, Icons.edit_outlined, sl),
-          _buildLocationField(sl),
-          _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses,
-              (v) => setState(() { _wsaCause = v ?? ''; _errWsa = null; }), sl,
-              requireChoice: true, errorText: _errWsa),
-          // Classified by the AI when it analysed the photo or the spoken
-          // description; the reporter can still override, and the badge says
-          // which of the two is currently in force.
-          _buildDropdownField('Observation Type', _obsType, _obsTypes,
-              (v) => setState(() {
-                _obsType = v ?? '';
-                _obsTypeFromAi = false;
-                _errObsType = null;
-              }), sl,
-              requireChoice: true, errorText: _errObsType,
-              badge: _obsTypeFromAi ? _aiSetBadge(sl) : null),
-          // The dropdown above is never locked. This line exists because a
-          // pre-filled field reads as a decision already taken: whoever saw the
-          // event knows whether anything actually nearly happened, and the model
-          // only had a photo or a sentence.
-          if (_obsTypeFromAi)
-            Padding(
-              padding: const EdgeInsets.only(left: 14, top: 0, bottom: 12),
-              child: Row(children: [
-                Icon(Icons.edit_outlined, size: 11, color: sl.accentText.withOpacity(0.8)),
-                const SizedBox(width: 4),
-                Expanded(child: Text(
-                  'Classified by AI — tap to change it if you disagree',
-                  style: TextStyle(color: sl.accentText.withOpacity(0.9),
-                    fontSize: 10.5, fontStyle: FontStyle.italic),
-                )),
-              ]),
-            ),
-          _buildDropdownField('Initial Risk Severity', _severity, _severities, (v) => setState(() => _severity = v!), sl),
-          // ★ Reference image now shown in _imageSection at top (via _imageAttachedOnly)
-          // ★ AI Summary of Near Miss (shown after AI processes voice/text input)
-          if (_aiSummary != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [AppColors.accent.withOpacity(0.06), AppColors.accent.withOpacity(0.02)]),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.accent.withOpacity(0.3))),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      Icon(Icons.summarize_rounded, size: 13, color: sl.accentText),
-                      const SizedBox(width: 6),
-                      Text('Summary of Near Miss',
-                        style: TextStyle(color: sl.accentText, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.3)),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () => setState(() => _aiSummary = null),
-                        child: Icon(Icons.close, size: 13, color: sl.text4)),
-                    ]),
-                    const SizedBox(height: 6),
-                    Text(_aiSummary!,
-                      style: TextStyle(color: sl.text1, fontSize: 11.5, height: 1.4, fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
-            ),
-          // ★ v25: Voice language selector chips
-          _buildVoiceLangChips(sl),
-          // Names the box the mic feeds. The field's own placeholder only talks
-          // about the mic, which made voice look like the ONLY way in; a worker
-          // who would rather type needs to be told that is equally fine. Sits
-          // below the language chips because it covers both input routes.
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6, left: 2),
-            child: Text('Describe Near Miss either by typing or by voice',
-              style: TextStyle(
-                color: sl.text2, fontSize: 12, fontWeight: FontWeight.w700)),
+  /// A numbered step card that lights up while the reporter is working inside it.
+  ///
+  /// The highlight is driven by descendant focus rather than by any bookkeeping
+  /// at the field level: a [FocusNode] reports `hasFocus` for its entire subtree,
+  /// so a field added to a card later is included automatically and there is no
+  /// list of nodes to keep in step. `canRequestFocus: false` and
+  /// `skipTraversal: true` keep this wrapper out of the tab order — without them
+  /// the card itself becomes a focus stop, and the reporter tabs onto a
+  /// container between every field.
+  ///
+  /// Deliberately a *fill* change and a border, not a text colour change:
+  /// `tools/audit_contrast.py` fails coloured text on these backgrounds, and the
+  /// tint is decoration behind content that must stay as readable as it was. The
+  /// wash is kept very light for the same reason — 4% dark / 5% light measured
+  /// against `sl.card`, which is a visible shift without dropping any label
+  /// below AA.
+  Widget _stepCard({
+    required int step,
+    required SL sl,
+    required List<Widget> children,
+  }) {
+    final active = _activeStep == step;
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onFocusChange: (hasFocus) {
+        if (!mounted) return;
+        // Only ever claims or releases its own step. Writing `_activeStep = 0`
+        // unconditionally on a lost focus would race the card that just gained
+        // it — Flutter reports the loss after the gain, so moving between two
+        // cards would leave nothing highlighted.
+        if (hasFocus) {
+          if (_activeStep != step) setState(() => _activeStep = step);
+        } else if (_activeStep == step) {
+          setState(() => _activeStep = 0);
+        }
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: active
+              ? Color.alphaBlend(
+                  AppColors.accent.withOpacity(sl.isDark ? 0.04 : 0.05), sl.card)
+              : sl.card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: active
+                ? AppColors.accent.withOpacity(0.45)
+                : Colors.transparent,
+            width: 1.5,
           ),
-          _buildTextField('Tap mic → speak in ${_selectedVoiceLang == "hi" ? "Hindi" : "English"} → AI frames it', _description, Icons.description_outlined, sl, maxLines: 3,
-            suffix: _micButton(_description),
-            required_: true,
-            errorText: _errDescription,
-            onChanged: (v) {
-              if (_errDescription != null) setState(() => _errDescription = null);
-              _onDescriptionChanged(v);
-            }),
-          // ★ AI Suggestion Card
-          if (_aiRefining)
-            _buildAiRefiningIndicator(sl),
-          if (_aiSuggestion != null)
-            _buildAiSuggestionCard(sl),
-          _buildTextField('Corrective Action 1', _immediateAction, Icons.flash_on_outlined, sl, maxLines: 2,
-            suffix: _micButton(_immediateAction),
-            required_: true,
-            errorText: _errAction,
-            onChanged: (v) {
-              if (_errAction != null && v.trim().isNotEmpty) {
-                setState(() => _errAction = null);
-              }
-              _onActionChanged(v);
-            }),
-          // ★ Additional corrective actions
-          ..._additionalActions.asMap().entries.map((entry) {
-            final idx = entry.key;
-            final ctrl = entry.value;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 0),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: _buildTextField(
-                      'Corrective Action ${idx + 2}', ctrl, Icons.flash_on_outlined, sl, maxLines: 2),
-                  ),
-                  GestureDetector(
-                    onTap: () => setState(() {
-                      _additionalActions[idx].dispose();
-                      _additionalActions.removeAt(idx);
-                    }),
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 14, left: 4),
-                      child: Icon(Icons.remove_circle_outline, size: 20, color: sl.redText.withOpacity(0.7)),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
-          // ★ Add more corrective actions button
-          Padding(
-            padding: const EdgeInsets.only(bottom: 14),
-            child: GestureDetector(
-              onTap: () => setState(() => _additionalActions.add(TextEditingController())),
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                decoration: BoxDecoration(
-                  border: Border.all(color: AppColors.accent.withOpacity(0.3)),
-                  borderRadius: BorderRadius.circular(8),
-                  color: AppColors.accent.withOpacity(0.04)),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.add_circle_outline, size: 15, color: sl.accentText),
-                  const SizedBox(width: 6),
-                  Text('Add Corrective Action',
-                    style: TextStyle(color: sl.accentText, fontSize: 11, fontWeight: FontWeight.w600)),
-                ]),
-              ),
+          boxShadow: [
+            BoxShadow(
+              color: active
+                  ? AppColors.accent.withOpacity(sl.isDark ? 0.18 : 0.12)
+                  : Colors.black.withOpacity(sl.isDark ? 0.2 : 0.06),
+              blurRadius: active ? 16 : 12,
+              offset: const Offset(0, 3),
             ),
-          ),
-        ],
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: children,
+        ),
       ),
     );
   }
+
+  /// Step 2 — the classification fields: who, where, and how bad.
+  Widget _detailsSection(SL sl) => _stepCard(
+    step: 2,
+    sl: sl,
+    children: [
+      _stepLabel('2', 'Observation Particulars', sl),
+      const SizedBox(height: 14),
+            _buildDropdownField('Plant/Unit', _plant, _plants, (v) => setState(() => _plant = v!), sl),
+            _buildDeptDropdown(sl),
+            if (_showOtherDept)
+              _buildTextField('Enter Department Name', _deptOther, Icons.edit_outlined, sl),
+            KeyedSubtree(key: _keyLocation, child: _buildLocationField(sl)),
+            KeyedSubtree(key: _keyWsa,
+              child: _buildDropdownField('Observation Category (WSA 13)', _wsaCause, _wsaCauses,
+                (v) => setState(() {
+                  _wsaCause = v ?? '';
+                  _wsaFromAi = false;
+                  _errWsa = null;
+                }), sl,
+                requireChoice: true, errorText: _errWsa,
+                badge: _wsaFromAi ? _aiSetBadge(sl) : null)),
+            // Classified by the AI when it analysed the photo or the spoken
+            // description; the reporter can still override, and the badge says
+            // which of the two is currently in force.
+            KeyedSubtree(key: _keyObsType,
+              child: _buildDropdownField('Observation Type', _obsType, _obsTypes,
+                (v) => setState(() {
+                  _obsType = v ?? '';
+                  _obsTypeFromAi = false;
+                  _errObsType = null;
+                }), sl,
+                requireChoice: true, errorText: _errObsType,
+                badge: _obsTypeFromAi ? _aiSetBadge(sl) : null)),
+            // The dropdown above is never locked. This line exists because a
+            // pre-filled field reads as a decision already taken: whoever saw the
+            // event knows whether anything actually nearly happened, and the model
+            // only had a photo or a sentence.
+            if (_obsTypeFromAi)
+              Padding(
+                padding: const EdgeInsets.only(left: 14, top: 0, bottom: 12),
+                child: Row(children: [
+                  Icon(Icons.edit_outlined, size: 11, color: sl.accentText.withOpacity(0.8)),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(
+                    'Classified by AI — tap to change it if you disagree',
+                    style: TextStyle(color: sl.accentText.withOpacity(0.9),
+                      fontSize: 10.5, fontStyle: FontStyle.italic),
+                  )),
+                ]),
+              ),
+            _buildDropdownField('Initial Risk Severity', _severity, _severities,
+                (v) => setState(() { _severity = v!; _severityFromAi = false; }), sl,
+                badge: _severityFromAi ? _aiSetBadge(sl) : null),
+            // ★ Reference image now shown in _imageSection at top (via _imageAttachedOnly)
+    ],
+  );
+
+  /// Step 3 — the account of the event and what was done about it.
+  ///
+  /// Split out of [_detailsSection], which was a single 180-line card holding
+  /// everything from Plant/Unit down to the last corrective action. It was one
+  /// card only because it grew that way, and the active-section tint made the
+  /// cost visible: highlighting "the section being worked in" lit up almost the
+  /// whole form, which tells the reporter nothing. The seam is where the fields
+  /// stop being classification and start being narrative.
+  Widget _descriptionSection(SL sl) => _stepCard(
+    step: 3,
+    sl: sl,
+    children: [
+      _stepLabel('3', 'What Happened & Action Taken', sl),
+      const SizedBox(height: 14),
+            // ★ AI Summary of Near Miss (shown after AI processes voice/text input)
+            if (_aiSummary != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [AppColors.accent.withOpacity(0.06), AppColors.accent.withOpacity(0.02)]),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.accent.withOpacity(0.3))),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Icon(Icons.summarize_rounded, size: 13, color: sl.accentText),
+                        const SizedBox(width: 6),
+                        Text('Summary of Near Miss',
+                          style: TextStyle(color: sl.accentText, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+                        const Spacer(),
+                        GestureDetector(
+                          onTap: () => setState(() => _aiSummary = null),
+                          child: Icon(Icons.close, size: 13, color: sl.text4)),
+                      ]),
+                      const SizedBox(height: 6),
+                      Text(_aiSummary!,
+                        style: TextStyle(color: sl.text1, fontSize: 11.5, height: 1.4, fontWeight: FontWeight.w500)),
+                    ],
+                  ),
+                ),
+              ),
+            // ★ v25: Voice language selector chips
+            _buildVoiceLangChips(sl),
+            // Names the box the mic feeds. The field's own placeholder only talks
+            // about the mic, which made voice look like the ONLY way in; a worker
+            // who would rather type needs to be told that is equally fine. Sits
+            // below the language chips because it covers both input routes.
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6, left: 2),
+              child: Text('Describe Near Miss either by typing or by voice',
+                style: TextStyle(
+                  color: sl.text2, fontSize: 12, fontWeight: FontWeight.w700)),
+            ),
+            KeyedSubtree(key: _keyDescription,
+              child: _buildTextField('Tap mic → speak in ${_selectedVoiceLang == "hi" ? "Hindi" : "English"} → AI frames it', _description, Icons.description_outlined, sl, maxLines: 3,
+                suffix: _micButton(_description),
+                required_: true,
+                errorText: _errDescription,
+                focusNode: _fnDescription,
+                onChanged: (v) {
+                  if (_errDescription != null) setState(() => _errDescription = null);
+                  _onDescriptionChanged(v);
+                })),
+            // ★ AI Suggestion Card
+            if (_aiRefining)
+              _buildAiRefiningIndicator(sl),
+            if (_aiSuggestion != null)
+              _buildAiSuggestionCard(sl),
+            KeyedSubtree(key: _keyAction,
+              child: _buildTextField('Corrective Action 1', _immediateAction, Icons.flash_on_outlined, sl, maxLines: 2,
+                suffix: _micButton(_immediateAction),
+                required_: true,
+                errorText: _errAction,
+                badge: _actionFromAi ? _aiSetBadge(sl) : null,
+                onChanged: (v) {
+                  if (_errAction != null && v.trim().isNotEmpty) {
+                    setState(() => _errAction = null);
+                  }
+                  if (_actionFromAi) setState(() => _actionFromAi = false);
+                  _onActionChanged(v);
+                })),
+            // ★ Additional corrective actions
+            ..._additionalActions.asMap().entries.map((entry) {
+              final idx = entry.key;
+              final ctrl = entry.value;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 0),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: _buildTextField(
+                        'Corrective Action ${idx + 2}', ctrl, Icons.flash_on_outlined, sl, maxLines: 2),
+                    ),
+                    GestureDetector(
+                      onTap: () => setState(() {
+                        _additionalActions[idx].dispose();
+                        _additionalActions.removeAt(idx);
+                      }),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 14, left: 4),
+                        child: Icon(Icons.remove_circle_outline, size: 20, color: sl.redText.withOpacity(0.7)),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+            // ★ Add more corrective actions button
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: GestureDetector(
+                onTap: () => setState(() => _additionalActions.add(TextEditingController())),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: AppColors.accent.withOpacity(0.3)),
+                    borderRadius: BorderRadius.circular(8),
+                    color: AppColors.accent.withOpacity(0.04)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.add_circle_outline, size: 15, color: sl.accentText),
+                    const SizedBox(width: 6),
+                    Text('Add Corrective Action',
+                      style: TextStyle(color: sl.accentText, fontSize: 11, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+              ),
+            ),
+    ],
+  );
 
   /// ★ v25: Animated mic button — tap to start, long-press to pick language
   Widget _micButton(TextEditingController field) {
@@ -3162,28 +3538,65 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
+  /// The AI's reading of the typed or dictated description.
+  ///
+  /// This card used to be a gate. The model was asked "is this a near miss?",
+  /// and on `false` the reporter got a red "Does NOT Qualify as Near Miss"
+  /// panel, a "Try Again" button, and nothing else — the rephrasing and the
+  /// suggested corrective action were both rendered only `if (isNearMiss)`. On a
+  /// screen titled "Near Miss / Unsafe Condition" that is the wrong question:
+  /// "one person was walking and there was a slippery surface" is a textbook
+  /// unsafe condition, and the app answered it by refusing the report and asking
+  /// a shop-floor worker to guess what wording would satisfy it. The likeliest
+  /// outcome of that is not a better report, it is no report.
+  ///
+  /// So it now classifies. The model returns the observation type, and the card
+  /// presents that alongside the rephrasing and the other fields it can fill,
+  /// with three ways out: take it, take it and edit it, or keep your own words.
+  /// The only state that still refuses is `hasHazard == false`, which means no
+  /// safety content at all — and even that only warns.
   Widget _buildAiSuggestionCard(SL sl) {
-    final isNearMiss = _aiSuggestion!['isNearMiss'] == true;
+    // Absent means present: an older response, or a model that ignored the
+    // field, must not be read as "no hazard" and silently gate the card again.
+    // The string "false" is tested alongside the bool because these models
+    // return it often enough; without that, a genuine no-hazard verdict would
+    // read as a hazard and the card would offer to fill four fields from it.
+    final rawHasHazard = _aiSuggestion!['hasHazard'];
+    final hasHazard = !(rawHasHazard == false || rawHasHazard == 'false');
     final confidence = (_aiSuggestion!['confidence'] ?? 0) as num;
     final reason = _aiSuggestion!['reason']?.toString() ?? '';
     final refined = _aiSuggestion!['refined']?.toString() ?? '';
     final correctiveAction = _aiSuggestion!['correctiveAction']?.toString() ?? '';
     final detectedLang = _aiSuggestion!['detectedLanguage']?.toString() ?? '';
+    // Resolved here, not at accept time, so the card can only advertise fills
+    // that will actually land. Promising a category and then applying '' would
+    // make the reporter believe a field was set when it was not.
+    final aiObsType = _canonicalObsType(_aiSuggestion!['category']?.toString() ?? '');
+    final aiWsa = _canonicalWsa(_aiSuggestion!['wsaCause']?.toString() ?? '');
+    final rawSeverity = _aiSuggestion!['severity']?.toString().trim().toUpperCase() ?? '';
+    final aiSeverity = _severities.contains(rawSeverity) ? rawSeverity : '';
+    // Built once. It is read three times below, and it is also what decides
+    // whether there is anything to accept when the model returned a
+    // classification but no rewording.
+    final fills = _aiFillChips(sl, aiObsType, aiWsa, aiSeverity, correctiveAction);
+    final canApply = refined.isNotEmpty || fills.isNotEmpty;
 
-    final cardColor = isNearMiss
-        ? (sl.isDark ? const Color(0xFF1B3A2E) : const Color(0xFFE8F5E9))
+    // Amber, not green or red. Green read as "your report passed", which invited
+    // the reporter to treat the AI as the authority on their own observation;
+    // red read as rejection. This is information awaiting a decision.
+    final accent = hasHazard ? AppColors.amber : AppColors.red;
+    final accentTx = hasHazard ? sl.amberText : sl.redText;
+    final cardColor = hasHazard
+        ? (sl.isDark ? const Color(0xFF32290F) : const Color(0xFFFFF8E1))
         : (sl.isDark ? const Color(0xFF3A1B1B) : const Color(0xFFFFEBEE));
-    final borderColor = isNearMiss
-        ? const Color(0xFF43A047)
-        : const Color(0xFFD32F2F);
-    final iconData = isNearMiss ? Icons.check_circle_outline : Icons.error_outline_rounded;
-    final iconColor = isNearMiss ? const Color(0xFF43A047) : const Color(0xFFD32F2F);
 
-    // ★ v25: Confidence color coding
     Color confidenceColor;
-    if (confidence >= 80) confidenceColor = const Color(0xFF43A047);
-    else if (confidence >= 50) confidenceColor = const Color(0xFFF57C00);
-    else confidenceColor = const Color(0xFFD32F2F);
+    if (confidence >= 80) confidenceColor = AppColors.green;
+    else if (confidence >= 50) confidenceColor = AppColors.amber;
+    else confidenceColor = AppColors.red;
+    final confidenceTx = confidence >= 80
+        ? sl.greenText
+        : (confidence >= 50 ? sl.amberText : sl.redText);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
@@ -3192,25 +3605,31 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         decoration: BoxDecoration(
           color: cardColor,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: borderColor.withOpacity(0.5), width: 1.5),
+          border: Border.all(color: accent.withOpacity(0.5), width: 1.5),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ★ v25: Status header with prominent confidence badge
             Row(
               children: [
-                Icon(iconData, size: 20, color: iconColor),
+                Icon(
+                  hasHazard
+                      ? Icons.auto_awesome_rounded
+                      : Icons.help_outline_rounded,
+                  size: 20, color: accentTx),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    isNearMiss ? 'Valid Near Miss' : 'Does NOT Qualify as Near Miss',
+                    hasHazard
+                        ? (aiObsType.isNotEmpty
+                            ? 'AI reads this as: $aiObsType'
+                            : 'AI has rephrased your description')
+                        : 'Could not find a safety hazard in this text',
                     style: TextStyle(
-                      color: iconColor,
+                      color: accentTx,
                       fontSize: 13,
                       fontWeight: FontWeight.w800)),
                 ),
-                // ★ Confidence badge
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
@@ -3219,50 +3638,37 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                     border: Border.all(color: confidenceColor.withOpacity(0.5)),
                   ),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.psychology_rounded, size: 12, color: confidenceColor),
+                    Icon(Icons.psychology_rounded, size: 12, color: confidenceTx),
                     const SizedBox(width: 4),
                     Text('${confidence.toInt()}%',
-                      style: TextStyle(color: confidenceColor, fontSize: 12, fontWeight: FontWeight.w900)),
+                      style: TextStyle(color: confidenceTx, fontSize: 12, fontWeight: FontWeight.w900)),
                   ]),
                 ),
                 const SizedBox(width: 6),
                 GestureDetector(
                   onTap: _dismissAiSuggestion,
-                  child: Icon(Icons.close, size: 16, color: sl.text4),
+                  child: Icon(Icons.close, size: 16, color: sl.text3),
                 ),
               ],
             ),
-            // ★ v25: Confidence level explanation
             const SizedBox(height: 6),
             Text(
               'AI Confidence: ${confidence.toInt()}% — ${confidence >= 80 ? "High confidence" : confidence >= 50 ? "Moderate confidence" : "Low confidence"}${detectedLang.isNotEmpty ? ' • Language: $detectedLang' : ''}',
-              style: TextStyle(color: sl.text4, fontSize: 10, fontWeight: FontWeight.w500)),
-            // ★ v25: Prominent rejection message for non-near-miss
-            if (!isNearMiss) ...[
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD32F2F).withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFD32F2F).withOpacity(0.3)),
-                ),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFD32F2F)),
-                  const SizedBox(width: 8),
-                  Expanded(child: Text(
-                    reason.isNotEmpty ? reason : 'The description provided does not match the definition of a near miss. A near miss is an unplanned event that did NOT result in injury but had the potential to cause harm.',
-                    style: TextStyle(color: sl.isDark ? Colors.red.shade200 : Colors.red.shade800, fontSize: 11.5, height: 1.4, fontWeight: FontWeight.w500))),
-                ]),
-              ),
-            ],
-            if (isNearMiss && reason.isNotEmpty) ...[
+              style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w500)),
+            // The reasoning, whichever way it went. On the no-hazard path this is
+            // the only actionable thing in the card, so it is not optional there.
+            if (reason.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(reason,
-                style: TextStyle(color: sl.text2, fontSize: 11, height: 1.3)),
+                style: TextStyle(color: sl.text2, fontSize: 11.5, height: 1.35)),
+            ] else if (!hasHazard) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Describe what you saw, where it was, and what could have gone '
+                'wrong — the mic works in Hindi too.',
+                style: TextStyle(color: sl.text2, fontSize: 11.5, height: 1.35)),
             ],
-            if (refined.isNotEmpty && isNearMiss) ...[
+            if (refined.isNotEmpty) ...[
               const SizedBox(height: 10),
               Container(
                 width: double.infinity,
@@ -3275,7 +3681,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('AI Refined Description:',
-                      style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w600)),
+                      style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w600)),
                     const SizedBox(height: 4),
                     Text(refined,
                       style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4)),
@@ -3283,8 +3689,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 ),
               ),
             ],
-            // ★ v35: Show AI-suggested corrective action
-            if (correctiveAction.isNotEmpty && isNearMiss) ...[
+            if (correctiveAction.isNotEmpty) ...[
               const SizedBox(height: 8),
               Container(
                 width: double.infinity,
@@ -3292,72 +3697,170 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 decoration: BoxDecoration(
                   color: sl.isDark ? const Color(0xFF1A2A1A) : const Color(0xFFF1F8E9),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFF43A047).withOpacity(0.3)),
+                  border: Border.all(color: AppColors.green.withOpacity(0.3)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(children: [
-                      Icon(Icons.build_circle_outlined, size: 13, color: const Color(0xFF43A047)),
+                      Icon(Icons.build_circle_outlined, size: 13, color: sl.greenText),
                       const SizedBox(width: 6),
                       Text('Suggested Corrective Action:',
-                        style: TextStyle(color: const Color(0xFF43A047), fontSize: 10, fontWeight: FontWeight.w600)),
+                        style: TextStyle(color: sl.greenText, fontSize: 10.5, fontWeight: FontWeight.w600)),
                     ]),
                     const SizedBox(height: 4),
                     Text(correctiveAction,
                       style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4)),
-                    const SizedBox(height: 4),
-                    Text('You can edit this after accepting',
-                      style: TextStyle(color: sl.text3, fontSize: 11, fontStyle: FontStyle.italic)),  // Improved: was text4/9px
                   ],
                 ),
               ),
             ],
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                if (refined.isNotEmpty && isNearMiss)
+            // Names every field this will write, before it writes any of them.
+            // Accepting used to change three dropdowns further up the form with
+            // no warning, which on a long form is indistinguishable from the app
+            // having filled them in by itself.
+            if (fills.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(refined.isEmpty ? 'Accepting will set:' : 'Accepting will also set:',
+                style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Wrap(spacing: 6, runSpacing: 6, children: fills),
+            ],
+            const SizedBox(height: 12),
+            // Keep / edit / reject. "Edit" is not a third opinion — it applies
+            // the AI text and drops the caret into the field, because the common
+            // case is that the rephrasing is nearly right and one clause is
+            // wrong. Without it the reporter's only route to that is to accept,
+            // then hunt for the field and tap it.
+            //
+            // Shown whenever there is anything to apply, which includes a
+            // classification without a rewording: the chips above have already
+            // promised those fills, so hiding the accept button would leave the
+            // promise with no way to keep it.
+            if (canApply)
+              Row(
+                children: [
                   Expanded(
-                    child: GestureDetector(
-                      onTap: _acceptAiRefinement,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        decoration: BoxDecoration(
-                          color: AppColors.accent,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Center(
-                          child: Text('Use AI Version',
-                            style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
-                        ),
-                      ),
+                    child: _cardButton(
+                      // Named for what the tap does. With no rewording on offer
+                      // there is no "AI version" of the description to take,
+                      // only the classification, and a button promising one
+                      // would be describing something that isn't there.
+                      label: refined.isEmpty ? 'Apply Fields' : 'Use AI Version',
+                      icon: Icons.check_rounded,
+                      filled: true,
+                      color: AppColors.accent,
+                      fg: Colors.white,
+                      onTap: () => _acceptAiRefinement(),
                     ),
                   ),
-                if (refined.isNotEmpty && isNearMiss) const SizedBox(width: 10),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: _dismissAiSuggestion,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.transparent,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: sl.text4.withOpacity(0.5)),
-                      ),
-                      child: Center(
-                        child: Text(isNearMiss ? 'Keep My Text' : 'Try Again',
-                          style: TextStyle(color: sl.text2, fontSize: 11, fontWeight: FontWeight.w600)),
-                      ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _cardButton(
+                      label: refined.isEmpty ? 'Apply & Edit' : 'Edit It',
+                      icon: Icons.edit_outlined,
+                      filled: false,
+                      color: AppColors.accent,
+                      fg: sl.accentText,
+                      onTap: () => _acceptAiRefinement(thenEdit: true),
                     ),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _cardButton(
+                      label: 'Keep Mine',
+                      icon: Icons.person_outline_rounded,
+                      filled: false,
+                      color: sl.text3,
+                      fg: sl.text2,
+                      onTap: _dismissAiSuggestion,
+                    ),
+                  ),
+                ],
+              )
+            else
+              // Nothing to accept — the model found no hazard, or returned no
+              // rephrasing. Dismissing is the only sensible action, and it is
+              // labelled for what it does rather than as "Try Again": the text
+              // stays exactly as typed and editing it re-runs the analysis.
+              _cardButton(
+                label: 'Edit My Description',
+                icon: Icons.edit_outlined,
+                filled: false,
+                color: sl.text3,
+                fg: sl.text2,
+                onTap: () {
+                  _dismissAiSuggestion();
+                  _fnDescription.requestFocus();
+                },
+              ),
           ],
         ),
       ),
     );
   }
+
+  /// One chip per field the AI answer will populate, so the reporter can see
+  /// the whole effect of "Use AI Version" before tapping it. Only fields that
+  /// resolved to a real member of the admin's lists appear.
+  List<Widget> _aiFillChips(SL sl, String obsType, String wsa, String severity,
+      String correctiveAction) {
+    Widget chip(IconData ic, String label) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: sl.isDark ? Colors.white10 : Colors.white.withOpacity(0.8),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: sl.border.withOpacity(0.6)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(ic, size: 11, color: sl.text3),
+        const SizedBox(width: 4),
+        Text(label,
+          style: TextStyle(color: sl.text2, fontSize: 10.5, fontWeight: FontWeight.w600)),
+      ]),
+    );
+    return <Widget>[
+      if (obsType.isNotEmpty) chip(Icons.category_outlined, 'Type: $obsType'),
+      if (wsa.isNotEmpty) chip(Icons.account_tree_outlined, 'Category: $wsa'),
+      if (severity.isNotEmpty) chip(Icons.speed_rounded, 'Severity: $severity'),
+      // Only advertised when it will actually be written: the existing rule is
+      // that a corrective action already typed is never overwritten.
+      if (correctiveAction.isNotEmpty && _immediateAction.text.trim().isEmpty)
+        chip(Icons.build_circle_outlined, 'Corrective Action 1'),
+    ];
+  }
+
+  /// Shared button shape for the suggestion card's three choices.
+  Widget _cardButton({
+    required String label,
+    required IconData icon,
+    required bool filled,
+    required Color color,
+    required Color fg,
+    required VoidCallback onTap,
+  }) =>
+      GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 4),
+          decoration: BoxDecoration(
+            color: filled ? color : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            border: filled ? null : Border.all(color: color.withOpacity(0.55)),
+          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, size: 13, color: fg),
+            const SizedBox(width: 5),
+            // The three labels have to survive a 320px screen in three columns.
+            Flexible(
+              child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w700)),
+            ),
+          ]),
+        ),
+      );
 
   /// ★ v32: Location field with GPS indicator + edit hint
   ///
@@ -3472,12 +3975,19 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   /// [errorText] non-null draws the field in red with the reason underneath.
   /// [required_] adds a red asterisk to the label so the reporter knows the
   /// field is mandatory BEFORE being refused at submit time.
-  Widget _buildTextField(String label, TextEditingController controller, IconData icon, SL sl, {int maxLines = 1, TextInputType keyboardType = TextInputType.text, Widget? suffix, void Function(String)? onChanged, String? errorText, bool required_ = false}) {
+  Widget _buildTextField(String label, TextEditingController controller, IconData icon, SL sl, {int maxLines = 1, TextInputType keyboardType = TextInputType.text, Widget? suffix, void Function(String)? onChanged, String? errorText, bool required_ = false, Widget? badge, FocusNode? focusNode}) {
     final hasErr = errorText != null;
+    // The mic already occupies suffixIcon on the fields that have one, so the
+    // "AI" chip has to share the slot rather than replace it — silently losing
+    // the mic button is worse than a slightly crowded suffix.
+    final Widget? suffixWidget = (suffix != null && badge != null)
+        ? Row(mainAxisSize: MainAxisSize.min, children: [badge, suffix])
+        : (suffix ?? badge);
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: TextField(
         controller: controller,
+        focusNode: focusNode,
         maxLines: maxLines,
         keyboardType: keyboardType,
         onChanged: onChanged,
@@ -3494,7 +4004,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             child: Icon(icon, size: 18,
               color: hasErr ? sl.redText : sl.accentText.withOpacity(0.7))),
           prefixIconConstraints: const BoxConstraints(minWidth: 40),
-          suffixIcon: suffix,
+          suffixIcon: suffixWidget,
           filled: true,
           fillColor: hasErr
               ? AppColors.red.withOpacity(0.06)
@@ -3692,6 +4202,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               isDark: widget.isDark,
             ),
           Expanded(child: SingleChildScrollView(
+            controller: _formScroll,
             padding: const EdgeInsets.fromLTRB(14, 14, 14, 100),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3701,6 +4212,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                 _guidanceBox(sl),
                 _imageSection(sl),
                 _detailsSection(sl),
+                const SizedBox(height: 14),
+                _descriptionSection(sl),
                 const SizedBox(height: 16),
                 // ★ v31: Show "New Report" button if saved, otherwise show Save/Share/PDF
                 if (_saved) ...[

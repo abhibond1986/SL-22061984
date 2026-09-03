@@ -231,6 +231,30 @@ Rules:
         ? '"category": ""'
         : '"category": "one of (exact wording): ${obsTypes.join(', ')}"';
 
+    // The WSA cause and severity lists, for the same reason: the near-miss form
+    // fills those two dropdowns from this answer, and a value that is not a
+    // member of the admin's list is discarded by the caller's resolvers — which
+    // leaves the reporter looking at a filled AI card above an empty field.
+    List<String> wsaCauses;
+    List<String> severities;
+    try {
+      wsaCauses = await AdminMasterData.getWsaCauses();
+    } catch (_) {
+      wsaCauses = List<String>.from(AdminMasterData.defaultWsaCauses);
+    }
+    try {
+      severities = await AdminMasterData.getSeverities();
+    } catch (_) {
+      severities = List<String>.from(AdminMasterData.defaultSeverities);
+    }
+    final wsaRule = wsaCauses.isEmpty
+        ? '"wsaCause": ""'
+        : '"wsaCause": "one of (exact wording, keep the leading number): '
+            '${wsaCauses.join(', ')}"';
+    final severityRule = severities.isEmpty
+        ? '"severity": ""'
+        : '"severity": "one of (exact wording): ${severities.join(', ')}"';
+
     final langInstruction = language == 'English'
         ? 'Respond with "reason", "refined", and "correctiveAction" fields in English.'
         : 'IMPORTANT: The worker spoke in $language. Write "reason", "refined", and "correctiveAction" in $language (native script). Do NOT translate to English.';
@@ -247,7 +271,7 @@ Rules:
             '$kb\n\n';
 
     final prompt = '''$kbBlock
-You are analyzing a potential near miss incident reported by a worker at SAIL (Steel Authority of India Limited).
+You are classifying a safety observation reported by a worker at SAIL (Steel Authority of India Limited).
 
 WORKER'S INPUT: "$text"
 
@@ -255,26 +279,37 @@ $langInstruction
 
 Respond in STRICT JSON format:
 {
-  "isNearMiss": true/false,
-  "confidence": 0-100,
-  "reason": "brief explanation (in worker's language)",
-  "refined": "rewritten professional near-miss description with safety terminology (in worker's language)",
-  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in worker's language)",
+  "hasHazard": true/false,
   $categoryRule,
+  "confidence": 0-100,
+  "reason": "one sentence saying WHY it is that category, quoting the deciding words from the input (in worker's language)",
+  "refined": "the report rewritten in clear professional safety language — correct grammar, proper terminology, what was observed, where, and what could have happened (in worker's language, NOT translated)",
+  "correctiveAction": "specific corrective action to prevent recurrence — practical, actionable steps (in worker's language)",
+  $wsaRule,
+  $severityRule,
   "detectedLanguage": "English/Hindi"
 }
+
+YOUR JOB IS TO CLASSIFY, NOT TO REJECT. This form records unsafe acts and
+unsafe conditions as well as near misses, and all of them are valuable reports.
+A description that is not a near miss is almost always a valid unsafe act or
+unsafe condition — say which in "category" and carry on. ALWAYS return "refined"
+and "correctiveAction" whatever the category is.
+
+Set "hasHazard": false ONLY when the text describes no safety hazard at all
+(empty, unintelligible, a maintenance request, unrelated to safety). Being "not
+a near miss" is NOT a reason to set it false.
+
+${AdminMasterData.obsTypeGuidance(obsTypes)}
+
+SEVERITY means the POTENTIAL consequence if the situation had continued or
+worsened, not what actually happened.
 
 CORRECTIVE ACTION GUIDANCE:
 - Be specific and actionable (e.g., "Install guardrail at platform edge" not just "Fix the issue")
 - Reference applicable safety measures (barricading, signage, PPE, LOTO, PTW)
 - Include both immediate action AND preventive measure where applicable
 - Keep it concise (1-2 sentences)
-
-${AdminMasterData.obsTypeGuidance(obsTypes)}
-
-NEAR MISS DEFINITION: An unplanned event that DID NOT result in injury/illness/damage but HAD THE POTENTIAL to do so.
-
-NOT A NEAR MISS: routine observations, planned maintenance, general complaints, requests, or situations with no potential for harm.
 
 Respond ONLY with JSON — nothing else.''';
 

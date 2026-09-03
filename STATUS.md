@@ -216,6 +216,146 @@ IS 14489"** (`admin_screen.dart:7220`) is ten hardcoded rows with three hardcode
 to display compliant regardless of data — a compliance panel that always says
 compliant is worse than no panel.
 
+**Near-miss form, 2026-09-02 late (commit `7c93a3c`) — NOT yet compiled.** The
+same no-fabricated-defaults argument as above, applied to the reporter's own
+form. `_obsType` lost its `'Unsafe Condition'` default and `''` is refused by
+`_submit`; the text providers' `category` answer, which was parsed into
+`_aiSuggestion` and then never read, is now applied through a new
+`_canonicalObsType()`; `AdminMasterData.obsTypeGuidance()` and a matching block
+in `apps_script_v14.js`'s `getSailPrompt` define act-vs-condition-vs-near-miss
+for the model, where both prompts previously passed only the list of type names.
+**Those two definitions are duplicated and must be kept in step.** Also: Save no
+longer replaces the action row, so the PDF of a just-filed report is still
+reachable (`_savedReporterName` / `_savedReporterPno` / `_postSaveBusy` hold the
+persisted record); five `_err*` fields give inline validation instead of
+snackbars; and `_locSource` is recorded at each fill site rather than inferred
+from whether the location string contains a comma.
+
+`Line of Fire` is deliberately **not** mapped onto act-or-condition by
+`_canonicalObsType`, and containment matching is accepted only when exactly one
+type matches — a bare `'Unsafe'` is a prefix of both `Unsafe Act` and `Unsafe
+Condition`, and picking whichever the admin listed first would put a coin flip in
+the record while the badge presents it as the AI's considered answer.
+
+**The text analysis no longer refuses reports — 2026-09-03, uncompiled.** The
+card was a gate: the model was asked `isNearMiss`, and on `false` the reporter got
+a red "Does NOT Qualify as Near Miss" panel with a "Try Again" button, because
+`refined`, `correctiveAction` and the accept button were all rendered only
+`if (isNearMiss)`. Observed live on safetylens.in: "one person was walking and
+there was a slippery surface" — a textbook unsafe condition — was refused at 95%
+confidence, on a screen titled *Near Miss / Unsafe Condition*. The likeliest
+result of asking a shop-floor worker to reword until the app accepts it is no
+report at all.
+
+* **Both text prompts now classify instead of judging.** `isNearMiss` is replaced
+  by `hasHazard`, which is false only for text with no safety content at all
+  (empty, unintelligible, a maintenance request) — explicitly *not* for "this is
+  not a near miss". The JSON gained `wsaCause` and `severity`, each constrained
+  to the admin's own list, and the prompt states that severity means the
+  potential consequence. Changed in **two places that must stay in step**:
+  `near_miss_tab.dart`'s inline prompt and `GroqService.classifyNearMiss`.
+* **`hasHazard` absent is read as true.** An older cached response, or a model
+  that drops the field, must not re-gate the card by default.
+* **Every AI-supplied value goes through the resolver for its own field**, so an
+  off-list answer becomes `''` and leaves the field alone: `_canonicalObsType`,
+  `_canonicalWsa` (the Pareto field — an invented value there would be *counted*),
+  and plain `_severities.contains` after upper-casing. The card resolves them
+  before rendering, so it can only advertise fills that will actually land.
+* **Three choices, not two: Use AI Version / Edit It / Keep Mine.** "Edit It"
+  applies the text and puts the caret at the end of the description — caret, not
+  select-all, because the common case is one wrong clause and a select-all means
+  the first keystroke destroys what they just accepted.
+* Each AI-filled field carries the `_aiSetBadge` chip via a `*FromAi` flag
+  (`_obsTypeFromAi`, `_wsaFromAi`, `_severityFromAi`, `_actionFromAi`), cleared by
+  that field's own `onChanged`. A stale badge would attribute the reporter's
+  judgement to the model, which is exactly backwards from the point of the badge.
+  The vision path sets the same flags. A corrective action the reporter has
+  already typed is still never overwritten.
+* **`_aiOriginalSuggestion` is now snapshotted *after* the fields are applied.**
+  It records `_severity`, so snapshotting first stored the pre-AI value and made
+  every later comparison read as a reporter edit that never happened.
+* The card is **amber, not green or red**. Green read as "your report passed",
+  which invites treating the model as the authority on someone else's own
+  observation; red read as rejection. It is information awaiting a decision.
+
+**Two form-usability fixes the same day, uncompiled.** Failed validation now
+scrolls the first offending field into view (`_scrollToFirstError`, posted to the
+next frame because the `errorText` rows do not exist yet in the setState that
+sets them, and ordered by visual position rather than validation order). Before
+this the inline errors had the same blind spot as the snackbars they replaced —
+the Save button is at the bottom and the empty field is often two screens up.
+
+And `_detailsSection`, a single 180-line card holding everything from Plant/Unit
+to the last corrective action, is **split into step 2 (Observation Particulars)
+and step 3 (What Happened & Action Taken)**, with a new `_stepCard()` wrapper
+that tints whichever card holds focus. The split is what makes the tint mean
+anything — highlighting the old card lit up almost the entire form. The
+highlight is driven by descendant focus through a single `Focus` per card
+(`canRequestFocus: false`, `skipTraversal: true`, or the card becomes a tab stop
+between every field), and it only ever claims or releases **its own** step:
+Flutter reports focus loss after focus gain, so an unconditional reset on loss
+would leave nothing highlighted when moving between cards. The tint is a fill and
+a border, never a text colour — `audit_contrast.py` is unmoved at **167 failures
+/ 262 warnings**, verified against a baseline of the same commit.
+
+Verified with `dart analyze` against a `git archive HEAD` baseline (see the
+verification-limits section): the only new diagnostics name Flutter framework
+symbols that are unresolvable in the sandbox regardless (`Widget`, `SizedBox`,
+`GlobalKey`, `Icons`, `setState`), and **no diagnostic names any symbol the change
+introduced**. No argument-type, duplicate-definition or assignment errors. Still
+no real compile.
+
+**Eight defects found by review of the above and fixed the same day, also
+uncompiled.** Written down because most of them are the kind that fail silently
+on a device rather than at the compiler:
+
+* `_scrollToFirstError` listed the two dropdowns before `_keyLocation`, but
+  Location sits **above** them on screen. On a blank-form submit — where all five
+  errors fire at once, the common case — it scrolled to WSA and left the location
+  error off-screen above it. That is the exact blind spot the function exists to
+  close, so the ordering is load-bearing: it must match `_detailsSection`'s
+  visual order, not the validation order.
+* Both new prompts asked for `"refined"` as *"professional safety **English**"*
+  while the same line and the `langInstruction` above it said to answer in the
+  worker's language and not translate. For Hindi dictation the model was as
+  likely to return English, which then lands in `_description` verbatim. The word
+  is now "language" in both files. **Keep them in step.**
+* The photo path set `_severityFromAi = true` unconditionally, so an off-list
+  severity got an "AI" chip — and worse, assigned `sev` raw, which the dropdown
+  then displayed as `items.first`: the reporter saw one value and the record
+  carried another. Severity is now membership-checked there too, the badge is
+  claimed only when a value landed, and `_aiOriginalSuggestion['severity']`
+  records the value **applied** rather than the raw answer. The same path fills
+  corrective action 1 and never badged it; it does now.
+* `_loadMasterData` blanks `_wsaCause`/`_severity`/`_obsType` when an admin edits
+  a master list, and it is wired to `AdminMasterData.revision` so it can run
+  mid-form. It left the `*FromAi` flags set, leaving an "AI" chip on an empty
+  dropdown or on a fallback value the AI never proposed. Each blanking now clears
+  its own flag.
+* Writing `controller.text` in code does not fire `onChanged`, so the mic and
+  `_refineFieldWithAI` skipped the badge- and error-clearing that lives there: a
+  reporter could dictate over the AI's corrective action and keep the "AI" chip on
+  their own words. New `_noteProgrammaticWrite(controller)` is called from every
+  programmatic write. **Call it from any new one.**
+* `_acceptAiRefinement` gated *everything* on `refined.isNotEmpty`, so a model
+  that classified the observation but returned no rewording silently dropped all
+  four fields the card had already promised under "Accepting will also set:".
+  Text and classification are now applied independently, the buttons show
+  whenever there is anything to apply, and they relabel to "Apply Fields" /
+  "Apply & Edit" when there is no wording on offer.
+* "Edit It" puts the caret in the description immediately after accepting, so the
+  first keystroke re-ran the classifier **on the AI's own prose**. `_acceptedAiText`
+  plus `_stillSubstantiallyAiText()` suppress re-analysis while ≥70% of the
+  accepted text survives at head and tail (what fixing one clause leaves behind),
+  and clear once the reporter has genuinely rewritten it. The vision path sets the
+  same guard, since its description is AI-written too.
+* `hasHazard` was tested as `!= false`, which read the JSON **string** `"false"`
+  as a hazard; and `_resetForm` did not clear `_aiSuggestion` /
+  `_aiOriginalSuggestion` / `_aiOriginalSource`, so the next report opened with
+  the previous one's AI reading on screen. Both fixed.
+
+Contrast audit unmoved at **167 failures / 262 warnings** after all of it.
+
 This file is the single place that states current reality. Every other markdown
 file at the root is a point-in-time note from when a feature was built; those
 describe what was true *that day*, not what is true now. Superseded notes have
