@@ -142,6 +142,19 @@ class GeminiDirectVision {
   static bool _quotaExhausted = false;
   static DateTime? _quotaExhaustedAt;
 
+  /// WHY the key is blocked, so the log can stop calling everything "quota".
+  /// `'quota'` (429), `'forbidden'` (403), `'invalid_key'` (400 API_KEY_INVALID),
+  /// or `''` when nothing is blocked.
+  ///
+  /// Added 2026-09-05 while chasing a live failure where this tier tried all
+  /// three models and reported "no usable result" with no cause. An invalid or
+  /// stale key produces exactly that shape: Google answers **400
+  /// API_KEY_INVALID**, not 401/403, so it fell into the generic `else` branch,
+  /// did NOT set [_quotaExhausted], and the caller dutifully burned two more
+  /// round trips on a key that could never work — then said nothing useful about
+  /// why. Fast, silent, and unactionable.
+  static String keyBlockKind = '';
+
   /// Analyze image for safety hazards
   /// Returns structured hazard data or null on failure
   /// [kbContext] — optional knowledge bank content to inject into prompt for accurate regulations
@@ -160,6 +173,7 @@ class GeminiDirectVision {
       return null;
     }
     _quotaExhausted = false;
+    keyBlockKind = '';
 
     final apiKey = await getApiKey();
     final selected = await getModel();
@@ -184,8 +198,9 @@ class GeminiDirectVision {
       // one, which also gave up after a 404, a per-MODEL error the next model
       // in the chain would have survived.
       if (_quotaExhausted) {
-        print('GeminiDirectVision: ⚡ Quota/key blocked on $model — '
-            'remaining models share the same key, bailing');
+        print('GeminiDirectVision: ⚡ Key-wide block on $model '
+            '(${keyBlockKind.isEmpty ? 'unknown' : keyBlockKind}) — remaining '
+            'models share the same key, bailing');
         return null;
       }
 
@@ -257,15 +272,71 @@ class GeminiDirectVision {
             return _parseHazardResponse(text);
           }
         }
-        print('GeminiDirectVision: [$model] No candidates in response');
+        // HTTP 200 with nothing usable. This used to print "No candidates in
+        // response" for three different causes, which is how a live failure on
+        // 2026-09-05 came back with no diagnosable reason at all. Google puts the
+        // reason in one of these three places and none of them were being read:
+        //
+        //   • promptFeedback.blockReason — a SAFETY filter refused the prompt or
+        //     image outright, so there are genuinely zero candidates. Industrial
+        //     photos (injuries, blood, restricted areas) do trip this.
+        //   • candidates[0].finishReason — 'MAX_TOKENS' means the model ran out of
+        //     output budget. On the Gemini 3.x thinking models the reasoning is
+        //     billed to maxOutputTokens, so the 8192 here can be consumed before a
+        //     single character of JSON is emitted, leaving `content` with NO
+        //     `parts`. That looks identical to "no candidates" but needs the
+        //     opposite fix (raise the budget / shorten the prompt).
+        //   • usageMetadata — the numbers that prove which of the two it was.
+        //
+        // Logged, not acted on: the caller already falls through to the next
+        // model, and guessing a remedy from one scan would be worse than printing
+        // the facts.
+        final blockReason = data['promptFeedback']?['blockReason']?.toString();
+        final finishReason = (candidates != null && candidates.isNotEmpty)
+            ? candidates[0]['finishReason']?.toString()
+            : null;
+        if (blockReason != null && blockReason.isNotEmpty) {
+          print('GeminiDirectVision: [$model] ⚠ BLOCKED by safety filter '
+              '(promptFeedback.blockReason=$blockReason) — the prompt or the '
+              'photo was refused, so no output was generated. Not a quota or key '
+              'problem; the next model will very likely refuse it too.');
+        } else if (finishReason != null) {
+          print('GeminiDirectVision: [$model] ⚠ HTTP 200 but no text part '
+              '(finishReason=$finishReason, usage=${data['usageMetadata']}). '
+              'MAX_TOKENS here means the thinking budget ate maxOutputTokens '
+              'before any JSON was written.');
+        } else {
+          print('GeminiDirectVision: [$model] No candidates in response — '
+              'body: ${responseText.substring(0, responseText.length.clamp(0, 300))}');
+        }
         return null;
       } else if (response.statusCode == 429) {
         print('GeminiDirectVision: [$model] Rate limited (429) — ALL models on this key are blocked');
+        keyBlockKind = 'quota';
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
         return null;
       } else if (response.statusCode == 403) {
         print('GeminiDirectVision: [$model] API key invalid or quota exceeded (403)');
+        keyBlockKind = 'forbidden';
+        _quotaExhausted = true;
+        _quotaExhaustedAt = DateTime.now();
+        return null;
+      } else if (response.statusCode == 400 &&
+          response.body.contains('API_KEY_INVALID')) {
+        // ⚠ GOOGLE REPORTS A BAD KEY AS 400, NOT 401 OR 403. Verified live on
+        // 2026-09-05: `{"error":{"code":400,"message":"API key not valid. Please
+        // pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":
+        // "API_KEY_INVALID"...`. Without this branch it fell to the generic `else`,
+        // which treats a failure as per-model — so a single dead key cost three
+        // full round trips per scan and printed nothing an admin could act on.
+        // Matched on the `reason` code rather than the English sentence, which is
+        // localisable.
+        print('GeminiDirectVision: [$model] ✗ API KEY INVALID (400 '
+            'API_KEY_INVALID) — the key is wrong, revoked, or restricted to '
+            'other APIs/referrers. Every model shares it, so bailing. Fix it in '
+            'Admin → System Health → Gemini.');
+        keyBlockKind = 'invalid_key';
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
         return null;

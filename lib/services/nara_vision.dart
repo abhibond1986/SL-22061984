@@ -328,6 +328,52 @@ class NaraVision {
   /// data that decides whether to keep this provider.
   static String? lastModelUsed;
 
+  /// True when the last failure said the *model* does not exist on this account
+  /// — not that the account is out of quota, blocked, or slow.
+  ///
+  /// This is the one failure worth retrying with a DIFFERENT model, which is why
+  /// it is separate from [lastStatus]. Everything else this provider returns is
+  /// account-wide (429 token quota, 401/403 key, 402 plan) and would fail
+  /// identically on every other slug, so retrying those would only add latency in
+  /// front of the offline fallback.
+  static bool lastModelUnavailable = false;
+
+  /// Slugs this app session has PROVEN are not routable on this account.
+  ///
+  /// Session-scoped on purpose, not persisted: the cause is a provider-side
+  /// catalogue change we cannot see, so a restart is the right moment to
+  /// re-test rather than carrying a possibly-stale verdict across days. It exists
+  /// only so the wasted round trip is paid once per session instead of on every
+  /// single scan.
+  static final Set<String> _unavailableModels = <String>{};
+
+  /// Which slugs have been ruled out this session — for the admin health card.
+  static Set<String> get unavailableModels =>
+      Set<String>.unmodifiable(_unavailableModels);
+
+  /// Does this status + body mean "that model does not exist here"?
+  ///
+  /// 404 is unambiguous. **400 is not**, and that distinction is the whole reason
+  /// this is a function: Nara returns
+  /// `400 {"type":"bad_request","message":"The requested model is not available."}`
+  /// for a dead slug — observed live on 2026-09-05 for [defaultModel]
+  /// `mistral-medium-3-5`, which killed this entire tier on every scan — but it
+  /// ALSO returns 400 for a genuinely malformed request. Treating every 400 as a
+  /// dead model would make a body-shape bug spend three extra round trips per
+  /// scan re-sending the same broken request. So the wording must name the model.
+  static bool _saysModelUnavailable(int status, String text) {
+    if (status == 404) return true;
+    if (status != 400) return false;
+    final t = text.toLowerCase();
+    return t.contains('model is not available') ||
+        t.contains('model not available') ||
+        t.contains('model is not supported') ||
+        t.contains('unknown model') ||
+        t.contains('invalid model') ||
+        t.contains('model not found') ||
+        t.contains('no such model');
+  }
+
   /// URL of the Apps Script AI proxy: the admin override if one is stored,
   /// otherwise the shipped [defaultProxyUrl].
   ///
@@ -375,6 +421,7 @@ class NaraVision {
     lastStatus = null;
     lastWasRateLimited = false;
     lastModelUsed = null;
+    lastModelUnavailable = false;
 
     final scriptUrl = await getProxyUrl();
     if (scriptUrl.isEmpty) {
@@ -475,6 +522,19 @@ class NaraVision {
         // they say what to actually DO about it. Named explicitly because the
         // generic message sends you debugging the proxy — which at this point has
         // already done its job correctly.
+        // Checked before the switch because the signal is in the WORDING, not the
+        // code — see [_saysModelUnavailable]. `relayed` is NaraRouter's own body
+        // and is where the sentence lives; `error` is the proxy's view and is
+        // usually just 'Unknown error'.
+        if (_saysModelUnavailable(statusCode, '$relayed $error')) {
+          lastModelUnavailable = true;
+          print('NaraVision: ✗ HTTP $statusCode — model "$model" is not '
+              'available on this account. Trying the next model in '
+              'availableModels; a permanent fix is to change the default in '
+              'Admin → NaraRouter.');
+          return null;
+        }
+
         switch (statusCode) {
           case 402:
             // Payment Required — and on a Free-plan account the cause is almost
@@ -495,10 +555,9 @@ class NaraVision {
                 'project\'s Script Properties is missing, wrong or revoked. '
                 'This key is the proxy\'s, NOT the one synced to devices.');
             break;
-          case 404:
-            print('NaraVision: ✗ HTTP 404 — model "$model" is not valid on this '
-                'account\'s plan. Pick another in Admin → NaraRouter.');
-            break;
+          // NOTE: there is no 404 case here any more — [_saysModelUnavailable]
+          // returns true for every 404 and has already returned above, so a case
+          // for it would be dead code.
           case 429:
             lastWasRateLimited = true;
             print('NaraVision: ✗ HTTP 429 — daily TOKEN allowance spent (Nara '
@@ -574,6 +633,7 @@ class NaraVision {
     lastStatus = null;
     lastWasRateLimited = false;
     lastModelUsed = null;
+    lastModelUnavailable = false;
 
     // KEY CHECK IS PLATFORM-SPECIFIC — deliberately not hoisted above the web
     // branch. On web the proxy holds the key; demanding one here would reject
@@ -583,7 +643,39 @@ class NaraVision {
       print('NaraVision: ⏭ skipped (no valid $keyPrefix key on this device)');
       return null;
     }
-    final model = await getModel();
+    // WHY THIS IS A LIST AND NOT ONE MODEL (added 2026-09-05).
+    //
+    // Until now this tier sent exactly one slug — the admin's pin, or
+    // [defaultModel] — so a slug that died at the provider took the WHOLE tier
+    // down on every scan, permanently and silently. That is what happened: a live
+    // scan on safetylens.in got `400 {"type":"bad_request","message":"The
+    // requested model is not available."}` for `mistral-medium-3-5`, and because
+    // Tier 3 is the last online provider, the user landed on the offline fallback
+    // and was told no hazards were found. On a shop floor that reads as "this
+    // scene is safe". Nara publishes no deprecation list and its /v1/models needs
+    // a key, so the app cannot pre-verify a slug — it can only survive one.
+    //
+    // The preferred model still goes FIRST, so an admin's choice is honoured and
+    // the normal path is unchanged. The rest of [availableModels] follow purely as
+    // survival, and only a "model unavailable" answer advances the list (see
+    // [_saysModelUnavailable]) — every other failure here is account-wide and
+    // returns immediately.
+    final preferred = await getModel();
+    final candidates = <String>[
+      if (!_unavailableModels.contains(preferred)) preferred,
+      for (final m in availableModels)
+        if (m['id'] != preferred && !_unavailableModels.contains(m['id']))
+          m['id']!,
+    ];
+    if (candidates.isEmpty) {
+      // Every known slug has already failed this session. Say so plainly: this
+      // is an admin action (pick a live model), not a transient error.
+      print('NaraVision: ⏭ skipped — every model in availableModels was '
+          'rejected as unavailable earlier this session '
+          '(${_unavailableModels.join(', ')}). The slugs in this build are stale; '
+          'check router.bynara.id and update NaraVision.availableModels.');
+      return null;
+    }
 
     // Shared prompt builder — includes the citable-regulation table with the KB
     // context spliced INTO it. Passing kbContext through matters: appending it
@@ -609,11 +701,43 @@ class NaraVision {
     // dropdown means the same thing everywhere, and no Apps Script edit is needed
     // to correct a costly default. NARA_MODEL still applies if a client ever
     // omits the field.
-    if (kIsWeb) {
-      return _analyzeViaProxy(bytes, prompt, await getModel());
+    for (var i = 0; i < candidates.length; i++) {
+      final model = candidates[i];
+      if (i > 0) {
+        print('NaraVision: ↻ [${i + 1}/${candidates.length}] retrying with '
+            '"$model" after the previous model was reported unavailable');
+      }
+      final result = kIsWeb
+          ? await _analyzeViaProxy(bytes, prompt, model)
+          : await _analyzeDirect(bytes, prompt, model, apiKey);
+      if (result != null) return result;
+      // ONLY a dead slug advances the list. A 429/401/402, a timeout, or a
+      // 200-that-would-not-parse all say nothing about the OTHER slugs, and the
+      // first three are account-wide by construction — retrying them would add up
+      // to three more full timeouts in front of the offline fallback, which is the
+      // one thing standing between a user and a report.
+      if (!lastModelUnavailable) return null;
+      _unavailableModels.add(model);
     }
+    return null;
+  }
 
-    // ON MOBILE/DESKTOP: Call NaraRouter directly
+  /// One direct POST to [endpoint] with one model. Mobile/desktop only.
+  ///
+  /// Split out of [analyzeImage] on 2026-09-05 so the model list can be walked
+  /// without duplicating the request body or the status handling. It sets the
+  /// `last*` fields and is not meant to be called from outside.
+  static Future<Map<String, dynamic>?> _analyzeDirect(
+    Uint8List bytes,
+    String prompt,
+    String model,
+    String apiKey,
+  ) async {
+    lastStatus = null;
+    lastWasRateLimited = false;
+    lastModelUsed = null;
+    lastModelUnavailable = false;
+
     final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
 
     final requestBody = {
@@ -697,15 +821,20 @@ class NaraVision {
           print('NaraVision: ⚠ PAYMENT REQUIRED (402) — the free plan quota is '
               'spent and pay-as-you-go is off. $detail');
           break;
-        case 404:
-          // The most likely failure on first use, hence its own case: the slugs
-          // in [availableModels] came from the free-models page, not from a
-          // verified /v1/models listing.
-          print('NaraVision: ⚠ MODEL NOT FOUND (404) — "$model" is not a valid '
-              'Nara alias, or is not available on this plan. $detail');
-          break;
         default:
-          print('NaraVision: HTTP ${response.statusCode} on $model — $detail');
+          // The most likely failure on first use, hence its own branch: the slugs
+          // in [availableModels] came from the free-models page, not from a
+          // verified /v1/models listing — and Nara reports a dead one as 400, not
+          // 404, so this must test the wording. Sets the flag that lets
+          // [analyzeImage] move on to the next candidate.
+          if (_saysModelUnavailable(response.statusCode, '$detail ${response.body}')) {
+            lastModelUnavailable = true;
+            print('NaraVision: ⚠ MODEL UNAVAILABLE (${response.statusCode}) — '
+                '"$model" is not a valid Nara alias, or is not on this plan. '
+                'Trying the next model. $detail');
+          } else {
+            print('NaraVision: HTTP ${response.statusCode} on $model — $detail');
+          }
       }
     } catch (e) {
       // Includes TimeoutException. Left as null lastStatus so the caller can

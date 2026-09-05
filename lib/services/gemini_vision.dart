@@ -201,10 +201,21 @@ class GeminiVision {
   // weak, not because it is known fast: MiniMax M3's BEST measured leg was
   // 19,021ms against a 20s [kAttemptTimeout], and it timed out twice in one scan.
   // Do NOT retune kAttemptTimeout or _kOrChainBudget from either model until a
-  // real success is timed. Note also that per the 2026-09-03 finding, reordering
-  // WITHIN the free chain cannot fix a stall caused by shared-pool queueing —
-  // this change buys a different model and a different provider at position 1,
-  // not a guaranteed speed-up.
+  // real success is timed.
+  //
+  // ✎ AMENDED 2026-09-05. The 2026-09-03 note here used to blame MiniMax's stalls
+  // on shared-pool QUEUEING, and concluded that reordering within the free chain
+  // could not help. The queueing claim was wrong, and it mattered: OpenRouter's
+  // provider page shows MiniMax M3's sole provider at 99.96% uptime, 1.90s P50
+  // latency and **47 tokens/sec**, so its stalls were GENERATION time on a long
+  // JSON schema, not waiting in a queue. That is why it now has its own 35s
+  // ceiling in [_kPerModelAttemptTimeout] rather than being reordered — read that
+  // comment before touching either model's position, because it also explains why
+  // the timeout is a mask and shrinking the output is the actual fix.
+  //
+  // The reorder caveat still stands for genuinely queue-bound stalls; it simply
+  // was not the diagnosis here. Check the provider's published tokens/sec before
+  // assuming a queue.
   static const String _orGemma31bModel = 'google/gemma-4-31b-it:free';
   // Mixture-of-experts, 512k context, accepts image input. Confirmed against
   // OpenRouter's /api/v1/models listing rather than assumed from the name.
@@ -297,6 +308,63 @@ class GeminiVision {
   // (an error or refusal, not a stall). That is the honest tradeoff for a
   // bounded wait: a hazard report arriving in 40s beats a better one at 80s.
   static const Duration _kOrChainBudget = Duration(seconds: 40);
+
+  // ── PER-MODEL ATTEMPT CEILINGS ─────────────────────────────────────────────
+  //
+  // [kAttemptTimeout] (20s) is the default and stays the default. This map is the
+  // narrow exception, added 2026-09-05 on admin decision, and it exists because
+  // one model is THROUGHPUT-bound rather than slow to start.
+  //
+  // THE ARITHMETIC, from OpenRouter's own provider page for MiniMax M3 (free) on
+  // 2026-09-05: sole provider GMICloud, P50 latency 1.90s, **throughput 47
+  // tokens/sec**, uptime 99.96%. Generation time is therefore
+  // `1.9s + output_tokens / 47`, and a 20s cap buys only about
+  // `(20 - 1.9) * 47 ≈ 850` output tokens.
+  //
+  // The hazard schema asks for eight top-level fields plus **up to 6 hazards of
+  // 14 fields each** (description, regulation, correctiveAction, visualEvidence,
+  // absenceCheck, bbox, lofZone…), which is roughly 150-200 tokens per hazard —
+  // call it 1,100-1,400 tokens for a full report. So at 47 tok/s a six-hazard
+  // report needs 25-30s and could NEVER fit in 20s, while the 19,021ms leg that
+  // was once measured as its "best" back-solves to ~800 tokens, i.e. a three or
+  // four hazard scene.
+  //
+  // ⚠ THAT IS THE REAL DEFECT AND THE TIMEOUT ONLY MASKS IT: this model failed as
+  // a function of HOW HAZARDOUS THE PHOTO WAS. An empty walkway returned fine; a
+  // busy shop floor with six findings — the photo that actually matters — blew
+  // the cap and was discarded. Backwards for a safety tool. The durable fix is to
+  // shrink the output (fewer/shorter fields, and a real `response_format` so no
+  // tokens go to fences or preamble); every 47 tokens saved buys back a second on
+  // EVERY provider. This map buys time, not a fix.
+  //
+  // Only add a model here with the provider's measured tokens/sec and an estimate
+  // of the output size. A guess here re-creates the 2026-08 problem where four
+  // fifths of a scan's wait bought nothing.
+  static const Map<String, Duration> _kPerModelAttemptTimeout = {
+    // 1.9s + 1400 tokens / 47 tps ≈ 31.7s, rounded up for headroom.
+    _orMinimaxModel: Duration(seconds: 35),
+  };
+
+  // Hard ceiling on the whole OpenRouter tier once per-model timeouts can exceed
+  // [kAttemptTimeout].
+  //
+  // [_kOrChainBudget] alone is no longer sufficient. It asks "has too much time
+  // ALREADY gone?", which was safe when every attempt was capped at the same 20s.
+  // With a 35s attempt in the list, an attempt could start at 39s elapsed and run
+  // to 74s — the exact unbounded wait both constants exist to prevent. So the gate
+  // is now PREDICTIVE: an attempt only starts if `elapsed + its own timeout` fits
+  // inside this ceiling.
+  //
+  // 60s = the 20s lead attempt plus the 35s MiniMax attempt plus 5s of slack, so
+  // the intended two-attempt sequence always fits and a third only runs when the
+  // first two failed FAST. Tier 3 (Nara, up to 45s) and the offline fallback are
+  // still downstream, so this is not the whole scan's budget — it is the most this
+  // tier may spend before handing over.
+  static const Duration _kOrChainHardCeiling = Duration(seconds: 60);
+
+  /// How long a single OpenRouter attempt at [model] may run.
+  static Duration _attemptTimeoutFor(String model) =>
+      _kPerModelAttemptTimeout[model] ?? kAttemptTimeout;
 
   // ── CONSISTENCY CACHE ──────────────────────────────────────────────────────
   // Keyed by image content hash so a repeat scan of the SAME photo returns the
@@ -953,6 +1021,7 @@ HOW TO USE IT:
       bool orQuotaHit = false;    // 429 naming the DAILY allowance — spent
       bool orThrottled = false;   // 429 short-window throttle — clears in ~1 min
       bool orRefusedUnknown = false; // 429 that named no counter — cause unclear
+      bool orUpstreamBusy = false; // 429 from the provider behind ONE model
       bool orKeyRejected = false; // 401/402/403 — key invalid, unpaid, blocked
       if (orKeys.isNotEmpty) {
         // If an admin pinned an OpenRouter model, use only that one; else walk
@@ -1062,10 +1131,28 @@ HOW TO USE IT:
                   '${attempts.length - i} model(s), moving to Tier 3');
               break keyLoop;
             }
-            print('GeminiVision: ▶ [${i + 1}/${attempts.length}]$keyTag OpenRouter $label...');
+            // PREDICTIVE GATE, and it is not a duplicate of the one above. That
+            // one asks whether too much time has already gone; this one asks
+            // whether THIS attempt could overrun the tier's hard ceiling if it
+            // stalls to its full timeout. Needed as soon as timeouts stopped being
+            // uniform — see [_kOrChainHardCeiling]. Only this model is skipped,
+            // not the tier: a shorter model behind it may still fit.
+            final attemptTimeout = _attemptTimeoutFor(model);
+            if (orClock.elapsed + attemptTimeout > _kOrChainHardCeiling) {
+              print('GeminiVision: ⏱ [${i + 1}/${attempts.length}]$keyTag '
+                  'skipping $label — its ${attemptTimeout.inSeconds}s ceiling '
+                  'would not fit in the remaining '
+                  '${(_kOrChainHardCeiling - orClock.elapsed).inSeconds}s of the '
+                  'tier\'s ${_kOrChainHardCeiling.inSeconds}s limit');
+              continue;
+            }
+            print('GeminiVision: ▶ [${i + 1}/${attempts.length}]$keyTag OpenRouter $label'
+                '${attemptTimeout == kAttemptTimeout ? '' : ' (${attemptTimeout.inSeconds}s cap)'}...');
             try {
               final orResult = await _callOpenRouterVision(bytes, orKey, model,
-                  kbContext: kbContext, sceneContext: sceneContext);
+                  kbContext: kbContext,
+                  sceneContext: sceneContext,
+                  timeout: attemptTimeout);
               if (_isValidResult(orResult)) {
                 print('GeminiVision: ✓ [${i + 1}/${attempts.length}]$keyTag OpenRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
                 orResult!['_source'] = 'openrouter_client';
@@ -1097,6 +1184,14 @@ HOW TO USE IT:
                   orQuotaHit = true;
                 } else if (_lastOr429Kind == 'throttle') {
                   orThrottled = true;
+                } else if (_lastOr429Kind == 'upstream') {
+                  // Recorded but NOT fatal: the chain keeps walking, so a later
+                  // model may still succeed and this flag never reaches the user.
+                  // It only matters if everything after it also fails, in which
+                  // case "the model was busy, try again" is the accurate advice —
+                  // not the quota message, which would send an admin hunting a
+                  // limit that was never hit.
+                  orUpstreamBusy = true;
                 } else {
                   orRefusedUnknown = true;
                 }
@@ -1288,6 +1383,16 @@ HOW TO USE IT:
         reason = 'too many scans were sent in the last minute';
         hint = 'This is a short cool-off, not the daily limit. Wait about a '
             'minute and scan again.';
+      } else if (orUpstreamBusy) {
+        // Reached only when EVERY model after the busy one also failed, since an
+        // upstream 429 no longer stops the walk. Placed after the two quota
+        // branches because those describe our own account and are the more
+        // actionable news; placed before orRefusedUnknown because this cause IS
+        // known and saying so spares an admin from checking a quota that is fine.
+        reason = 'the AI model was busy';
+        hint = 'The AI provider was briefly overloaded — this is not your '
+            'scan limit and nothing needs changing. Try again in a few '
+            'seconds, or record the observation manually.';
       } else if (orRefusedUnknown) {
         // Deliberately vague, because the service was vague. Naming a specific
         // cause here would be a guess, and a wrong guess sends the reporter
@@ -1534,11 +1639,13 @@ HOW TO USE IT:
   /// True when the most recent 429 named the DAILY allowance rather than the
   /// short-window (per-minute) throttle. Reset on every request so a stale
   /// value from an earlier scan cannot leak into this one's message.
-  /// Which of the two 429s the last OpenRouter call hit: `'daily'` (allowance
-  /// spent, retrying is pointless until the UTC reset), `'throttle'` (short
-  /// cool-off, retrying in a minute works), `'unknown'` (429 with a body that
-  /// named neither — say so rather than inventing a cause), or `''` (no 429).
-  /// A tri-state, not a bool, precisely so "unknown" cannot masquerade as
+  /// Which kind of 429 the last OpenRouter call hit: `'daily'` (our allowance
+  /// spent, retrying is pointless until the UTC reset), `'throttle'` (our
+  /// short-window cool-off, retrying in a minute works), `'upstream'` (the
+  /// provider behind THIS ONE model is busy — our counters untouched, so the
+  /// rest of the chain is still good), `'unknown'` (429 with a body that named
+  /// nothing — say so rather than inventing a cause), or `''` (no 429).
+  /// Four states, not a bool, precisely so "unknown" cannot masquerade as
   /// "throttle" and send a user off to retry a limit that will not clear.
   static String _lastOr429Kind = '';
 
@@ -1549,8 +1656,19 @@ HOW TO USE IT:
   /// setting that rejects one specific provider — so treating it as key-wide
   /// would abandon the remaining models on a fault that only affected one, a
   /// regression against the old unconditional 4-model walk.
+  ///
+  /// An `'upstream'` 429 is excluded for exactly that reason, added 2026-09-05
+  /// after a live scan on safetylens.in failed outright in 38,970ms. Gemma 4 31B
+  /// (then the Tier 2 lead) came back 429 "temporarily rate-limited upstream.
+  /// Please retry shortly" — a Google-side limit on that one model — and because
+  /// EVERY 429 counted as key-wide, MiniMax M3 and Nemotron were never tried and
+  /// the user got "All vision providers unavailable". A plain 429 still counts,
+  /// since our daily and per-minute counters really are account-wide and every
+  /// remaining `:free` model draws on them.
   static bool get _lastOrFailureIsKeyWide =>
-      _lastOrStatus == 429 || // daily/minute quota — counted per ACCOUNT
+      // daily/minute quota — counted per ACCOUNT, so the rest of the chain is
+      // doomed too. 'upstream' is the one 429 that is NOT ours.
+      (_lastOrStatus == 429 && _lastOr429Kind != 'upstream') ||
       _lastOrStatus == 401 || // key invalid or revoked
       _lastOrStatus == 402;   // out of credit
 
@@ -2022,9 +2140,14 @@ HOW TO USE IT:
     return null;
   }
 
+  /// [timeout] defaults to [kAttemptTimeout]; the chain passes
+  /// [_attemptTimeoutFor] so a throughput-bound model can be given a longer
+  /// ceiling without loosening it for every provider.
   static Future<Map<String, dynamic>?> _callOpenRouterVision(
       Uint8List bytes, String apiKey, String model,
-      {String? kbContext, String sceneContext = ''}) async {
+      {String? kbContext,
+      String sceneContext = '',
+      Duration timeout = kAttemptTimeout}) async {
     final base64Image = base64Encode(bytes);
     final dataUrl = 'data:image/jpeg;base64,$base64Image';
 
@@ -2084,8 +2207,10 @@ HOW TO USE IT:
           'X-Title': 'SAIL Safety Lens',
         },
         body: jsonEncode(requestBody),
-        // See [kAttemptTimeout] for why this is 20s and not the 45s it was.
-      ).timeout(kAttemptTimeout);
+        // Defaults to [kAttemptTimeout] (20s — see its comment for why, and why
+        // it is not the 45s it once was). The caller overrides it only for the
+        // models listed in [_kPerModelAttemptTimeout].
+      ).timeout(timeout);
 
       _lastOrStatus = response.statusCode;
       // Ledger before parsing. A malformed 200 body still spent the request, so
@@ -2118,7 +2243,20 @@ HOW TO USE IT:
         String detail = '';
         try {
           final err = jsonDecode(response.body) as Map<String, dynamic>;
-          detail = (err['error']?['message'] ?? '').toString();
+          final e = err['error'];
+          detail = (e?['message'] ?? '').toString();
+          // ⚠ THE CAUSE IS USUALLY NOT IN `message`. Fixed 2026-09-05 from a live
+          // log: OpenRouter puts its OWN generic text in `error.message` — the
+          // observed value was the useless "Provider returned error" — and the
+          // upstream provider's actual sentence in `error.metadata.raw`, which
+          // read "google/gemma-4-31b-it:free temporarily rate-limited upstream.
+          // Please retry shortly". Reading only `message` meant every
+          // provider-side 429 classified as 'unknown', which is how a retryable
+          // per-model limit ended up abandoning the entire tier. Both are joined
+          // rather than one replacing the other, because `message` is what
+          // carries the account-counter wording the checks below look for.
+          final raw = (e?['metadata']?['raw'] ?? '').toString();
+          if (raw.isNotEmpty) detail = detail.isEmpty ? raw : '$detail — $raw';
         } catch (_) {}
         final d = detail.toLowerCase();
 
@@ -2152,9 +2290,22 @@ HOW TO USE IT:
             d.contains('daily limit') ||
             d.contains('daily quota') ||
             d.contains('per-day');
-        _lastOr429Kind = throttleNamed
-            ? 'throttle'
-            : (dailyNamed ? 'daily' : 'unknown');
+        // Checked BEFORE the other two, because it answers a different and more
+        // consequential question: WHOSE limit was hit. 'daily' and 'throttle'
+        // both describe our account's counters, and both correctly abandon the
+        // tier since every remaining :free model shares them. 'upstream' means
+        // the provider serving THIS ONE model is busy — our counters are
+        // untouched, so the next model in the chain is very likely to work and
+        // giving up on it throws away a working scan.
+        final upstreamNamed = d.contains('rate-limited upstream') ||
+            d.contains('rate limited upstream') ||
+            d.contains('upstream rate') ||
+            d.contains('retry shortly');
+        _lastOr429Kind = upstreamNamed
+            ? 'upstream'
+            : throttleNamed
+                ? 'throttle'
+                : (dailyNamed ? 'daily' : 'unknown');
         if (_lastOr429Kind == 'daily') {
           await _recordFreeUsage(served: false);
         }
@@ -2170,6 +2321,11 @@ HOW TO USE IT:
           case 'throttle':
             print('GeminiVision:   Short-window throttle (not the daily cap) — '
                 'this clears within a minute. Ledger NOT marked exhausted.');
+            break;
+          case 'upstream':
+            print('GeminiVision:   UPSTREAM provider throttle for THIS model '
+                'only — our account counters are untouched, so the chain '
+                'CONTINUES to the next model. Ledger NOT marked exhausted.');
             break;
           default:
             print('GeminiVision:   429 named no counter, so the cause is '
