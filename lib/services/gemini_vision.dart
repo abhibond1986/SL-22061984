@@ -16,8 +16,15 @@
 //            best of ~19s, and on one scan it was the only tier that answered.
 //            Full evidence at its banner in analyseImageBytes.
 //   TIER 2 — OpenRouter free vision models, in order:
-//     1. MiniMax M3 (:free)     — lead model as of 2026-09-03
-//     2. Nemotron 30B Omni      — highest capacity, but a REASONING model
+//     1. Gemma 4 31B dense      — lead as of 2026-09-05. Free, thinking off by
+//                                 default, 262k ctx. Added as the free stand-in
+//                                 for a request for qwen-2.5-vl-7b-instruct,
+//                                 which has NO serving endpoints and no free
+//                                 Qwen VL equivalent — see _orGemma31bModel.
+//                                 UNMEASURED on this prompt so far.
+//     2. MiniMax M3 (:free)     — lead from 2026-09-03 to 2026-09-05. Demoted for
+//                                 having no margin: best leg 19,021ms vs a 20s cap.
+//     3. Nemotron 30B Omni      — highest capacity, but a REASONING model
 //                                 and by far the slowest; demoted from first
 //                                 place on 2026-08-17 after it cost a measured
 //                                 45s timeout on a live scan
@@ -53,8 +60,34 @@
 //   since 2026-09-03 it is also the FASTEST, so without it every scan begins on
 //   the slower shared free pool. Set it in Admin → System Health → Gemini Vision.
 //
-// All model IDs above were verified against OpenRouter's /api/v1/models
-// listing as accepting image input — do not add one without checking.
+// EVERY MODEL IN THIS CHAIN IS FREE, and that is a hard requirement (admin
+// decision 2026-09-05, restated after a paid model was briefly added and backed
+// out the same day). OpenRouter ':free', Groq's free allowance, Gemini's free
+// daily quota and Nara's FREE plan — a model that bills credits does not belong
+// here at any position. Note there is currently NO free Qwen VL model on
+// OpenRouter: every Qwen vision slug there is paid, so a request for one cannot
+// be satisfied without breaking this rule.
+//
+// All model IDs above accept image input. ⚠ TWO CHECKS, NOT ONE, before adding
+// any model here — /api/v1/models alone is NOT sufficient and this comment
+// previously implied it was:
+//
+//   1. IS IT ROUTABLE?  curl -s https://openrouter.ai/api/v1/models/<slug>/endpoints
+//      `data.endpoints` MUST be a NON-EMPTY array. The listing OMITS delisted
+//      models, so absence there is not proof of death; and this endpoint route
+//      returns HTTP 200 with a full name and description for DEAD slugs too,
+//      because OpenRouter keeps the record forever, so 200 is not proof of life.
+//      Only the endpoint COUNT answers it. Measured 2026-09-05:
+//      qwen-2.5-vl-7b-instruct 0 and nemotron-nano-12b-v2-vl 0 (independently
+//      confirming the 2026-09-03 removal), vs. minimax-m3:free 1, gemma-4-26b:free
+//      1, dots-3-note-preview:free 1, nemotron-3-nano-omni:free 1 — all live.
+//   2. IS IT FREE?  Same payload: every endpoint's `pricing.prompt` must be 0.
+//      Do not infer this from the ':free' suffix alone when adding something new.
+//
+// Slug spelling is NOT consistent between models — OpenRouter hosts both
+// `qwen/qwen-2.5-vl-7b-instruct` (hyphenated) and `qwen/qwen2.5-vl-72b-instruct`
+// (not) — so a grep for one form will wrongly report the other missing. Probe the
+// exact slug rather than searching for it.
 // ALL keys auto-sync from Apps Script Properties on every app launch.
 
 import 'dart:convert';
@@ -131,6 +164,48 @@ class GeminiVision {
   // longer first: see the ordering comment in the chain below.
   static const String _orNemotronModel = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
   static const String _orGemmaModel    = 'google/gemma-4-26b-a4b-it:free';
+
+  // ── Gemma 4 31B — TIER 2 LEAD as of 2026-09-05 ─────────────────────────────
+  //
+  // NOT the same model as [_orGemmaModel] above, despite the near-identical
+  // name: that one is `gemma-4-26b-a4b-it` — an MoE with only ~4B ACTIVE
+  // parameters — while this is a DENSE 30.7B. Keep both names in full in any
+  // label, because "Gemma 4" alone is now ambiguous in this file.
+  //
+  // Added as the free replacement for an admin request for
+  // `qwen/qwen-2.5-vl-7b-instruct`, which cannot be used at all: it has zero
+  // serving endpoints. There is no free Qwen VL model on OpenRouter — every Qwen
+  // vision slug there is paid — so this is a different family by necessity, not
+  // by preference. The free Qwen vision path that does exist is Tier 0 on Groq.
+  //
+  // Verified 2026-09-05 by both checks named in the file header: 1 live endpoint
+  // (Google AI Studio), `pricing.prompt` 0 on that endpoint, input_modalities
+  // ['text','image'], 262k context, max_completion_tokens 32768 — comfortably
+  // above the 4096 this file requests.
+  //
+  // WHY IT IS ALLOWED TO LEAD, when a reasoning model is not:
+  // `reasoning: {mandatory: false, default_enabled: FALSE}`. Thinking is OFF
+  // unless asked for, so it cannot spend the 4096 max_tokens on a monologue
+  // before the JSON — the failure that cost [_orNemotronModel] the lead slot
+  // after a measured 45s timeout. It is still listed in
+  // [_kReasoningOptOutModels] as belt-and-braces; see the note there.
+  //
+  // ⚠ REJECTED CANDIDATES, recorded so they are not re-proposed: the only other
+  // free image-capable models on OpenRouter not already referenced in this file
+  // are `thinkingmachines/inkling:free` and `inkling-small:free`. Both are live
+  // and free, but both are `default_enabled: TRUE` with `default_effort: 'high'`
+  // — reasoning ON at high effort by default, i.e. the Nemotron failure mode by
+  // construction and worse. Neither belongs in front of a shop-floor scan.
+  //
+  // ⚠ THIS MODEL IS UNMEASURED on this prompt. It leads because the incumbent is
+  // weak, not because it is known fast: MiniMax M3's BEST measured leg was
+  // 19,021ms against a 20s [kAttemptTimeout], and it timed out twice in one scan.
+  // Do NOT retune kAttemptTimeout or _kOrChainBudget from either model until a
+  // real success is timed. Note also that per the 2026-09-03 finding, reordering
+  // WITHIN the free chain cannot fix a stall caused by shared-pool queueing —
+  // this change buys a different model and a different provider at position 1,
+  // not a guaranteed speed-up.
+  static const String _orGemma31bModel = 'google/gemma-4-31b-it:free';
   // Mixture-of-experts, 512k context, accepts image input. Confirmed against
   // OpenRouter's /api/v1/models listing rather than assumed from the name.
   static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
@@ -146,7 +221,18 @@ class GeminiVision {
   /// in its name whose provider rejects the field with a 400, taking the whole
   /// tier down. Membership must be earned per model by checking `reasoning
   /// .mandatory == false` in https://openrouter.ai/api/v1/models first.
-  static const Set<String> _kReasoningOptOutModels = {_orNemotronModel};
+  ///
+  /// [_orGemma31bModel] joined on 2026-09-05 and it is the WEAKER case of the
+  /// two: unlike Nemotron it is already `default_enabled: false`, so the field
+  /// changes nothing today. It earns membership under the rule above —
+  /// `mandatory: false`, and `reasoning` is in its `supported_parameters`, so the
+  /// field cannot 400 — and it is here because this model now LEADS the chain,
+  /// where a silent upstream flip of that default would put a thinking monologue
+  /// in front of the JSON on every scan. Being explicit costs one field.
+  static const Set<String> _kReasoningOptOutModels = {
+    _orNemotronModel,
+    _orGemma31bModel,
+  };
 
   // Rate-limiting between analyses (kept small — only affects back-to-back scans)
   static DateTime? _lastCallTime;
@@ -914,8 +1000,31 @@ HOW TO USE IT:
             // verification, quota accounting — for slots that almost never ran.
             // They remain in [groqVisionModels] so an admin can still pin either
             // one explicitly if a future outage makes that useful.
+            //
+            // LEAD MODEL CHANGED 2026-09-05: Gemma 4 31B (dense) takes position
+            // 1, MiniMax M3 drops to 2, Nemotron to 3. Everything here is still
+            // ':free' — that is a hard requirement, see the file header.
+            //
+            // This replaced an admin request for `qwen/qwen-2.5-vl-7b-instruct`,
+            // which has zero serving endpoints and could only ever have failed.
+            // No free Qwen VL exists on OpenRouter, so the substitute is a
+            // different family; full provenance at [_orGemma31bModel].
+            //
+            // MiniMax was not demoted for failing — it was demoted because it
+            // only just fits: its best measured leg was 19,021ms against a 20s
+            // attempt timeout, and it timed out twice in a single scan. A lead
+            // model whose best case is 95% of the ceiling has no margin. Gemma
+            // 31B is UNMEASURED and may prove worse; if it does, swapping these
+            // two back is a one-line change and the right one.
+            //
+            // THREE models now. The 2-model rationale below still binds: at
+            // kAttemptTimeout 20s and _kOrChainBudget 40s only two stalled
+            // attempts fit, so position 3 is now the slot that almost never
+            // runs. Nemotron took it because it was already the least likely to
+            // answer in time — the same reason it lost first place in 2026-08.
             : const [
-                [_orMinimaxModel,  'MiniMax M3 (primary, free)'],
+                [_orGemma31bModel, 'Gemma 4 31B dense (primary, free)'],
+                [_orMinimaxModel,  'MiniMax M3 (free)'],
                 [_orNemotronModel, 'Nemotron 30B Omni (fallback — highest capacity, slowest)'],
               ];
         // OpenRouter spend is timed separately from the run stopwatch. See
@@ -1261,13 +1370,19 @@ HOW TO USE IT:
   /// all rather than a slower answer. This is the same trap [GroqService]
   /// documents for its text models, with a worse failure mode.
   static const List<Map<String, String>> groqVisionModels = [
-    {'id': 'auto', 'name': 'Auto (Groq Qwen → MiniMax M3 → Nemotron 30B → Gemini) — recommended'},
+    // Label rewritten 2026-09-05 to the ACTUAL tier order. It previously read
+    // "Groq Qwen → MiniMax M3 → Nemotron 30B → Gemini", which had been wrong
+    // since the 2026-09-03 reorder promoted Gemini ahead of the OpenRouter chain.
+    {'id': 'auto', 'name': 'Auto (Groq Qwen → Gemini → Gemma 4 31B → MiniMax M3 → Nemotron 30B) — recommended'},
     // Tier 0. Pinning it means Groq ONLY — no OpenRouter, no Gemini, no Nara —
     // so a Groq outage becomes a total loss of hazard analysis. 'auto' is the
     // right answer for almost everyone.
     {'id': _groqQwenVisionModel, 'name': 'Qwen 3.6 27B on Groq (primary, separate quota)'},
-    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter primary)'},
-    {'id': _orGemmaModel,    'name': 'Gemma 4 26B (free, slower)'},
+    // Tier 2 lead since 2026-09-05. Named "31B dense" to keep it apart from the
+    // 26B-a4b MoE entry below — the two slugs differ by four characters.
+    {'id': _orGemma31bModel, 'name': 'Gemma 4 31B dense (free, OpenRouter primary)'},
+    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter fallback)'},
+    {'id': _orGemmaModel,    'name': 'Gemma 4 26B-a4b MoE (free, slower)'},
     {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
     // Listed last and labelled honestly: pinning this one makes every scan wait
     // on a reasoning model that measured a 45s timeout on 2026-08-17. It is in
