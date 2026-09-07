@@ -175,7 +175,30 @@ class NaraVision {
   /// Latency is the honest tradeoff here: 10447ms server-side, 14594ms
   /// end-to-end through the proxy. That is why [kProxyTimeout] is 45s and why
   /// this tier sits late in the chain rather than leading it.
-  static const String defaultModel = 'mistral-medium-3-5';
+  ///
+  /// ★ CHANGED 2026-09-07: 'mistral-medium-3-5' → 'stepfun-3.7-flash'.
+  ///
+  /// Everything above still stands — mistral WAS the right default and the
+  /// cost reasoning is still the reasoning to follow. It is no longer the
+  /// default for one reason only: **this account cannot serve it.** Nara has
+  /// answered `HTTP 400 {"type":"bad_request","message":"The requested model is
+  /// not available."}` for it on every scan since 2026-09-02, verified again in
+  /// a live console on 2026-09-07. `analyzeImage` survives that by walking
+  /// [availableModels], so the tier still works — but the FIRST request of every
+  /// scan that reaches Tier 3 was being spent to be told the same thing, and
+  /// `_unavailableModels` is session-scoped, so on web a page reload re-paid it.
+  ///
+  /// Why stepfun and not one of the Agnes models: it is the only other slug in
+  /// this list with any evidence behind it — it is the one `analyzeImage` already
+  /// retried onto, so it is at least reachable on this account. The Agnes pair
+  /// remain completely unmeasured here.
+  ///
+  /// ⚠ mistral-medium-3-5 STAYS in [availableModels] and is deliberately not
+  /// deleted. It is the strongest model on the list, an admin can still pin it,
+  /// and "not available" from a router is frequently temporary — a provider
+  /// re-adds a model without announcement. Removing it would make its return
+  /// undiscoverable. Re-promote it here the moment it answers again.
+  static const String defaultModel = 'stepfun-3.7-flash';
 
   /// Models offered in the Admin panel dropdown.
   ///
@@ -194,8 +217,12 @@ class NaraVision {
   /// These four are the complete intersection: every model tagged Vision on the
   /// Free plan. Do not add a slug without checking BOTH columns.
   static const List<Map<String, String>> availableModels = [
-    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — default, strongest)'},
-    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — flash tier)'},
+    // Label updated 2026-09-07 — see [defaultModel]. Kept in the list on
+    // purpose despite being unavailable on this account: it is the strongest
+    // model here, "not available" is often temporary, and an admin needs to be
+    // able to re-test it without a code change.
+    {'id': 'mistral-medium-3-5', 'name': 'Mistral Medium 3.5 (256K ctx — strongest, but NOT AVAILABLE on this account since 02-09)'},
+    {'id': 'stepfun-3.7-flash',  'name': 'StepFun 3.7 Flash (262K ctx — default)'},
     {'id': 'agnes-2.0-flash',    'name': 'Agnes 2.0 Flash (512K ctx — fastest tier)'},
     {'id': 'agnes-2.5-flash',    'name': 'Agnes 2.5 Flash (512K ctx)'},
   ];
@@ -374,6 +401,16 @@ class NaraVision {
   /// re-test rather than carrying a possibly-stale verdict across days. It exists
   /// only so the wasted round trip is paid once per session instead of on every
   /// single scan.
+  ///
+  /// ★ 2026-09-07 — considered persisting this and DECIDED AGAINST IT, because
+  /// the change to [defaultModel] removed the reason to. The argument for
+  /// persisting was that on web a page reload re-pays the wasted 400, and a
+  /// reload is exactly what someone does after a slow scan. That mattered only
+  /// while the dead slug was the DEFAULT, i.e. tried first on every scan. Now
+  /// nothing reaches mistral-medium-3-5 unless an admin pins it deliberately, so
+  /// persisting would buy one saved round trip for the rare pinned case while
+  /// permanently caching a verdict about someone else's catalogue. Fix the
+  /// default, don't cache around it.
   static final Set<String> _unavailableModels = <String>{};
 
   /// Which slugs have been ruled out this session — for the admin health card.

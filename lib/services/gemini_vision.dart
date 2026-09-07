@@ -1709,6 +1709,17 @@ HOW TO USE IT:
               }
               if (a.failureIsKeyWide) keyWideStatus ??= a.status;
             }
+            // One line that always accounts for the whole round, whatever the
+            // cause. Added 2026-09-07: the per-attempt logs can be missing (a
+            // null returned from deep inside the parser) or interleaved (two
+            // hedged requests print out of order), so a single summary is what
+            // makes a tier failure diagnosable from a screenshot.
+            print('GeminiVision: ✗$keyTag Tier 2 round failed — '
+                '${live.map((a) => '${a.label.split(' (').first}='
+                    '${a.status == null ? 'no response' : 'HTTP ${a.status}'}'
+                    // kind429 is a non-nullable String defaulting to '', not a
+                    // nullable — an `== null` test here is always false.
+                    '${a.kind429.isEmpty ? '' : '/${a.kind429}'}').join(', ')}');
             if (keyWideStatus != null) {
               if (k + 1 < orKeys.length) {
                 print('GeminiVision: ⏩$keyTag blocked (HTTP $keyWideStatus) — '
@@ -2945,9 +2956,30 @@ HOW TO USE IT:
           // body, it is prompt-instructed).
           health(parsed != null,
               parsed != null ? '' : ModelHealth.kFailUnparseable);
+          // ★ LOG IT — added 2026-09-07. These two returns were the ONLY failure
+          // paths in the tier that printed nothing, and they are the two most
+          // likely ones. A live console went from '▶ [2/2] Dots3-Note...'
+          // straight to '▶ NaraRouter', so a 91.6s total failure had no
+          // recoverable cause at all. A silent failure in a fallback chain is
+          // worse than a loud one: the chain hides it by succeeding later, until
+          // the day nothing succeeds.
+          if (parsed == null) {
+            final snippet = content.trim().replaceAll(RegExp(r'\s+'), ' ');
+            print('GeminiVision: ✗ HTTP 200 from $model but the body would NOT '
+                'PARSE as the hazard schema (${content.length} chars). This is '
+                'grounds for removing the model — nothing enforces the JSON, it '
+                'is prompt-instructed. First 300 chars: '
+                '${snippet.length <= 300 ? snippet : '${snippet.substring(0, 300)}…'}');
+          }
           return parsed;
         }
         health(false, ModelHealth.kFailEmpty);
+        // Usually the reasoning budget eating max_tokens before any content was
+        // emitted — a DIFFERENT fault from unparseable above, and one that argues
+        // for opting the model out of reasoning rather than dropping it.
+        print('GeminiVision: ✗ HTTP 200 from $model with NO choices — the model '
+            'was reached and billed but produced nothing. Check whether it has '
+            'reasoning on by default; if so add it to _kReasoningOptOutModels.');
         return null;
       } else if (response.statusCode == 429) {
         // The single most common real-world failure, and previously logged as a
@@ -3169,14 +3201,90 @@ HOW TO USE IT:
 
     try {
       final parsed = jsonDecode(jsonStr) as Map<String, dynamic>;
-      if (parsed['hazards'] is List && (parsed['hazards'] as List).isNotEmpty) {
-        return parsed;
+      if (parsed['hazards'] is! List) return null;
+      final hazards = parsed['hazards'] as List;
+      if (hazards.isNotEmpty) return parsed;
+      // ★ AN EMPTY HAZARD LIST IS A VALID ANSWER — fixed 2026-09-07.
+      //
+      // This line used to read `&& (parsed['hazards'] as List).isNotEmpty`, so a
+      // model that found nothing wrong was recorded as a PARSE FAILURE. The
+      // prompt's own words are: `If the room contains nothing wrong, say so:
+      // overallRisk "LOW", riskScore under 20, "hazards": []. An empty hazards
+      // array is a correct, complete and professional answer.` A model that
+      // obeyed that instruction was thrown away.
+      //
+      // How it surfaced (live scan, 91,615ms, "All vision providers
+      // unavailable"): a benign photo — a man seated at a table — was answered
+      // honestly by BOTH OpenRouter models, both were discarded here, both
+      // returned null with no log line, and the app told the field user "the AI
+      // service did not respond". It had responded, correctly, twice.
+      //
+      // This was latent for as long as the prompt still encouraged findings.
+      // The 2026-09-07 anti-fabrication work (scene-relevance,
+      // normal-by-design, "do not manufacture a finding to fill the table") is
+      // what made empty answers common, so hardening the prompt is precisely
+      // what armed this bug. Expect that shape again: a guard written when the
+      // model always did X starts firing when we successfully teach it not to.
+      //
+      // Two further reasons this had to change:
+      //   • Tier 1 disagreed with Tiers 0/2 about what a valid answer IS.
+      //     `GeminiDirectVision._validateAndReturn` DEFAULTS `hazards` to `[]`
+      //     and returns normally, so the same reply was a success through Gemini
+      //     and a failure through OpenRouter. One prompt must mean one contract.
+      //   • It poisoned `ModelHealth` with false `kFailUnparseable` counts
+      //     against models that were behaving perfectly — and that panel exists
+      //     so an admin can DELETE models that fail every time. The telemetry
+      //     was arguing for the removal of the honest ones.
+      //
+      // THE GUARD. Accept empty only when the model clearly produced a real
+      // assessment, so a bare `{}`, a hollow `{"hazards":[]}` or a body
+      // truncated before the content still fail. Any ONE substantive scene field
+      // is enough — models vary in which they fill, and demanding all of them
+      // would rebuild the same false-negative in a stricter disguise. An empty
+      // table is a clinical finding ("nothing wrong here") and must be
+      // distinguishable from silence; these keys are the evidence that a scene
+      // was actually looked at.
+      final bool assessed = _hasText(parsed['summary']) ||
+          _hasText(parsed['sceneInventory']) ||
+          _hasText(parsed['overallRisk']) ||
+          _hasText(parsed['sceneType']) ||
+          parsed['riskScore'] is num ||
+          parsed['confidence'] is num ||
+          parsed['people'] is num;
+      if (!assessed) {
+        print('GeminiVision: ✗ parse rejected — "hazards" was empty AND no '
+            'scene field was returned, so this is a hollow body, not a '
+            'clean bill of health');
+        return null;
       }
-      return null;
+      // An accepted empty table must carry an EXPLICIT low risk. Unlike Tier 1,
+      // the OpenRouter path never passes through `_validateAndReturn`, so an
+      // omitted `overallRisk` would reach the UI as null, print
+      // `[SeverityScores] NO ENTRY for "UNKNOWN"` and fall back to **MEDIUM** —
+      // a MEDIUM banner over an empty hazard table, which is the same
+      // self-contradiction the scene-relevance audit was built to remove. LOW/15
+      // are the numbers that audit already uses when a withdrawal empties the
+      // table, so the two paths agree.
+      if (!_hasText(parsed['overallRisk'])) parsed['overallRisk'] = 'LOW';
+      if (parsed['riskScore'] is! num) parsed['riskScore'] = 15;
+      if (!_hasText(parsed['summary'])) {
+        parsed['summary'] = 'No hazards were identified in this frame. '
+            'Verify on site before treating the area as clear.';
+      }
+      print('GeminiVision: ✓ model reported NO hazards, and that is a valid '
+          'answer — accepting it as a clean frame rather than a failure');
+      return parsed;
     } catch (_) {
       return null;
     }
   }
+
+  /// True when [v] is a non-blank string. Used by the empty-hazards guard above,
+  /// where a present-but-empty key must count as absent — several models emit
+  /// `"summary": ""` when they run out of output budget, and treating that as
+  /// evidence of an assessment would defeat the guard.
+  static bool _hasText(Object? v) =>
+      v is String && v.trim().isNotEmpty;
 
   // ══════════════════════════════════════════════════════════════════════════
   //  SHARED PROMPT — used by Groq & OpenRouter (client-side)

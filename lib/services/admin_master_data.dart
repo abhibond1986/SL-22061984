@@ -1316,8 +1316,47 @@ class AdminMasterData {
   /// 0. An unrecognised severity usually means the admin renamed or removed a
   /// level, and scoring a real hazard 0 because of a rename would file it as
   /// harmless.
+  /// Labels that mean "no assessment was made", not "a severity we don't know".
+  ///
+  /// `UNKNOWN` is written by `GeminiDirectVision._validateAndReturn` when the
+  /// model returned no `overallRisk`, and it reaches here from an unanalysed
+  /// scan. Blank arrives the same way from stored rows saved before the field
+  /// existed.
+  static const Set<String> _kNoAssessmentLabels = {'UNKNOWN', 'N/A', 'NA', '-'};
+
   static int scoreFromMap(Map<String, int> scores, String severity) {
     final key = severity.trim().toUpperCase();
+
+    // ★ A NON-ASSESSMENT IS NOT A SEVERITY — added 2026-09-07.
+    //
+    // A live console read `[SeverityScores] NO ENTRY for "UNKNOWN" — the stored
+    // scale has keys [LOW, HIGH, MEDIUM, CRITICAL]. Falling back to MEDIUM.` on a
+    // scan whose own banner said **"Not Analysed — AI unavailable"**. So a photo
+    // that nothing had examined was carrying a MEDIUM risk score of 45/100. That
+    // is the same defect class as the `scoreForDisplay` inflation fixed the same
+    // day: a safety document asserting a number nothing measured.
+    //
+    // The fallback ladder below is RIGHT for what it was written for — an admin
+    // renaming or deleting a severity level, where the hazard is real and only
+    // its label is unrecognised. UNKNOWN is a different thing entirely: there is
+    // no hazard, so there is nothing to score. Falling through would apply the
+    // remedy for the wrong disease.
+    //
+    // Returning 0 here does NOT weaken the never-score-a-hazard-zero rule below.
+    // That rule protects a REAL severity from being zeroed by a bad stored map;
+    // this returns zero for the absence of a severity, which is the only honest
+    // answer. Callers already hide the risk card when `_imageAnalysed == false`,
+    // so 0 renders as nothing rather than as a reassuring low number.
+    if (key.isEmpty || _kNoAssessmentLabels.contains(key)) {
+      if (_warnedKeys.add('NOASSESS:$key')) {
+        print('$_kScoreTag "$key" is a NON-ASSESSMENT, not a severity — scoring '
+            '0 and NOT falling back to MEDIUM. Something asked for the risk '
+            'score of a photo that was never analysed; if a score is being '
+            'displayed for it, that caller is the bug.');
+      }
+      return 0;
+    }
+
     final exact = scores[key];
     // `> 0`, not just `!= null`. A stored 0 for a canonical level is repaired in
     // _withCanonicalLevels, but this method is also handed maps that never went
