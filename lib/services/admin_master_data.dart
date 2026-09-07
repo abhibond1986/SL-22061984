@@ -499,10 +499,17 @@ class AdminMasterData {
   /// allowed to return. Returns '' when nothing is recognised.
   static String obsTypeGuidance(List<String> types) {
     const defs = <String, String>{
+      // "could cause harm" was unbounded — on a long enough chain of inference
+      // any behaviour could cause harm, and the model used that licence to file
+      // "singing while walking in the office" as an unsafe act. The test is a
+      // realistic path to injury, which is also the test a safety officer
+      // applies before raising an observation.
       'unsafe act':
-          'something a PERSON is doing or has done that could cause harm '
-          '(bypassing a guard, no PPE, not holding the handrail, working '
-          'without a permit). The hazard is the behaviour.',
+          'something a PERSON is doing or has done that puts someone on a '
+          'realistic path to injury or damage (bypassing a guard, no PPE, not '
+          'holding the handrail, working without a permit). The hazard is the '
+          'behaviour. Ordinary conduct with no hazard around it is not an '
+          'unsafe act.',
       'unsafe condition':
           'a physical STATE of the plant, equipment or environment that could '
           'cause harm regardless of who is present (missing guardrail, exposed '

@@ -40,6 +40,7 @@ import '../widgets/universal_app_bar.dart';
 import '../services/i18n.dart';
 import '../services/groq_service.dart';
 import '../services/near_miss_prompt.dart';
+import '../services/near_miss_guard.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
 
@@ -192,6 +193,15 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   // this turned on; it is gone, because the question was never whether the
   // report was a near miss but what kind of observation it is.
   Map<String, dynamic>? _aiSuggestion;
+  /// Whether the description the model was given carries any hazard signal of
+  /// its own — `NearMissGuard.hazardSignalInText` for the text that produced
+  /// `_aiSuggestion`.
+  ///
+  /// THREE STATES, AND null IS NOT false. null means the guard declined to
+  /// judge (Hindi or mixed script, too few words), and the model's verdict must
+  /// then stand untouched. Only an explicit `false` overrides it. Collapsing
+  /// this to a bool would turn every Hindi report into a rejected one.
+  bool? _aiHazardSignal;
   String? _aiSummary; // ★ Summary of Near Miss shown above description
   // ★ AI correction feedback loop: pristine snapshot of what the AI suggested
   // (description/summary, corrective action, severity) so we can diff it
@@ -690,7 +700,10 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     _detectLanguageFromText(text);
     // Clear previous suggestion if user is still editing
     if (_aiSuggestion != null) {
-      setState(() => _aiSuggestion = null);
+      setState(() {
+        _aiSuggestion = null;
+        _aiHazardSignal = null;
+      });
     }
     // ★ v29: Proper Timer debounce — cancels previous, only fires once
     _descDebounce?.cancel();
@@ -875,6 +888,11 @@ If the text is already fine, return it unchanged.''';
       // ★ v29: Detect language from the raw text before sending to AI
       _detectLanguageFromText(rawText);
 
+      // Computed from the text we are about to send, before either provider is
+      // asked, so both branches below record the same verdict and neither can
+      // leave a stale one from the previous keystroke's analysis behind.
+      final hazardSignal = NearMissGuard.hazardSignalInText(rawText);
+
       // ★ v29: Get KB context with timeout to prevent hanging.
       // maxKbDocs raised from 2 and the timeout from 3s: this is a text
       // classification, so uploaded documents are the main thing that makes
@@ -900,6 +918,7 @@ If the text is already fine, return it unchanged.''';
         refineProvider = 'groq';
         setState(() {
           _aiSuggestion = groqResult;
+          _aiHazardSignal = hazardSignal;
           _aiRefining = false;
         });
         return;
@@ -953,6 +972,7 @@ If the text is already fine, return it unchanged.''';
             if (mounted) {
               setState(() {
                 _aiSuggestion = parsed;
+                _aiHazardSignal = hazardSignal;
                 _aiRefining = false;
               });
             }
@@ -1008,6 +1028,15 @@ If the text is already fine, return it unchanged.''';
   /// where the rephrasing is nearly right.
   void _acceptAiRefinement({bool thenEdit = false}) {
     if (_aiSuggestion == null) return;
+    // Nothing from a no-hazard answer may reach the form. The card already hides
+    // its accept buttons in that state, so this is unreachable through the UI —
+    // it is here because the card deciding what may be applied, in build(), is
+    // the arrangement that produced the original bug, and a second caller (or a
+    // rebuild ordering) must not be able to bypass the verdict.
+    if (!_aiVerdictHasHazard) {
+      _dismissAiSuggestion();
+      return;
+    }
     final refined = _aiSuggestion!['refined']?.toString() ?? '';
     final correctiveAction = _aiSuggestion!['correctiveAction']?.toString() ?? '';
     // Both text providers are asked for "category" as one of the admin's
@@ -1088,6 +1117,7 @@ If the text is already fine, return it unchanged.''';
         _acceptedAiText = refined;
       }
       _aiSuggestion = null;
+      _aiHazardSignal = null;
     });
     if (thenEdit) {
       // Caret at the end rather than selecting the whole text: this is a
@@ -1111,7 +1141,10 @@ If the text is already fine, return it unchanged.''';
   }
 
   void _dismissAiSuggestion() {
-    setState(() => _aiSuggestion = null);
+    setState(() {
+      _aiSuggestion = null;
+      _aiHazardSignal = null;
+    });
   }
 
   /// ★ v34: Compute risk score from severity for manual entries.
@@ -1895,6 +1928,7 @@ If the text is already fine, return it unchanged.''';
       // just filed. Left standing, the next report opens with the previous
       // one's AI reading on screen.
       _aiSuggestion = null;
+      _aiHazardSignal = null;
       _aiOriginalSuggestion = null;
       _aiOriginalSource = null;
       // The WSA cause and observation type are per-incident judgements, not
@@ -3592,6 +3626,29 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
+  /// Whether the model claimed a hazard, before the guard has its say.
+  ///
+  /// Absent means present: an older response, or a model that ignored the field,
+  /// must not be read as "no hazard" and silently gate the card again. The
+  /// string "false" is tested alongside the bool because these models return it
+  /// often enough; without that, a genuine no-hazard verdict would read as a
+  /// hazard and the card would offer to fill four fields from it.
+  bool get _modelClaimsHazard {
+    final raw = _aiSuggestion?['hasHazard'];
+    return !(raw == false || raw == 'false');
+  }
+
+  /// The verdict the reporter is actually shown, and the one that decides
+  /// whether any field may be filled from this answer.
+  ///
+  /// The guard can only ever veto. It cannot promote a `hasHazard: false` answer
+  /// into a hazard, because the presence of a hazard word in the text is not
+  /// evidence that the text describes an incident — "no oil on the floor today"
+  /// contains "oil". `_aiHazardSignal == null` means the guard did not judge and
+  /// changes nothing. Read [_modelClaimsHazard] instead of this if you need to
+  /// know which of the two decided.
+  bool get _aiVerdictHasHazard => _modelClaimsHazard && _aiHazardSignal != false;
+
   /// The AI's reading of the typed or dictated description.
   ///
   /// This card used to be a gate. The model was asked "is this a near miss?",
@@ -3607,28 +3664,60 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   /// So it now classifies. The model returns the observation type, and the card
   /// presents that alongside the rephrasing and the other fields it can fill,
   /// with three ways out: take it, take it and edit it, or keep your own words.
-  /// The only state that still refuses is `hasHazard == false`, which means no
-  /// safety content at all — and even that only warns.
+  ///
+  /// The correction to THAT correction: removing the gate left the model with
+  /// only two answers, and it stopped using the second one. "While walking
+  /// inside his office he was singing a song" came back as an Unsafe Act,
+  /// Slip/Fall, MEDIUM, 90% confident, advising the plant to discourage singing.
+  /// The no-hazard state is now reachable again — but as an answer, not as a
+  /// gate. It is reached either because the model said so or because
+  /// `NearMissGuard` found no hazard in the worker's words at all, and in that
+  /// state the card shows the verdict and the reason and nothing else: no
+  /// rephrasing, no corrective action, no field chips, no confidence score, and
+  /// no accept button. A non-observation must not be filed under a type, and a
+  /// worker must not be handed a corrective action for a hazard nobody reported.
+  /// What it still does not do is refuse the report or demand a rewrite: the
+  /// text stays exactly as typed, and editing it re-runs the analysis.
   Widget _buildAiSuggestionCard(SL sl) {
-    // Absent means present: an older response, or a model that ignored the
-    // field, must not be read as "no hazard" and silently gate the card again.
-    // The string "false" is tested alongside the bool because these models
-    // return it often enough; without that, a genuine no-hazard verdict would
-    // read as a hazard and the card would offer to fill four fields from it.
-    final rawHasHazard = _aiSuggestion!['hasHazard'];
-    final hasHazard = !(rawHasHazard == false || rawHasHazard == 'false');
+    final hasHazard = _aiVerdictHasHazard;
+    // True when the model reported a hazard and the guard found nothing in the
+    // worker's own words to support it. Tracked separately because the model's
+    // `reason` argues FOR the hazard it invented, and printing that under a
+    // header saying the report does not qualify would contradict the header.
+    final guardVetoed = _modelClaimsHazard && !hasHazard;
     final confidence = (_aiSuggestion!['confidence'] ?? 0) as num;
-    final reason = _aiSuggestion!['reason']?.toString() ?? '';
-    final refined = _aiSuggestion!['refined']?.toString() ?? '';
-    final correctiveAction = _aiSuggestion!['correctiveAction']?.toString() ?? '';
+    final reason =
+        guardVetoed ? '' : (_aiSuggestion!['reason']?.toString() ?? '');
+    // Suppressed on the no-hazard path, both branches of it. A description that
+    // is not an observation must not be offered a rewrite into professional
+    // safety language, and must never offer a corrective action — that is how
+    // "he was singing a song" acquired the advice "encourage employees to
+    // refrain from singing". With all three empty, `canApply` below is false, so
+    // the accept row collapses to the single "Edit My Description" button.
+    final refined =
+        hasHazard ? (_aiSuggestion!['refined']?.toString() ?? '') : '';
+    final correctiveAction =
+        hasHazard ? (_aiSuggestion!['correctiveAction']?.toString() ?? '') : '';
     final detectedLang = _aiSuggestion!['detectedLanguage']?.toString() ?? '';
     // Resolved here, not at accept time, so the card can only advertise fills
     // that will actually land. Promising a category and then applying '' would
     // make the reporter believe a field was set when it was not.
-    final aiObsType = _canonicalObsType(_aiSuggestion!['category']?.toString() ?? '');
-    final aiWsa = _canonicalWsa(_aiSuggestion!['wsaCause']?.toString() ?? '');
-    final rawSeverity = _aiSuggestion!['severity']?.toString().trim().toUpperCase() ?? '';
-    final aiSeverity = _severities.contains(rawSeverity) ? rawSeverity : '';
+    //
+    // Read only on the hazard path. The model is asked to leave these empty when
+    // it answers no-hazard, and it usually does, but it filled all three for the
+    // singing report — and once the guard is doing the vetoing the model has not
+    // been asked anything at all. Classifying a non-observation is the whole bug,
+    // so the type, cause and severity are read only once a hazard is agreed.
+    final aiObsType = hasHazard
+        ? _canonicalObsType(_aiSuggestion!['category']?.toString() ?? '')
+        : '';
+    final aiWsa = hasHazard
+        ? _canonicalWsa(_aiSuggestion!['wsaCause']?.toString() ?? '')
+        : '';
+    final rawSeverity =
+        _aiSuggestion!['severity']?.toString().trim().toUpperCase() ?? '';
+    final aiSeverity =
+        hasHazard && _severities.contains(rawSeverity) ? rawSeverity : '';
     // Built once. It is read three times below, and it is also what decides
     // whether there is anything to accept when the model returned a
     // classification but no rewording.
@@ -3712,13 +3801,23 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       : Text(
                           hasHazard
                               ? 'AI has rephrased your description'
-                              : 'Could not find a safety hazard in this text',
+                              // Named against the three types this form records,
+                              // rather than the vaguer "could not find a safety
+                              // hazard". The reporter's next question is always
+                              // "then what would qualify?", and the register's own
+                              // three answers are the closest thing to a reply.
+                              : 'This does not qualify as an unsafe act, unsafe '
+                                  'condition or near miss',
                           style: TextStyle(
                               color: accentTx,
                               fontSize: 13,
                               fontWeight: FontWeight.w800)),
                 ),
-                Container(
+                // Hidden on the no-hazard path. A confidence score belongs to a
+                // finding, and there is no finding — the singing report showed
+                // "90%" in green beside a verdict of no hazard, which reads as
+                // 90% sure there IS one.
+                if (hasHazard) Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     // Near-white in light mode rather than a wash of the
@@ -3744,19 +3843,23 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       style: TextStyle(color: confidenceTx, fontSize: 12, fontWeight: FontWeight.w900)),
                   ]),
                 ),
-                const SizedBox(width: 6),
+                if (hasHazard) const SizedBox(width: 6),
                 GestureDetector(
                   onTap: _dismissAiSuggestion,
                   child: Icon(Icons.close, size: 16, color: sl.text3),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              'AI Confidence: ${confidence.toInt()}% — ${confidence >= 80 ? "High confidence" : confidence >= 50 ? "Moderate confidence" : "Low confidence"}${detectedLang.isNotEmpty ? ' • Language: $detectedLang' : ''}',
-              style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w500)),
+            if (hasHazard) ...[
+              const SizedBox(height: 6),
+              Text(
+                'AI Confidence: ${confidence.toInt()}% — ${confidence >= 80 ? "High confidence" : confidence >= 50 ? "Moderate confidence" : "Low confidence"}${detectedLang.isNotEmpty ? ' • Language: $detectedLang' : ''}',
+                style: TextStyle(color: sl.text3, fontSize: 10.5, fontWeight: FontWeight.w500)),
+            ],
             // The reasoning, whichever way it went. On the no-hazard path this is
-            // the only actionable thing in the card, so it is not optional there.
+            // the only actionable thing in the card, so it is not optional there
+            // — and when the guard was the one that vetoed, `reason` is empty by
+            // construction and this is the only explanation there is.
             if (reason.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(reason,
@@ -3764,8 +3867,16 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             ] else if (!hasHazard) ...[
               const SizedBox(height: 8),
               Text(
-                'Describe what you saw, where it was, and what could have gone '
-                'wrong — the mic works in Hindi too.',
+                guardVetoed
+                    // Says what is missing, not that the worker did something
+                    // wrong. The report may well be about something real; it is
+                    // this register that it does not belong in.
+                    ? 'Nothing in this description names a hazard, an unsafe '
+                        'action, or something that nearly went wrong. If there '
+                        'was one, add it: what was unsafe, where it was, and '
+                        'what could have happened. The mic works in Hindi too.'
+                    : 'Describe what you saw, where it was, and what could have '
+                        'gone wrong — the mic works in Hindi too.',
                 style: TextStyle(color: sl.text2, fontSize: 11.5, height: 1.35)),
             ],
             if (refined.isNotEmpty) ...[
