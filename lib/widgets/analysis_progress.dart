@@ -23,6 +23,14 @@
 // real timings from the new order — a bar tuned to 8s that then waits out a
 // 40s OpenRouter fallback breaks rule 2, which is the more damaging failure.
 //
+// `expected` was deliberately left at 22s again on 2026-09-07, when a live scan
+// measured 35s end to end (three Gemini 503s, one upstream 429, then MiniMax M3
+// answering in 28,929ms). Raising it to 35 would make the bar stop admitting an
+// overrun on a run that really was slow, and that run was slow because of a
+// Google-side outage rather than because 35s is normal. One measurement is not a
+// distribution; the captions were retuned instead, which is the change that does
+// not require guessing.
+//
 // Because it is a prediction, two rules apply and must not be relaxed:
 //
 //   1. IT NEVER REACHES 100%. It approaches a ceiling asymptotically. A bar that
@@ -110,15 +118,32 @@ class _AnalysisProgressState extends State<AnalysisProgress> {
   /// What the chain is most likely doing, from the tier boundaries in
   /// gemini_vision.dart. Thresholds are absolute seconds, not fractions of
   /// [expected], because the tier timeouts they mirror are absolute too.
+  /// ★ Retuned 2026-09-07 for the hedge. The tier no longer waits for the lead
+  /// model to give up before starting another one: a lead still silent after 10s
+  /// gets a second model started alongside it (`_kOrHedgeAfter`), and the first
+  /// usable answer wins. So the old "trying another" caption at 40s described a
+  /// handover that now happens much earlier, and "falling back to the backup
+  /// model" described a sequence the chain no longer follows.
+  ///
+  /// The captions stay deliberately non-committal about WHICH tier is running.
+  /// This widget cannot see the chain, and the absolute clock includes Tier 1's
+  /// Gemini leg, whose length varies from ~5s to ~45s depending on how many of
+  /// its models return 503. Naming a tier at a fixed second would therefore be a
+  /// claim that is sometimes simply false, which breaks the same honesty rule as
+  /// the fake progress steps removed from near_miss_tab.dart on the same day.
   String get _phase {
     final s = _sw.elapsed.inSeconds;
     if (s < 3) return 'Preparing the photo…';
-    if (s < 8) return 'Sending it to the AI reader…';
+    if (s < 10) return 'Sending it to the AI reader…';
     if (s < 20) return 'Looking for hazards in the scene…';
-    if (s < 40) {
-      return 'The first model is slow — trying another. Nothing has stalled.';
+    if (s < 35) {
+      return 'A second model is now reading the same photo — whichever answers '
+          'first wins. Nothing has stalled.';
     }
-    if (s < 70) return 'Falling back to the backup model…';
+    if (s < 60) {
+      return 'Still reading. The model that usually answers takes about 30 '
+          'seconds.';
+    }
     return 'Still working. Free AI services queue requests when busy.';
   }
 

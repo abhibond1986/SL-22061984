@@ -6,7 +6,8 @@
 //            configured, which is also how it behaves on a fresh install before
 //            the key sync lands. ALSO SELF-SKIPS, in about a millisecond, when the
 //            request cannot fit Groq's free 8000 tokens/minute — which is every
-//            normal-sized scan image, because the prompt alone is ~5,200 tokens.
+//            normal-sized scan image, because the prompt alone is ~5,680 tokens
+//            (re-measured 2026-09-07; the template is 23,341 chars).
 //            See _kGroqTpmLimit. It stays in front because a skip is free and it
 //            can still win on a small crop; do not read its position as a claim
 //            that it usually runs.
@@ -349,8 +350,42 @@ class GeminiVision {
   // fifths of a scan's wait bought nothing.
   static const Map<String, Duration> _kPerModelAttemptTimeout = {
     // 1.9s + 1400 tokens / 47 tps ≈ 31.7s, rounded up for headroom.
-    _orMinimaxModel: Duration(seconds: 35),
+    // ★ 2026-09-07: 35s → 45s, from a live scan on safetylens.in. MiniMax was the
+    // ONLY model that answered that photo — three Gemini models 503'd and the
+    // Tier 2 lead came back upstream-429 — and it took 28,929ms, landing just 6s
+    // inside its own cap. A 35s cap therefore had roughly a one-in-a-few chance
+    // of discarding the single working provider on a marginally slower day, and
+    // the cost of that is not a slower scan but an offline checklist. 45s ≈ the
+    // measured 28.9s plus 55% headroom.
+    //
+    // Raising this REQUIRES raising [_kOrChainHardCeiling] with it — the
+    // predictive gate refuses to start an attempt whose timeout would not fit in
+    // the remaining ceiling, so a 45s cap under the old 60s ceiling would have
+    // SKIPPED MiniMax entirely whenever the lead burned more than 15s. That is
+    // the opposite of the intent, and it is the trap to check first whenever a
+    // number in this map goes up.
+    _orMinimaxModel: Duration(seconds: 45),
   };
+
+  // How long the Tier 2 lead gets to itself before a second model is started
+  // ALONGSIDE it. Chosen by the admin (2026-09-07) over both alternatives:
+  // running two models on every scan (double the free-tier spend, always) and
+  // leaving the tier strictly sequential (what produced the ~35s wait below).
+  //
+  // Measured on a live scan: Gemini ×3 returned 503 in 2-5s each, the Tier 2 lead
+  // returned an upstream 429 in 1-2s, and MiniMax M3 then succeeded in 28,929ms —
+  // about 80% of the total wait. The pattern that costs the most time is not a
+  // model that FAILS (those come back in seconds and the chain moves on) but one
+  // that is simply SLOW, because nothing else starts until it gives up.
+  //
+  // 10s separates the two cases cleanly. Every failure observed in production
+  // settled well inside it, so a hedge partner is normally never started and the
+  // scan still costs exactly one free request; a lead still silent at 10s is
+  // either slow or about to time out, and both are worth spending a second
+  // request on. Lowering this towards a few seconds would start burning two
+  // requests per scan for no gain, which the standing "everything on free
+  // models" constraint makes a real cost, not a theoretical one.
+  static const Duration _kOrHedgeAfter = Duration(seconds: 10);
 
   // Hard ceiling on the whole OpenRouter tier once per-model timeouts can exceed
   // [kAttemptTimeout].
@@ -362,12 +397,25 @@ class GeminiVision {
   // is now PREDICTIVE: an attempt only starts if `elapsed + its own timeout` fits
   // inside this ceiling.
   //
-  // 60s = the 20s lead attempt plus the 35s MiniMax attempt plus 5s of slack, so
+  // 70s = the 20s lead attempt plus the 45s MiniMax attempt plus 5s of slack, so
   // the intended two-attempt sequence always fits and a third only runs when the
   // first two failed FAST. Tier 3 (Nara, up to 45s) and the offline fallback are
   // still downstream, so this is not the whole scan's budget — it is the most this
   // tier may spend before handing over.
-  static const Duration _kOrChainHardCeiling = Duration(seconds: 60);
+  //
+  // ★ 2026-09-07: 60s → 70s, forced by MiniMax's cap going 35s → 45s. This
+  // constant is NOT independent of [_kPerModelAttemptTimeout]: the gate skips an
+  // attempt when `elapsed + its timeout` exceeds this, so leaving it at 60 would
+  // have made a 45s model unreachable after 15s of elapsed time — the chain would
+  // have silently dropped its most reliable provider and reported "no provider
+  // available". Whenever a per-model cap rises, re-derive this from
+  // `lead cap + largest cap + slack`.
+  //
+  // The worst case is smaller than 70s in practice because of the hedge: the
+  // second model is started at [_kOrHedgeAfter] rather than after the lead
+  // finishes, so the two attempts overlap by 10s or more, and [_kOrChainBudget]
+  // then stops a third from starting at all.
+  static const Duration _kOrChainHardCeiling = Duration(seconds: 70);
 
   /// How long a single OpenRouter attempt at [model] may run.
   static Duration _attemptTimeoutFor(String model) =>
@@ -1129,7 +1177,70 @@ HOW TO USE IT:
         for (int k = 0; k < orKeys.length; k++) {
           final orKey = orKeys[k];
           final keyTag = orKeys.length > 1 ? ' {key ${k + 1}/${orKeys.length}}' : '';
+
+          // ── HEDGING BOOKKEEPING (2026-09-07) ──────────────────────────────
+          // Indexes already started on THIS key, whether as a lead or as a hedge
+          // partner. Without it the outer loop would eventually reach a partner's
+          // own turn and send the same model a second time — a free request spent
+          // to re-learn a verdict already in hand.
+          final consumed = <int>{};
+
+          /// Sends one attempt and returns its handle WITHOUT awaiting it.
+          ///
+          /// The `.then` is what makes a losing attempt safe to walk away from:
+          /// the outcome lands on the [_OrAttempt], and any error is absorbed
+          /// here, so the race can stop listening without ever leaving an
+          /// unhandled async error behind. The request itself is deliberately not
+          /// cancelled — it has already been paid for out of the free allowance,
+          /// so letting it finish means ModelHealth records the truth about a
+          /// request that really was sent, and the usage ledger stays honest.
+          _OrAttempt launch(int idx) {
+            final m = attempts[idx][0];
+            final l = attempts[idx][1];
+            final t = _attemptTimeoutFor(m);
+            final a = _OrAttempt(index: idx, model: m, label: l);
+            consumed.add(idx);
+            print('GeminiVision: ▶ [${idx + 1}/${attempts.length}]$keyTag '
+                'OpenRouter $l'
+                '${t == kAttemptTimeout ? '' : ' (${t.inSeconds}s cap)'}...');
+            a.future = _callOpenRouterVision(bytes, orKey, m,
+                    kbContext: kbContext,
+                    sceneContext: sceneContext,
+                    timeout: t,
+                    att: a)
+                .then<Map<String, dynamic>?>((r) {
+              a.result = r;
+              a.done = true;
+              return r;
+            }, onError: (Object e, StackTrace st) {
+              print('GeminiVision: ✗$keyTag OpenRouter $l exception: $e');
+              a.done = true;
+              return null;
+            });
+            return a;
+          }
+
+          /// The first model at or after [from] that may be started right now.
+          ///
+          /// Applies the same predictive ceiling test as the sequential gate
+          /// below, because a hedge partner is a real attempt and must not be the
+          /// one thing in the tier allowed to overrun. Returns null when nothing
+          /// left fits, in which case the lead is simply waited out.
+          int? nextEligible(int from) {
+            for (int j = from; j < attempts.length; j++) {
+              if (consumed.contains(j)) continue;
+              if (orClock.elapsed + _attemptTimeoutFor(attempts[j][0]) >
+                  _kOrChainHardCeiling) {
+                continue;
+              }
+              return j;
+            }
+            return null;
+          }
+
           for (int i = 0; i < attempts.length; i++) {
+            // Already sent as a hedge partner on an earlier iteration.
+            if (consumed.contains(i)) continue;
             final model = attempts[i][0];
             final label = attempts[i][1];
             // BUDGET GATE. Checked before starting an attempt, never mid-flight:
@@ -1168,45 +1279,100 @@ HOW TO USE IT:
                   'tier\'s ${_kOrChainHardCeiling.inSeconds}s limit');
               continue;
             }
-            print('GeminiVision: ▶ [${i + 1}/${attempts.length}]$keyTag OpenRouter $label'
-                '${attemptTimeout == kAttemptTimeout ? '' : ' (${attemptTimeout.inSeconds}s cap)'}...');
+            // ── THE HEDGE ─────────────────────────────────────────────────────
+            // Start the lead alone and give it [_kOrHedgeAfter] of exclusivity.
+            //
+            // `.timeout` here derives a NEW future; it does not cancel the
+            // request behind it. That distinction is the whole design: the lead
+            // keeps running and keeps its place in the race, so hedging only ever
+            // ADDS a competitor. Cancelling the incumbent instead would throw
+            // away a free request already spent and could discard the one model
+            // that was going to answer.
+            //
+            // A lead that FAILS fast never triggers the hedge — every failure
+            // seen in production (503, upstream 429, dead slug) settled in 1-5s,
+            // well inside the window — so the common case still costs exactly one
+            // request and simply falls through to the next iteration as before.
+            final live = <_OrAttempt>[launch(i)];
+            final lead = live.first;
             try {
-              final orResult = await _callOpenRouterVision(bytes, orKey, model,
-                  kbContext: kbContext,
-                  sceneContext: sceneContext,
-                  timeout: attemptTimeout);
-              if (_isValidResult(orResult)) {
-                print('GeminiVision: ✓ [${i + 1}/${attempts.length}]$keyTag OpenRouter SUCCESS in ${stopwatch.elapsedMilliseconds}ms');
-                orResult!['_source'] = 'openrouter_client';
-                orResult['_model'] = model;
-                orResult['_isOnline'] = true;
-                _lastCallTime = DateTime.now();
-                _isAnalyzing = false;
-                // Cache so the SAME image always returns THIS result.
-                await _writeCachedResult(imgHash, orResult);
-                // The only SUCCESS path: a real provider returned hazards for
-                // this image. Model is passed explicitly so the dashboard can
-                // compare the primary and secondary models' latency.
-                return await logged(orResult,
-                    outcome: AiRunLog.outcomeSuccess,
-                    model: model,
-                    imageHash: imgHash);
+              await lead.future!.timeout(_kOrHedgeAfter);
+            } catch (_) {
+              // Only the derived timeout can throw here; lead.future itself is
+              // error-absorbing by construction. Nothing to record — `lead.done`
+              // already distinguishes "still in flight" from "finished".
+            }
+            if (!lead.done) {
+              final j = nextEligible(i + 1);
+              if (j != null) {
+                print('GeminiVision: ⧗$keyTag $label still running after '
+                    '${_kOrHedgeAfter.inSeconds}s — starting ${attempts[j][1]} '
+                    'alongside it, first valid answer wins');
+                live.add(launch(j));
+              } else {
+                print('GeminiVision: ⧗$keyTag $label still running after '
+                    '${_kOrHedgeAfter.inSeconds}s, but no remaining model fits '
+                    'the tier\'s ${_kOrChainHardCeiling.inSeconds}s ceiling — '
+                    'waiting it out');
               }
-              // 429/401/402/403 condemn the key, not the model: the other three
-              // models draw on the same account allowance and would fail the
-              // same way. Abandon this key now rather than burning three more
-              // round trip (~20s worst case) to learn nothing.
-              if (_lastOrStatus == 429) {
+            }
+
+            // Resolves as soon as ANY live attempt returns a usable result, and
+            // otherwise only once every one of them has settled. Not advancing
+            // while a request is still in the air is deliberate: starting a third
+            // model on top of two would spend the tier's whole allowance on one
+            // photo.
+            final winner = await _firstValidOf(live);
+            if (winner != null) {
+              final orResult = winner.result!;
+              if (winner.index != i) {
+                print('GeminiVision: ⚡$keyTag the hedge won — ${winner.label} '
+                    'answered before $label');
+              }
+              print('GeminiVision: ✓ [${winner.index + 1}/${attempts.length}]'
+                  '$keyTag OpenRouter SUCCESS in '
+                  '${stopwatch.elapsedMilliseconds}ms');
+              orResult['_source'] = 'openrouter_client';
+              orResult['_model'] = winner.model;
+              orResult['_isOnline'] = true;
+              _lastCallTime = DateTime.now();
+              _isAnalyzing = false;
+              // Cache so the SAME image always returns THIS result.
+              await _writeCachedResult(imgHash, orResult);
+              // The only SUCCESS path: a real provider returned hazards for this
+              // image. The model is passed explicitly, and it must be the
+              // WINNER's — attributing a hedge win to the lead would corrupt
+              // exactly the per-model latency comparison the dashboard exists for.
+              return await logged(orResult,
+                  outcome: AiRunLog.outcomeSuccess,
+                  model: winner.model,
+                  imageHash: imgHash);
+            }
+
+            // Every live attempt failed. Classify ALL of them, not just the lead:
+            // with two requests in flight either one could have hit the account's
+            // daily counter, and a key-wide verdict found on the partner is just
+            // as binding as one found on the lead.
+            //
+            // Read from the per-attempt objects, never from
+            // [lastOrStatusForDebug] — that mirror now holds whichever attempt
+            // settled last, which under a hedge is not necessarily the one being
+            // classified.
+            int? keyWideStatus;
+            for (final a in live) {
+              // 429/401/402 condemn the key, not the model: every other model
+              // draws on the same account allowance and would fail the same way.
+              if (a.status == 429) {
                 // Only a 429 that named the DAILY counter means "come back
                 // tomorrow". A per-minute throttle is recorded separately so the
-                // user is told to retry in a minute, which actually works. A
-                // 429 that named neither sets both false and falls through to
-                // the honest "either one" message.
-                if (_lastOr429Kind == 'daily') {
+                // user is told to retry in a minute, which actually works. A 429
+                // that named neither sets both false and falls through to the
+                // honest "either one" message.
+                if (a.kind429 == 'daily') {
                   orQuotaHit = true;
-                } else if (_lastOr429Kind == 'throttle') {
+                } else if (a.kind429 == 'throttle') {
                   orThrottled = true;
-                } else if (_lastOr429Kind == 'upstream') {
+                } else if (a.kind429 == 'upstream') {
                   // Recorded but NOT fatal: the chain keeps walking, so a later
                   // model may still succeed and this flag never reaches the user.
                   // It only matters if everything after it also fails, in which
@@ -1219,28 +1385,25 @@ HOW TO USE IT:
                 }
               }
               // 403 belongs here even though it is deliberately excluded from
-              // _lastOrFailureIsKeyWide: that flag decides whether to abandon
-              // the remaining MODELS (403 can be per-model moderation, so we
-              // keep trying), while this one decides what to TELL THE USER. A
-              // blocked key is not "the service did not respond", and advising
-              // a retry for it would be useless.
-              if (_lastOrStatus == 401 ||
-                  _lastOrStatus == 402 ||
-                  _lastOrStatus == 403) {
+              // [_OrAttempt.failureIsKeyWide]: that flag decides whether to
+              // abandon the remaining MODELS (403 can be per-model moderation, so
+              // we keep trying), while this one decides what to TELL THE USER. A
+              // blocked key is not "the service did not respond", and advising a
+              // retry for it would be useless.
+              if (a.status == 401 || a.status == 402 || a.status == 403) {
                 orKeyRejected = true;
               }
-              if (_lastOrFailureIsKeyWide) {
-                if (k + 1 < orKeys.length) {
-                  print('GeminiVision: ⏩$keyTag blocked (HTTP $_lastOrStatus) — '
-                      'switching to key ${k + 2}/${orKeys.length}');
-                  continue keyLoop;
-                }
-                print('GeminiVision: ⏹$keyTag blocked (HTTP $_lastOrStatus) and '
-                    'no further keys — leaving Tier 2');
-                break keyLoop;
+              if (a.failureIsKeyWide) keyWideStatus ??= a.status;
+            }
+            if (keyWideStatus != null) {
+              if (k + 1 < orKeys.length) {
+                print('GeminiVision: ⏩$keyTag blocked (HTTP $keyWideStatus) — '
+                    'switching to key ${k + 2}/${orKeys.length}');
+                continue keyLoop;
               }
-            } catch (e) {
-              print('GeminiVision: ✗$keyTag OpenRouter $label exception: $e');
+              print('GeminiVision: ⏹$keyTag blocked (HTTP $keyWideStatus) and '
+                  'no further keys — leaving Tier 2');
+              break keyLoop;
             }
           }
         }
@@ -1463,6 +1626,43 @@ HOW TO USE IT:
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  //  HELPER: race two in-flight attempts for the first USABLE answer
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /// Returns the first attempt in [live] to come back with a result that passes
+  /// [_isValidResult], or null once every one of them has settled without doing
+  /// so.
+  ///
+  /// Why not `Future.any` on its own: `Future.any` resolves on the first future
+  /// to COMPLETE, and completing is not the same as succeeding. The lead very
+  /// often completes first with a 503 or a 429 while the hedge partner is still
+  /// working, and taking that as the answer would make hedging strictly worse
+  /// than not hedging — it would convert a slow success into a fast failure. So
+  /// each completion is inspected and a useless one only removes that attempt
+  /// from the race.
+  ///
+  /// The losers are neither cancelled nor awaited afterwards. Their futures are
+  /// error-absorbing (see `launch`), so abandoning them cannot produce an
+  /// unhandled async error, and letting them run to completion is what keeps the
+  /// free-usage ledger and the per-model health counters truthful about requests
+  /// that really were sent.
+  static Future<_OrAttempt?> _firstValidOf(List<_OrAttempt> live) async {
+    final remaining = List<_OrAttempt>.of(live);
+    while (remaining.isNotEmpty) {
+      // Each wrapper resolves to its OWN attempt, so the winner of the race
+      // identifies itself. Re-wrapping already-completed futures on later passes
+      // is harmless — a completed future's listener fires on the next microtask.
+      final finished = await Future.any(remaining.map((a) async {
+        await a.future;
+        return a;
+      }));
+      remaining.remove(finished);
+      if (_isValidResult(finished.result)) return finished;
+    }
+    return null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   //  HELPER: Validate result has real hazards
   // ══════════════════════════════════════════════════════════════════════════
   static bool _isValidResult(Map<String, dynamic>? result) {
@@ -1541,8 +1741,10 @@ HOW TO USE IT:
           'provider': 'groq',
           'tier': '0',
           'note': 'Separate Groq quota. Usually SKIPPED — the free tier\'s '
-              '8000 tokens/min cannot fit a full-size scan image, so zero '
-              'attempts here is expected, not a fault.',
+              '8000 tokens/min cannot fit a full-size scan image (the prompt '
+              'alone is ~5,680 tokens), so zero attempts here is expected, not '
+              'a fault. The skip is arithmetic only: it costs no request and no '
+              'time, which is why the tier is kept.',
         },
         for (final m in GeminiDirectVision.fallbackChain)
           {
@@ -1556,7 +1758,9 @@ HOW TO USE IT:
           'model': _orGemma31bModel,
           'provider': 'openrouter',
           'tier': '2',
-          'note': 'Free chain lead, ${kAttemptTimeout.inSeconds}s cap.',
+          'note': 'Free chain lead, ${kAttemptTimeout.inSeconds}s cap. If it is '
+              'still silent after ${_kOrHedgeAfter.inSeconds}s the next model '
+              'starts alongside it, so both may show an attempt for one scan.',
         },
         {
           'model': _orMinimaxModel,
@@ -1565,7 +1769,8 @@ HOW TO USE IT:
           'note': 'Free chain, '
               '${_attemptTimeoutFor(_orMinimaxModel).inSeconds}s cap — raised '
               'because it generates at ~47 tokens/sec and the hazard schema is '
-              '1,100-1,400 tokens.',
+              '1,100-1,400 tokens. Usually the hedge partner rather than a '
+              'sequential fallback, so its attempts often overlap the lead\'s.',
         },
         {
           'model': _orNemotronModel,
@@ -1715,52 +1920,29 @@ HOW TO USE IT:
           {required bool served}) async =>
       _recordFreeUsage(served: served);
 
-  /// HTTP status of the most recent OpenRouter call, or null if the request
-  /// never completed (timeout / socket error).
+  /// HTTP status of the LAST OpenRouter attempt to settle, and the kind of 429
+  /// it hit. **Diagnostics only — no control flow may read these.**
   ///
-  /// Exists so the caller can distinguish a failure that is specific to ONE
-  /// MODEL (e.g. 404 bad slug, 502 upstream provider hiccup — try the next
-  /// model) from one that condemns the WHOLE KEY (429 quota, 401 revoked, 402
-  /// no credit, 403 blocked — every model on this key will fail identically, so
-  /// stop wasting requests and move to the next key). Without this the caller
-  /// only saw `null` and had to burn four calls to learn the same thing.
-  static int? _lastOrStatus;
-
-  /// True when the most recent 429 named the DAILY allowance rather than the
-  /// short-window (per-minute) throttle. Reset on every request so a stale
-  /// value from an earlier scan cannot leak into this one's message.
-  /// Which kind of 429 the last OpenRouter call hit: `'daily'` (our allowance
-  /// spent, retrying is pointless until the UTC reset), `'throttle'` (our
-  /// short-window cool-off, retrying in a minute works), `'upstream'` (the
-  /// provider behind THIS ONE model is busy — our counters untouched, so the
-  /// rest of the chain is still good), `'unknown'` (429 with a body that named
-  /// nothing — say so rather than inventing a cause), or `''` (no 429).
-  /// Four states, not a bool, precisely so "unknown" cannot masquerade as
-  /// "throttle" and send a user off to retry a limit that will not clear.
-  static String _lastOr429Kind = '';
-
-  /// True when [_lastOrStatus] means "this key is finished for now", as opposed
-  /// to "this model didn't work".
-  /// 403 is deliberately EXCLUDED. OpenRouter returns it for per-model and
-  /// per-provider conditions too — moderation-flagged input, or a data-policy
-  /// setting that rejects one specific provider — so treating it as key-wide
-  /// would abandon the remaining models on a fault that only affected one, a
-  /// regression against the old unconditional 4-model walk.
+  /// They used to be the mechanism: `_callOpenRouterVision` wrote them and the
+  /// Tier 2 loop read them back after its await to decide whether the failure
+  /// condemned one model or the whole key. That is only sound while exactly one
+  /// request is ever in flight, and since 2026-09-07 the tier hedges — a second
+  /// model starts while the first is still running (see [_kOrHedgeAfter]). Two
+  /// concurrent writers would let one attempt's reset erase the other's
+  /// classification, which is precisely how the 2026-09-05 upstream-429 bug
+  /// abandoned a key that had plenty of quota left. The real state now lives on
+  /// [_OrAttempt], one instance per request.
   ///
-  /// An `'upstream'` 429 is excluded for exactly that reason, added 2026-09-05
-  /// after a live scan on safetylens.in failed outright in 38,970ms. Gemma 4 31B
-  /// (then the Tier 2 lead) came back 429 "temporarily rate-limited upstream.
-  /// Please retry shortly" — a Google-side limit on that one model — and because
-  /// EVERY 429 counted as key-wide, MiniMax M3 and Nemotron were never tried and
-  /// the user got "All vision providers unavailable". A plain 429 still counts,
-  /// since our daily and per-minute counters really are account-wide and every
-  /// remaining `:free` model draws on them.
-  static bool get _lastOrFailureIsKeyWide =>
-      // daily/minute quota — counted per ACCOUNT, so the rest of the chain is
-      // doomed too. 'upstream' is the one 429 that is NOT ours.
-      (_lastOrStatus == 429 && _lastOr429Kind != 'upstream') ||
-      _lastOrStatus == 401 || // key invalid or revoked
-      _lastOrStatus == 402;   // out of credit
+  /// Kept because they are genuinely useful when reading a console log after the
+  /// fact, and because zeroing them would silently change what a future debug
+  /// print reports. Written once, synchronously, when an attempt settles — never
+  /// reset at request start, so they hold a complete outcome rather than a
+  /// half-cleared one.
+  static int? lastOrStatusForDebug;
+
+  /// Companion to [lastOrStatusForDebug]. Same rule: read it in a log line, not
+  /// in an `if`.
+  static String lastOr429KindForDebug = '';
 
   // ══════════════════════════════════════════════════════════════════════════
   //  FREE-TIER USAGE LEDGER
@@ -1927,6 +2109,16 @@ HOW TO USE IT:
   // fit 8000, which cannot hold the hazard JSON. THE FREE TIER CANNOT SERVE A
   // FULL-SIZE SCAN. Tier 0 is therefore now gated on a per-image estimate: it
   // runs for small images and steps aside for large ones.
+  //
+  // ★ 2026-09-07: re-checked against the grown prompt (~5,680 text tokens now,
+  // see [_kGroqMaxTokens]) and the conclusion is unchanged and firmer. Kept in
+  // front of the chain anyway, for one reason worth stating plainly: THE SKIP
+  // COSTS NOTHING. The pre-flight is arithmetic on a string length and a JPEG
+  // header — no network call, no ModelHealth attempt, about a millisecond — so a
+  // tier that almost never runs is not a latency problem to be solved by deleting
+  // it. It was audited on 2026-09-07 precisely to check that (the scan measured
+  // at 35s spent none of it here), and retiring it would have removed a free
+  // upside on small uploads while making the scan no faster at all.
   static const int _kGroqTpmLimit = 8000;
 
   /// Completion cap for the GROQ call only. OpenRouter stays at 4096.
@@ -1937,33 +2129,51 @@ HOW TO USE IT:
   /// block), and the image was only 3,826 bytes — a small crop — so essentially
   /// all 4,899 tokens were TEXT, giving ~4.5 chars/token for this prompt.
   ///
-  /// That leaves 8000 - 4900 = ~3,100 tokens for the image and the completion
-  /// combined. A full-size scan image (900px long edge, quality 72) is ~80-120KB
-  /// rather than 3.8KB and will itself cost roughly 700-1,300 tokens. So 2,000 is
-  /// the largest completion cap that plausibly fits a REAL photo, and even that
-  /// has little margin.
+  /// ★ RE-DERIVED 2026-09-07, and the answer changed because the prompt grew.
+  /// The template is now **23,341 chars** (it was 17,521 when the figures above
+  /// were taken and 20,834 at the last revision). Anchoring on the last real log
+  /// line — `text ~7161 incl. 2000 reserved`, i.e. 5,161 text tokens ≈ 25,031
+  /// resolved chars — and adding the 2,507 chars of template growth since gives a
+  /// resolved prompt of ≈27,540 chars ≈ **5,680 text tokens**.
   ///
-  /// BE CLEAR-EYED: the dominant cost is the ~21k-char prompt, which is the
-  /// safety design of the feature and is not negotiable. Groq's free 8000 TPM is
-  /// simply a tight fit for this request. Expect Tier 0 to still 413 sometimes on
-  /// large images. That is why the guards below exist and why every failure here
-  /// is swallowed — the durable fixes are Groq's paid Dev Tier or dropping this
-  /// tier, not shaving this number further.
+  /// That is what the completion cap now has to be set against:
   ///
-  /// THE TRADE-OFF, stated so nobody has to rediscover it: a scene with many
-  /// hazards can now run out of completion budget on this tier and return
-  /// truncated JSON. That is survivable and not a correctness risk —
-  /// [_parseAIResponse] fails, [_isValidResult] rejects it, and the chain falls
-  /// through to Tier 1 exactly as it did when this tier 413'd. The cost of a
-  /// truncation is one wasted attempt, not a wrong hazard report. Raising this
-  /// back towards 4096 trades that away for guaranteed 413s instead.
-  static const int _kGroqMaxTokens = 2000;
+  ///   cap 2000 → 7,680 of 8,000 spent, leaving 320 tokens for the image
+  ///              ≈ 0.11MP ≈ 380×280. Nothing the app actually sends.
+  ///   cap 1200 → 6,880 spent, leaving ~1,120 tokens ≈ 0.37MP ≈ 640×480.
+  ///              A cropped or phone-thumbnail upload fits.
+  ///
+  /// So 2,000 had quietly stopped being "the largest cap that plausibly fits a
+  /// real photo" and become a cap under which NOTHING fits — the tier was dead
+  /// arithmetic, not a marginal one. 1,200 is the value that buys back the only
+  /// cases that can still work.
+  ///
+  /// BE CLEAR-EYED ABOUT WHAT THIS DOES NOT FIX. The scan path resizes to a 900px
+  /// long edge (~0.6MP, ~1,800 image tokens), so a normal photographed hazard
+  /// still cannot fit at ANY completion cap, and Tier 0 will go on self-skipping
+  /// for it. Only two things would change that: shrinking the prompt, which is
+  /// the safety design of the feature, or a paid Groq tier, which the standing
+  /// "everything runs on free models" constraint rules out. Neither is on the
+  /// table, so this tier is kept for the cases where it fits and its skip is
+  /// free — see [_kGroqTpmLimit].
+  ///
+  /// THE TRADE-OFF, stated so nobody has to rediscover it: 1,200 tokens is below
+  /// the hazard schema's measured 1,100-1,400, so a scene with several hazards
+  /// will sometimes run out of completion budget here and return truncated JSON.
+  /// That is survivable and is not a correctness risk — [_parseAIResponse] fails,
+  /// [_isValidResult] rejects it, and the chain falls through to Tier 1 exactly
+  /// as it did when this tier 413'd. The cost of a truncation is one cheap ~2-3s
+  /// attempt; the prize when it succeeds is skipping the ~26s the OpenRouter tier
+  /// takes. Raising this back towards 4096 trades that away for a guaranteed
+  /// pre-flight skip on every image instead.
+  static const int _kGroqMaxTokens = 1200;
 
   /// Chars per token for this prompt, solved from run 1's 413: the prompt was
   /// ~23,811 chars (the template as it then stood, 17,521 chars, plus
   /// `obsTypeGuidance`, a 4,290-char KB block and the enums) and input was 4,899
-  /// tokens, i.e. **4.86 chars/token**. The template has since grown to ~20,834
-  /// chars, so the TOTALS quoted here are historical; the RATE is what is being
+  /// tokens, i.e. **4.86 chars/token**. The template has since grown to 23,341
+  /// chars (measured 2026-09-07), so the TOTALS quoted here are historical; the
+  /// RATE is what is being
   /// derived and a longer prompt of the same kind of text does not change it. Not
   /// the generic 4.0 — this prompt is dense structured text with heavy repetition,
   /// which tokenises better than prose, and 4.0 would overestimate by ~20%.
@@ -2279,11 +2489,19 @@ HOW TO USE IT:
   /// [timeout] defaults to [kAttemptTimeout]; the chain passes
   /// [_attemptTimeoutFor] so a throughput-bound model can be given a longer
   /// ceiling without loosening it for every provider.
+  ///
+  /// [att] receives this attempt's HTTP status and 429 kind. The caller MUST
+  /// pass one and MUST read its verdict from there rather than from
+  /// [lastOrStatusForDebug]: since the hedge can have two of these running at
+  /// once, per-call state is the only state that can be trusted. It is optional
+  /// solely so a future one-shot caller cannot be broken by forgetting it.
   static Future<Map<String, dynamic>?> _callOpenRouterVision(
       Uint8List bytes, String apiKey, String model,
       {String? kbContext,
       String sceneContext = '',
-      Duration timeout = kAttemptTimeout}) async {
+      Duration timeout = kAttemptTimeout,
+      _OrAttempt? att}) async {
+    final a = att ?? _OrAttempt(index: -1, model: model, label: model);
     final base64Image = base64Encode(bytes);
     final dataUrl = 'data:image/jpeg;base64,$base64Image';
 
@@ -2331,8 +2549,11 @@ HOW TO USE IT:
         'reasoning': {'enabled': false},
     };
 
-    _lastOrStatus = null;
-    _lastOr429Kind = '';
+    // NOTE: there is deliberately no "reset the outcome" step here any more.
+    // [a] is created fresh per attempt, so there is nothing stale to clear — and
+    // the reset is exactly what made the old static fields unsafe to hedge with:
+    // the second request's reset would wipe the first request's classification
+    // while the loop was still relying on it.
     // ── PER-MODEL HEALTH INSTRUMENTATION ────────────────────────────────────
     // Recorded HERE rather than at the chain walk above, deliberately: the walk
     // sees only "null came back", which is the exact ambiguity that made the
@@ -2373,7 +2594,8 @@ HOW TO USE IT:
         // models listed in [_kPerModelAttemptTimeout].
       ).timeout(timeout);
 
-      _lastOrStatus = response.statusCode;
+      a.status = response.statusCode;
+      lastOrStatusForDebug = a.status;
       // Ledger before parsing. A malformed 200 body still spent the request, so
       // counting it here keeps the tally honest instead of only counting scans
       // that happened to come back well-formed.
@@ -2473,17 +2695,18 @@ HOW TO USE IT:
             d.contains('rate limited upstream') ||
             d.contains('upstream rate') ||
             d.contains('retry shortly');
-        _lastOr429Kind = upstreamNamed
+        a.kind429 = upstreamNamed
             ? 'upstream'
             : throttleNamed
                 ? 'throttle'
                 : (dailyNamed ? 'daily' : 'unknown');
-        if (_lastOr429Kind == 'daily') {
+        lastOr429KindForDebug = a.kind429;
+        if (a.kind429 == 'daily') {
           await _recordFreeUsage(served: false);
         }
         print('GeminiVision: ⚠ OpenRouter RATE LIMITED (429) on $model'
             '${detail.isEmpty ? '' : ' — $detail'}');
-        switch (_lastOr429Kind) {
+        switch (a.kind429) {
           case 'daily':
             print('GeminiVision:   DAILY allowance exhausted. It is '
                 'account-wide across all :free models, so the remaining models '
@@ -2512,7 +2735,7 @@ HOW TO USE IT:
         // repeating on one slug says that slug's sole provider is unreliable.
         health(
             false,
-            _lastOr429Kind == 'upstream'
+            a.kind429 == 'upstream'
                 ? ModelHealth.kFailUpstream
                 : ModelHealth.kFailQuota);
       } else if (response.statusCode == 401 || response.statusCode == 403) {
@@ -2558,7 +2781,7 @@ HOW TO USE IT:
       final m = e.toString().toLowerCase();
       // A throw AFTER the status was recorded as 200 means the body itself broke
       // the decoder, which is the unparseable case, not a transport fault.
-      final kind = _lastOrStatus == 200
+      final kind = a.status == 200
           ? ModelHealth.kFailUnparseable
           : (t.contains('timeout') || m.contains('timeout'))
           ? ModelHealth.kFailTimeout
@@ -3110,4 +3333,85 @@ FIELD RULES:
   }
 
   static bool get isConfigured => true;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ONE OPENROUTER ATTEMPT — its own outcome, not the class's
+//
+//  Added 2026-09-07 as the precondition for hedging (see _kOrHedgeAfter). Before
+//  this, `_callOpenRouterVision` recorded the HTTP status and the 429 kind in
+//  static fields on GeminiVision, and the Tier 2 loop read them back after the
+//  await to decide whether to abandon the key. That works only while exactly one
+//  request is ever in flight.
+//
+//  The hedge breaks that assumption on purpose: a second model is started while
+//  the first is still running. With static state the two would overwrite each
+//  other, and the specific damage is not a cosmetic wrong log line — it is the
+//  bug class already fixed once on 2026-09-05. The second call's `status = null`
+//  reset would erase a 429 the first call had classified as `upstream`, the
+//  key-wide test would then read a bare null (or worse, the OTHER model's daily
+//  429) and abandon a key that was never out of quota. So the outcome travels
+//  WITH the attempt.
+//
+//  Deliberately a plain mutable holder rather than something returned from the
+//  call: the classification has to survive both the success path (which returns
+//  a parsed map) and the timeout path (which returns null after the caller has
+//  already moved on), and both need the same fields.
+class _OrAttempt {
+  _OrAttempt({required this.index, required this.model, required this.label});
+
+  /// Position in the tier's `attempts` list, so the loop can mark a model that
+  /// was consumed as a hedge partner and not run it a second time.
+  final int index;
+  final String model;
+  final String label;
+
+  /// HTTP status of this attempt, or null if the request never completed
+  /// (timeout / socket error). See [GeminiVision.lastOrStatusForDebug] for why
+  /// no control flow may read the static mirror of this.
+  int? status;
+
+  /// `'daily'` (our allowance spent — retrying is pointless until the UTC
+  /// reset), `'throttle'` (our short-window cool-off — a minute fixes it),
+  /// `'upstream'` (the provider behind THIS ONE model is busy; our counters are
+  /// untouched, so the rest of the chain is still good), `'unknown'` (a 429
+  /// whose body named no counter — say so rather than inventing a cause), or
+  /// `''` (no 429).
+  ///
+  /// Four states and not a bool, precisely so "unknown" cannot masquerade as
+  /// "throttle" and send a field user off to retry a limit that will not clear.
+  String kind429 = '';
+
+  /// The parsed result, valid or not. Null covers every failure.
+  Map<String, dynamic>? result;
+
+  /// Set when the future has settled. Read by the race so it can tell "still in
+  /// flight" from "finished and failed" without awaiting again.
+  bool done = false;
+
+  /// Kept so the future can be awaited more than once (Dart futures are
+  /// single-completion but multi-listener, so this is safe) and so the race can
+  /// leave a losing attempt running rather than trying to cancel it.
+  Future<Map<String, dynamic>?>? future;
+
+  /// True when this attempt's failure means "this KEY is finished for now", as
+  /// opposed to "this MODEL didn't work".
+  ///
+  /// 403 is deliberately EXCLUDED. OpenRouter returns it for per-model and
+  /// per-provider conditions too — moderation-flagged input, or a data-policy
+  /// setting that rejects one specific provider — so treating it as key-wide
+  /// would abandon the remaining models over a fault that affected only one.
+  ///
+  /// An `'upstream'` 429 is excluded for the same reason, added 2026-09-05 after
+  /// a live scan on safetylens.in failed outright in 38,970ms. Gemma 4 31B (then
+  /// the Tier 2 lead) came back 429 "temporarily rate-limited upstream. Please
+  /// retry shortly" — a Google-side limit on that one model — and because EVERY
+  /// 429 counted as key-wide, MiniMax M3 and Nemotron were never tried and the
+  /// user got "All vision providers unavailable". A plain 429 still counts,
+  /// since our daily and per-minute counters really are account-wide and every
+  /// remaining `:free` model draws on them.
+  bool get failureIsKeyWide =>
+      (status == 429 && kind429 != 'upstream') ||
+      status == 401 || // key invalid or revoked
+      status == 402; // out of credit
 }

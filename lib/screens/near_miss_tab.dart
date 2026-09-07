@@ -1507,18 +1507,30 @@ If the text is already fine, return it unchanged.''';
     // ✅ FIXED: Removed backend reachability pre-check that always failed on Android
     // The actual GeminiVision call has its own retry logic and will fallback if needed
 
-    final steps = ['Uploaded', 'Analyzing image...', 'Classifying hazard...', 'Pre-filling form...'];
-    for (var i = 0; i < steps.length - 1; i++) {
-      setState(() => _step = steps[i]);
-      await Future.delayed(const Duration(milliseconds: 700));
-    }
+    // ── NO FAKE PROGRESS ──────────────────────────────────────────────────────
+    // This used to step through 'Uploaded' → 'Analyzing image...' →
+    // 'Classifying hazard...' with a 700ms `Future.delayed` between each, and
+    // then set 'Pre-filling form...' immediately before the real await.
+    //
+    // It was wrong twice over. It added 2.1 seconds to every single scan — real
+    // seconds an operator stood waiting at a hazard, spent animating work that
+    // had not started. And because the last caption was set BEFORE the analysis,
+    // the label then sat on "Pre-filling form..." for the whole genuine ~30s
+    // wait: at the exact moment the user most needed to know something was still
+    // happening, the screen claimed a step that would not begin for half a
+    // minute. That reads as a freeze, and a user who thinks the app has frozen
+    // closes it — which is how a near miss goes unreported.
+    //
+    // Progress is now [AnalysisProgress]'s job. Its captions come from the real
+    // tier boundaries in gemini_vision.dart and its elapsed-seconds counter is
+    // measured, not scripted, so a slow run is described as a slow run instead of
+    // being disguised as a finished one. `_step` is left empty deliberately —
+    // the overlay falls back to its own honest heading when it is.
     try {
-      setState(() => _step = steps.last);
+      setState(() => _step = '');
       // runType/plant/dept are passed so the ONE instrumentation point inside
       // GeminiVision can attribute this run to near-miss rather than to a
-      // hazard scan. The three 700ms fake-progress delays above are outside the
-      // measured window (the Stopwatch starts inside analyseImageBytes), so
-      // they do not inflate the reported response time.
+      // hazard scan.
       Map<String, dynamic>? result = kIsWeb
           ? await GeminiVision.analyseImageBytes(_imageBytes!,
               runType: AiRunLog.typeNearMissImage,
