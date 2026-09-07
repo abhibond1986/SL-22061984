@@ -706,6 +706,44 @@ void main() {
   ok(!HazardQuality.describesNormalStateOnly(hz(name: '', description: '')),
       'an empty row is not treated as normal-by-design');
 
+  // ── THE IDLE HOOK BLOCK ────────────────────────────────────────────────────
+  // Regression for the gap found in the 2026-09-07 15:05 live scan: "Hanging
+  // crane hook block ..." was filed at LOW on a build that already ran this
+  // audit, because every cue in the lifting group named the LOAD and an idle
+  // hook carries none.
+  ok(
+      HazardQuality.describesNormalStateOnly(hz(
+          name: 'Hanging crane hook block',
+          description: 'Visible: the crane hook block hangs at height over the '
+              'bay with nothing attached to it.')),
+      'an idle hook block parked at height is normal by design');
+  ok(
+      HazardQuality.describesNormalStateOnly(hz(
+          name: 'Empty hook suspended above the floor',
+          description: 'Visible: the bottom block of the hoist is suspended '
+              'above the shop floor.')),
+      'an empty suspended hook is not a finding on its own');
+  // ...and the veto still wins, both for a defect on the hook and for a person
+  // under it. These are the two cases the widened cue list must NOT swallow.
+  ok(
+      !HazardQuality.describesNormalStateOnly(hz(
+          name: 'Hook block safety latch missing',
+          description: 'Visible: the safety latch on the crane hook block is '
+              'missing.')),
+      'a defect on the hook block survives the widened cue list');
+  ok(
+      !HazardQuality.describesNormalStateOnly(hz(
+          name: 'Hook block over occupied walkway',
+          description: 'Visible: a worker is passing directly beneath the '
+              'hanging hook block.')),
+      'a person beneath the hook block survives the widened cue list');
+  ok(
+      !HazardQuality.describesNormalStateOnly(hz(
+          name: 'Frayed wire rope on hoist drum',
+          description: 'Visible: the wire rope hoist rope is frayed where it '
+              'enters the rope drum.')),
+      'a frayed rope on the hoist is a real defect, not a design element');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

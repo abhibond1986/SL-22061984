@@ -806,6 +806,19 @@ class HazardQuality {
       'suspended material', 'suspended from the hook', 'suspended from hook',
       'lifting magnet', 'magnet suspended', 'grab suspended', 'ladle suspended',
       'load at height', 'elevated load', 'load overhead', 'overhead load',
+      // The hook itself, loaded or empty. ★ ADDED 2026-09-07 after a live scan
+      // filed "Hanging crane hook block ..." at LOW on a build that ALREADY had
+      // this rule: every cue above names the LOAD, and an idle hook block carries
+      // none. A hook block hangs from the rope whether or not anything is on it —
+      // parking it at height is where it is supposed to be, not a finding. Note
+      // 'block' is safe to use here: the veto lists 'blocked', whose suffix
+      // pattern cannot match the bare noun.
+      'hook block', 'hook blocks', 'crane hook', 'lifting hook', 'hoist hook',
+      'hoist block', 'load block', 'bottom block', 'sheave block',
+      'hanging hook', 'hook hanging', 'hook suspended', 'suspended hook',
+      'hook at height', 'hook lowered', 'hook raised', 'empty hook',
+      'unloaded hook', 'bare hook', 'idle hook', 'hook assembly',
+      'hook and block', 'wire rope hoist', 'rope drum',
       // Being at height / near plant, offered as a hazard in itself.
       'working at height', 'work at height', 'at elevated height',
       'height of the structure', 'structure at height', 'elevated structure',

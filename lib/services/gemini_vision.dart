@@ -17,24 +17,39 @@
 //            best of ~19s, and on one scan it was the only tier that answered.
 //            Full evidence at its banner in analyseImageBytes.
 //   TIER 2 — OpenRouter free vision models, in order:
-//     1. Gemma 4 31B dense      — lead as of 2026-09-05. Free, thinking off by
-//                                 default, 262k ctx. Added as the free stand-in
-//                                 for a request for qwen-2.5-vl-7b-instruct,
-//                                 which has NO serving endpoints and no free
-//                                 Qwen VL equivalent — see _orGemma31bModel.
-//                                 UNMEASURED on this prompt so far.
-//     2. MiniMax M3 (:free)     — lead from 2026-09-03 to 2026-09-05. Demoted for
-//                                 having no margin: best leg 19,021ms vs a 20s cap.
-//     3. Nemotron 30B Omni      — highest capacity, but a REASONING model
-//                                 and by far the slowest; demoted from first
-//                                 place on 2026-08-17 after it cost a measured
-//                                 45s timeout on a live scan
+//     1. MiniMax M3 (:free)     — LEAD AGAIN as of 2026-09-07. GMICloud endpoint,
+//                                 99.9%/99.92% uptime, reasoning off by default.
+//                                 The only model in this tier that has ever
+//                                 actually answered a scan: 19.0s / 22s / 28.9s /
+//                                 36.5s measured. Keeps its 45s cap.
+//     2. Dots3-Note Preview     — back in the chain 2026-09-07 after leaving it on
+//                                 2026-08-17. AtlasCloud (a THIRD provider, so the
+//                                 tier finally has real diversity), 99.99% uptime
+//                                 both windows, MoE 16B active of 280B, 512k ctx,
+//                                 `response_format` supported, and reasoning has NO
+//                                 `default_enabled` — so it is not the Inkling /
+//                                 Nemotron failure mode. UNMEASURED on this prompt.
+//                                 It fits now only because the chain is 2 deep; it
+//                                 was budget-unreachable when it was 3rd of 3.
+//
+//   ⛔ REMOVED FROM THIS TIER ON 2026-09-07, both still pinnable from the admin
+//      dropdown (see groqVisionModels) so nothing becomes unreachable:
+//     • Gemma 4 31B dense — led from 2026-09-05. Its ONLY serving endpoint is
+//       **Google AI Studio**, i.e. the same upstream Tier 1 calls directly. It was
+//       therefore never an independent fallback: by the time Tier 2 runs, Tier 1 has
+//       already spent or been refused by that exact free-tier pool, so the model
+//       answered "temporarily rate-limited upstream" on every scan it was asked. A
+//       fallback that shares the failed tier's provider is not a fallback. Full
+//       evidence at _orGemma31bModel — read it before proposing any Gemma slug,
+//       because gemma-4-26b-a4b:free has the same single endpoint.
+//     • Nemotron 30B Omni — endpoint status -2 with 84.9%/90.7% uptime, and
+//       `reasoning.default_enabled: true`, which is the exact property that
+//       disqualified both Inkling models. It never won a scan. Tier 3 (Nara) is the
+//       backstop it was pretending to be.
 //     (Nemotron Nano 12B VL held position 1 until 2026-09-03, when it was found
 //      to have been REMOVED from OpenRouter entirely — see _orMinimaxModel.
-//      Gemma 4 26B and Dots3-Note Preview left the runtime chain on 2026-08-17
-//      and are still pinnable from the admin dropdown, see groqVisionModels.
-//      Those two are valid image models; they were simply unreachable inside the
-//      40s chain budget.)
+//      Gemma 4 26B is still pinnable too, but see the Google AI Studio note above:
+//      pinning it during a Google outage cannot work either.)
 //            DEMOTED FROM TIER 1 on 2026-09-03. Its role is now the one Gemini
 //            used to have: a different account that can still answer when the
 //            tier ahead of it is out of daily allowance.
@@ -173,7 +188,40 @@ class GeminiVision {
   static const String _orNemotronModel = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
   static const String _orGemmaModel    = 'google/gemma-4-26b-a4b-it:free';
 
-  // ── Gemma 4 31B — TIER 2 LEAD as of 2026-09-05 ─────────────────────────────
+  // ── Gemma 4 31B — REMOVED FROM THE TIER 2 CHAIN on 2026-09-07 ──────────────
+  //
+  // ⛔ THE REASON, AND IT DISQUALIFIES EVERY FREE GEMMA SLUG, NOT JUST THIS ONE.
+  // `google/gemma-4-31b-it:free` has exactly ONE serving endpoint and it is
+  // **Google AI Studio** — the same upstream provider [GeminiDirectVision] calls
+  // directly in Tier 1. Verified 2026-09-07 against
+  // `/api/v1/models/google/gemma-4-31b-it:free/endpoints`: 1 endpoint,
+  // provider_name 'Google AI Studio', tag 'google-ai-studio', prompt price 0.
+  // `google/gemma-4-26b-a4b-it:free` ([_orGemmaModel]) returns the SAME single
+  // endpoint, so it is not an alternative — it is the same dependency renamed.
+  //
+  // Tier 2 exists to answer when the tier ahead of it could not. This model could
+  // not do that even in principle: by the time it runs, Tier 1 has already spent
+  // or been refused by that identical free-tier pool. That is the whole content of
+  // the `429 … temporarily rate-limited upstream` the admin reported — it is
+  // GOOGLE's limit, already consumed by our own three direct Gemini calls a second
+  // earlier. The live trace makes it unambiguous: Tier 1 took a 503 from
+  // generativelanguage.googleapis.com, and Tier 2 then asked Google the same
+  // question through a middleman and was refused. It cost a wasted round trip on
+  // EVERY scan and could never have paid off.
+  //
+  // The 429 handling itself was never wrong — `kind429 == 'upstream'` correctly
+  // let the chain walk on, which is why scans still succeeded via MiniMax. The
+  // defect was one level up, in the chain's composition: provider diversity was
+  // assumed from the model NAME instead of checked against the endpoint list.
+  // ⚠ When adding any model to this tier, check `/endpoints` and confirm its
+  // provider is not already used by another tier. A different model family on the
+  // same provider buys nothing.
+  //
+  // Kept as a constant, and kept in [groqVisionModels], because an admin may still
+  // pin it deliberately — and a pin bypasses the chain, so it is then the only
+  // model asked and the Tier 1 collision cannot arise.
+  //
+  // ── Historical notes from when it led, retained for provenance ──────────────
   //
   // NOT the same model as [_orGemmaModel] above, despite the near-identical
   // name: that one is `gemma-4-26b-a4b-it` — an MoE with only ~4B ACTIVE
@@ -198,12 +246,25 @@ class GeminiVision {
   // after a measured 45s timeout. It is still listed in
   // [_kReasoningOptOutModels] as belt-and-braces; see the note there.
   //
-  // ⚠ REJECTED CANDIDATES, recorded so they are not re-proposed: the only other
-  // free image-capable models on OpenRouter not already referenced in this file
-  // are `thinkingmachines/inkling:free` and `inkling-small:free`. Both are live
-  // and free, but both are `default_enabled: TRUE` with `default_effort: 'high'`
-  // — reasoning ON at high effort by default, i.e. the Nemotron failure mode by
-  // construction and worse. Neither belongs in front of a shop-floor scan.
+  // ⚠ REJECTED CANDIDATES, recorded so they are not re-proposed. A full sweep on
+  // 2026-09-07 found exactly EIGHT free image-capable models on OpenRouter (of 430
+  // total), so this list is the whole field, not a sample:
+  //   • `thinkingmachines/inkling:free`, `inkling-small:free` — live and free, but
+  //     both `default_enabled: TRUE` with `default_effort: 'high'`, i.e. reasoning
+  //     ON at high effort by default: the Nemotron failure mode by construction and
+  //     worse. Neither belongs in front of a shop-floor scan.
+  //   • `nvidia/nemotron-3.5-content-safety:free` — a 4B GUARDRAIL/moderation
+  //     classifier fine-tuned from Gemma-3-4B, not a general VLM. It would not
+  //     return a hazard schema at all.
+  //   • `google/gemma-4-26b-a4b-it:free` — same single Google AI Studio endpoint as
+  //     this model. See the removal note above.
+  //   • `nvidia/nemotron-3-nano-omni-…-reasoning:free` — retired from the chain the
+  //     same day; endpoint status -2, ~85% uptime, reasoning on by default.
+  // That leaves [_orMinimaxModel] and [_orDotsModel], which are the two now in the
+  // chain. There is no untried free vision model in reserve — so if BOTH of those
+  // endpoints degrade, the answer is Tier 3 or a paid model, and paid is excluded by
+  // the standing constraint in the file header. Do not go looking for a fifth
+  // option; there isn't one.
   //
   // ⚠ THIS MODEL IS UNMEASURED on this prompt. It leads because the incumbent is
   // weak, not because it is known fast: MiniMax M3's BEST measured leg was
@@ -225,8 +286,35 @@ class GeminiVision {
   // was not the diagnosis here. Check the provider's published tokens/sec before
   // assuming a queue.
   static const String _orGemma31bModel = 'google/gemma-4-31b-it:free';
+  // ── Dots3-Note Preview — TIER 2 POSITION 2 as of 2026-09-07 ────────────────
+  //
   // Mixture-of-experts, 512k context, accepts image input. Confirmed against
   // OpenRouter's /api/v1/models listing rather than assumed from the name.
+  //
+  // It left the runtime chain on 2026-08-17 for a reason that no longer applies:
+  // as 3rd of 3 it could not be reached inside [_kOrChainBudget]. The chain is now
+  // 2 deep, so position 2 is a slot that actually runs — it is the hedge partner
+  // started at [_kOrHedgeAfter].
+  //
+  // WHY IT EARNS A CHAIN SLOT (all verified 2026-09-07, both required checks):
+  //   • `/endpoints` → 1 endpoint, provider **AtlasCloud**, prompt price 0. That is
+  //     a THIRD provider, independent of Google AI Studio (Tier 1, and the reason
+  //     [_orGemma31bModel] was removed) and of GMICloud ([_orMinimaxModel]). This is
+  //     the property the tier was missing, and the only one that makes it a genuine
+  //     fallback rather than a second guess at the same machine.
+  //   • uptime 99.99% over both the 30m and 1d windows — the best of any free vision
+  //     endpoint on OpenRouter, MiniMax's GMICloud included.
+  //   • `reasoning: {mandatory: false}` with NO `default_enabled` key, so thinking is
+  //     off unless asked. This is the test both Inkling models fail and it is why
+  //     this one is admissible where they are not.
+  //   • `response_format` and `structured_outputs` both in `supported_parameters`,
+  //     so the JSON-shape work this file wants is available on it.
+  //
+  // ⚠ UNMEASURED on this prompt. It is position 2, not lead, precisely because of
+  // that: [_orMinimaxModel] has four timed successes behind it and this has none.
+  // Do not promote it, and do not tune any timeout from it, until ModelHealth shows
+  // real successes — 16B active params argues it should be fast, but that is an
+  // argument, not a measurement.
   static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
 
   /// Models whose request body should carry `reasoning: {enabled: false}`.
@@ -241,16 +329,26 @@ class GeminiVision {
   /// tier down. Membership must be earned per model by checking `reasoning
   /// .mandatory == false` in https://openrouter.ai/api/v1/models first.
   ///
-  /// [_orGemma31bModel] joined on 2026-09-05 and it is the WEAKER case of the
-  /// two: unlike Nemotron it is already `default_enabled: false`, so the field
-  /// changes nothing today. It earns membership under the rule above —
-  /// `mandatory: false`, and `reasoning` is in its `supported_parameters`, so the
-  /// field cannot 400 — and it is here because this model now LEADS the chain,
-  /// where a silent upstream flip of that default would put a thinking monologue
-  /// in front of the JSON on every scan. Being explicit costs one field.
+  /// [_orGemma31bModel] joined on 2026-09-05 and it is the WEAKER case: unlike
+  /// Nemotron it is already `default_enabled: false`, so the field changes nothing
+  /// today. It earns membership under the rule above — `mandatory: false`, and
+  /// `reasoning` is in its `supported_parameters`, so the field cannot 400.
+  ///
+  /// [_orDotsModel] joined 2026-09-07 on the same footing, and for the same reason
+  /// Gemma was added when it led: it is now a live chain member, and a silent
+  /// upstream flip of `default_enabled` would put a thinking monologue in front of
+  /// the JSON on every scan. Verified admissible: `mandatory: false`, no
+  /// `default_enabled`, `reasoning` present in `supported_parameters`.
+  ///
+  /// ⚠ Nemotron and Gemma 31B STAY in this set even though both left the chain on
+  /// 2026-09-07. They remain pinnable from [groqVisionModels], and a pin sends the
+  /// slug through this same request builder — so removing them here would quietly
+  /// re-expose the 45s reasoning stall to the one admin who pinned Nemotron. A slug
+  /// leaves this set only when it leaves the dropdown too.
   static const Set<String> _kReasoningOptOutModels = {
     _orNemotronModel,
     _orGemma31bModel,
+    _orDotsModel,
   };
 
   // Rate-limiting between analyses (kept small — only affects back-to-back scans)
@@ -364,6 +462,16 @@ class GeminiVision {
     // SKIPPED MiniMax entirely whenever the lead burned more than 15s. That is
     // the opposite of the intent, and it is the trap to check first whenever a
     // number in this map goes up.
+    // ★ 2026-09-07 (second change of the day): this model is now the tier LEAD, so
+    // this cap is the first thing a scan can spend, not the second. Two consequences
+    // worth knowing before anyone "tidies" it downwards. (1) A scan where MiniMax
+    // stalls now costs 45s at the front of Tier 2 rather than after a fast failure —
+    // mitigated by [_kOrHedgeAfter], which starts Dots3-Note at 10s, so the tier can
+    // still answer at ~10-30s while the lead runs on. (2) The measured evidence for
+    // 45s got STRONGER, not weaker: the 2026-09-07 15:05 scan had MiniMax answering
+    // in 36,503ms — 7.5s further into the cap than the 28,929ms that justified
+    // raising it from 35s that morning. A 35s cap would have discarded that scan's
+    // only working provider. Do not lower this without a distribution, not a sample.
     _orMinimaxModel: Duration(seconds: 45),
   };
 
@@ -397,11 +505,20 @@ class GeminiVision {
   // is now PREDICTIVE: an attempt only starts if `elapsed + its own timeout` fits
   // inside this ceiling.
   //
-  // 70s = the 20s lead attempt plus the 45s MiniMax attempt plus 5s of slack, so
-  // the intended two-attempt sequence always fits and a third only runs when the
-  // first two failed FAST. Tier 3 (Nara, up to 45s) and the offline fallback are
-  // still downstream, so this is not the whole scan's budget — it is the most this
-  // tier may spend before handing over.
+  // 70s = the 45s MiniMax attempt plus the 20s second attempt plus 5s of slack, so
+  // the intended two-attempt sequence always fits. Tier 3 (Nara, up to 45s) and the
+  // offline fallback are still downstream, so this is not the whole scan's budget —
+  // it is the most this tier may spend before handing over.
+  //
+  // ✎ 2026-09-07: the two terms SWAPPED PLACES when the chain was rebuilt. The 45s
+  // is now the LEAD's cap (MiniMax) and the 20s belongs to the position-2 model
+  // (Dots3-Note), where it used to be the other way round. The sum is unchanged, so
+  // this constant did not have to move — but the two gates now bind differently:
+  // the lead is checked at `0s + 45s ≤ 70s` (always passes) and the hedge partner at
+  // `~10s + 20s ≤ 70s` (also always passes). With only two models there is no third
+  // attempt for the predictive gate to skip, so a ceiling breach is no longer
+  // reachable by adding attempts — only by raising a cap. Re-derive from
+  // `lead cap + second cap + slack` if either changes.
   //
   // ★ 2026-09-07: 60s → 70s, forced by MiniMax's cap going 35s → 45s. This
   // constant is NOT independent of [_kPerModelAttemptTimeout]: the gate skips an
@@ -420,6 +537,160 @@ class GeminiVision {
   /// How long a single OpenRouter attempt at [model] may run.
   static Duration _attemptTimeoutFor(String model) =>
       _kPerModelAttemptTimeout[model] ?? kAttemptTimeout;
+
+  // ── PER-MODEL UPSTREAM-429 COOLDOWN (2026-09-07) ───────────────────────────
+  //
+  // An `upstream` 429 means the provider serving ONE slug is busy while our own
+  // account counters are untouched (see the classifier in _callOpenRouterVision).
+  // The chain correctly walks past it — but before this, it walked past it AGAIN on
+  // the very next scan, and the next, re-paying a round trip to re-learn a verdict
+  // the provider had already given. That is what made
+  // `google/gemma-4-31b-it:free` cost a wasted hop on every single scan for two
+  // days: the classification was right and nothing remembered it.
+  //
+  // This is the same shape as [GeminiDirectVision]'s tier cooldown, at a finer
+  // grain: per SLUG rather than per tier, because an upstream 429 is by definition
+  // a statement about one model's provider and says nothing about the others.
+  //
+  // ⚠ THE GUARD THAT MATTERS MOST — a cooldown must never empty the chain.
+  // Tier 2 is only two models deep now, so a naive filter could skip both and hand
+  // the scan to Tier 3 or the offline checklist, which reports "no hazards found"
+  // on a shop floor. A possibly-throttled model is strictly better than that: it
+  // costs one round trip and might work, because a 60s-old upstream throttle
+  // usually has cleared. So when every candidate is cooled, ALL cooldowns are
+  // ignored for that scan. Skipping work is an optimisation; having no analysis is
+  // a safety failure, and the two must never be traded the wrong way round.
+  //
+  // Persisted, for the reason spelled out on the Gemini cooldown: this is a Flutter
+  // *web* app, so a static field lives only as long as the tab, and an operator who
+  // reloads safetylens.in between photographs would reset it every time.
+  //
+  // 60s, not the Gemini tier's 90s, because OpenRouter's own wording for this case
+  // is "Please retry shortly" — a short provider-side burst limit, not the
+  // multi-minute provider outage the Gemini number was chosen for.
+  static const String _kOrUpstreamCooldownPref = 'or_upstream_cooldown_v1';
+  static const Duration _kOrUpstreamCooldown = Duration(seconds: 60);
+
+  /// Slug → epoch ms at which its cooldown expires. Expired, malformed and
+  /// implausible entries are dropped on read, and the pref is rewritten when any
+  /// were, so the map cannot grow stale entries for slugs that left the chain.
+  ///
+  /// The implausible-deadline check is the same safety valve as the Gemini tier's:
+  /// a clock change or a hand-edited pref must not be able to park a model
+  /// indefinitely. Anything further out than twice the window is not trusted.
+  static Future<Map<String, int>> _loadOrCooldowns() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kOrUpstreamCooldownPref);
+      if (raw == null || raw.isEmpty) return const {};
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const {};
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final maxAhead = now + _kOrUpstreamCooldown.inMilliseconds * 2;
+      final out = <String, int>{};
+      var repaired = false;
+      decoded.forEach((k, v) {
+        final ms = v is int ? v : int.tryParse('$v');
+        if (ms == null || ms <= now) {
+          // Malformed or simply expired — both just leave the map.
+          repaired = true;
+          return;
+        }
+        if (ms > maxAhead) {
+          print('GeminiVision: ⚠ cooldown for $k expires implausibly far out '
+              '(${DateTime.fromMillisecondsSinceEpoch(ms)}) — cleared rather '
+              'than trusted');
+          repaired = true;
+          return;
+        }
+        out['$k'] = ms;
+      });
+      if (repaired) await _saveOrCooldowns(out);
+      return out;
+    } catch (_) {
+      // A cooldown is an optimisation. If its storage is unreadable the right
+      // outcome is to attempt every model, never to fail the scan.
+      return const {};
+    }
+  }
+
+  static Future<void> _saveOrCooldowns(Map<String, int> m) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (m.isEmpty) {
+        await prefs.remove(_kOrUpstreamCooldownPref);
+      } else {
+        await prefs.setString(_kOrUpstreamCooldownPref, jsonEncode(m));
+      }
+    } catch (_) {/* see _loadOrCooldowns */}
+  }
+
+  /// Parks [model] after its provider returned an upstream 429.
+  static Future<void> _markOrModelUpstreamBusy(String model) async {
+    final cur = Map<String, int>.from(await _loadOrCooldowns());
+    cur[model] = DateTime.now().add(_kOrUpstreamCooldown).millisecondsSinceEpoch;
+    await _saveOrCooldowns(cur);
+    print('GeminiVision: ⏸ $model parked for '
+        '${_kOrUpstreamCooldown.inSeconds}s — its provider is throttling, so '
+        'the next scan skips straight past it instead of re-paying this hop');
+  }
+
+  /// Releases [model]'s parking slot, called on a successful answer from it.
+  ///
+  /// Cheap no-op in the common case: reads the pref, finds nothing, returns.
+  static Future<void> _clearOrModelCooldown(String model) async {
+    final cur = await _loadOrCooldowns();
+    if (!cur.containsKey(model)) return;
+    final next = Map<String, int>.from(cur)..remove(model);
+    await _saveOrCooldowns(next);
+    print('GeminiVision: ▶ $model answered — upstream cooldown released early');
+  }
+
+  /// Clears every per-model cooldown. For the admin panel's diagnostics.
+  static Future<void> clearOpenRouterCooldowns() async =>
+      _saveOrCooldowns(const {});
+
+  /// Seconds of cooldown left on [model], or 0 when it is free to try.
+  static Future<int> orCooldownSecondsRemaining(String model) async {
+    final until = (await _loadOrCooldowns())[model];
+    if (until == null) return 0;
+    final left = until - DateTime.now().millisecondsSinceEpoch;
+    return left <= 0 ? 0 : (left / 1000).ceil();
+  }
+
+  /// Drops cooled-down models from [chain], unless doing so would leave nothing.
+  ///
+  /// [pinned] disables the filter entirely: an admin pin is an explicit
+  /// instruction to use one model and nothing else, so silently skipping it would
+  /// turn a deliberate choice into no analysis at all.
+  static Future<List<List<String>>> _applyOrCooldowns(
+      List<List<String>> chain, {required bool pinned}) async {
+    if (pinned || chain.length < 2) return chain;
+    final until = await _loadOrCooldowns();
+    if (until.isEmpty) return chain;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final kept = <List<String>>[];
+    final skipped = <String>[];
+    for (final a in chain) {
+      final t = until[a[0]];
+      if (t != null && t > now) {
+        skipped.add('${a[1]} (${((t - now) / 1000).ceil()}s left)');
+      } else {
+        kept.add(a);
+      }
+    }
+    if (skipped.isEmpty) return chain;
+    if (kept.isEmpty) {
+      // See the banner: never trade "no analysis" for "no wasted request".
+      print('GeminiVision: ⚠ every Tier 2 model is in upstream cooldown '
+          '(${skipped.join(', ')}) — IGNORING all cooldowns and trying the full '
+          'chain, because a throttled attempt still beats no analysis');
+      return chain;
+    }
+    print('GeminiVision: ⏭ Skipping ${skipped.length} Tier 2 model(s) in '
+        'upstream cooldown: ${skipped.join(', ')}');
+    return kept;
+  }
 
   // ── CONSISTENCY CACHE ──────────────────────────────────────────────────────
   // Keyed by image content hash so a repeat scan of the SAME photo returns the
@@ -1098,7 +1369,7 @@ HOW TO USE IT:
         // the chain. `pinned` is resolved above, before Tier 0 — it is not read
         // again here, because the pin decides which TIER runs and two reads
         // could disagree.
-        final List<List<String>> attempts = pinIsOpenRouter
+        final List<List<String>> chainAttempts = pinIsOpenRouter
             ? [[pinned, 'pinned model']]
             // ORDER = FASTEST FIRST. Superseded the 2026-08-15 admin request
             // that put Nemotron 30B Omni first, on measured evidence: a live
@@ -1144,6 +1415,37 @@ HOW TO USE IT:
             // 1, MiniMax M3 drops to 2, Nemotron to 3. Everything here is still
             // ':free' — that is a hard requirement, see the file header.
             //
+            // ★★ CHAIN REBUILT 2026-09-07 ON ENDPOINT EVIDENCE. Now TWO models:
+            // MiniMax M3 leads, Dots3-Note Preview is position 2. Gemma 4 31B and
+            // Nemotron 30B both left the chain.
+            //
+            // THE PRINCIPLE THIS TIER HAD BEEN MISSING — provider diversity, not
+            // model diversity. Every reorder above chose models by family, speed or
+            // capacity, and none checked WHO SERVES THEM. The result was a "fallback"
+            // tier whose lead ran on Google AI Studio, the same upstream Tier 1 had
+            // just failed against, so its `429 … rate-limited upstream` was Google
+            // refusing a pool our own Gemini calls had already drained. The three
+            // slots now resolve to three different companies:
+            //   Tier 1 Gemini  → Google AI Studio
+            //   Tier 2 lead    → GMICloud      (MiniMax M3)
+            //   Tier 2 pos. 2  → AtlasCloud    (Dots3-Note)
+            // Before adding anything here, run
+            // `/api/v1/models/<slug>/endpoints` and confirm the provider is not
+            // already in that list. A new family on an existing provider adds a
+            // round trip and no resilience.
+            //
+            // MiniMax leads on the only evidence that counts: it is the sole model in
+            // this tier's history to return a usable answer (19.0s / 22s / 28.9s /
+            // 36.5s), and its GMICloud endpoint is 99.9%/99.92% up. It keeps the 45s
+            // cap in [_kPerModelAttemptTimeout] — that cap is now on the LEAD, so
+            // re-check [_kOrChainHardCeiling] before touching it (0s + 45s ≤ 70s
+            // holds; the hedge partner starts at 10s and needs 10s + 20s ≤ 70s).
+            //
+            // Dots3-Note is UNMEASURED and sits second for that reason alone. It is
+            // reachable now only because the chain shrank: the 2026-08-17 note above
+            // is still correct that positions 3-4 never ran, which is exactly why a
+            // 2-model chain is worth more than a 4-model one.
+            //
             // This replaced an admin request for `qwen/qwen-2.5-vl-7b-instruct`,
             // which has zero serving endpoints and could only ever have failed.
             // No free Qwen VL exists on OpenRouter, so the substitute is a
@@ -1162,10 +1464,14 @@ HOW TO USE IT:
             // runs. Nemotron took it because it was already the least likely to
             // answer in time — the same reason it lost first place in 2026-08.
             : const [
-                [_orGemma31bModel, 'Gemma 4 31B dense (primary, free)'],
-                [_orMinimaxModel,  'MiniMax M3 (free)'],
-                [_orNemotronModel, 'Nemotron 30B Omni (fallback — highest capacity, slowest)'],
+                [_orMinimaxModel, 'MiniMax M3 (primary, free — GMICloud)'],
+                [_orDotsModel,    'Dots3-Note Preview (fallback, free — AtlasCloud)'],
               ];
+        // Drop any slug whose provider told us it was throttling within the last
+        // minute — see [_applyOrCooldowns], which refuses to empty the chain and
+        // leaves an admin pin alone.
+        final attempts =
+            await _applyOrCooldowns(chainAttempts, pinned: pinIsOpenRouter);
         // OpenRouter spend is timed separately from the run stopwatch. See
         // [_kOrChainBudget] for why setup time — including Tier 1's Gemini leg —
         // must not count against it.
@@ -1337,6 +1643,14 @@ HOW TO USE IT:
               orResult['_isOnline'] = true;
               _lastCallTime = DateTime.now();
               _isAnalyzing = false;
+              // A model that just answered is demonstrably not throttled, so
+              // release its parking slot. This normally cannot fire — a parked
+              // slug is filtered out before it is ever called — EXCEPT in the one
+              // case that matters: [_applyOrCooldowns] ignored every cooldown
+              // because honouring them would have emptied the chain. Without this
+              // line that safety override would keep re-triggering for a full
+              // minute after the provider had already recovered.
+              await _clearOrModelCooldown(winner.model);
               // Cache so the SAME image always returns THIS result.
               await _writeCachedResult(imgHash, orResult);
               // The only SUCCESS path: a real provider returned hazards for this
@@ -1700,22 +2014,32 @@ HOW TO USE IT:
     // Label rewritten 2026-09-05 to the ACTUAL tier order. It previously read
     // "Groq Qwen → MiniMax M3 → Nemotron 30B → Gemini", which had been wrong
     // since the 2026-09-03 reorder promoted Gemini ahead of the OpenRouter chain.
-    {'id': 'auto', 'name': 'Auto (Groq Qwen → Gemini → Gemma 4 31B → MiniMax M3 → Nemotron 30B) — recommended'},
+    // Label rewritten again 2026-09-07 for the 2-model Tier 2. Keep it in step with
+    // the `attempts` list in analyseImageBytes — this string has drifted twice.
+    {'id': 'auto', 'name': 'Auto (Groq Qwen → Gemini → MiniMax M3 → Dots3-Note) — recommended'},
     // Tier 0. Pinning it means Groq ONLY — no OpenRouter, no Gemini, no Nara —
     // so a Groq outage becomes a total loss of hazard analysis. 'auto' is the
     // right answer for almost everyone.
     {'id': _groqQwenVisionModel, 'name': 'Qwen 3.6 27B on Groq (primary, separate quota)'},
-    // Tier 2 lead since 2026-09-05. Named "31B dense" to keep it apart from the
-    // 26B-a4b MoE entry below — the two slugs differ by four characters.
-    {'id': _orGemma31bModel, 'name': 'Gemma 4 31B dense (free, OpenRouter primary)'},
-    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter fallback)'},
-    {'id': _orGemmaModel,    'name': 'Gemma 4 26B-a4b MoE (free, slower)'},
-    {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, 512k ctx)'},
-    // Listed last and labelled honestly: pinning this one makes every scan wait
-    // on a reasoning model that measured a 45s timeout on 2026-08-17. It is in
-    // the list because higher capacity is occasionally worth the wait, but an
-    // admin choosing it should know what it costs.
-    {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (highest capacity, SLOW — often times out)'},
+    // ── The two models actually in the Tier 2 chain ─────────────────────────
+    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter primary)'},
+    {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, OpenRouter fallback, 512k ctx)'},
+    // ── Pinnable but NOT in the auto chain as of 2026-09-07 ─────────────────
+    // Labels say so out loud. An admin comparing this dropdown against the
+    // "Model reliability" table needs to know why these show no recent attempts:
+    // it is not that they are broken, it is that nothing calls them.
+    //
+    // Both Gemma entries resolve to a SINGLE Google AI Studio endpoint — the same
+    // upstream as Tier 1 — so pinning either during a Google outage or quota block
+    // cannot work, and a pin disables the fallback chain that would have saved the
+    // scan. That is the worst combination in this list; the labels warn accordingly.
+    {'id': _orGemma31bModel, 'name': 'Gemma 4 31B dense (free — not in auto; Google AI Studio, same quota as Gemini)'},
+    {'id': _orGemmaModel,    'name': 'Gemma 4 26B-a4b MoE (free — not in auto; Google AI Studio, same quota as Gemini)'},
+    // Retired from the chain 2026-09-07: endpoint status -2 at ~85% uptime and
+    // reasoning ON by default. Kept pinnable because higher capacity is very
+    // occasionally worth the wait, but pinning it makes every scan wait on a
+    // reasoning model that measured a 45s timeout on 2026-08-17.
+    {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (free — not in auto; highest capacity, SLOW, ~85% uptime)'},
   ];
 
   /// The image-analysis chain in the order it is actually attempted, for display.
@@ -1751,34 +2075,39 @@ HOW TO USE IT:
             'model': m,
             'provider': 'gemini',
             'tier': '1',
-            'note': 'Google AI Studio key, 15s each. The tier bails on the '
-                'FIRST key-wide block, so later entries may show no attempts.',
+            'note': 'Google AI Studio key, 8s each (cut from 15s on 2026-09-07). '
+                'The tier bails on the FIRST key-wide block, so later entries may '
+                'show no attempts — and after a TOTAL failure the whole tier is '
+                'parked for 90s, so a scan may show no Gemini attempts at all.',
           },
-        {
-          'model': _orGemma31bModel,
-          'provider': 'openrouter',
-          'tier': '2',
-          'note': 'Free chain lead, ${kAttemptTimeout.inSeconds}s cap. If it is '
-              'still silent after ${_kOrHedgeAfter.inSeconds}s the next model '
-              'starts alongside it, so both may show an attempt for one scan.',
-        },
+        // Tier 2 rebuilt 2026-09-07 — two models on two different providers.
+        // Gemma 4 31B and Nemotron 30B are deliberately ABSENT: they are still
+        // pinnable, but they are no longer attempted automatically, and this list is
+        // what lets the panel mark their accumulated health rows as no-longer-in-use
+        // rather than reporting them as failing models.
         {
           'model': _orMinimaxModel,
           'provider': 'openrouter',
           'tier': '2',
-          'note': 'Free chain, '
-              '${_attemptTimeoutFor(_orMinimaxModel).inSeconds}s cap — raised '
+          'note': 'Free chain LEAD (GMICloud), '
+              '${_attemptTimeoutFor(_orMinimaxModel).inSeconds}s cap — long '
               'because it generates at ~47 tokens/sec and the hazard schema is '
-              '1,100-1,400 tokens. Usually the hedge partner rather than a '
-              'sequential fallback, so its attempts often overlap the lead\'s.',
+              '1,100-1,400 tokens. The only model in this tier with timed '
+              'successes behind it. If it is still silent after '
+              '${_kOrHedgeAfter.inSeconds}s the next model starts alongside it, '
+              'so both may show an attempt for one scan.',
         },
         {
-          'model': _orNemotronModel,
+          'model': _orDotsModel,
           'provider': 'openrouter',
           'tier': '2',
-          'note': 'Free chain last resort — highest capacity, slowest; often '
-              'skipped when the tier\'s '
-              '${_kOrChainHardCeiling.inSeconds}s ceiling is already spent.',
+          'note': 'Free chain fallback (AtlasCloud — a different provider from '
+              'both the lead and Tier 1, which is the point of it). '
+              '${kAttemptTimeout.inSeconds}s cap. Normally the hedge partner '
+              'rather than a sequential fallback, so its attempts usually overlap '
+              'the lead\'s. UNMEASURED on this prompt as of 2026-09-07 — a low '
+              'attempt count here means the lead has been answering, not that '
+              'this is broken.',
         },
         for (final m in NaraVision.availableModels)
           {
@@ -2721,6 +3050,12 @@ HOW TO USE IT:
             print('GeminiVision:   UPSTREAM provider throttle for THIS model '
                 'only — our account counters are untouched, so the chain '
                 'CONTINUES to the next model. Ledger NOT marked exhausted.');
+            // Remember it, so the NEXT scan does not re-pay this round trip to be
+            // told the same thing. Only this classification arms a cooldown: a
+            // 'daily' or 'throttle' 429 is about our account and every :free model
+            // shares it, so parking one slug would fix nothing and would shrink the
+            // chain for a reason unrelated to that slug.
+            await _markOrModelUpstreamBusy(model);
             break;
           default:
             print('GeminiVision:   429 named no counter, so the cause is '
@@ -3275,6 +3610,10 @@ FIELD RULES:
     lifting, not a hazard — it becomes one only when a person is visibly
     standing or working UNDER or beside it. If you can see no such person, the
     lift is simply a lift.
+  • The hook block itself, loaded or EMPTY. A crane hook, bottom block or
+    hoist block hangs from its rope at all times — that is the only place it
+    can be. "Hanging crane hook block" is not a finding; a missing safety
+    latch on it, or a person walking under it, is.
   • Walkways, platforms, gantries, ladders, girders, rails, cable trays,
     ducting or pipework that are merely present and intact.
   • Working at height, in a bay, or near plant, described as a hazard in itself.
