@@ -110,6 +110,13 @@ import 'local_db.dart';
 // analysis — see the comment on analyseImageBytes for why it is here and not
 // at the call sites.
 import 'ai_run_log.dart';
+// PER-MODEL counters, one row per ATTEMPT — the complement to AiRunLog's one row
+// per scan. AiRunLog names a model only when the scan succeeded; every failure
+// it stores is a chain-level verdict (`providers_exhausted`) that can hide up to
+// nine individual model attempts. So "is this slug failing every time?" — the
+// question that decides whether to delete it from the chain — can only be
+// answered here. Recording is fire-and-forget and never awaited on the hot path.
+import 'model_health.dart';
 // Direct Google AI Studio vision path. This is a SEPARATE quota from
 // OpenRouter's shared free tier, which is the whole point: when OpenRouter
 // returns 429 (free-tier cap hit, account-wide across every ':free' model),
@@ -914,6 +921,21 @@ HOW TO USE IT:
             // timeout, a 400 on an unsupported body field, a dead slug — costs
             // one attempt and nothing else.
             print('GeminiVision: ✗ Tier 0 Groq error: $e — continuing to Tier 1');
+            // _callGroqVision has no try/catch of its own (by design — see its
+            // health() note), so anything that throws escapes before it can
+            // record. Recorded here instead, or a Groq timeout would be missing
+            // from the panel entirely and the slug would look healthier than it
+            // is. Duration is unavailable at this point; 0 is honest, and
+            // ModelHealth averages latency over successes only anyway.
+            final t = e.runtimeType.toString().toLowerCase();
+            ModelHealth.recordFailure(
+                _groqQwenVisionModel,
+                'groq',
+                t.contains('timeout')
+                    ? ModelHealth.kFailTimeout
+                    : t.contains('socket') || t.contains('clientexception')
+                        ? ModelHealth.kFailNetwork
+                        : ModelHealth.kFailError);
           }
         }
       }
@@ -1496,6 +1518,74 @@ HOW TO USE IT:
     {'id': _orNemotronModel, 'name': 'Nemotron 30B Omni (highest capacity, SLOW — often times out)'},
   ];
 
+  /// The image-analysis chain in the order it is actually attempted, for display.
+  ///
+  /// EXISTS SO THE ADMIN PANEL CANNOT LIE. The per-model health counters are
+  /// cumulative and survive a chain edit, so a slug removed from the code keeps
+  /// its row forever — and an admin reading "0% success, 40 attempts" on a model
+  /// that is no longer wired up would draw a conclusion about a model that is not
+  /// running. Comparing the counters against this list lets the panel label such
+  /// a row as no-longer-in-use instead.
+  ///
+  /// Kept next to the chain it describes rather than duplicated in the UI, which
+  /// is how [groqVisionModels]' label drifted for two days after the 2026-09-03
+  /// reorder. Tier 1 and Tier 3 are read from their own services so there is
+  /// still exactly one source per tier.
+  ///
+  /// `tier` is the position in the fallback order; `note` says what the entry
+  /// costs or why it may never be reached, because "never attempted" is one of
+  /// the readings the panel has to support (Tier 0 normally self-skips on TPM).
+  static List<Map<String, String>> get activeVisionChain => [
+        {
+          'model': _groqQwenVisionModel,
+          'provider': 'groq',
+          'tier': '0',
+          'note': 'Separate Groq quota. Usually SKIPPED — the free tier\'s '
+              '8000 tokens/min cannot fit a full-size scan image, so zero '
+              'attempts here is expected, not a fault.',
+        },
+        for (final m in GeminiDirectVision.fallbackChain)
+          {
+            'model': m,
+            'provider': 'gemini',
+            'tier': '1',
+            'note': 'Google AI Studio key, 15s each. The tier bails on the '
+                'FIRST key-wide block, so later entries may show no attempts.',
+          },
+        {
+          'model': _orGemma31bModel,
+          'provider': 'openrouter',
+          'tier': '2',
+          'note': 'Free chain lead, ${kAttemptTimeout.inSeconds}s cap.',
+        },
+        {
+          'model': _orMinimaxModel,
+          'provider': 'openrouter',
+          'tier': '2',
+          'note': 'Free chain, '
+              '${_attemptTimeoutFor(_orMinimaxModel).inSeconds}s cap — raised '
+              'because it generates at ~47 tokens/sec and the hazard schema is '
+              '1,100-1,400 tokens.',
+        },
+        {
+          'model': _orNemotronModel,
+          'provider': 'openrouter',
+          'tier': '2',
+          'note': 'Free chain last resort — highest capacity, slowest; often '
+              'skipped when the tier\'s '
+              '${_kOrChainHardCeiling.inSeconds}s ceiling is already spent.',
+        },
+        for (final m in NaraVision.availableModels)
+          {
+            'model': m['id'] ?? '',
+            'provider': 'nara',
+            'tier': '3',
+            'note': 'NaraRouter walks these in order and advances ONLY on a '
+                '"model not available" reply, so the ones after the default '
+                'are only reached when a slug dies.',
+          },
+      ];
+
   /// Pinned vision model IDs that no longer exist → what to do instead.
   ///
   /// 'auto' means "clear the pin and use the chain", which is the honest answer
@@ -2033,6 +2123,13 @@ HOW TO USE IT:
     // only catch a text-only overrun. That is deliberate: a request is never
     // blocked on an estimate that could not be made. The 413 path still learns.
     if (estimate > _kGroqTpmLimit) {
+      // NOT recorded in ModelHealth. A pre-flight skip never reached Groq, so
+      // scoring it as a failed attempt would give this slug a 0% success rate
+      // and invite the admin to delete a model that is, as far as we know, fine
+      // — the exact wrong conclusion. Tier 0 skipping on essentially every real
+      // scan image is expected (see [_kGroqTpmLimit]); the panel therefore shows
+      // this model with ZERO attempts, and "configured but never reached" is a
+      // finding the admin can read directly.
       print('GeminiVision: ⏩ Tier 0 skipped — estimated $estimate tokens '
           '(text ~$textTokens incl. $_kGroqMaxTokens reserved, image ~$imageTokens '
           'for ${megapixels.toStringAsFixed(2)}MP at '
@@ -2065,6 +2162,22 @@ HOW TO USE IT:
     };
 
     _lastGroqStatus = null;
+    // Per-model health, from the pre-flight onward — see the matching block in
+    // [_callOpenRouterVision] for why classification has to happen here.
+    // NOTE this function does NOT catch: the Tier 0 caller swallows everything so
+    // a new first tier cannot break the chain. A timeout therefore escapes past
+    // this point unrecorded, which is why the caller records it too.
+    final sw = Stopwatch()..start();
+    void health(bool ok, String failKind) {
+      ModelHealth.recordAttempt(
+        model: model,
+        provider: 'groq',
+        ok: ok,
+        ms: sw.elapsedMilliseconds,
+        failKind: failKind,
+      );
+    }
+
     final response = await http.post(
       Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
       headers: {
@@ -2085,9 +2198,14 @@ HOW TO USE IT:
       final data =
           jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
       final choices = data['choices'] as List?;
-      if (choices == null || choices.isEmpty) return null;
+      if (choices == null || choices.isEmpty) {
+        health(false, ModelHealth.kFailEmpty);
+        return null;
+      }
       final content = choices[0]['message']?['content']?.toString() ?? '';
-      return _parseAIResponse(content);
+      final parsed = _parseAIResponse(content);
+      health(parsed != null, parsed != null ? '' : ModelHealth.kFailUnparseable);
+      return parsed;
     }
 
     // Groq's error body is `{error: {message, type, code}}`. Logged in full
@@ -2109,6 +2227,24 @@ HOW TO USE IT:
     } catch (_) {}
     print('GeminiVision: ⚠ Groq HTTP ${response.statusCode} on $model'
         '${detail.isEmpty ? '' : ' — $detail'}');
+
+    // 413 and 429 are BOTH the free tier's per-minute token budget, not a fault
+    // in the model, so they are `quota` — a Groq row showing nothing but quota
+    // means the answer is Groq's paid tier or dropping Tier 0, never a different
+    // slug. 404 model_not_found is the one that says the slug is gone; it has
+    // already killed the near-miss text model twice.
+    final gd = detail.toLowerCase();
+    health(
+        false,
+        (response.statusCode == 413 || response.statusCode == 429)
+            ? ModelHealth.kFailQuota
+            : (response.statusCode == 404 ||
+                    gd.contains('model_not_found') ||
+                    gd.contains('does not exist'))
+                ? ModelHealth.kFailDeadSlug
+                : (response.statusCode == 401 || response.statusCode == 403)
+                    ? ModelHealth.kFailKeyBlocked
+                    : ModelHealth.kFailError);
 
     // LEARN THE IMAGE COST FROM THE REFUSAL. The body carries "Requested N", and
     // every other term in that sum is known exactly, so the image cost falls out.
@@ -2197,6 +2333,31 @@ HOW TO USE IT:
 
     _lastOrStatus = null;
     _lastOr429Kind = '';
+    // ── PER-MODEL HEALTH INSTRUMENTATION ────────────────────────────────────
+    // Recorded HERE rather than at the chain walk above, deliberately: the walk
+    // sees only "null came back", which is the exact ambiguity that made the
+    // admin's question unanswerable. Only this function knows whether null meant
+    // a dead slug, our quota, the upstream provider being busy, a timeout, or a
+    // 200 whose body would not parse — and those five have five different
+    // remedies, of which only two argue for removing the model.
+    //
+    // The stopwatch starts before base64 work is already done above, so it
+    // measures the request itself; on timeout it reads as the ceiling, which is
+    // why ModelHealth averages latency over SUCCESSES only.
+    final sw = Stopwatch()..start();
+    void health(bool ok, String failKind) {
+      // Fire-and-forget: awaiting a SharedPreferences write inside the vision
+      // chain would add disk latency to every attempt, and a telemetry failure
+      // must never fail a scan.
+      ModelHealth.recordAttempt(
+        model: model,
+        provider: 'openrouter',
+        ok: ok,
+        ms: sw.elapsedMilliseconds,
+        failKind: failKind,
+      );
+    }
+
     try {
       final response = await http.post(
         Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
@@ -2224,8 +2385,19 @@ HOW TO USE IT:
         final choices = data['choices'] as List?;
         if (choices != null && choices.isNotEmpty) {
           final content = choices[0]['message']?['content']?.toString() ?? '';
-          return _parseAIResponse(content);
+          final parsed = _parseAIResponse(content);
+          // A 200 that will not parse is NOT the same failure as a 200 with no
+          // choices, and both used to return null indistinguishably. Empty is
+          // usually the reasoning budget eating max_tokens; unparseable means the
+          // model cannot hold the hazard schema, which IS grounds for removal
+          // (nothing enforces the JSON — there is no response_format in this
+          // body, it is prompt-instructed).
+          health(parsed != null,
+              parsed != null ? '' : ModelHealth.kFailUnparseable);
+          return parsed;
         }
+        health(false, ModelHealth.kFailEmpty);
+        return null;
       } else if (response.statusCode == 429) {
         // The single most common real-world failure, and previously logged as a
         // bare status code that read like an app bug.
@@ -2333,17 +2505,70 @@ HOW TO USE IT:
                 'and the user is told both possibilities. Body: '
                 '${response.body.length > 200 ? '${response.body.substring(0, 200)}…' : response.body}');
         }
+        // 'upstream' is the provider behind THIS model being busy; the other
+        // three are our own account's counters. Keeping them apart is the whole
+        // point of the panel: a model whose failures are all `quota` is innocent
+        // and deleting it would make the chain worse, while `upstream_429`
+        // repeating on one slug says that slug's sole provider is unreliable.
+        health(
+            false,
+            _lastOr429Kind == 'upstream'
+                ? ModelHealth.kFailUpstream
+                : ModelHealth.kFailQuota);
       } else if (response.statusCode == 401 || response.statusCode == 403) {
         print('GeminiVision: ⚠ OpenRouter REJECTED THE KEY '
             '(${response.statusCode}) on $model — key invalid, revoked, or '
             'blocked. Check Admin → System Health.');
+        // Attributed to the model that happened to be in flight, but the kind
+        // says otherwise — when every model on a provider shows key_blocked
+        // together, that pattern is the finding.
+        health(false, ModelHealth.kFailKeyBlocked);
       } else if (response.statusCode == 402) {
         print('GeminiVision: ⚠ OpenRouter OUT OF CREDIT (402) on $model.');
+        health(false, ModelHealth.kFailQuota);
       } else {
         print('GeminiVision: OpenRouter HTTP ${response.statusCode} on $model');
+        // DEAD-SLUG DETECTION, and the one verdict that justifies deleting a
+        // model from the chain. OpenRouter answers an unroutable slug — one with
+        // zero endpoints, the "zombie" case in [[ai-model-ids]] — with 404, or a
+        // 400 naming the model. The wording is required for the 400 because a
+        // 400 is also how a malformed request comes back, and mislabelling that
+        // as a dead model would advise removing a perfectly good slug.
+        final b = response.body.toLowerCase();
+        final saysDead = response.statusCode == 404 ||
+            (response.statusCode == 400 &&
+                (b.contains('not a valid model') ||
+                    b.contains('no allowed providers') ||
+                    b.contains('no endpoints') ||
+                    b.contains('model not found') ||
+                    b.contains('invalid model') ||
+                    b.contains('unknown model')));
+        health(false,
+            saysDead ? ModelHealth.kFailDeadSlug : ModelHealth.kFailError);
       }
     } catch (e) {
       print('GeminiVision: OpenRouter exception: $e');
+      // TimeoutException is matched on its type name rather than by importing
+      // dart:async here, so the classification cannot silently stop working if
+      // the timeout is ever raised by a different layer (http's own client
+      // throws its own types). Timeout must be distinguishable from a network
+      // fault: the remedy for a timeout is a bigger ceiling or a shorter
+      // prompt, and for a network fault there is no remedy in this app at all.
+      final t = e.runtimeType.toString().toLowerCase();
+      final m = e.toString().toLowerCase();
+      // A throw AFTER the status was recorded as 200 means the body itself broke
+      // the decoder, which is the unparseable case, not a transport fault.
+      final kind = _lastOrStatus == 200
+          ? ModelHealth.kFailUnparseable
+          : (t.contains('timeout') || m.contains('timeout'))
+          ? ModelHealth.kFailTimeout
+          : (t.contains('socket') ||
+                  t.contains('clientexception') ||
+                  m.contains('failed host lookup') ||
+                  m.contains('connection'))
+              ? ModelHealth.kFailNetwork
+              : ModelHealth.kFailError;
+      health(false, kind);
     }
     return null;
   }

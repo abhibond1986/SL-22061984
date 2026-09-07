@@ -42,6 +42,12 @@ import 'package:flutter/foundation.dart' show Uint8List, kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'gemini_vision.dart';
+// Per-model attempt counters. This tier walks up to four slugs on one account, so
+// "which of them actually works" is exactly the question model_health.dart exists
+// to answer — and Nara slugs cannot be pre-verified (its /v1/models needs a key
+// and there is no public listing), which makes measured evidence the ONLY way to
+// find a dead one here.
+import 'model_health.dart';
 
 class NaraVision {
   /// SharedPreferences key holding the Nara API key.
@@ -338,6 +344,29 @@ class NaraVision {
   /// front of the offline fallback.
   static bool lastModelUnavailable = false;
 
+  /// Why the last attempt THREW, when it did: `'timeout'`, `'network'`,
+  /// `'error'`, or `''` if it returned a status instead.
+  ///
+  /// Exists purely for per-model health classification. Both request paths leave
+  /// [lastStatus] null on a throw so the caller can tell "did not respond" from
+  /// "responded with a refusal" — true, but it collapses a 45s ceiling and a lost
+  /// Wi-Fi connection into the same null, and those two lead to opposite
+  /// decisions about whether to keep the slug.
+  static String lastExceptionKind = '';
+
+  /// Classifies a caught object without importing dart:async, matching on the
+  /// type name so it keeps working whichever layer raises the timeout.
+  static String _exceptionKind(Object e) {
+    final t = e.runtimeType.toString().toLowerCase();
+    final m = e.toString().toLowerCase();
+    if (t.contains('timeout') || m.contains('timeout')) return 'timeout';
+    if (t.contains('socket') ||
+        t.contains('clientexception') ||
+        m.contains('failed host lookup') ||
+        m.contains('connection')) return 'network';
+    return 'error';
+  }
+
   /// Slugs this app session has PROVEN are not routable on this account.
   ///
   /// Session-scoped on purpose, not persisted: the cause is a provider-side
@@ -422,6 +451,7 @@ class NaraVision {
     lastWasRateLimited = false;
     lastModelUsed = null;
     lastModelUnavailable = false;
+    lastExceptionKind = '';
 
     final scriptUrl = await getProxyUrl();
     if (scriptUrl.isEmpty) {
@@ -605,6 +635,7 @@ class NaraVision {
       print('NaraVision: ⚠ No choices in NaraRouter response via proxy');
       return null;
     } catch (e) {
+      lastExceptionKind = _exceptionKind(e);
       print('NaraVision: ✗ Apps Script proxy exception: $e');
       return null;
     }
@@ -634,6 +665,7 @@ class NaraVision {
     lastWasRateLimited = false;
     lastModelUsed = null;
     lastModelUnavailable = false;
+    lastExceptionKind = '';
 
     // KEY CHECK IS PLATFORM-SPECIFIC — deliberately not hoisted above the web
     // branch. On web the proxy holds the key; demanding one here would reject
@@ -707,9 +739,44 @@ class NaraVision {
         print('NaraVision: ↻ [${i + 1}/${candidates.length}] retrying with '
             '"$model" after the previous model was reported unavailable');
       }
+      // Health is recorded HERE, not inside the two request paths, because this
+      // is the only place that sees both of them and because the fields they set
+      // (`lastStatus`, `lastModelUnavailable`, `lastExceptionKind`) are together
+      // enough to classify. The model recorded is [lastModelUsed] when Nara told
+      // us what it served — on web an unsynced browser can have the proxy
+      // substitute its own NARA_MODEL, and attributing that attempt to the slug
+      // we asked for would put the numbers against the wrong row.
+      final attemptClock = Stopwatch()..start();
       final result = kIsWeb
           ? await _analyzeViaProxy(bytes, prompt, model)
           : await _analyzeDirect(bytes, prompt, model, apiKey);
+      final served = (lastModelUsed ?? '').trim();
+      ModelHealth.recordAttempt(
+        model: served.isEmpty ? model : served,
+        provider: 'nara',
+        ok: result != null,
+        ms: attemptClock.elapsedMilliseconds,
+        failKind: result != null
+            ? ''
+            : lastModelUnavailable
+                // The only kind that argues for editing availableModels.
+                ? ModelHealth.kFailDeadSlug
+                : lastExceptionKind == 'timeout'
+                    ? ModelHealth.kFailTimeout
+                    : lastExceptionKind == 'network'
+                        ? ModelHealth.kFailNetwork
+                        : lastStatus == 429
+                            ? ModelHealth.kFailQuota
+                            : (lastStatus == 401 ||
+                                    lastStatus == 403 ||
+                                    lastStatus == 402)
+                                ? ModelHealth.kFailKeyBlocked
+                                : lastStatus == 200
+                                    // A 200 the shared parser rejected: the model
+                                    // answered but could not hold the schema.
+                                    ? ModelHealth.kFailUnparseable
+                                    : ModelHealth.kFailError,
+      );
       if (result != null) return result;
       // ONLY a dead slug advances the list. A 429/401/402, a timeout, or a
       // 200-that-would-not-parse all say nothing about the OTHER slugs, and the
@@ -737,6 +804,7 @@ class NaraVision {
     lastWasRateLimited = false;
     lastModelUsed = null;
     lastModelUnavailable = false;
+    lastExceptionKind = '';
 
     final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
 
@@ -838,7 +906,9 @@ class NaraVision {
       }
     } catch (e) {
       // Includes TimeoutException. Left as null lastStatus so the caller can
-      // tell "did not respond" from "responded with a refusal".
+      // tell "did not respond" from "responded with a refusal"; the KIND of
+      // throw goes to [lastExceptionKind] for the health counters.
+      lastExceptionKind = _exceptionKind(e);
       print('NaraVision: ✗ exception on $model: $e');
     }
     return null;

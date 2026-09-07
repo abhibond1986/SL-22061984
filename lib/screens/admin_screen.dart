@@ -48,6 +48,11 @@ import '../services/nara_vision.dart';
 import '../services/pdf_kb_extractor.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
+// Per-model attempt counters. Answers the one question AiRunLog cannot: which
+// individual slug is failing, and with what kind of failure — the distinction
+// that decides whether the fix is deleting the model, raising its timeout, or
+// leaving it alone because the limit is the account's.
+import '../services/model_health.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_config.dart';
 import '../services/visitor_service.dart';
@@ -168,6 +173,24 @@ class _AdminScreenState extends State<AdminScreen>
   bool _runsSchemaMissing = false;
   bool _runsCloudDisabled = false;
   bool _runsRetrying = false;
+
+  // ── Per-model health (ModelHealth) ───────────────────────────────────────
+  // Sorted worst-first by the service, so this list is displayed in order and the
+  // UI adds no ranking of its own.
+  //
+  // WHY THIS IS SEPARATE FROM _aiRuns: AiRunLog holds one row per SCAN and names
+  // a model only when the scan succeeded — every failure it stores is a
+  // chain-level verdict that can cover up to nine model attempts. So it can show
+  // which provider served the wins but is structurally unable to say which slug
+  // wasted the time. ModelHealth counts one row per ATTEMPT and is the only
+  // source that can answer "is this model failing every time?".
+  //
+  // It is DEVICE-LOCAL (SharedPreferences, no Supabase mirror), unlike _aiRuns —
+  // the section says so, because an admin comparing the two totals will otherwise
+  // assume one of them is broken.
+  List<ModelHealthEntry> _modelHealth = [];
+  bool _modelHealthLoading = false;
+  bool _modelHealthLoadedOnce = false;
 
   // Free-tier budget for image analysis, read from GeminiVision.freeQuotaSnapshot().
   // Empty until _loadAiRuns() fills it; every reader must handle that, which is
@@ -2772,6 +2795,12 @@ class _AdminScreenState extends State<AdminScreen>
           ),
         ),
         const SizedBox(height: 10),
+        // Measured health of the CURRENT selection, so the removal decision can
+        // be made here instead of from memory after visiting AI Performance.
+        // With 'auto' there is no single model to describe, so it summarises the
+        // chain — which is also the reading that matters for a pin, since pinning
+        // replaces the chain entirely.
+        _modelHealthInline(sl, _groqVisionModel, isChainPin: true),
         // Vision model — Groq (Tier 0) then OpenRouter.
         DropdownButtonFormField<String>(
           // CLAMPED 2026-09-03. DropdownButtonFormField ASSERTS when `value` is
@@ -2857,6 +2886,11 @@ class _AdminScreenState extends State<AdminScreen>
         const SizedBox(height: 12),
         _apiKeyInputField(_geminiVisionKeyCtrl, 'Gemini API Key (from AI Studio)', sl, isGemini: true),
         const SizedBox(height: 10),
+        // NOTE this describes the SELECTED model only. Tier 1 also tries two
+        // siblings after it, and their rows are in AI Performance → Model
+        // reliability; a key-wide block (429/403/400 API_KEY_INVALID) stops the
+        // tier at the first model, so the siblings can legitimately show nothing.
+        _modelHealthInline(sl, _geminiVisionSelectedModel),
         DropdownButtonFormField<String>(
           // Dropdown asserts if value is absent from items, which would red-screen
           // this whole card. A saved model can legitimately fall outside the list
@@ -2964,6 +2998,10 @@ class _AdminScreenState extends State<AdminScreen>
           },
         ),
         const SizedBox(height: 10),
+        // Nara slugs cannot be verified against any public listing, so these
+        // measured counters are the ONLY evidence that a slug is still alive.
+        // "Model not available" here means change the selection.
+        _modelHealthInline(sl, _naraSelectedModel),
         DropdownButtonFormField<String>(
           isExpanded: true,
           // Falls back rather than asserting, like the Gemini dropdown: a value
@@ -9148,6 +9186,34 @@ class _AdminScreenState extends State<AdminScreen>
     }
   }
 
+  /// Loads the per-model attempt counters.
+  ///
+  /// SEPARATE from [_loadAiRuns] on purpose: these numbers appear in TWO modules
+  /// — the AI Performance section and a one-line summary above each vision model
+  /// dropdown in provider config — and the config module never calls
+  /// [_loadAiRuns]. Folding this into that method would leave the dropdown
+  /// summaries permanently blank for an admin who goes straight to the config
+  /// screen, which is exactly where the removal decision gets made.
+  ///
+  /// Purely local (SharedPreferences), so it cannot fail for network reasons and
+  /// is cheap enough to re-run on every refresh.
+  Future<void> _loadModelHealth() async {
+    if (_modelHealthLoading) return;
+    if (!mounted) return;
+    setState(() => _modelHealthLoading = true);
+    try {
+      final list = await ModelHealth.snapshot();
+      if (mounted) setState(() => _modelHealth = list);
+    } catch (_) {
+      // Diagnostic only — never allowed to break the panel.
+    } finally {
+      if (mounted) setState(() {
+        _modelHealthLoading = false;
+        _modelHealthLoadedOnce = true;
+      });
+    }
+  }
+
   /// Start of the window currently selected, in LOCAL time.
   /// 'today' is local midnight, so the count matches what the admin would
   /// count by hand — AiRunLog stores UTC and converts back before comparing.
@@ -9503,6 +9569,9 @@ class _AdminScreenState extends State<AdminScreen>
     if (!_runsLoadedOnce && !_runsLoading) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadAiRuns());
     }
+    if (!_modelHealthLoadedOnce && !_modelHealthLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadModelHealth());
+    }
 
     const accent = Color(0xFF455A64);
     final since = _runWindowStart;
@@ -9546,7 +9615,16 @@ class _AdminScreenState extends State<AdminScreen>
             Expanded(child: Text('AI Performance', style: TextStyle(
                 color: sl.text1, fontSize: 15, fontWeight: FontWeight.w800))),
             IconButton(
-              onPressed: _runsLoading ? null : _loadAiRuns,
+              // Refreshes BOTH sources — the per-model counters are local and
+              // change on every scan, so a refresh that updated only the cloud
+              // runs would leave the reliability section stale next to fresh
+              // numbers.
+              onPressed: _runsLoading
+                  ? null
+                  : () {
+                      _loadAiRuns();
+                      _loadModelHealth();
+                    },
               icon: _runsLoading
                   ? const SizedBox(width: 16, height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2))
@@ -9704,6 +9782,12 @@ class _AdminScreenState extends State<AdminScreen>
                 stats['total'] as int, const Color(0xFF1E88E5))),
         const SizedBox(height: 12),
       ],
+
+      // ── Per-model reliability ──
+      // Placed BELOW the run breakdowns and ABOVE the recent-run list because it
+      // is the section an admin acts on: the blocks above say how the app did,
+      // this one says which model to change.
+      ..._modelReliabilitySection(sl),
 
       // ── Recent runs ──
       _sectionHeader('Recent runs', sl),
@@ -9895,6 +9979,438 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   /// One labelled bar: count, share of [total], and a proportional fill.
+  // ══════════════════════════════════════════════════════════════════
+  //  PER-MODEL RELIABILITY  (ModelHealth)
+  //
+  //  Built for one decision: "this model fails every time — should I take it
+  //  out of the list?" Everything here is shaped by the fact that the honest
+  //  answer depends on the KIND of failure, and that four of the kinds argue
+  //  AGAINST removal:
+  //
+  //    dead_slug / unparseable  → remove it. The slug is gone, or the model
+  //                               cannot hold the hazard schema.
+  //    timeout                  → keep it, raise its ceiling or shrink the
+  //                               prompt. Removing a model for being slow on a
+  //                               hazardous photo removes it exactly when it
+  //                               was needed most.
+  //    quota / key_blocked      → keep it. The limit belongs to the ACCOUNT and
+  //                               every sibling model shares it; deleting the
+  //                               model changes nothing and shortens the chain.
+  //    upstream_429 / network   → keep it. Transient and not ours.
+  //
+  //  So the panel never shows a bare failure count. Every row names its
+  //  dominant kind and the section states the reading above it.
+  // ══════════════════════════════════════════════════════════════════
+
+  /// Rows for the AI Performance module. Returns a list so it can be spread into
+  /// the surrounding ListView and contribute nothing when there is no data.
+  List<Widget> _modelReliabilitySection(SL sl) {
+    final chain = GeminiVision.activeVisionChain;
+    // Index the live chain so each recorded model can be labelled with its tier —
+    // and, more importantly, so a model that is NO LONGER in the chain can be
+    // marked as such. Counters are cumulative and survive a chain edit, so
+    // without this an admin would read "0% of 40" against a slug that has not
+    // been called in a week and conclude something about a model that is not
+    // running.
+    final chainByModel = <String, Map<String, String>>{
+      for (final c in chain) (c['model'] ?? ''): c,
+    };
+    final recorded = _modelHealth;
+    final recordedIds = recorded.map((e) => e.model).toSet();
+    // Chain entries with no counters at all. Worth showing rather than omitting:
+    // "configured but never reached" is a real finding (Tier 0 self-skips on
+    // Groq's TPM limit; Tier 1's later models are never tried when the tier bails
+    // key-wide), and an admin who cannot see it will assume the model is fine.
+    final untried = chain
+        .where((c) => !recordedIds.contains(c['model'] ?? ''))
+        .toList();
+
+    if (recorded.isEmpty && untried.isEmpty) return const [];
+
+    final totalAttempts =
+        recorded.fold<int>(0, (a, e) => a + e.attempts);
+
+    return [
+      _sectionHeader('Model reliability (this device)', sl,
+          trailing: recorded.isEmpty
+              ? null
+              : TextButton.icon(
+                  onPressed: _confirmResetModelHealth,
+                  icon: const Icon(Icons.restart_alt_rounded,
+                      size: 14, color: AppColors.amber),
+                  label: const Text('Reset',
+                      style: TextStyle(
+                          color: AppColors.amber,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700)),
+                )),
+      const SizedBox(height: 8),
+      Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: AppColors.amber.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.amber.withOpacity(0.25)),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+            'One row per MODEL ATTEMPT, worst first — '
+            '$totalAttempts attempt${totalAttempts == 1 ? '' : 's'} recorded. '
+            'A single scan tries several models in order, so these numbers are '
+            'much larger than the run counts above and will never tie out '
+            'against them.',
+            style: TextStyle(color: sl.text2, fontSize: 10, height: 1.45),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Only "Model not available" and "Bad JSON" argue for removing a '
+            'model. Timeouts mean raise its limit; quota and key failures '
+            'belong to the account and every model shares them, so deleting '
+            'one just makes the fallback chain shorter.',
+            style: TextStyle(color: sl.text3, fontSize: 9, height: 1.45),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Counted on THIS device only (not synced), so a phone and the web '
+            'build keep separate tallies.',
+            style: TextStyle(color: sl.text4, fontSize: 9, height: 1.4),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 8),
+      ...recorded.map((e) => _modelHealthCard(sl, e,
+          chainInfo: chainByModel[e.model])),
+      if (untried.isNotEmpty) ...[
+        const SizedBox(height: 4),
+        Text('Configured but never attempted on this device',
+            style: TextStyle(
+                color: sl.text3, fontSize: 10, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 6),
+        ...untried.map((c) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: sl.card,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: sl.glassBorder),
+                ),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Expanded(
+                            child: Text(c['model'] ?? '',
+                                style: TextStyle(
+                                    color: sl.text2,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis)),
+                        Text('Tier ${c['tier']} · ${c['provider']}',
+                            style:
+                                TextStyle(color: sl.text4, fontSize: 9)),
+                      ]),
+                      const SizedBox(height: 3),
+                      Text(c['note'] ?? '',
+                          style: TextStyle(
+                              color: sl.text4, fontSize: 9, height: 1.4)),
+                    ]),
+              ),
+            )),
+      ],
+      const SizedBox(height: 12),
+    ];
+  }
+
+  /// One model's row. Deliberately verbose — a bare percentage is what made the
+  /// old panel unactionable.
+  Widget _modelHealthCard(SL sl, ModelHealthEntry e,
+      {Map<String, String>? chainInfo}) {
+    // Bound to a local so the tier/provider labels below can read it without a
+    // null check on every access — `orphaned` does not promote the parameter.
+    final info = chainInfo;
+    final orphaned = info == null;
+    final rate = e.successRate;
+    // Same thresholds as the headline success card so the two read consistently.
+    final color = e.attempts == 0
+        ? sl.text3
+        : rate >= 90
+            ? const Color(0xFF43A047)
+            : rate >= 70
+                ? AppColors.amber
+                : const Color(0xFFD32F2F);
+    final kind = e.dominantFailKind;
+    final removalWorthy = ModelHealth.removalWorthyKinds.contains(kind);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+              color: removalWorthy && e.isHopeless
+                  ? const Color(0xFFD32F2F).withOpacity(0.45)
+                  : sl.glassBorder),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+                child: Text(e.model,
+                    style: TextStyle(
+                        color: sl.text1,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 6),
+            Text('${rate.toStringAsFixed(0)}%',
+                style: TextStyle(
+                    color: sl.textOn(color),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900)),
+          ]),
+          const SizedBox(height: 2),
+          Row(children: [
+            Text(
+                orphaned
+                    ? 'not in the current chain'
+                    : 'Tier ${info['tier']} · ${info['provider']}',
+                style: TextStyle(
+                    color: orphaned ? AppColors.amber : sl.text4,
+                    fontSize: 9,
+                    fontWeight:
+                        orphaned ? FontWeight.w700 : FontWeight.w400)),
+            const Spacer(),
+            Text(
+                '${e.successes} ok · ${e.failures} failed '
+                'of ${e.attempts}',
+                style: TextStyle(color: sl.text3, fontSize: 9)),
+          ]),
+          const SizedBox(height: 5),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: (rate / 100).clamp(0.0, 1.0),
+              minHeight: 4,
+              backgroundColor: sl.glassBorder,
+              valueColor: AlwaysStoppedAnimation(color),
+            ),
+          ),
+          const SizedBox(height: 6),
+          // Latency is averaged over SUCCESSES only. A timeout contributes
+          // exactly its ceiling, so including failures would make a fast model
+          // that occasionally stalls look slower than a uniformly mediocre one.
+          Wrap(spacing: 10, runSpacing: 3, children: [
+            Text(
+                e.successes == 0
+                    ? 'no successful run yet'
+                    : 'avg ${(e.avgOkMs / 1000).toStringAsFixed(1)}s when it works',
+                style: TextStyle(color: sl.text3, fontSize: 9)),
+            if (e.lastOkAt > 0)
+              Text('last ok ${_healthAgo(e.lastOkAt)}',
+                  style: TextStyle(color: sl.text4, fontSize: 9)),
+            if (e.lastFailAt > 0)
+              Text('last fail ${_healthAgo(e.lastFailAt)}',
+                  style: TextStyle(color: sl.text4, fontSize: 9)),
+          ]),
+          if (kind.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+              decoration: BoxDecoration(
+                color: (removalWorthy
+                        ? const Color(0xFFD32F2F)
+                        : AppColors.amber)
+                    .withOpacity(0.10),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                  'mostly: ${ModelHealth.failKindLabel(kind)} '
+                  '(${e.dominantFailCount} of ${e.failures})',
+                  style: TextStyle(
+                      color: sl.textOn(removalWorthy
+                          ? const Color(0xFFD32F2F)
+                          : AppColors.amber),
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ],
+          // The verdict, stated only when the evidence supports it: three or
+          // more attempts, never a success, and a failure kind that a different
+          // slug would actually fix.
+          if (e.isHopeless) ...[
+            const SizedBox(height: 5),
+            Text(
+                removalWorthy
+                    ? '→ Failing every time for a reason a different model '
+                        'would fix. Safe to remove from the list.'
+                    : '→ Failing every time, but the cause '
+                        '(${ModelHealth.failKindLabel(kind)}) is not the '
+                        'model\'s fault — removing it will not help.',
+                style: TextStyle(
+                    color: removalWorthy ? sl.redText : sl.text3,
+                    fontSize: 9,
+                    height: 1.4,
+                    fontWeight: FontWeight.w600)),
+          ],
+          if (e.failures > 1 && e.failKinds.length > 1) ...[
+            const SizedBox(height: 4),
+            Text(
+                (e.failKinds.entries.toList()
+                      ..sort((a, b) => b.value.compareTo(a.value)))
+                    .map((f) =>
+                        '${ModelHealth.failKindLabel(f.key)} ${f.value}')
+                    .join(' · '),
+                style: TextStyle(color: sl.text4, fontSize: 8.5, height: 1.4)),
+          ],
+          if (orphaned) ...[
+            const SizedBox(height: 5),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () async {
+                  await ModelHealth.forget(e.model);
+                  await _loadModelHealth();
+                  _toast('Cleared counters for ${e.model}', AppColors.amber);
+                },
+                style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    minimumSize: const Size(0, 24)),
+                child: const Text('Clear this row',
+                    style: TextStyle(color: AppColors.amber, fontSize: 9)),
+              ),
+            ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  /// Compact "3m ago" / "2d ago" for epoch milliseconds.
+  String _healthAgo(int epochMs) {
+    if (epochMs <= 0) return '—';
+    final d = DateTime.now()
+        .difference(DateTime.fromMillisecondsSinceEpoch(epochMs));
+    if (d.inSeconds < 60) return '${d.inSeconds}s ago';
+    if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+    if (d.inHours < 24) return '${d.inHours}h ago';
+    return '${d.inDays}d ago';
+  }
+
+  /// One-line health summary for a model dropdown.
+  ///
+  /// PLACED HERE, NOT ONLY IN AI PERFORMANCE, on admin request: the decision to
+  /// drop a model is made at the dropdown, and making someone hold numbers in
+  /// their head across two screens is how the wrong slug gets deleted.
+  ///
+  /// [selected] may be the sentinel `'auto'`, in which case there is no single
+  /// model to describe and the line summarises the whole chain instead — how
+  /// many of its models have ever worked on this device.
+  Widget _modelHealthInline(SL sl, String selected, {bool isChainPin = false}) {
+    // The provider-config module does not load runs, so it has to trigger this
+    // itself — see _loadModelHealth's doc comment.
+    if (!_modelHealthLoadedOnce && !_modelHealthLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadModelHealth());
+    }
+
+    ModelHealthEntry? find(String id) {
+      for (final e in _modelHealth) {
+        if (e.model == id) return e;
+      }
+      return null;
+    }
+
+    String text;
+    Color color = sl.text4;
+
+    if (isChainPin && selected == 'auto') {
+      final chain = GeminiVision.activeVisionChain
+          .map((c) => c['model'] ?? '')
+          .toSet();
+      final tried = _modelHealth.where((e) => chain.contains(e.model)).toList();
+      if (tried.isEmpty) {
+        text = 'No attempts recorded on this device yet — scan a photo, then '
+            'check AI Performance → Model reliability.';
+      } else {
+        final working = tried.where((e) => e.successes > 0).length;
+        final dead = tried.where((e) => e.isHopeless).length;
+        text = '$working of ${tried.length} attempted model(s) have worked here'
+            '${dead == 0 ? '' : ', $dead never have'}. '
+            'Full breakdown in AI Performance → Model reliability.';
+        color = dead > 0 ? AppColors.amber : sl.text4;
+      }
+    } else {
+      final e = find(selected);
+      if (e == null) {
+        text = 'No attempts recorded on this device yet.';
+      } else {
+        final rate = e.successRate.toStringAsFixed(0);
+        final avg = e.successes == 0
+            ? 'never succeeded'
+            : 'avg ${(e.avgOkMs / 1000).toStringAsFixed(1)}s';
+        final kind = e.dominantFailKind;
+        text = '$rate% success over ${e.attempts} attempt'
+            '${e.attempts == 1 ? '' : 's'} · $avg'
+            '${kind.isEmpty ? '' : ' · mostly ${ModelHealth.failKindLabel(kind)}'}';
+        color = e.attempts == 0
+            ? sl.text4
+            : e.successRate >= 90
+                ? AppColors.green
+                : e.successRate >= 70
+                    ? AppColors.amber
+                    : AppColors.red;
+      }
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(Icons.monitor_heart_outlined, size: 11, color: color),
+        const SizedBox(width: 5),
+        Expanded(
+            child: Text(text,
+                style: TextStyle(color: color, fontSize: 9, height: 1.35))),
+      ]),
+    );
+  }
+
+  Future<void> _confirmResetModelHealth() async {
+    final sl = SL.of(context);
+    final ok = await showDialog<bool>(context: context, builder: (_) =>
+      AlertDialog(
+        backgroundColor: sl.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Text('Reset model counters?',
+            style: TextStyle(color: sl.text1, fontSize: 14,
+                fontWeight: FontWeight.w800)),
+        content: Text(
+          'Clears the attempt/success tallies for all '
+          '${_modelHealth.length} model(s) on this device. Worth doing after '
+          'changing a model, a timeout or a key — otherwise a model that has '
+          'just been fixed is still judged on its broken history.\n\n'
+          'The AI Performance run history above is NOT affected.',
+          style: TextStyle(color: sl.text2, fontSize: 12, height: 1.45)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.amber,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8))),
+            child: const Text('Reset', style: TextStyle(color: Colors.white))),
+        ]));
+    if (ok != true) return;
+    await ModelHealth.resetAll();
+    await _loadModelHealth();
+    _toast('Model counters reset', AppColors.amber);
+  }
+
   Widget _runBreakdownRow(
       SL sl, String label, int count, int total, Color color) {
     final pct = total <= 0 ? 0.0 : count * 100.0 / total;

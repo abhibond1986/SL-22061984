@@ -24,6 +24,11 @@ import 'admin_master_data.dart';
 // file in turn; Dart allows mutual imports between libraries and the pair
 // nara_vision.dart / gemini_vision.dart already relies on that.
 import 'gemini_vision.dart';
+// Per-model attempt counters for the admin panel. See model_health.dart's header
+// for why per-ATTEMPT recording exists alongside AiRunLog's per-SCAN record: this
+// tier tries up to three slugs on one key, and only this file can tell "the model
+// is retired" apart from "the key is dead" — advice that points opposite ways.
+import 'model_health.dart';
 
 class GeminiDirectVision {
   static const String _kApiKey = 'gemini_vision_api_key';
@@ -137,6 +142,15 @@ class GeminiDirectVision {
     'gemini-3.6-flash',      // Documented replacement for 2.0-flash
     'gemini-2.5-flash',      // Older generation, still supported — extra headroom
   ];
+
+  /// Read-only view of [_modelFallbackChain] for display.
+  ///
+  /// Exists so `GeminiVision.activeVisionChain` can describe this tier without a
+  /// second hand-maintained copy of the order — the admin panel's model-health
+  /// section compares recorded counters against the live chain to spot slugs that
+  /// are no longer wired up, and a stale copy there would mislabel a working
+  /// model as orphaned.
+  static const List<String> fallbackChain = _modelFallbackChain;
 
   // ★ v25: Track if quota is exhausted (429) — all models on same key are blocked
   static bool _quotaExhausted = false;
@@ -252,6 +266,18 @@ class GeminiDirectVision {
       }
     };
 
+    // Per-model health. Fire-and-forget; never awaited, never allowed to throw.
+    final sw = Stopwatch()..start();
+    void health(bool ok, String failKind) {
+      ModelHealth.recordAttempt(
+        model: model,
+        provider: 'gemini',
+        ok: ok,
+        ms: sw.elapsedMilliseconds,
+        failKind: failKind,
+      );
+    }
+
     try {
       final response = await http.post(
         Uri.parse(url),
@@ -269,7 +295,13 @@ class GeminiDirectVision {
           final parts = content?['parts'] as List?;
           if (parts != null && parts.isNotEmpty) {
             final text = parts[0]['text']?.toString() ?? '';
-            return _parseHazardResponse(text);
+            final parsed = _parseHazardResponse(text);
+            // Gemini is asked for `responseMimeType: application/json`, so an
+            // unparseable body here is a genuine schema failure rather than the
+            // prompt-instructed-JSON gamble the OpenRouter tier takes.
+            health(parsed != null,
+                parsed != null ? '' : ModelHealth.kFailUnparseable);
+            return parsed;
           }
         }
         // HTTP 200 with nothing usable. This used to print "No candidates in
@@ -309,18 +341,27 @@ class GeminiDirectVision {
           print('GeminiDirectVision: [$model] No candidates in response — '
               'body: ${responseText.substring(0, responseText.length.clamp(0, 300))}');
         }
+        // All three causes above are `empty`: a 200 arrived and carried no
+        // usable text. They are NOT grounds for removing the model — a safety
+        // block is about the photo and MAX_TOKENS is about the budget — so they
+        // must not be lumped in with dead_slug.
+        health(false, ModelHealth.kFailEmpty);
         return null;
       } else if (response.statusCode == 429) {
         print('GeminiDirectVision: [$model] Rate limited (429) — ALL models on this key are blocked');
         keyBlockKind = 'quota';
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
+        // Gemini's free allowance is a per-DAY request count and it is shared by
+        // every model on the key, so this says nothing about the slug.
+        health(false, ModelHealth.kFailQuota);
         return null;
       } else if (response.statusCode == 403) {
         print('GeminiDirectVision: [$model] API key invalid or quota exceeded (403)');
         keyBlockKind = 'forbidden';
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
+        health(false, ModelHealth.kFailKeyBlocked);
         return null;
       } else if (response.statusCode == 400 &&
           response.body.contains('API_KEY_INVALID')) {
@@ -339,6 +380,11 @@ class GeminiDirectVision {
         keyBlockKind = 'invalid_key';
         _quotaExhausted = true;
         _quotaExhaustedAt = DateTime.now();
+        // key_blocked, not dead_slug — the 400 is about the key. Recorded against
+        // whichever model was first in the chain, and the panel's reading is that
+        // key_blocked appearing on ONE model of a tier means the tier bailed early,
+        // exactly as designed.
+        health(false, ModelHealth.kFailKeyBlocked);
         return null;
       } else if (response.statusCode == 404) {
         // Model retired by Google. This is per-MODEL, so _quotaExhausted must
@@ -349,13 +395,31 @@ class GeminiDirectVision {
         print('GeminiDirectVision:   If this repeats for every model, update '
             'availableModels/_modelFallbackChain against '
             'https://ai.google.dev/gemini-api/docs/deprecations');
+        // The one verdict that means "take this ID out of the list".
+        health(false, ModelHealth.kFailDeadSlug);
         return null;
       } else {
         print('GeminiDirectVision: [$model] Error ${response.statusCode}: ${response.body.substring(0, response.body.length.clamp(0, 200))}');
+        health(false, ModelHealth.kFailError);
         return null;
       }
     } catch (e) {
       print('GeminiDirectVision: [$model] Exception: $e');
+      // The 15s ceiling lands here. Distinguishing it from a network fault
+      // matters: three models x 15s is 45s of a scan's budget, so a model that
+      // times out habitually is the most expensive kind of bad entry even though
+      // it never returns an error.
+      final t = e.runtimeType.toString().toLowerCase();
+      final m = e.toString().toLowerCase();
+      health(
+          false,
+          (t.contains('timeout') || m.contains('timeout'))
+              ? ModelHealth.kFailTimeout
+              : (t.contains('socket') ||
+                      t.contains('clientexception') ||
+                      m.contains('failed host lookup'))
+                  ? ModelHealth.kFailNetwork
+                  : ModelHealth.kFailError);
       return null;
     }
   }
