@@ -169,6 +169,114 @@ class GeminiDirectVision {
   /// why. Fast, silent, and unactionable.
   static String keyBlockKind = '';
 
+  /// ── TIER-WIDE COOLDOWN AFTER A TOTAL FAILURE ────────────────────────────────
+  ///
+  /// [_quotaExhausted] above only arms on a key-wide verdict: 429, 403, or the
+  /// 400 API_KEY_INVALID. **A timeout, a 503 or an empty 200 armed nothing**, so
+  /// when Google itself was unwell every scan re-paid the full cost of this tier
+  /// and got nothing for it.
+  ///
+  /// Measured twice on 2026-09-07 on the user's own device. First scan: three
+  /// models, all 503. Second scan: `TimeoutException after 0:00:15` then
+  /// `✗ All 3 model(s) failed` — about 15s of a 38.9s scan, 39% of the wait,
+  /// spent on a tier whose entire justification is that it is the FAST one
+  /// (~7s when healthy). Nothing about that is per-model, and nothing about it
+  /// was remembered.
+  ///
+  /// So: when every model in the chain fails and no key-wide cause was found,
+  /// skip the whole tier for [_kTierDownFor]. The next scan starts at Tier 2 and
+  /// saves the 15s outright.
+  ///
+  /// **Persisted, unlike [_quotaExhausted].** This is a Flutter *web* app: a
+  /// static field lives only as long as the tab. An operator who reloads
+  /// safetylens.in between photographs — which is exactly what someone does when
+  /// a scan felt slow — would otherwise reset the cooldown every time and never
+  /// benefit from it once.
+  static const String _kTierDownUntil = 'gemini_tier_down_until';
+
+  /// Per-model ceiling. **8s, cut from 15s on 2026-09-07.**
+  ///
+  /// This tier exists ONLY because it is fast — it was promoted ahead of the free
+  /// OpenRouter models on the strength of a measured ~7s leg, against MiniMax's
+  /// 19-29s. A Gemini call that has not answered in 8s has already lost the race
+  /// it was entered to win: the work then falls to Tier 2 regardless, so the
+  /// remaining 7s of a 15s wait bought nothing but a later start for the model
+  /// that was going to answer anyway.
+  ///
+  /// The risk being accepted is a slow-but-successful Gemini reply discarded
+  /// between 8s and 15s. It is small and self-correcting: 8s is still comfortably
+  /// above the healthy leg, the chain continues to a tier that has answered every
+  /// time so far, and [ModelHealth]'s `timeout` counter makes the trade visible —
+  /// if timeouts climb while Gemini is otherwise healthy, this is the number that
+  /// went too far. Do not raise it without checking that panel first.
+  ///
+  /// Worst case for the tier is now 3 x 8s = 24s instead of 45s, and with the
+  /// cooldown below it is paid at most once every 90 seconds.
+  static const Duration _kPerModelTimeout = Duration(seconds: 8);
+
+  /// 90s, not the 60s used for quota. A quota block clears on a schedule; a
+  /// provider outage does not, and the two live scans were minutes apart. Long
+  /// enough to cover a burst of scans at one location, short enough that a
+  /// recovered Gemini is back in play within the same walkaround.
+  static const Duration _kTierDownFor = Duration(seconds: 90);
+
+  /// Mirrors the stored deadline so the common case costs no async read. Null
+  /// means "not yet loaded this session", which is why [_tierIsDown] still
+  /// consults SharedPreferences.
+  static DateTime? _tierDownUntil;
+
+  /// True while the tier is being skipped. Also repairs a deadline further out
+  /// than [_kTierDownFor] — a clock change or a hand-edited pref must not be
+  /// able to disable this tier permanently, which is the failure mode that makes
+  /// a "safety" cooldown unsafe.
+  static Future<bool> _tierIsDown() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(_kTierDownUntil);
+    if (ms == null) return false;
+    final until = DateTime.fromMillisecondsSinceEpoch(ms);
+    final now = DateTime.now();
+    if (until.difference(now) > _kTierDownFor * 2) {
+      await prefs.remove(_kTierDownUntil);
+      _tierDownUntil = null;
+      print('GeminiDirectVision: ⚠ cooldown deadline was implausibly far out '
+          '($until) — cleared rather than trusted');
+      return false;
+    }
+    if (now.isBefore(until)) {
+      _tierDownUntil = until;
+      return true;
+    }
+    await prefs.remove(_kTierDownUntil);
+    _tierDownUntil = null;
+    return false;
+  }
+
+  static Future<void> _markTierDown(String why) async {
+    final until = DateTime.now().add(_kTierDownFor);
+    _tierDownUntil = until;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kTierDownUntil, until.millisecondsSinceEpoch);
+    print('GeminiDirectVision: ⏸ TIER DOWN for ${_kTierDownFor.inSeconds}s — '
+        '$why. The next scan goes straight to Tier 2 (OpenRouter) and saves the '
+        'time this tier just spent returning nothing.');
+  }
+
+  /// Clears the cooldown. Called on success, and available to the admin panel so
+  /// "Test Gemini" is never answered by a stale skip.
+  static Future<void> clearTierCooldown() async {
+    _tierDownUntil = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kTierDownUntil);
+  }
+
+  /// Seconds remaining, for the admin panel's health line. 0 when up.
+  static int get tierDownSecondsRemaining {
+    final u = _tierDownUntil;
+    if (u == null) return 0;
+    final s = u.difference(DateTime.now()).inSeconds;
+    return s > 0 ? s : 0;
+  }
+
   /// Analyze image for safety hazards
   /// Returns structured hazard data or null on failure
   /// [kbContext] — optional knowledge bank content to inject into prompt for accurate regulations
@@ -179,6 +287,15 @@ class GeminiDirectVision {
   static Future<Map<String, dynamic>?> analyzeImage(Uint8List imageBytes,
       {String? kbContext, String sceneContext = ''}) async {
     if (!await isConfigured) return null;
+
+    // Whole tier parked after a total failure. Checked BEFORE the quota flag
+    // because it is the broader condition and, unlike the quota flag, it
+    // survives a page reload.
+    if (await _tierIsDown()) {
+      print('GeminiDirectVision: ⏭ Skipping tier — every model failed recently, '
+          '${tierDownSecondsRemaining}s of cooldown left');
+      return null;
+    }
 
     // If quota was exhausted recently (within 60s), skip entirely
     if (_quotaExhausted && _quotaExhaustedAt != null &&
@@ -222,6 +339,10 @@ class GeminiDirectVision {
           result['hazards'] != null &&
           (result['hazards'] as List).isNotEmpty) {
         print('GeminiDirectVision: ✓ SUCCESS on $model');
+        // One success clears the cooldown even if it was still nominally
+        // running: the evidence for parking the tier was "nothing works", and
+        // that has just been disproved.
+        await clearTierCooldown();
         result['_source'] = 'gemini_direct';
         result['_model'] = model;
         return result;
@@ -230,6 +351,13 @@ class GeminiDirectVision {
 
     print('GeminiDirectVision: ✗ All ${attempts.length} model(s) failed: '
         '${attempts.join(", ")}');
+    // Every model failed and no key-wide cause was identified (a key-wide one
+    // returns above, and does not deserve a 90s tier park because the 60s quota
+    // cooldown already covers it with the right duration). What is left is a
+    // provider-side outage — 503s, timeouts, empty 200s — which is exactly the
+    // case that used to cost 15-45s on every subsequent scan.
+    await _markTierDown('all ${attempts.length} models failed with no key-wide '
+        'cause (provider-side: timeout, 5xx or empty response)');
     return null;
   }
 
@@ -283,7 +411,7 @@ class GeminiDirectVision {
         Uri.parse(url),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(requestBody),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(_kPerModelTimeout);
 
       if (response.statusCode == 200) {
         // ★ v29 FIX: Force UTF-8 decode for non-English text support
@@ -405,10 +533,12 @@ class GeminiDirectVision {
       }
     } catch (e) {
       print('GeminiDirectVision: [$model] Exception: $e');
-      // The 15s ceiling lands here. Distinguishing it from a network fault
-      // matters: three models x 15s is 45s of a scan's budget, so a model that
-      // times out habitually is the most expensive kind of bad entry even though
-      // it never returns an error.
+      // The [_kPerModelTimeout] ceiling lands here. Distinguishing it from a
+      // network fault matters: three models x 8s is 24s of a scan's budget, so a
+      // model that times out habitually is the most expensive kind of bad entry
+      // even though it never returns an error. A run of these across all three
+      // models is also what arms the tier cooldown, so this classification is no
+      // longer only a report — it changes what the next scan does.
       final t = e.runtimeType.toString().toLowerCase();
       final m = e.toString().toLowerCase();
       health(

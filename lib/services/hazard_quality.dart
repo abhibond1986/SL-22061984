@@ -40,6 +40,7 @@ class QualityReport {
     this.boxesWithdrawn = 0,
     this.viewCapped = 0,
     this.sceneWithdrawn = 0,
+    this.normalWithdrawn = 0,
   });
 
   /// Hazards folded into another row.
@@ -64,13 +65,20 @@ class QualityReport {
   /// room. See [HazardQuality.auditSceneRelevance].
   final int sceneWithdrawn;
 
+  /// Findings withdrawn because they described a designed feature in its normal
+  /// state, or a normal operating condition, with no deviation named — a crane
+  /// cabin bolted to its bridge, a load hanging from a hook with nobody under it.
+  /// See [HazardQuality.auditNormalByDesign].
+  final int normalWithdrawn;
+
   bool get changedAnything =>
       merged > 0 ||
       absenceDowngraded > 0 ||
       absenceFlagged > 0 ||
       boxesWithdrawn > 0 ||
       viewCapped > 0 ||
-      sceneWithdrawn > 0;
+      sceneWithdrawn > 0 ||
+      normalWithdrawn > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
@@ -78,7 +86,8 @@ class QualityReport {
       'absenceFlagged: $absenceFlagged, '
       'boxesWithdrawn: $boxesWithdrawn, '
       'viewCapped: $viewCapped, '
-      'sceneWithdrawn: $sceneWithdrawn)';
+      'sceneWithdrawn: $sceneWithdrawn, '
+      'normalWithdrawn: $normalWithdrawn)';
 }
 
 class HazardQuality {
@@ -141,6 +150,13 @@ class HazardQuality {
       // report describe rows that will actually be shown).
       final sceneWithdrawn = auditSceneRelevance(result, deduped);
 
+      // Then: does the finding name a DEVIATION at all, or just a designed
+      // feature doing its job? Runs immediately after the scene rule because the
+      // two are the same kind of judgement — "the requirement does not exist
+      // here" and "there is nothing wrong here" — and both must settle before the
+      // audits below count rows that will be shown.
+      final normalWithdrawn = auditNormalByDesign(result, deduped);
+
       var downgraded = 0;
       var flagged = 0;
       var boxesWithdrawn = 0;
@@ -169,6 +185,7 @@ class HazardQuality {
         boxesWithdrawn: boxesWithdrawn,
         viewCapped: viewCapped,
         sceneWithdrawn: sceneWithdrawn,
+        normalWithdrawn: normalWithdrawn,
       );
     } catch (_) {
       return const QualityReport(
@@ -726,6 +743,194 @@ class HazardQuality {
     // The banner and the score are derived from the rows, so they have to follow
     // them down or the report contradicts itself: a MEDIUM headline over an
     // empty table is exactly the output that prompted this rule.
+    if (hazards.isEmpty) {
+      final overall = _str(result['overallRisk']);
+      if (overall.isNotEmpty && severityRank(overall) > severityRank('LOW')) {
+        result['overallRiskBeforeSceneAudit'] = overall;
+        result['overallRisk'] = 'LOW';
+      }
+      final score = _asInt(result['riskScore']);
+      if (score != null && score > 15) {
+        result['riskScoreBeforeSceneAudit'] = score;
+        result['riskScore'] = 15;
+      }
+    }
+    return withdrawn.length;
+  }
+
+  // ── NORMAL BY DESIGN ─────────────────────────────────────────────────────
+  //
+  // The second and last place in this file that takes a row off the list, and it
+  // exists for the same reason as [auditSceneRelevance]: the finding is not a
+  // hazard that might be true and cannot be confirmed, it is a description of a
+  // thing being what it was built to be.
+  //
+  // **Why, in the reporter's own words (2026-09-07).** A crane scan came back
+  // with "Operator cabin suspended ..." and "Crane bridge walkway acc..." — both
+  // LOW, both meaningless. The safety officer who raised it: *"crane cabin is
+  // always fixed with the structure, its the design element. i dont know why it
+  // is shown as a hazard. also the load will obviously be suspended .. i cant
+  // understand why is it a hazard unless some person is directly below it."*
+  //
+  // That is the whole rule. An EOT crane's cabin is bolted to the girder; a load
+  // hangs from the hook. Reporting either as a non-conformance produces a report
+  // with nothing to action, and — exactly as with helmets in a conference hall —
+  // trains the reader to skim the table that also holds the real finding.
+
+  /// Written onto the result when at least one normal-state finding was withdrawn.
+  static const String kNormalByDesignFlag = '_normalByDesignWithdrawn';
+
+  /// Things that are SUPPOSED to be there, keyed by the phrase that gives them
+  /// away. Matched against the hazard's own name + description + visual evidence.
+  ///
+  /// Each entry is a designed feature or a normal operating state. None of them
+  /// is inherently wrong, and none of them can be made wrong by its mere
+  /// presence — only by a defect, which [_deviationCues] below detects and which
+  /// vetoes this whole rule for that row.
+  static final List<RegExp> _normalStateCues = [
+    for (final kw in const [
+      // Crane structure. The cabin, and the walkway that serves it, are welded
+      // or bolted to the bridge girder — that is the design.
+      'operator cabin', 'operators cabin', 'crane cabin', 'driver cabin',
+      'cabin suspended', 'suspended cabin', 'cabin mounted', 'cabin attached',
+      'cabin fixed', 'cabin at height', 'cabin located', 'cabin positioned',
+      'elevated cabin', 'cabin access', 'crane bridge', 'bridge girder',
+      'crane girder', 'crane walkway', 'bridge walkway', 'walkway access',
+      'access walkway', 'maintenance walkway', 'catwalk', 'gantry walkway',
+      'trolley mounted', 'end carriage', 'long travel', 'cross travel',
+      'festoon', 'downshop lead',
+      // Normal lifting. A load in the air is a lift, not a hazard.
+      'suspended load', 'load suspended', 'hanging load', 'load hanging',
+      'load hoisted', 'hoisted load', 'load lifted', 'lifted load',
+      'load on hook', 'load on the hook', 'material suspended',
+      'suspended material', 'suspended from the hook', 'suspended from hook',
+      'lifting magnet', 'magnet suspended', 'grab suspended', 'ladle suspended',
+      'load at height', 'elevated load', 'load overhead', 'overhead load',
+      // Being at height / near plant, offered as a hazard in itself.
+      'working at height', 'work at height', 'at elevated height',
+      'height of the structure', 'structure at height', 'elevated structure',
+      'elevated position', 'overhead structure', 'overhead crane present',
+      'presence of crane', 'presence of overhead', 'proximity to plant',
+    ])
+      RegExp('\\b${RegExp.escape(kw)}(?:s|es)?\\b', caseSensitive: false),
+  ];
+
+  /// The VETO. Any of these anywhere in the row's own text means a real defect or
+  /// a real exposure was named, and the row survives untouched.
+  ///
+  /// Deliberately generous — every word here that fires wrongly costs one false
+  /// hazard kept, while every word MISSING from this list costs a real defect
+  /// silently withdrawn. Those are not comparable, so the list errs long.
+  static final List<RegExp> _deviationCues = [
+    for (final kw in const [
+      // Structural / mechanical defect.
+      'crack', 'cracked', 'broken', 'break', 'missing', 'absent', 'without',
+      'corroded', 'corrosion', 'rust', 'rusted', 'rusty', 'worn', 'wear',
+      'damaged', 'damage', 'bent', 'buckled', 'deformed', 'distorted',
+      'loose', 'slack', 'detached', 'dislodged', 'displaced', 'gap', 'hole',
+      'frayed', 'fray', 'kinked', 'twisted', 'stretched', 'elongated',
+      'defective', 'faulty', 'failed', 'failure', 'weakened', 'sagging',
+      'leaking', 'leak', 'spill', 'spilled',
+      // Guarding and protection.
+      'unguarded', 'no guard', 'guard removed', 'unprotected', 'no handrail',
+      'handrail missing', 'no railing', 'railing missing', 'no toe board',
+      'toe guard', 'no barricade', 'not barricaded', 'unbarricaded',
+      'no cover', 'cover removed', 'open edge', 'unfenced', 'no fall arrest',
+      'no lifeline', 'no safety net', 'not anchored', 'unsecured', 'not secured',
+      // Exposure — a person in the wrong place. This is the whole point of the
+      // suspended-load carve-out the reporter described.
+      'person below', 'person beneath', 'person under', 'people below',
+      'people beneath', 'people under', 'worker below', 'worker beneath',
+      'worker under', 'workers below', 'workers beneath', 'workers under',
+      'standing below', 'standing beneath', 'standing under', 'walking below',
+      'walking beneath', 'walking under', 'working below', 'working beneath',
+      'working under', 'passing below', 'passing beneath', 'passing under',
+      'directly below', 'directly beneath', 'directly under', 'underneath',
+      'line of fire', 'in the path', 'struck by', 'swing radius',
+      'occupied', 'personnel in', 'man below',
+      // Operating and procedural deviation.
+      'overload', 'overloaded', 'exceeds', 'exceeding', 'unsafe', 'improper',
+      'incorrect', 'wrong', 'not rated', 'uncertified', 'expired',
+      'no permit', 'without permit', 'unauthorised', 'unauthorized',
+      'obstructed', 'blocked', 'obstruction', 'debris', 'housekeeping',
+      'slippery', 'wet', 'no illumination', 'poor illumination',
+      'no signage', 'no sign', 'not tagged', 'no lockout', 'energised',
+      'energized', 'exposed conductor', 'bare conductor', 'unattended',
+    ])
+      RegExp('\\b${RegExp.escape(kw)}(?:s|es|ed|ing)?\\b', caseSensitive: false),
+  ];
+
+  /// The row's own words — everything the model wrote about THIS finding.
+  ///
+  /// The scan-level summary is excluded on purpose. A summary sentence naming a
+  /// real defect elsewhere in the frame would veto the withdrawal of an unrelated
+  /// normal-state row, which is the self-disarming failure that
+  /// [_inventoryText]'s doc comment describes for the PPE rule.
+  static String _hazardText(Map hazard) => [
+        _str(hazard['name']),
+        _str(hazard['description']),
+        _str(hazard['visualEvidence']),
+        _str(hazard['correctiveAction']),
+      ].join(' ');
+
+  /// Whether this row describes only a normal state, with no deviation named.
+  static bool describesNormalStateOnly(Map hazard) {
+    final text = _hazardText(hazard);
+    // Nothing to reason from. Calling an empty row "normal" would withdraw
+    // findings for being badly written rather than for being wrong.
+    if (text.trim().length < 12) return false;
+    if (!_anyMatch(_normalStateCues, text)) return false;
+    return !_anyMatch(_deviationCues, text);
+  }
+
+  /// Withdraws normal-state findings and returns how many were removed.
+  ///
+  /// **How to apply:** three conditions, all required, mirroring the PPE rule's
+  /// narrowness — the row must name a designed feature or normal operating state,
+  /// must name NO deviation from [_deviationCues], and is moved to
+  /// `withdrawnHazards` rather than destroyed, so the record still shows what the
+  /// model said and why the app disagreed.
+  ///
+  /// Note this rule is scene-independent: unlike [auditSceneRelevance] it does
+  /// NOT require a non-industrial frame. A crane cabin is a design element on the
+  /// shop floor too — which is precisely where it was wrongly reported.
+  static int auditNormalByDesign(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    final withdrawn = <Map<String, dynamic>>[];
+    hazards.removeWhere((h) {
+      if (!describesNormalStateOnly(h)) return false;
+      h['withdrawnReason'] =
+          'Withdrawn by the app: this describes equipment in its normal, '
+          'as-designed state — for example a crane cabin fixed to the bridge, or '
+          'a load hanging from the hook with nobody underneath it — and names no '
+          'defect, deviation or exposed person. It was not shown as a '
+          'non-conformance.';
+      withdrawn.add(h);
+      return true;
+    });
+
+    if (withdrawn.isEmpty) return 0;
+
+    result[kNormalByDesignFlag] = true;
+    final existing = result[kWithdrawnKey];
+    result[kWithdrawnKey] = <Map<String, dynamic>>[
+      if (existing is List)
+        for (final e in existing)
+          if (e is Map) e.cast<String, dynamic>(),
+      ...withdrawn,
+    ];
+
+    // Appended, not assigned: auditSceneRelevance may already have written a
+    // note, and overwriting it would hide one of the two judgements the app made.
+    final note = '${withdrawn.length} observation'
+        '${withdrawn.length == 1 ? '' : 's'} withdrawn — equipment in its normal '
+        'designed state, with no defect or exposed person visible.';
+    final prior = _str(result['sceneNote']);
+    result['sceneNote'] = prior.isEmpty ? note : '$prior $note';
+
+    // Same reason as in auditSceneRelevance: the banner and the score are derived
+    // from the rows, so when the rows go the headline must follow or the report
+    // contradicts itself.
     if (hazards.isEmpty) {
       final overall = _str(result['overallRisk']);
       if (overall.isNotEmpty && severityRank(overall) > severityRank('LOW')) {

@@ -1235,23 +1235,67 @@ class AdminMasterData {
   /// this repairs what is ALREADY stored, and what arrives from Apps Script,
   /// at the last point before display.
   ///
-  /// **How to apply:** the LABEL wins, always — it is derived from the hazard rows
-  /// the reader is acting on. The score is raised to the band floor if it was too
-  /// low and capped at the ceiling if it was too high ("LOW" printing 95/100 is
-  /// the same defect mirrored), and returned untouched when it already agrees,
-  /// which is the normal case. An unrecognised label is left alone rather than
-  /// guessed at.
-  static int scoreForDisplay(String severity, dynamic score) {
+  /// **How to apply:** the clamp exists for ONE input — a score computed on a
+  /// different scale from the one in force, which is what put "23 / 100" under a
+  /// CRITICAL banner. It is NOT a way to make a headline label and an honest
+  /// score agree by moving the score.
+  ///
+  /// ★ NARROWED 2026-09-07. It used to raise any too-low score to the band floor.
+  /// A live crane scan then logged `score 24 contradicts severity MEDIUM — shown
+  /// as 35`: `combinedScore` had honestly totalled two LOW hazards to 24, the
+  /// banner said MEDIUM only because the model's scene-level `overallRisk` claim
+  /// is never lowered below the rows, and this method invented the missing 11
+  /// points so the two would match. The report then read "MEDIUM 35" above two
+  /// LOW rows — self-consistent in the code's terms and wrong in the reader's.
+  ///
+  /// An upward correction now depends on PROVENANCE, not magnitude. Magnitude
+  /// cannot separate the two cases and it is worth being explicit about why: the
+  /// crane score was 24, which sits inside the retired 5-25 range *and* is a
+  /// perfectly ordinary LOW-band total on the 0-100 one. No threshold can tell
+  /// those apart.
+  ///
+  /// What does tell them apart is where the number came from. [combinedScore]
+  /// reads the scale currently in force, so its output is on the right scale **by
+  /// construction** — pass `onCurrentScale: true` and it is never lifted. The
+  /// wrong-scale bug only ever arrived from a number that had been *stored*
+  /// earlier or handed over by Apps Script, and those callers leave the flag at
+  /// its default so the repair still applies to them.
+  ///
+  /// Downward capping is unchanged and needs no flag: "LOW" printing 95/100
+  /// cannot be defended on any scale.
+  ///
+  /// Inflating a risk score is not a neutral tidy-up. It is a safety document
+  /// asserting a number nothing measured.
+  static int scoreForDisplay(String severity, dynamic score,
+      {bool onCurrentScale = false}) {
     final raw =
         (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
     final band = severityBands[severity.trim().toUpperCase()];
     if (band == null) return raw;
     if (raw >= band.min && raw <= band.max) return raw;
-    final fixed = raw < band.min ? band.min : band.max;
+
+    if (raw > band.max) {
+      // Too high for its label — indefensible on any scale, so still capped.
+      print('$_kScoreTag score $raw exceeds the $severity band — capped at '
+          '${band.max}');
+      return band.max;
+    }
+
+    if (onCurrentScale) {
+      // The honest disagreement: the hazard rows total less than the headline
+      // label implies. The banner is a scene-level judgement, the score is the
+      // sum of the rows, and they are allowed to differ. Show what was measured.
+      print('$_kScoreTag score $raw is below the $severity band '
+          '(${band.min}-${band.max}) — shown AS COMPUTED, not raised. The banner '
+          'is a scene-level judgement; the score is the sum of the hazard rows.');
+      return raw;
+    }
+
+    final fixed = band.min;
     // Loud on purpose: this firing means something upstream is on the wrong
     // scale, and the display is only papering over it at the last moment.
-    print('$_kScoreTag score $raw contradicts severity $severity — shown as '
-        '$fixed to keep the report self-consistent');
+    print('$_kScoreTag stored score $raw contradicts severity $severity and is '
+        'not known to be on the current scale — shown as $fixed');
     return fixed;
   }
 

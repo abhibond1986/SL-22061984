@@ -163,12 +163,16 @@ class _AIScanTabState extends State<AIScanTab> {
       final raw = r['riskScore'];
       return AdminMasterData.scoreForDisplay(_overallRisk, raw);
     }
-    // Banded against the label the card actually shows. combinedScore already
-    // derives from the same severities, so this normally changes nothing — it
-    // catches the case where the stored scale is on the wrong range, which put
-    // "23 / 100" under a CRITICAL banner on a real report.
+    // Banded against the label the card actually shows, but flagged as already
+    // being on the live scale: combinedScore reads _severityScores, so its total
+    // cannot be a stale-scale artefact. That flag is what stops an honest 24
+    // under a MEDIUM banner being inflated to the band floor of 35 — the banner
+    // may legitimately sit above the rows, since _overallRisk keeps the model's
+    // scene-level judgement and never lowers it. Only the downward cap still
+    // applies here.
     return AdminMasterData.scoreForDisplay(
-        _overallRisk, AdminMasterData.combinedScore(_severityScores, labels));
+        _overallRisk, AdminMasterData.combinedScore(_severityScores, labels),
+        onCurrentScale: true);
   }
 
   /// The headline risk label, reconciled with the hazard rows underneath it.

@@ -588,6 +588,124 @@ void main() {
       'a wet floor in an office is not a PPE finding and is not withdrawn');
   ok((wetOffice['hazards'] as List).length == 1, 'the spill is still reported');
 
+  // ── normal by design ──────────────────────────────────────────────────
+  //
+  // From a real crane scan, 2026-09-07. The reporter's objection: the cabin is
+  // bolted to the bridge by design, and a load is meant to hang from the hook.
+  // Neither is a non-conformance unless something is wrong with it.
+  final crane = <String, dynamic>{
+    'sceneInventory': 'An overhead EOT crane bridge spanning a steel plant bay, '
+        'with the operator cabin below the girder and a load on the hook. Blast '
+        'furnace stacks are visible behind.',
+    'overallRisk': 'MEDIUM',
+    'riskScore': 35,
+    'hazards': [
+      hz(
+        name: 'Operator cabin suspended at height',
+        description: 'Visible: the crane operator cabin is suspended from the '
+            'crane bridge above the bay floor.',
+        severity: 'LOW',
+        evidence: 'The cabin hangs beneath the bridge girder.',
+      ),
+      hz(
+        name: 'Crane bridge walkway access',
+        description: 'Visible: a walkway access runs along the crane bridge.',
+        severity: 'LOW',
+        evidence: 'Walkway visible along the girder.',
+      ),
+      hz(
+        name: 'Suspended load over the bay',
+        description: 'Visible: a load is suspended from the crane hook over the '
+            'bay.',
+        severity: 'LOW',
+      ),
+    ],
+  };
+  final craneReport = HazardQuality.apply(crane);
+  ok(craneReport.normalWithdrawn == 3,
+      'crane cabin, bridge walkway and suspended load are all withdrawn');
+  ok((crane['hazards'] as List).isEmpty,
+      'nothing was wrong in the frame, so no hazard is reported');
+  ok((crane['withdrawnHazards'] as List).length == 3,
+      'withdrawn rows are kept in the record, not deleted');
+  ok(crane[HazardQuality.kNormalByDesignFlag] == true,
+      'the result is flagged so a reader knows the app made a judgement');
+  ok(crane['overallRisk'] == 'LOW',
+      'the banner follows the rows down instead of stranding MEDIUM over an '
+      'empty table');
+
+  // The veto. Same features, now with something actually wrong with them —
+  // these must all survive, because withdrawing one is a missed real defect.
+  final craneDefects = <String, dynamic>{
+    'sceneInventory': 'An overhead crane bridge in a steel plant bay.',
+    'hazards': [
+      hz(
+        name: 'Missing handrail on cabin access walkway',
+        description: 'Visible: the handrail is missing along the cabin access '
+            'walkway on the crane bridge.',
+        severity: 'HIGH',
+      ),
+      hz(
+        name: 'Worker standing under suspended load',
+        description: 'Visible: a worker is standing directly below the '
+            'suspended load on the hook.',
+        severity: 'CRITICAL',
+      ),
+      hz(
+        name: 'Frayed sling on crane hook',
+        description: 'Visible: the sling carrying the suspended load is frayed '
+            'at the eye.',
+        severity: 'HIGH',
+      ),
+      hz(
+        name: 'Corroded crane walkway plate',
+        description: 'Visible: the bridge walkway plate is corroded through '
+            'near the end carriage.',
+        severity: 'HIGH',
+      ),
+    ],
+  };
+  final defectReport = HazardQuality.apply(craneDefects);
+  ok(defectReport.normalWithdrawn == 0,
+      'a named defect on a designed feature vetoes the withdrawal');
+  ok((craneDefects['hazards'] as List).length == 4,
+      'all four genuine crane defects survive');
+
+  // A person under the load is the exposure the reporter named explicitly.
+  ok(
+      !HazardQuality.describesNormalStateOnly(hz(
+          name: 'Suspended load',
+          description:
+              'Visible: personnel walking beneath the suspended load.')),
+      'a person beneath the load makes the lift a real hazard');
+  ok(
+      HazardQuality.describesNormalStateOnly(hz(
+          name: 'Suspended load',
+          description: 'Visible: a load suspended from the hook, no person in '
+              'the vicinity.')),
+      'the same lift with nobody under it is normal operation');
+
+  // Unrelated findings in a crane bay must be untouched — the rule keys on the
+  // row's own words, not on the scene being industrial.
+  final craneBayOther = <String, dynamic>{
+    'sceneInventory': 'A crane bay with material stacked on the floor.',
+    'hazards': [
+      hz(
+        name: 'Oil spill on the bay floor',
+        description: 'Visible: an oil spill spreads across the walking route.',
+        severity: 'MEDIUM',
+      ),
+    ],
+  };
+  ok(HazardQuality.apply(craneBayOther).normalWithdrawn == 0,
+      'an oil spill in a crane bay is not a design element');
+  ok((craneBayOther['hazards'] as List).length == 1,
+      'the spill is still reported');
+
+  // An empty or near-empty row must not be withdrawn for being badly written.
+  ok(!HazardQuality.describesNormalStateOnly(hz(name: '', description: '')),
+      'an empty row is not treated as normal-by-design');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

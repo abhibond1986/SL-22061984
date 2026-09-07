@@ -3263,6 +3263,30 @@ FIELD RULES:
 ★ If the room contains nothing wrong, say so: overallRisk "LOW", riskScore
   under 20, "hazards": []. An empty hazards array is a correct, complete and
   professional answer. Do not manufacture a finding to fill the table.
+★ A DESIGNED FEATURE IN ITS NORMAL STATE IS NOT A HAZARD. Equipment is allowed
+  to be what it is. Before writing a hazard, name the DEVIATION — what is
+  broken, missing, worn, out of place, or being done wrongly. If you cannot
+  name one, there is no finding.
+  Do NOT report any of these, at any severity:
+  • A crane operator cabin fixed to the crane bridge or girder. It is bolted to
+    the structure by design; that is where the cabin belongs. "Cabin suspended
+    at height" describes every EOT crane ever built.
+  • A load hanging from a hook, sling or magnet. A suspended load is normal
+    lifting, not a hazard — it becomes one only when a person is visibly
+    standing or working UNDER or beside it. If you can see no such person, the
+    lift is simply a lift.
+  • Walkways, platforms, gantries, ladders, girders, rails, cable trays,
+    ducting or pipework that are merely present and intact.
+  • Working at height, in a bay, or near plant, described as a hazard in itself.
+  These are the same mistake as "no helmet in a conference hall": the report
+  names a normal condition as a non-conformance, the safety officer who reads it
+  finds nothing to act on, and the finding that mattered is discounted with it.
+★ The SAME features ARE reportable the moment you can see something wrong with
+  them: a cracked or corroded walkway plate, a MISSING or damaged handrail on
+  the cabin access, a frayed sling or a load slipping in its sling, a person
+  standing beneath a suspended load, an access ladder with broken rungs, a
+  cabin walkway obstructed by stored material. Report the defect, and say in
+  "visualEvidence" what you can actually see that proves it.
 • "viewType" / "inspectable" describe THE PHOTOGRAPH, not the site.
   GENERAL_VIEW = a whole yard, plant or building from a distance; you can see
   layout and large structures but not fittings. On a GENERAL_VIEW, or whenever
