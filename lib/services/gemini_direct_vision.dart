@@ -277,6 +277,78 @@ class GeminiDirectVision {
     return s > 0 ? s : 0;
   }
 
+  /// True when [v] is a non-blank string. A present-but-empty key must count as
+  /// absent: [_validateAndReturn] writes `sceneInventory: ''` and
+  /// `sectionCues: ''` unconditionally, so an `!= null` test here would pass for
+  /// a body that contained nothing at all.
+  static bool _hasText(Object? v) => v is String && v.trim().isNotEmpty;
+
+  /// Whether [result] is an answer, as opposed to a hollow body.
+  ///
+  /// ★ AN EMPTY HAZARD LIST IS A VALID ANSWER — fixed 2026-09-07, the SECOND
+  /// site of this bug. The gate here used to be
+  /// `result['hazards'] != null && (result['hazards'] as List).isNotEmpty`,
+  /// which is the same mistake [GeminiVision._parseAIResponse] was carrying, and
+  /// worse in its consequences: a benign photo failed all three Gemini models,
+  /// no key-wide cause was found, so [_markTierDown] **parked the entire tier
+  /// for 90s** on the strength of three correct answers. One clean frame
+  /// therefore made the next minute and a half of scans skip the fast tier.
+  ///
+  /// Note the split responsibility that hid it: [_validateAndReturn] *defaults*
+  /// `hazards` to `[]` and returns normally, so the parser accepted the reply and
+  /// only this loop rejected it. When a contract changes, the parser is not the
+  /// only place that judges a response — grep for every `isNotEmpty` on the
+  /// payload.
+  ///
+  /// The guard against genuinely hollow bodies is the same one Tier 2 uses: some
+  /// real scene content must be present. One field is deliberately enough, since
+  /// models differ in which they fill.
+  static bool _isUsableResult(Map<String, dynamic> result, String model) {
+    final hazards = result['hazards'];
+    if (hazards is! List) return false;
+    if (hazards.isNotEmpty) return true;
+
+    // `summary` counts ONLY if the model actually wrote it. _validateAndReturn
+    // substitutes the literal 'Analysis complete.' when the key was missing, so
+    // testing `summary != null` here would accept a completely hollow body — the
+    // defaults would supply the very evidence being looked for. Same trap for
+    // `sceneInventory` and `sectionCues`, which it defaults to ''; `_hasText`
+    // covers those. This is the general hazard of validating a map that an
+    // earlier stage has already filled in: check the values, not the keys.
+    final assessed = (_hasText(result['summary']) &&
+            result['summary'] != 'Analysis complete.') ||
+        _hasText(result['sceneInventory']) ||
+        _hasText(result['sceneType']) ||
+        (result['riskScore'] is num && (result['riskScore'] as num) > 0) ||
+        (result['confidence'] is num && (result['confidence'] as num) > 0) ||
+        (result['people'] is num && (result['people'] as num) > 0);
+    if (!assessed) {
+      print('GeminiDirectVision: ✗ $model returned no hazards AND no scene '
+          'content — hollow body, not a clean bill of health');
+      return false;
+    }
+
+    // An accepted empty table must carry an EXPLICIT low risk. _validateAndReturn
+    // defaults overallRisk to 'UNKNOWN', which AdminMasterData now scores 0 as a
+    // non-assessment — correct for a scan that never ran, wrong for this one,
+    // which DID run and found nothing. LOW/15 matches what HazardQuality writes
+    // when an audit empties the table, so all three paths agree.
+    if (!_hasText(result['overallRisk']) || result['overallRisk'] == 'UNKNOWN') {
+      result['overallRisk'] = 'LOW';
+    }
+    if (result['riskScore'] is! num || (result['riskScore'] as num) <= 0) {
+      result['riskScore'] = 15;
+    }
+    if (!_hasText(result['summary']) ||
+        result['summary'] == 'Analysis complete.') {
+      result['summary'] = 'No hazards were identified in this frame. '
+          'Verify on site before treating the area as clear.';
+    }
+    print('GeminiDirectVision: ✓ $model reported NO hazards, and that is a '
+        'valid answer — accepting it as a clean frame rather than a failure');
+    return true;
+  }
+
   /// Analyze image for safety hazards
   /// Returns structured hazard data or null on failure
   /// [kbContext] — optional knowledge bank content to inject into prompt for accurate regulations
@@ -335,9 +407,7 @@ class GeminiDirectVision {
         return null;
       }
 
-      if (result != null &&
-          result['hazards'] != null &&
-          (result['hazards'] as List).isNotEmpty) {
+      if (result != null && _isUsableResult(result, model)) {
         print('GeminiDirectVision: ✓ SUCCESS on $model');
         // One success clears the cooldown even if it was still nominally
         // running: the evidence for parking the tier was "nothing works", and
