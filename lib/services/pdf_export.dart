@@ -18,6 +18,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 import 'admin_master_data.dart';
+import 'hazard_quality.dart';
 import 'image_storage.dart';
 import 'line_of_fire.dart';
 import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
@@ -119,7 +120,8 @@ class PdfExport {
           w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
           w.add(pw.SizedBox(height: 3));
           w.add(_photoAndSummary(imgBytes, hazards.length, summary,
-              severity, riskScore, confidence, hazards));
+              severity, riskScore, confidence, hazards,
+              verifyCount: _verifyOnSiteCount(incident)));
           w.add(pw.SizedBox(height: 7));
         } else {
           w.add(_sectionTitle('INCIDENT SUMMARY'));
@@ -138,7 +140,12 @@ class PdfExport {
           // the report ran to a second page. Removed deliberately — do not
           // re-add it. The page-1 panel is the one source of the score.
           w.add(pw.SizedBox(height: 7));
+          w.addAll(_verifyOnSiteSection(incident));
         } else {
+          // No confirmed hazards. The verify list may still have content, and on
+          // this branch it is the only substantive finding section in the report,
+          // so it must be added before the near-miss corrective-action box below.
+          w.addAll(_verifyOnSiteSection(incident));
           // Near-miss reports have no hazards list, so the table above is
           // skipped — and with the IMMEDIATE CORRECTIVE ACTION box gone, the
           // reporter's own corrective action would appear NOWHERE in the PDF.
@@ -252,6 +259,121 @@ class PdfExport {
       fontSize: 7.5, color: PdfColor.fromHex('#7A4F01'), lineSpacing: 1.2,
       fontWeight: pw.FontWeight.bold)),
   );
+
+  // ─── TO VERIFY ON SITE ───────────────────────────────────────────────────
+  /// Observations the analysis itself said this photograph could not confirm.
+  ///
+  /// These are **not** hazards and must never be counted as such — that is the
+  /// entire reason `HazardQuality.auditUnverifiable` moves them out of `hazards`.
+  /// They are still printed, because a distant corrosion lead is worth an
+  /// inspector's time; it is just not a non-conformance yet. The distinction the
+  /// reader must be able to make is "someone saw this" vs "someone should go and
+  /// look", so the heading says TO VERIFY and the intro line says why they moved.
+  ///
+  /// Deliberately compact — one wrapped line per item in a single bordered box,
+  /// no table grid and no per-row header, because the one-page budget documented
+  /// in [build] leaves only ~40pt of slack once the hazards table is present.
+  /// Returns an empty list (not a null widget) so both branches of `build` can
+  /// `addAll` it unconditionally.
+  static List<Map<String, dynamic>> _verifyOnSiteItems(
+      Map<String, dynamic> inc) {
+    final raw = inc[HazardQuality.kVerifyOnSiteKey];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    return <Map<String, dynamic>>[
+      for (final e in raw)
+        if (e is Map) e.cast<String, dynamic>(),
+    ];
+  }
+
+  static int _verifyOnSiteCount(Map<String, dynamic> inc) =>
+      _verifyOnSiteItems(inc).length;
+
+  static List<pw.Widget> _verifyOnSiteSection(Map<String, dynamic> inc) {
+    final items = _verifyOnSiteItems(inc);
+    if (items.isEmpty) return const <pw.Widget>[];
+
+    final lines = <pw.Widget>[];
+    for (var i = 0; i < items.length; i++) {
+      final it = items[i];
+      final name = _safe(it['name']?.toString().trim() ?? '');
+      // The description is the useful part (it is what carries "distant view",
+      // "silhouetted", the actual observation) but it is also long, so it is
+      // clipped. correctiveAction is the fallback because a row can arrive with
+      // an empty description; a numbered line with nothing after the dash would
+      // read as a formatting bug.
+      var detail = _safe(it['description']?.toString().trim() ?? '');
+      if (detail.isEmpty) {
+        detail = _safe(it['correctiveAction']?.toString().trim() ?? '');
+      }
+      if (detail.length > 240) detail = '${detail.substring(0, 240)}...';
+      final loc = _safe(it['location']?.toString().trim() ?? '');
+      final head = name.isEmpty ? 'Observation ${i + 1}' : name;
+      if (i > 0) lines.add(pw.SizedBox(height: 3));
+      lines.add(pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 13,
+            child: pw.Text('${i + 1}.',
+                style: pw.TextStyle(
+                    fontSize: 7.5,
+                    fontWeight: pw.FontWeight.bold,
+                    color: _textMed)),
+          ),
+          // Two stacked pw.Text widgets rather than one pw.RichText: RichText and
+          // TextSpan appear nowhere else in this file, and with no Flutter/pdf
+          // package resolvable in this environment their API cannot be checked
+          // by the analyzer. Every widget used here is one the report already
+          // renders successfully somewhere above.
+          pw.Expanded(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(loc.isEmpty ? head : '$head  ($loc)',
+                    style: pw.TextStyle(
+                        fontSize: 7.5,
+                        fontWeight: pw.FontWeight.bold,
+                        color: _textDark)),
+                if (detail.isNotEmpty)
+                  pw.Text(detail,
+                      style: pw.TextStyle(
+                          fontSize: 7, color: _textMed, lineSpacing: 1.1)),
+              ],
+            ),
+          ),
+        ],
+      ));
+    }
+
+    return <pw.Widget>[
+      _sectionTitle('TO VERIFY ON SITE  —  ${items.length} '
+          'ITEM${items.length == 1 ? '' : 'S'}'),
+      pw.SizedBox(height: 3),
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.fromLTRB(9, 5, 9, 5),
+        decoration: pw.BoxDecoration(
+            color: PdfColor.fromHex('#FFF8E1'),
+            border:
+                pw.Border.all(color: PdfColor.fromHex('#F9A825'), width: 0.8)),
+        child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(
+                  _safe('NOT counted as hazards. The analysis stated it could '
+                      'not confirm these from the photograph - check them at '
+                      'close range before recording a finding.'),
+                  style: pw.TextStyle(
+                      fontSize: 7,
+                      color: PdfColor.fromHex('#7A4F01'),
+                      fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 4),
+              ...lines,
+            ]),
+      ),
+      pw.SizedBox(height: 7),
+    ];
+  }
 
   static pw.Widget _banner(Map<String, dynamic> inc, String sev, bool isAi,
       dynamic score, dynamic conf, pw.MemoryImage? logoImage) {
@@ -429,9 +551,14 @@ class PdfExport {
   // ─────────────────────────────────────────────────────────────────────────
   //  PHOTO + SUMMARY (with bbox overlays)
   // ─────────────────────────────────────────────────────────────────────────
+  /// [verifyCount] is the length of the Verify-on-site list, NOT part of [count].
+  /// It exists so the caption can say "0 hazard(s) identified, 3 to verify on
+  /// site" instead of a bare "0 hazard(s) identified" under a photograph the
+  /// analysis clearly had something to say about. Keeping the two figures
+  /// separate is the point of the whole feature — never fold it into [count].
   static pw.Widget _photoAndSummary(Uint8List img, int count, String summary,
       String severity, dynamic score, dynamic conf,
-      List<Map<String, dynamic>> hazards) {
+      List<Map<String, dynamic>> hazards, {int verifyCount = 0}) {
     final sc = _getSevCol(severity);
     final sb = _getSevBg(severity);
     final s  = (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
@@ -531,12 +658,15 @@ class PdfExport {
                 // that the location could not be pinned, so the reader knows to
                 // look for it on site rather than on the page.
                 child: pw.Text(
-                  bboxedCount > 0
-                    ? '$count hazard(s) - $bboxedCount marked on photo'
-                        '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'
-                    : unpinnedCount > 0
-                      ? '$count hazard(s) - none locatable in this view'
-                      : '$count hazard(s) identified',
+                  (bboxedCount > 0
+                      ? '$count hazard(s) - $bboxedCount marked on photo'
+                          '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'
+                      : unpinnedCount > 0
+                        ? '$count hazard(s) - none locatable in this view'
+                        : '$count hazard(s) identified') +
+                    (verifyCount > 0
+                        ? ', $verifyCount to verify on site'
+                        : ''),
                   textAlign: pw.TextAlign.center,
                   style: pw.TextStyle(fontSize: 6.5, color: _textMed,
                     fontStyle: pw.FontStyle.italic))),

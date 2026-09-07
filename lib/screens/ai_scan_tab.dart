@@ -1934,16 +1934,88 @@ class _AIScanTabState extends State<AIScanTab> {
     }
   }
 
+  static String _str(Object? v) => v?.toString().trim() ?? '';
+
+  /// The row that should title the report: highest severity among findings the
+  /// app actually believes. Returns null when nothing qualifies.
+  ///
+  /// "Confirmed" here means the quality pipeline left no doubt-marker on the row:
+  ///
+  /// * `absenceUnconfirmed` — [HazardQuality.auditAbsenceClaim] judged its
+  ///   "something is missing" claim unsupported by the photograph.
+  /// * `unmeasuredFigure` — it quotes a distance, weight or voltage a single
+  ///   photograph cannot establish.
+  /// * `severityBeforeAudit` / `severityBeforeViewCap` — its severity was reduced
+  ///   by an audit, so the number beside it is not what the model argued for.
+  ///
+  /// Rows disclaiming themselves never reach here at all: `auditUnverifiable`
+  /// has already moved them to `verifyOnSite`.
+  ///
+  /// Ties go to the earliest row, so a genuinely tied pair still titles
+  /// deterministically rather than by map iteration order.
+  /// The rows `HazardQuality.auditUnverifiable` moved out of `hazards`.
+  ///
+  /// Read from [_result] rather than passed down, because the list is a sibling
+  /// of `hazards` in the result map and every caller that needs it already has
+  /// `_result` in scope. Returns const [] when absent, so callers can treat the
+  /// feature as simply off on older saved reports.
+  List<Map<String, dynamic>> _verifyOnSiteItems() {
+    final raw = _result?[HazardQuality.kVerifyOnSiteKey];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    return <Map<String, dynamic>>[
+      for (final e in raw)
+        if (e is Map) e.cast<String, dynamic>(),
+    ];
+  }
+
+  Map<String, dynamic>? _strongestConfirmedHazard(List<dynamic> hazards) {
+    Map<String, dynamic>? best;
+    var bestRank = -1;
+    for (final h in hazards) {
+      if (h is! Map) continue;
+      final row = Map<String, dynamic>.from(h);
+      if (row['absenceUnconfirmed'] == true) continue;
+      if (row.containsKey('unmeasuredFigure')) continue;
+      if (row.containsKey('severityBeforeAudit')) continue;
+      if (row.containsKey('severityBeforeViewCap')) continue;
+      if (_str(row['name']).isEmpty) continue;
+      final rank = HazardQuality.severityRank(_str(row['severity']));
+      if (rank > bestRank) {
+        bestRank = rank;
+        best = row;
+      }
+    }
+    return best;
+  }
+
   Map<String, dynamic> _buildIncident(Map<String, dynamic> user) {
     final hazards        = (_result!['hazards'] as List?) ?? [];
     // ✅ FIX: Safe access to first hazard — guard against null/non-Map entries
     Map<String, dynamic> firstHazardMap = <String, dynamic>{};
     String firstHazard = 'AI Hazard Scan';
-    if (hazards.isNotEmpty && hazards.first is Map) {
+    // ★ TITLE COMES FROM THE STRONGEST **CONFIRMED** FINDING — 2026-09-07.
+    // It used to be `hazards.first`, i.e. whatever order the model happened to
+    // emit, with no regard to severity or to whether the app believed the row.
+    // A live report was therefore headed "AI Hazard Scan: Suspended cabin
+    // without visible secondary retention" — a LOW row that HazardQuality had
+    // already flagged as an unproven absence claim — while the MEDIUM corrosion
+    // finding sat second and untitled. The headline of a safety document is the
+    // one line that gets read in a list, quoted in a mail and pasted into a
+    // register, so it must not be the weakest sentence in the report.
+    final titleRow = _strongestConfirmedHazard(hazards);
+    if (titleRow != null) {
+      firstHazardMap = titleRow;
+      firstHazard = _str(titleRow['name']).isEmpty
+          ? 'AI Hazard Scan'
+          : _str(titleRow['name']);
+    } else if (hazards.isNotEmpty && hazards.first is Map) {
+      // Rows exist but none is confirmed. Say that, rather than asserting one of
+      // them: an unproven row in the title reads as a finding to everyone
+      // downstream, and no amount of hedging inside the body undoes it.
       try {
         firstHazardMap = Map<String, dynamic>.from(hazards.first as Map);
-        firstHazard = firstHazardMap['name']?.toString() ?? 'AI Hazard Scan';
       } catch (_) {}
+      firstHazard = 'observations to verify on site';
     }
 
     // Build base incident
@@ -1995,6 +2067,14 @@ class _AIScanTabState extends State<AIScanTab> {
       // without it becomes, months later, an unqualified severity.
       if (_result!['_viewUninspectable'] == true) 'viewCaveat':
           _result!['viewCaveat']?.toString() ?? HazardQuality.kUninspectableCaveat,
+      // Findings the model disclaimed itself. Carried alongside `hazards` rather
+      // than inside it so every count, chart and KPI that reads `hazards` keeps
+      // describing confirmed non-conformances only — which is the whole point of
+      // moving them out. See HazardQuality.auditUnverifiable.
+      if (_result![HazardQuality.kVerifyOnSiteKey] is List &&
+          (_result![HazardQuality.kVerifyOnSiteKey] as List).isNotEmpty)
+        HazardQuality.kVerifyOnSiteKey:
+            _result![HazardQuality.kVerifyOnSiteKey],
       'ptw_required':    _result!['ptw_required']?.toString() ?? 'None',
       'section_specific_risks': _result!['section_specific_risks'] ?? [],
       'imageBase64':     _imageBytes != null
@@ -2726,7 +2806,13 @@ class _AIScanTabState extends State<AIScanTab> {
             Text(overallRisk, style: TextStyle(
               color: riskColor, fontSize: 18,
               fontWeight: FontWeight.w800)),
-            Text('${hazards.length} hazards · $confidence% confidence',
+            // The verify count is stated separately and never added into the
+            // hazard count: "0 hazards" under a photo the AI plainly had
+            // something to say about reads as a failure, and "3 hazards" would
+            // be the false claim this whole feature exists to prevent.
+            Text('${hazards.length} hazards'
+                '${_verifyOnSiteItems().isEmpty ? '' : ' · ${_verifyOnSiteItems().length} to verify'}'
+                ' · $confidence% confidence',
               style: TextStyle(color: sl.text3, fontSize: 10)),
             if (validation != null) _validationStrip(validation, sl),
             if (hasBbox)
@@ -2793,6 +2879,36 @@ class _AIScanTabState extends State<AIScanTab> {
       // state is the only honest thing to show.
       if (hazards.isNotEmpty)
         _hazardTable(hazards, sl)
+      // An ANALYSED photo with no hazards is a clean frame, not a failure — see
+      // GeminiVision/_isUsableResult, where accepting `hazards: []` was the fix
+      // for a scan that failed every provider. Falling through to the "not
+      // analysed" card below would undo that fix in the UI: the user would be
+      // told to rescan a photo that was assessed correctly.
+      else if (analysed)
+        Container(
+          padding: const EdgeInsets.all(16),
+          margin: const EdgeInsets.only(bottom: 4),
+          decoration: BoxDecoration(
+            color: AppColors.green.withOpacity(0.06),
+            border: Border.all(color: AppColors.green.withOpacity(0.4)),
+            borderRadius: BorderRadius.circular(12)),
+          child: Column(
+            children: [
+              Icon(Icons.verified_outlined, color: AppColors.green, size: 32),
+              const SizedBox(height: 8),
+              Text('No hazards identified',
+                style: TextStyle(color: sl.text1, fontSize: 14,
+                    fontWeight: FontWeight.w700)),
+              const SizedBox(height: 6),
+              Text(_verifyOnSiteItems().isEmpty
+                    ? 'The AI assessed this photo and found no non-conformance. '
+                        'Verify on site before treating the area as clear.'
+                    : 'The AI assessed this photo and confirmed no '
+                        'non-conformance. See the items to verify below.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
+            ]),
+        )
       else
         Container(
           padding: const EdgeInsets.all(16),
@@ -2814,6 +2930,72 @@ class _AIScanTabState extends State<AIScanTab> {
                 style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
             ]),
         ),
+
+      // ── TO VERIFY ON SITE ────────────────────────────────────────────────
+      // Findings the analysis itself said this frame could not confirm. Placed
+      // BELOW the hazard table on purpose: it must read as a weaker class of
+      // observation than anything in that table, and it must not compete with it
+      // for the reader's first attention. Amber, mirroring the view caveat, and
+      // never styled with a severity colour — a severity here would reassert the
+      // very claim auditUnverifiable withdrew.
+      if (_verifyOnSiteItems().isNotEmpty) ...[
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.amber.withOpacity(0.07),
+            border: Border.all(color: AppColors.amber.withOpacity(0.5)),
+            borderRadius: BorderRadius.circular(12)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Icon(Icons.search_outlined, size: 15, color: sl.amberText),
+                const SizedBox(width: 6),
+                Expanded(child: Text(
+                  'TO VERIFY ON SITE · ${_verifyOnSiteItems().length}',
+                  style: TextStyle(color: sl.amberText, fontSize: 9,
+                      fontWeight: FontWeight.w700, letterSpacing: 0.9))),
+              ]),
+              const SizedBox(height: 6),
+              Text('Not counted as hazards. The AI stated it could not confirm '
+                  'these from the photograph — check them at close range '
+                  'before recording a finding.',
+                style: TextStyle(color: sl.text3, fontSize: 10, height: 1.35)),
+              const SizedBox(height: 8),
+              for (var i = 0; i < _verifyOnSiteItems().length; i++)
+                Padding(
+                  padding: EdgeInsets.only(
+                      bottom: i == _verifyOnSiteItems().length - 1 ? 0 : 7),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(width: 16, child: Text('${i + 1}.',
+                        style: TextStyle(color: sl.text4, fontSize: 11,
+                            fontWeight: FontWeight.w700))),
+                      Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _str(_verifyOnSiteItems()[i]['name']).isEmpty
+                                ? 'Observation ${i + 1}'
+                                : _str(_verifyOnSiteItems()[i]['name']),
+                            style: TextStyle(color: sl.text1, fontSize: 11.5,
+                                fontWeight: FontWeight.w700, height: 1.3)),
+                          if (_str(_verifyOnSiteItems()[i]['description'])
+                              .isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              _str(_verifyOnSiteItems()[i]['description']),
+                              style: TextStyle(color: sl.text3, fontSize: 10.5,
+                                  height: 1.35)),
+                          ],
+                        ])),
+                    ]),
+                ),
+            ]),
+        ),
+      ],
       const SizedBox(height: 12),
 
       // ✅ v23: Two-row button layout for proper alignment

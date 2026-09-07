@@ -744,6 +744,143 @@ void main() {
               'enters the rope drum.')),
       'a frayed rope on the hoist is a real defect, not a design element');
 
+  // ── THE LIFTING ATTACHMENT ─────────────────────────────────────────────────
+  // The ore-bridge scan of 2026-09-07 called a teal grab bucket on the hoist
+  // rope a "suspended cabin". The attachment on the end of the rope hangs there
+  // because that is the design, exactly like the hook block above.
+  ok(
+      HazardQuality.describesNormalStateOnly(hz(
+          name: 'Grab bucket suspended at height',
+          description: 'Visible: a clamshell grab bucket hangs from the hoist '
+              'rope above the stockyard.')),
+      'a grab bucket on the rope is normal by design');
+  ok(
+      HazardQuality.describesNormalStateOnly(hz(
+          name: 'Lifting magnet suspended over the scrap bay',
+          description: 'Visible: a magnet attachment hangs from the crane.')),
+      'a lifting magnet on the rope is normal by design');
+  ok(
+      !HazardQuality.describesNormalStateOnly(hz(
+          name: 'Cracked lug on the grab bucket',
+          description: 'Visible: the lifting lug on the grab bucket is '
+              'cracked through.')),
+      'a cracked lug on the bucket survives the attachment cues');
+
+  // ── THE VETO IS UNCONDITIONAL ──────────────────────────────────────────────
+  // A conditional veto was tried on 2026-09-07 (absence words stop vetoing once
+  // auditAbsenceClaim rules the claim unproven) and reverted, because it deleted
+  // "Missing handrail on cabin access walkway" — a real finding that names no
+  // observed defect, mentions a normal-state cue, and usually arrives without an
+  // absenceCheck. These two assertions pin the reverted behaviour so the same
+  // idea cannot be reintroduced silently.
+  final unprovenAbsence = hz(
+      name: 'Missing handrail on cabin access walkway',
+      description: 'Visible: the handrail is missing along the cabin access '
+          'walkway on the crane bridge.');
+  HazardQuality.auditAbsenceClaim(unprovenAbsence);
+  ok(!HazardQuality.describesNormalStateOnly(unprovenAbsence),
+      'an unproven absence still vetoes the withdrawal — it is downgraded '
+          'elsewhere, never deleted here');
+  ok(unprovenAbsence['severity'] == HazardQuality.kUnprovenSeverity,
+      'the unproven absence is handled by a downgrade instead');
+
+  // The row that started all this. It is NOT suppressed by the normal-by-design
+  // rule (the veto stands), and does not need to be: it disclaims itself, so
+  // auditUnverifiable moves it out of the hazard table intact.
+  final oreBridgeRow = hz(
+      name: 'Suspended cabin without visible secondary retention',
+      description: 'Visible: a box-like body hangs from the hoist rope. From a '
+          'distant, silhouetted view the arrangement cannot be fully resolved.');
+  ok(HazardQuality.disclaimsItself(oreBridgeRow),
+      'the ore-bridge row is caught as self-disclaimed, not as normal-by-design');
+
+  // ── SELF-DISCLAIMED FINDINGS ───────────────────────────────────────────────
+  ok(
+      HazardQuality.disclaimsItself(hz(
+          name: 'Structural member integrity to be verified',
+          description: 'Visible: a lattice member appears darker; this cannot '
+              'be confirmed from this frame.')),
+      'a row that says it cannot be confirmed disclaims itself');
+  ok(
+      HazardQuality.disclaimsItself(hz(
+          name: 'Walkway condition to be verified',
+          description: 'Visible: the walkway surface warrants closer '
+              'inspection.')),
+      '"warrants closer inspection" disclaims the finding');
+  // The corrective action is EXCLUDED from the scan on purpose: a good
+  // corrective action is supposed to say "inspect at close range", and reading
+  // it here would withdraw the best-written findings in the report.
+  ok(
+      !HazardQuality.disclaimsItself(hz(
+          name: 'Handrail missing on the east walkway',
+          description: 'Visible: a 3 m section of handrail is absent; the open '
+              'edge and the drop below it are both in frame.',
+          corrective: 'Barricade the section and verify at close range before '
+              'reinstating the rail.')),
+      'a corrective action that says "verify at close range" does not withdraw '
+          'the finding');
+
+  final selfDisclaimed = <String, dynamic>{
+    'overallRisk': 'MEDIUM',
+    'riskScore': 38,
+    'hazards': [
+      hz(
+          name: 'Lattice member integrity to be verified',
+          description: 'Visible: discolouration on a diagonal; the extent '
+              'cannot be determined from this distance.',
+          severity: 'MEDIUM'),
+      hz(
+          name: 'Walkway edge protection',
+          description: 'Visible: edge protection is unclear; to be verified on '
+              'site.',
+          severity: 'MEDIUM'),
+    ],
+  };
+  final disclaimReport = HazardQuality.apply(selfDisclaimed);
+  ok(disclaimReport.unverifiableMoved == 2,
+      'both self-disclaimed rows move to the verify list');
+  ok((selfDisclaimed['hazards'] as List).isEmpty,
+      'they leave the hazards table');
+  ok(
+      (selfDisclaimed[HazardQuality.kVerifyOnSiteKey] as List).length == 2,
+      'they land in the verify-on-site list');
+  ok(selfDisclaimed[HazardQuality.kVerifyOnSiteFlag] == true,
+      'the verify flag is set for the UI');
+  ok(selfDisclaimed['overallRisk'] == 'LOW' && selfDisclaimed['riskScore'] == 15,
+      'the banner follows the rows down, as in the withdrawal audits');
+  ok(
+      ((selfDisclaimed[HazardQuality.kVerifyOnSiteKey] as List).first
+              as Map)['verifyReason']
+          .toString()
+          .isNotEmpty,
+      'each moved row carries the reason it moved');
+
+  // A confirmed finding in the same result is untouched, and keeps the banner.
+  final mixed = <String, dynamic>{
+    'overallRisk': 'HIGH',
+    'riskScore': 62,
+    'hazards': [
+      hz(
+          name: 'Open floor opening beside the walkway',
+          description: 'Visible: an uncovered floor opening about 1 m across '
+              'sits beside the walkway, with the drop below it in frame.',
+          evidence: 'The opening and its edges are fully visible in the '
+              'foreground.',
+          severity: 'HIGH',
+          bbox: box(0.31, 0.42, 0.14, 0.12)),
+      hz(
+          name: 'Column base condition to be verified',
+          description: 'Visible: possible corrosion; cannot be confirmed from '
+              'this frame.',
+          severity: 'MEDIUM'),
+    ],
+  };
+  final mixedReport = HazardQuality.apply(mixed);
+  ok(mixedReport.unverifiableMoved == 1, 'only the disclaimed row moves');
+  ok((mixed['hazards'] as List).length == 1, 'the confirmed row stays');
+  ok(mixed['overallRisk'] == 'HIGH',
+      'a surviving confirmed hazard keeps the banner where it is');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

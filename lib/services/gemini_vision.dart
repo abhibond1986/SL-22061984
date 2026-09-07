@@ -3722,6 +3722,14 @@ FIELD RULES:
     hoist block hangs from its rope at all times — that is the only place it
     can be. "Hanging crane hook block" is not a finding; a missing safety
     latch on it, or a person walking under it, is.
+  • The lifting ATTACHMENT on the end of the rope — grab bucket, clamshell,
+    tongs, magnet, ladle, spreader beam, lifting frame. It hangs from the hoist
+    rope because that is the design. Do NOT call it a cabin: a hanging box-like
+    object on a crane is far more often a bucket or grab than a manned cabin,
+    and operator cabins are BOLTED to the bridge. Do not ask for a "secondary
+    retention rope", "backup lanyard" or "safety sling" on a hoisted
+    attachment — no such requirement exists, and inventing one wastes a safety
+    officer's time on a control that was never specified.
   • Walkways, platforms, gantries, ladders, girders, rails, cable trays,
     ducting or pipework that are merely present and intact.
   • Working at height, in a bay, or near plant, described as a hazard in itself.
@@ -3742,6 +3750,16 @@ FIELD RULES:
   missing, that a nip point is unguarded, or that anyone was working there — an
   experienced safety officer would not raise a CRITICAL non-conformance from it,
   and doing so here discredits the findings that ARE defensible.
+★ DO NOT FILE A HAZARD YOU ARE ABOUT TO DISCLAIM. If the honest description of a
+  finding has to say "cannot be confirmed from this frame", "cannot be determined
+  from this distance", "condition to be verified" or "warrants closer inspection",
+  then you have not found a hazard — you have found something you could not see
+  well enough. LEAVE IT OUT. Do not name a finding "... integrity to be verified":
+  that is an inspection task, not a non-conformance. A report listing three
+  hazards that each admit they might not exist is worse than a report listing
+  none, because the reader can no longer tell which findings to act on. It is
+  always acceptable to return FEWER hazards, including zero, on a frame that
+  cannot support them.
 • "description" MUST begin with "Visible: ..." stating what you physically observe.
 • Maximum 7 hazards, and no two describing the same physical condition.
   Quality over quantity.

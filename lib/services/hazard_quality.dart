@@ -41,6 +41,7 @@ class QualityReport {
     this.viewCapped = 0,
     this.sceneWithdrawn = 0,
     this.normalWithdrawn = 0,
+    this.unverifiableMoved = 0,
   });
 
   /// Hazards folded into another row.
@@ -71,6 +72,11 @@ class QualityReport {
   /// See [HazardQuality.auditNormalByDesign].
   final int normalWithdrawn;
 
+  /// Findings moved out of the hazard table into `verifyOnSite` because the
+  /// finding's own words said this photograph could not confirm it. Not deleted —
+  /// they print as inspection points. See [HazardQuality.auditUnverifiable].
+  final int unverifiableMoved;
+
   bool get changedAnything =>
       merged > 0 ||
       absenceDowngraded > 0 ||
@@ -78,7 +84,8 @@ class QualityReport {
       boxesWithdrawn > 0 ||
       viewCapped > 0 ||
       sceneWithdrawn > 0 ||
-      normalWithdrawn > 0;
+      normalWithdrawn > 0 ||
+      unverifiableMoved > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
@@ -87,7 +94,8 @@ class QualityReport {
       'boxesWithdrawn: $boxesWithdrawn, '
       'viewCapped: $viewCapped, '
       'sceneWithdrawn: $sceneWithdrawn, '
-      'normalWithdrawn: $normalWithdrawn)';
+      'normalWithdrawn: $normalWithdrawn, '
+      'unverifiableMoved: $unverifiableMoved)';
 }
 
 class HazardQuality {
@@ -155,7 +163,24 @@ class HazardQuality {
       // two are the same kind of judgement — "the requirement does not exist
       // here" and "there is nothing wrong here" — and both must settle before the
       // audits below count rows that will be shown.
+      // ★ MOVED BEFORE auditNormalByDesign, 2026-09-07. Nothing downstream reads
+      // `absenceUnconfirmed` to change a withdrawal decision (an attempt to do
+      // that was reverted — see [_deviationCues]), so this order is not required
+      // for correctness. It is kept because the flag- and downgrade-counting loop
+      // further down reads the marks this audit leaves on each row, and because
+      // "was this claim proven?" is a question about the row itself, which is
+      // cheaper to settle before any audit starts moving rows between lists.
+      for (final h in deduped) {
+        auditAbsenceClaim(h);
+      }
+
       final normalWithdrawn = auditNormalByDesign(result, deduped);
+
+      // Then remove the rows the model disclaimed itself. After the two
+      // withdrawal audits, so a row that is BOTH normal-by-design and
+      // unverifiable is withdrawn as the falsehood it is rather than filed as
+      // something worth checking.
+      final unverifiableMoved = auditUnverifiable(result, deduped);
 
       var downgraded = 0;
       var flagged = 0;
@@ -165,10 +190,16 @@ class HazardQuality {
         // uses to decide that two rows describe the same object, so withdrawing
         // them first would lose merges.
         if (auditBoxPrecision(h)) boxesWithdrawn++;
-        final verdict = auditAbsenceClaim(h);
-        if (verdict == null) continue;
-        flagged++;
-        if (verdict.severityChanged) downgraded++;
+        // Counted from the flags the absence audit left on the row, not by
+        // calling it again: it MUTATES severity, so a second call would report a
+        // second downgrade that never happened. Counting here rather than in the
+        // loop above also keeps the promise the old code made — these numbers
+        // describe rows that will actually be shown, and rows withdrawn in
+        // between are correctly no longer counted.
+        if (h.containsKey('absenceIssue') || h.containsKey('unmeasuredFigure')) {
+          flagged++;
+        }
+        if (h.containsKey('severityBeforeAudit')) downgraded++;
       }
 
       // Last, because it reads the withdrawn boxes above as its evidence that the
@@ -186,6 +217,7 @@ class HazardQuality {
         viewCapped: viewCapped,
         sceneWithdrawn: sceneWithdrawn,
         normalWithdrawn: normalWithdrawn,
+        unverifiableMoved: unverifiableMoved,
       );
     } catch (_) {
       return const QualityReport(
@@ -819,6 +851,28 @@ class HazardQuality {
       'hook at height', 'hook lowered', 'hook raised', 'empty hook',
       'unloaded hook', 'bare hook', 'idle hook', 'hook assembly',
       'hook and block', 'wire rope hoist', 'rope drum',
+      // The lifting ATTACHMENT on the end of the rope. ★ ADDED 2026-09-07 after a
+      // scan of a blast-furnace ore bridge called the grab bucket hanging from
+      // the trolley "a suspended operator/maintenance cabin" and asked for a
+      // secondary retention rope on it. Two separate errors in one row: a bucket
+      // was mistaken for a manned cabin, and a requirement that does not exist
+      // was invented for it — a hoisted attachment hangs on the hoist rope, that
+      // is the design, and nothing gets a backup lanyard.
+      //
+      // Note that the cabin cues above DID match that row — the withdrawal was
+      // vetoed by the model's own guessed word "without". Weakening the veto for
+      // guessed absences was tried and reverted ([_deviationCues]); what actually
+      // removes that row from the hazard table is [auditUnverifiable], because it
+      // admitted it could not resolve what it was looking at. These cues are still
+      // worth having: they stop the NEXT such row from being filed at all when it
+      // is written without a hedge.
+      'grab bucket', 'grab buckets', 'clamshell', 'clam shell', 'bucket grab',
+      'grab attachment', 'bucket suspended', 'suspended bucket',
+      'hanging bucket', 'bucket hanging', 'bucket at height',
+      'lifting beam', 'lifting frame', 'spreader beam', 'lifting tackle',
+      'hoist attachment', 'lifting attachment', 'end effector',
+      'tong', 'tongs', 'ladle hook', 'charging bucket', 'skip bucket',
+      'magnet attachment', 'lifting magnet suspended', 'orange peel grab',
       // Being at height / near plant, offered as a hazard in itself.
       'working at height', 'work at height', 'at elevated height',
       'height of the structure', 'structure at height', 'elevated structure',
@@ -834,22 +888,62 @@ class HazardQuality {
   /// Deliberately generous — every word here that fires wrongly costs one false
   /// hazard kept, while every word MISSING from this list costs a real defect
   /// silently withdrawn. Those are not comparable, so the list errs long.
+  ///
+  /// ★ A SPLIT WAS TRIED HERE ON 2026-09-07 AND DELIBERATELY REVERTED. Read this
+  /// before attempting it again. A live scan filed "Suspended cabin without
+  /// visible secondary retention": `suspended cabin` IS in [_normalStateCues], so
+  /// the withdrawal fired correctly and was then vetoed by the word **without**,
+  /// which the model supplied itself while admitting in the same breath that
+  /// "from a distant, silhouetted view the arrangement cannot be fully resolved".
+  /// A finding had immunised itself against suppression by guessing.
+  ///
+  /// The attempted fix moved the pure "not there" words (`missing`, `without`,
+  /// `no guard`, `unguarded`…) into a weak group that stops vetoing once
+  /// [auditAbsenceClaim] has ruled the claim unproven. Two things killed it:
+  ///
+  /// 1. **It did not fix the reported case.** `claimsAbsence` requires an absence
+  ///    word AND a recognised protective thing, and "secondary retention" is not
+  ///    in [_protectiveThing] — so `absenceUnconfirmed` was never set on that very
+  ///    row and the weakening never engaged. A rule keyed on another rule's flag
+  ///    inherits that rule's blind spots.
+  /// 2. **It withdrew a real finding.** "Missing handrail on cabin access
+  ///    walkway" carries no observed-defect word, mentions a normal-state cue
+  ///    (`cabin`), and is routinely filed without an `absenceCheck` — so it became
+  ///    unproven-and-vetoless and was DELETED, where the absence audit had
+  ///    correctly been merely downgrading it to LOW.
+  ///
+  /// The reported row is handled properly by two other changes instead: the
+  /// lifting-attachment cues (so a grab bucket is not called a cabin at all) and
+  /// [auditUnverifiable], which moves any row that disclaims itself — as that one
+  /// did — out of the hazard table without destroying it. **Withdrawal is the
+  /// heaviest instrument in this file; when a row is doubtful rather than wrong,
+  /// downgrade it or move it, do not widen what deletes it.**
   static final List<RegExp> _deviationCues = [
-    for (final kw in const [
+    for (final kw in _kDeviationWords)
+      RegExp('\\b${RegExp.escape(kw)}(?:s|es|ed|ing)?\\b', caseSensitive: false),
+  ];
+
+  static const List<String> _kDeviationWords = [
+      // Something is not there. These veto unconditionally — see the doc comment
+      // above for why an attempt to make them conditional was reverted.
+      'missing', 'absent', 'without', 'no guard', 'unguarded', 'unprotected',
+      'no handrail', 'handrail missing', 'no railing', 'railing missing',
+      'no toe board', 'no barricade', 'not barricaded', 'unbarricaded',
+      'no cover', 'unfenced', 'no fall arrest', 'no lifeline', 'no safety net',
+      'not anchored', 'unsecured', 'not secured', 'no permit', 'without permit',
+      'not tagged', 'no lockout', 'no signage', 'no sign', 'no illumination',
+      'uncertified', 'not rated',
       // Structural / mechanical defect.
-      'crack', 'cracked', 'broken', 'break', 'missing', 'absent', 'without',
+      'crack', 'cracked', 'broken', 'break',
       'corroded', 'corrosion', 'rust', 'rusted', 'rusty', 'worn', 'wear',
       'damaged', 'damage', 'bent', 'buckled', 'deformed', 'distorted',
       'loose', 'slack', 'detached', 'dislodged', 'displaced', 'gap', 'hole',
       'frayed', 'fray', 'kinked', 'twisted', 'stretched', 'elongated',
       'defective', 'faulty', 'failed', 'failure', 'weakened', 'sagging',
       'leaking', 'leak', 'spill', 'spilled',
-      // Guarding and protection.
-      'unguarded', 'no guard', 'guard removed', 'unprotected', 'no handrail',
-      'handrail missing', 'no railing', 'railing missing', 'no toe board',
-      'toe guard', 'no barricade', 'not barricaded', 'unbarricaded',
-      'no cover', 'cover removed', 'open edge', 'unfenced', 'no fall arrest',
-      'no lifeline', 'no safety net', 'not anchored', 'unsecured', 'not secured',
+      // Guarding and protection, in the forms that assert an observation — a
+      // guard you can see has been taken off, an edge you can see is open.
+      'guard removed', 'toe guard', 'cover removed', 'open edge',
       // Exposure — a person in the wrong place. This is the whole point of the
       // suspended-load carve-out the reporter described.
       'person below', 'person beneath', 'person under', 'people below',
@@ -863,14 +957,12 @@ class HazardQuality {
       'occupied', 'personnel in', 'man below',
       // Operating and procedural deviation.
       'overload', 'overloaded', 'exceeds', 'exceeding', 'unsafe', 'improper',
-      'incorrect', 'wrong', 'not rated', 'uncertified', 'expired',
-      'no permit', 'without permit', 'unauthorised', 'unauthorized',
+      'incorrect', 'wrong', 'expired',
+      'unauthorised', 'unauthorized',
       'obstructed', 'blocked', 'obstruction', 'debris', 'housekeeping',
-      'slippery', 'wet', 'no illumination', 'poor illumination',
-      'no signage', 'no sign', 'not tagged', 'no lockout', 'energised',
+      'slippery', 'wet', 'poor illumination',
+      'energised',
       'energized', 'exposed conductor', 'bare conductor', 'unattended',
-    ])
-      RegExp('\\b${RegExp.escape(kw)}(?:s|es|ed|ing)?\\b', caseSensitive: false),
   ];
 
   /// The row's own words — everything the model wrote about THIS finding.
@@ -893,6 +985,11 @@ class HazardQuality {
     // findings for being badly written rather than for being wrong.
     if (text.trim().length < 12) return false;
     if (!_anyMatch(_normalStateCues, text)) return false;
+
+    // One veto, applied unconditionally. This function must NOT consult
+    // `absenceUnconfirmed` or any other row flag to decide how hard to look for a
+    // deviation — see the [_deviationCues] doc comment for the reverted attempt
+    // and the two ways it went wrong.
     return !_anyMatch(_deviationCues, text);
   }
 
@@ -957,6 +1054,136 @@ class HazardQuality {
       }
     }
     return withdrawn.length;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  SELF-ADMITTED UNVERIFIABLE FINDINGS  ★ added 2026-09-07
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Key holding findings moved out of the hazards table because the model itself
+  /// said they could not be confirmed. These are inspection points, not
+  /// non-conformances.
+  static const String kVerifyOnSiteKey = 'verifyOnSite';
+
+  /// Set when [auditUnverifiable] moved at least one row.
+  static const String kVerifyOnSiteFlag = '_verifyOnSiteMoved';
+
+  /// Phrases in which the model states, about its OWN finding, that the frame
+  /// cannot settle it.
+  ///
+  /// **Why this class needed its own rule.** A scan of a distant, backlit ore
+  /// bridge produced three rows, and every one of them argued against itself:
+  /// *"specific defects cannot be confirmed from this distant frame"*,
+  /// *"whether any section is perforated or structurally significant cannot be
+  /// determined from this distance"*, *"floor-plate and handrail condition cannot
+  /// be confirmed from this frame"*. The third was even NAMED
+  /// "Stair/ladder tower platform integrity to be verified" — a task, not a
+  /// finding. Neither existing audit could touch them: they make no absence
+  /// claim, quote no invented measurement, and name real deviation words
+  /// (corrosion, rust), so `auditNormalByDesign` correctly left them alone.
+  ///
+  /// The model had in effect written *"I could not see"* three times, and the app
+  /// printed it as **3 HAZARDS IDENTIFIED** under a MEDIUM banner. That is the
+  /// specific harm: a safety officer reading the count cannot tell a confirmed
+  /// defect from an admission of poor visibility.
+  ///
+  /// Kept deliberately tight. Every phrase here is the model explicitly
+  /// disclaiming its own row — not mere hedging, which [_hedged] already handles
+  /// by capping severity. "Appears rusty" stays a hazard; "whether it is rusty
+  /// cannot be determined" does not.
+  static final List<RegExp> _selfDisclaimCues = [
+    for (final kw in const [
+      'cannot be confirmed', 'can not be confirmed', 'could not be confirmed',
+      'cannot be determined', 'can not be determined',
+      'could not be determined',
+      'cannot be verified', 'can not be verified', 'cannot be established',
+      'cannot be assessed', 'cannot be resolved', 'cannot be fully resolved',
+      'cannot be ruled out', 'cannot be confirmed from', 'not confirmable',
+      'unable to confirm', 'unable to determine', 'unable to verify',
+      'unable to assess', 'impossible to confirm', 'impossible to determine',
+      'to be verified', 'to be confirmed', 'requires verification',
+      'requires confirmation', 'needs verification', 'pending verification',
+      'subject to verification', 'warrants closer inspection',
+      'warrants close inspection', 'requires closer inspection',
+      'needs closer inspection', 'should be inspected closer',
+      'observation to verify', 'verify at close range',
+      'not resolvable', 'indeterminate from', 'inconclusive',
+    ])
+      RegExp(RegExp.escape(kw), caseSensitive: false),
+  ];
+
+  /// True when the row's own words disclaim it.
+  ///
+  /// Reads name + description + visualEvidence and **excludes
+  /// `correctiveAction`**, which is the opposite choice to [_hazardText] and the
+  /// one detail most likely to be "corrected" wrongly later. A corrective action
+  /// is *supposed* to say "inspect at close range and confirm" — that is what a
+  /// good corrective action for a real distant observation looks like. Including
+  /// it would move almost every legitimate finding on a general view into the
+  /// verify list, which would be worse than the bug being fixed.
+  static bool disclaimsItself(Map hazard) {
+    final text = [
+      _str(hazard['name']),
+      _str(hazard['description']),
+      _str(hazard['visualEvidence']),
+    ].join(' ');
+    if (text.trim().length < 12) return false;
+    return _anyMatch(_selfDisclaimCues, text);
+  }
+
+  /// Moves self-disclaimed rows out of `hazards` into [kVerifyOnSiteKey].
+  ///
+  /// Returns how many moved. They are NOT deleted: a distant corrosion lead is
+  /// worth someone's attention, it is just not a non-conformance yet. The report
+  /// prints them as inspection points, so the hazard count states what was
+  /// actually confirmed.
+  static int auditUnverifiable(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    final moved = <Map<String, dynamic>>[];
+    hazards.removeWhere((h) {
+      if (!disclaimsItself(h)) return false;
+      h['verifyReason'] =
+          'Moved out of the hazard table by the app: the finding itself states '
+          'that this frame cannot confirm it. Recorded as a point to check on '
+          'site, not as a non-conformance.';
+      moved.add(h);
+      return true;
+    });
+
+    if (moved.isEmpty) return 0;
+
+    result[kVerifyOnSiteFlag] = true;
+    final existing = result[kVerifyOnSiteKey];
+    result[kVerifyOnSiteKey] = <Map<String, dynamic>>[
+      if (existing is List)
+        for (final e in existing)
+          if (e is Map) e.cast<String, dynamic>(),
+      ...moved,
+    ];
+
+    final note = '${moved.length} observation'
+        '${moved.length == 1 ? '' : 's'} moved to "verify on site" — the '
+        '${moved.length == 1 ? 'finding states' : 'findings state'} that this '
+        'photograph cannot confirm ${moved.length == 1 ? 'it' : 'them'}.';
+    final prior = _str(result['sceneNote']);
+    result['sceneNote'] = prior.isEmpty ? note : '$prior $note';
+
+    // The banner must follow the rows, exactly as in the two withdrawal audits.
+    // This is the case the ore-bridge scan got wrong: its MEDIUM 38 came from a
+    // row whose own description said the significance could not be determined.
+    if (hazards.isEmpty) {
+      final overall = _str(result['overallRisk']);
+      if (overall.isNotEmpty && severityRank(overall) > severityRank('LOW')) {
+        result['overallRiskBeforeSceneAudit'] = overall;
+        result['overallRisk'] = 'LOW';
+      }
+      final score = _asInt(result['riskScore']);
+      if (score != null && score > 15) {
+        result['riskScoreBeforeSceneAudit'] = score;
+        result['riskScore'] = 15;
+      }
+    }
+    return moved.length;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
