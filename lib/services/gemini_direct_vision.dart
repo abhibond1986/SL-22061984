@@ -674,6 +674,11 @@ $causeBlock
       // repaired) where a hazard is most likely to have been half-invented.
       final inventoryMatch =
           RegExp(r'"sceneInventory"\s*:\s*"([^"]*)"').firstMatch(json);
+      // Carried through for the same reason as the inventory: HazardQuality's
+      // scene-relevance rule reads it, and a truncated response that dropped it
+      // would let a "Missing PPE" row survive into a conference-hall report.
+      final sceneTypeMatch =
+          RegExp(r'"sceneType"\s*:\s*"([A-Z_]+)"').firstMatch(json);
 
       if (riskMatch == null && scoreMatch == null) return null;
 
@@ -691,6 +696,7 @@ $causeBlock
 
       final result = <String, dynamic>{
         'sceneInventory': inventoryMatch?.group(1) ?? '',
+        if (sceneTypeMatch != null) 'sceneType': sceneTypeMatch.group(1),
         'overallRisk': riskMatch?.group(1) ?? 'UNKNOWN',
         'riskScore': int.tryParse(scoreMatch?.group(1) ?? '0') ?? 0,
         'confidence': int.tryParse(confMatch?.group(1) ?? '0') ?? 0,

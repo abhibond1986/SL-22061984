@@ -13,6 +13,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'kb_seed_data.dart';
 import 'crypto_utils.dart';
 import 'admin_master_data.dart';
+// For [PlantScope.orgLevelPlants] only. This is a cycle — plant_scope imports
+// this file — which Dart permits, and it is the lesser evil: duplicating the
+// "which designations are not a real plant" set is how two definitions of a
+// visibility rule drift apart, and that rule decides who can see whose reports.
+import 'plant_scope.dart';
 
 class LocalDB {
   static late SharedPreferences _prefs;
@@ -541,6 +546,31 @@ class LocalDB {
     // if the admin renames the first status, new records must use the new name.
     incident['status']        ??= await AdminMasterData.firstStatus();
 
+    // ★ 2026-09-07: fall back to the REPORTER's plant when the record carries
+    // none. A blank plant is not a neutral value — PlantScope filters incidents
+    // by canonical plant, so a report saved without one was invisible to every
+    // plant-locked user, including the person who filed it. Two rows in the live
+    // table are in exactly that state. The reporter's own plant is the only
+    // defensible guess available at save time, and it is the right one: a user
+    // reports what they see where they work.
+    //
+    // Applied here rather than in the two forms because this is the single
+    // choke point every write passes through — AI scan, Near Miss, edits and
+    // the server pull alike — so the two entry points cannot drift apart.
+    // Server rows are unaffected: they arrive with a plant already set, and
+    // `??=` semantics are preserved by only filling a BLANK value.
+    if ((incident['plant']?.toString().trim() ?? '').isEmpty) {
+      final userPlant = (user?['plant']?.toString() ?? '').trim();
+      // Org-level designations ("ALL", "OTHERS") are not a shop floor, so
+      // stamping them would file the report against a plant that does not
+      // exist. Left blank in that case — an admin's own report legitimately has
+      // no plant, and the visibility rule below no longer hides it.
+      if (userPlant.isNotEmpty &&
+          !PlantScope.orgLevelPlants.contains(userPlant.toUpperCase())) {
+        incident['plant'] = userPlant;
+      }
+    }
+
     // Normalize plant name to canonical name from admin panel
     if (incident['plant'] != null && incident['plant'].toString().isNotEmpty) {
       final plants = await AdminMasterData.getPlants();
@@ -669,7 +699,14 @@ class LocalDB {
     final idx = all.indexWhere((i) => i['id']?.toString() == id);
     if (idx < 0) {
       // Brand-new to this device — nothing to preserve.
-      await saveIncident(Map<String, dynamic>.from(serverInc),
+      //
+      // Marked synced because it demonstrably IS on the server: that is where it
+      // just came from. Without this every pulled row would look like a local
+      // row that still owes an upload, so the retry loop would push all of them
+      // back on every sync and `reconcileWithServer` would never be able to
+      // clear anything after an admin wipe.
+      await saveIncident(
+          Map<String, dynamic>.from(serverInc)..['_synced'] = true,
           stampUpdatedAt: false);
       return;
     }
@@ -689,6 +726,14 @@ class LocalDB {
     required Map<String, dynamic> server,
   }) {
     final merged = Map<String, dynamic>.from(local);
+
+    // The server has this id, so whatever the local copy thought, the row is no
+    // longer unsynced. Set here rather than only in saveIncidentFromServer so
+    // the bulk-pull path in SyncService — which calls this method directly and
+    // saves the result itself — gets the same treatment. Note this says nothing
+    // about pending local EDITS to the row; those are protected by the
+    // workflow-key rules below and by their own queue entry.
+    merged['_synced'] = true;
 
     final localTs  = DateTime.tryParse(local['updatedAt']?.toString() ?? '');
     final serverTs = DateTime.tryParse(server['updatedAt']?.toString() ?? '');
@@ -766,6 +811,27 @@ class LocalDB {
   /// local data — that's why the sync path uses [SupabaseService
   /// .fetchIncidentsOrNull] and skips reconcile when it returns null.
   ///
+  /// ★ 2026-09-07: "absent from the server" has TWO causes and only one of them
+  /// justifies deletion.
+  ///
+  ///   deleted server-side   → the row should go (this method's purpose)
+  ///   never uploaded        → the row is the user's ONLY copy
+  ///
+  /// This did not distinguish them, so a report whose upload had failed was
+  /// erased from the device that created it on the next sync — and for a Near
+  /// Miss, whose photo is only ever persisted by that same upload, the evidence
+  /// went with it. That is how scans could be "saved" and then be nowhere: not
+  /// on the server, because the push failed, and not on the phone, because this
+  /// tidied them away. Sync failures are common and invisible; deleting the
+  /// user's work must never be their consequence.
+  ///
+  /// A row is spared when it has never been confirmed on the server, i.e.
+  /// `_synced != true`. [isUnsyncedIncident] is the single definition, shared
+  /// with the sync layer's retry loop so the two cannot disagree about which
+  /// rows still owe an upload. Records written before that flag existed have no
+  /// `_synced` key at all; they are also present on the server (that is how
+  /// they got here), so `serverIds` covers them and the exemption never applies.
+  ///
   /// Returns the number of local incidents removed.
   static Future<int> reconcileWithServer(Set<String> serverIds) async {
     final raw = _prefs.getString(_kIncidents);
@@ -774,12 +840,82 @@ class LocalDB {
         .map((e) => Map<String, dynamic>.from(e as Map))
         .toList();
     final before = list.length;
-    list.removeWhere((i) => !serverIds.contains(i['id']?.toString() ?? ''));
+    list.removeWhere((i) =>
+        !serverIds.contains(i['id']?.toString() ?? '') &&
+        !isUnsyncedIncident(i));
     final removed = before - list.length;
     if (removed > 0) {
       await _prefs.setString(_kIncidents, jsonEncode(list));
     }
     return removed;
+  }
+
+  /// True when [incident] has never been confirmed as written to the server.
+  ///
+  /// The flag is set to `true` only by the sync layer after a successful push,
+  /// so anything else — absent, false, or the string 'false' — means the row
+  /// still owes an upload. Compared as a string because incident maps survive a
+  /// JSON round trip through SharedPreferences on every read and write, and
+  /// booleans have arrived back as strings elsewhere in this file before (see
+  /// `isAdmin` in plant_scope.dart for the same defensive comparison).
+  static bool isUnsyncedIncident(Map<String, dynamic> incident) =>
+      (incident['_synced']?.toString().toLowerCase() ?? 'false') != 'true';
+
+  /// Every locally-stored incident that has never been confirmed on the server.
+  ///
+  /// This is the backlog the sync layer must retry and the diagnostic must
+  /// count. Reads the RAW list on purpose: a tombstoned id is deliberately
+  /// hidden from the UI, but if one is somehow still pending it must not be
+  /// resurrected by a retry, so tombstones are honoured via [getIncidents].
+  static Future<List<Map<String, dynamic>>> getUnsyncedIncidents() async {
+    final all = await getIncidents();
+    return all.where(isUnsyncedIncident).toList();
+  }
+
+  /// Mark one incident as confirmed present on the server.
+  ///
+  /// Called after a successful push so the row stops being retried and stops
+  /// being exempt from reconciliation. Writes through the raw list rather than
+  /// [saveIncident] because this is bookkeeping, not a user edit: going through
+  /// saveIncident would re-stamp `updatedAt` with the local clock and make the
+  /// row look like an unsynced local edit to `mergeServerIncident` — the exact
+  /// confusion that method's comment warns about.
+  static Future<void> markIncidentSynced(String id, {bool synced = true}) async {
+    if (id.isEmpty) return;
+    final raw = _prefs.getString(_kIncidents);
+    if (raw == null) return;
+    final list = (jsonDecode(raw) as List)
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    final idx = list.indexWhere((i) => i['id']?.toString() == id);
+    if (idx < 0) return;
+    if (synced) {
+      list[idx]['_synced'] = true;
+    } else {
+      list[idx].remove('_synced');
+    }
+    await _prefs.setString(_kIncidents, jsonEncode(list));
+  }
+
+  /// Merge [fields] into one stored incident, leaving every other key alone.
+  ///
+  /// Same reasoning as [markIncidentSynced]: this is bookkeeping written by the
+  /// sync layer (currently the Storage URL discovered during a push), not a user
+  /// edit, so it must NOT go through [saveIncident] and re-stamp `updatedAt`.
+  /// Does nothing if the id is unknown, so a record deleted mid-push cannot be
+  /// resurrected as a partial row.
+  static Future<void> updateIncidentFields(
+      String id, Map<String, dynamic> fields) async {
+    if (id.isEmpty || fields.isEmpty) return;
+    final raw = _prefs.getString(_kIncidents);
+    if (raw == null) return;
+    final list = (jsonDecode(raw) as List)
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    final idx = list.indexWhere((i) => i['id']?.toString() == id);
+    if (idx < 0) return;
+    list[idx].addAll(fields);
+    await _prefs.setString(_kIncidents, jsonEncode(list));
   }
 
   // ═══════════════════════════════════════════════════════════════

@@ -39,6 +39,7 @@ class QualityReport {
     required this.absenceFlagged,
     this.boxesWithdrawn = 0,
     this.viewCapped = 0,
+    this.sceneWithdrawn = 0,
   });
 
   /// Hazards folded into another row.
@@ -58,19 +59,26 @@ class QualityReport {
   /// support them. The findings themselves are untouched.
   final int viewCapped;
 
+  /// Findings withdrawn because the requirement they cite does not exist in the
+  /// place photographed — PPE rows raised against people seated in a meeting
+  /// room. See [HazardQuality.auditSceneRelevance].
+  final int sceneWithdrawn;
+
   bool get changedAnything =>
       merged > 0 ||
       absenceDowngraded > 0 ||
       absenceFlagged > 0 ||
       boxesWithdrawn > 0 ||
-      viewCapped > 0;
+      viewCapped > 0 ||
+      sceneWithdrawn > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
       'absenceDowngraded: $absenceDowngraded, '
       'absenceFlagged: $absenceFlagged, '
       'boxesWithdrawn: $boxesWithdrawn, '
-      'viewCapped: $viewCapped)';
+      'viewCapped: $viewCapped, '
+      'sceneWithdrawn: $sceneWithdrawn)';
 }
 
 class HazardQuality {
@@ -126,6 +134,13 @@ class HazardQuality {
       final deduped = dedupe(hazards);
       final mergedCount = hazards.length - deduped.length;
 
+      // Before anything is judged, decide whether the requirement each finding
+      // cites applies to the place in the photograph at all. Runs after dedupe
+      // (so a withdrawn row has already absorbed its duplicates and the audit
+      // trail travels with it) and before the audits below (so the counts they
+      // report describe rows that will actually be shown).
+      final sceneWithdrawn = auditSceneRelevance(result, deduped);
+
       var downgraded = 0;
       var flagged = 0;
       var boxesWithdrawn = 0;
@@ -153,6 +168,7 @@ class HazardQuality {
         absenceFlagged: flagged,
         boxesWithdrawn: boxesWithdrawn,
         viewCapped: viewCapped,
+        sceneWithdrawn: sceneWithdrawn,
       );
     } catch (_) {
       return const QualityReport(
@@ -520,6 +536,209 @@ class HazardQuality {
       result['overallRisk'] = kUninspectableSeverity;
     }
     return capped;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  DOES THE RULE APPLY HERE AT ALL?
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Written onto the result when the photograph is not of a workplace where
+  /// industrial PPE is required.
+  static const String kNonIndustrialFlag = '_sceneNonIndustrial';
+
+  /// Where withdrawn findings go. They are NOT deleted — see the note on
+  /// [auditSceneRelevance] about why this is the one place in this file that
+  /// takes a row off the list.
+  static const String kWithdrawnKey = 'withdrawnHazards';
+
+  /// Cues that the frame is a meeting room, office, classroom or canteen.
+  ///
+  /// Matched against `sceneInventory` and `summary` — the model's own plain
+  /// description of what it can see, written before it was allowed to judge
+  /// anything, which makes it the most trustworthy sentence in the response.
+  static final List<RegExp> _nonIndustrialCues = [
+    for (final kw in const [
+      'conference hall', 'conference room', 'conference table', 'meeting room',
+      'meeting hall', 'boardroom', 'board room', 'seminar hall', 'seminar room',
+      'auditorium', 'lecture hall', 'lecture theatre', 'classroom',
+      'class room', 'training room', 'training hall', 'committee room',
+      'office room', 'office cabin', 'office desk', 'cubicle', 'workstation',
+      'reception', 'canteen', 'dining hall', 'dining room', 'cafeteria',
+      'pantry', 'guest house', 'hotel', 'banquet',
+      'projector', 'projection screen', 'presentation screen', 'whiteboard',
+      'white board', 'podium', 'lectern', 'dais', 'stage backdrop',
+      'notice board', 'laptop', 'laptops', 'desktop computer', 'keyboard',
+      'microphone', 'water bottles', 'notepad', 'notepads', 'stationery',
+      'upholstered chairs', 'office chairs', 'swivel chairs', 'carpeted floor',
+      'carpet', 'false ceiling', 'air conditioner', 'curtains',
+      'seated around a table', 'seated at a table', 'seated audience',
+      'attendees', 'delegates', 'participants seated',
+    ])
+      RegExp('\\b${RegExp.escape(kw)}(?:s|es)?\\b', caseSensitive: false),
+  ];
+
+  /// Cues that there IS industrial plant in the frame, which veto the above.
+  ///
+  /// A control room with a window onto the converter, a training hall with a
+  /// cutting demonstration set up in it, or a "meeting" held on a shop floor are
+  /// all real, and in every one of them the PPE finding may be correct. The rule
+  /// only fires when the frame contains a non-industrial setting and NOTHING
+  /// industrial, which is the only case where the requirement demonstrably does
+  /// not exist.
+  static final List<RegExp> _industrialCues = [
+    for (final kw in const [
+      'furnace', 'ladle', 'molten', 'slag', 'tundish', 'blast', 'coke oven',
+      'converter', 'caster', 'rolling mill', 'mill', 'shop floor', 'workshop',
+      'bay', 'crane', 'hoist', 'conveyor', 'rotating', 'machinery', 'machine',
+      'lathe', 'grinder', 'welding', 'gas cutting', 'torch', 'scaffold',
+      'excavator', 'forklift', 'tipper', 'dumper', 'locomotive', 'wagon',
+      'rail track', 'pipeline', 'pipe rack', 'valve', 'boiler', 'turbine',
+      'switchgear', 'transformer', 'busbar', 'gantry', 'girder', 'rebar',
+      'shuttering', 'trench', 'excavation', 'stockyard', 'scrap yard',
+      'construction', 'site work', 'hard hat', 'helmet', 'coverall',
+      'high visibility', 'hi vis', 'safety shoe', 'boiler suit',
+    ])
+      RegExp('\\b${RegExp.escape(kw)}(?:s|es|ing)?\\b', caseSensitive: false),
+  ];
+
+  /// Hazard families whose requirement simply does not exist in a meeting room.
+  ///
+  /// Deliberately ONLY the two PPE families. Housekeeping is not here: a cable
+  /// trailing across a conference-room floor is a genuine trip hazard and the
+  /// report should say so. Nor are the machine, electrical or lifting families —
+  /// if one of those matched, an industrial cue almost certainly matched too and
+  /// the rule will not have fired at all.
+  static const Set<String> _familiesNotRequiredIndoors = {
+    'ppe-head-eye',
+    'ppe-other',
+  };
+
+  /// Whether the photograph shows a place where industrial PPE is not required.
+  ///
+  /// The model's own `sceneType` is believed first when it gave one; otherwise
+  /// this reads the cues above. Returns false whenever it is not sure, because
+  /// the cost of guessing wrong in this direction is a suppressed real hazard.
+  static bool sceneIsNonIndustrial(Map<String, dynamic> result) {
+    final declared = _str(result['sceneType']).toUpperCase();
+    if (declared.isNotEmpty) {
+      if (declared.contains('INDUSTRIAL') && !declared.contains('NON')) {
+        return false;
+      }
+      if (declared.contains('OFFICE') ||
+          declared.contains('MEETING') ||
+          declared.contains('NON_INDUSTRIAL') ||
+          declared.contains('NON-INDUSTRIAL')) {
+        // Still require no industrial cue: the model has, in the past, labelled
+        // a frame OFFICE and then described a gas cylinder standing in it.
+        return !_anyMatch(_industrialCues, _inventoryText(result));
+      }
+      // OUTDOOR_PUBLIC / UNCLEAR and anything unrecognised fall through to the
+      // cue test rather than being trusted either way.
+    }
+    if (_anyMatch(_industrialCues, _inventoryText(result))) return false;
+    final text = _sceneText(result);
+    if (text.trim().length < 20) return false; // nothing to reason from
+    return _anyMatch(_nonIndustrialCues, text);
+  }
+
+  /// Where the INDUSTRIAL veto looks: the inventory only, falling back to the
+  /// summary when the model gave no inventory.
+  ///
+  /// The summary is excluded whenever there is an inventory because the prompt
+  /// asks for the primary safety concern in it, so a summary reading "the seated
+  /// attendees are not wearing helmets" would supply the very industrial cue
+  /// ("helmet") that vetoes withdrawing that finding — the rule would disarm
+  /// itself on precisely the reports it exists for. The inventory is written
+  /// before the model is allowed to judge anything and names only what is
+  /// physically in the frame, so a helmet appearing there really does mean a
+  /// helmet is in the picture.
+  static String _inventoryText(Map<String, dynamic> result) {
+    final inv = _str(result['sceneInventory']);
+    return inv.isNotEmpty ? inv : _str(result['summary']);
+  }
+
+  /// Where the non-industrial cues look. The summary is included here because a
+  /// stray office word in it can only ever make the rule fire, and the rule then
+  /// still has to clear the veto above.
+  static String _sceneText(Map<String, dynamic> result) =>
+      '${_str(result['sceneInventory'])} ${_str(result['summary'])}';
+
+  static bool _anyMatch(List<RegExp> patterns, String text) {
+    for (final p in patterns) {
+      if (p.hasMatch(text)) return true;
+    }
+    return false;
+  }
+
+  /// Removes findings whose requirement does not exist in the place photographed,
+  /// and returns how many were removed.
+  ///
+  /// **Why:** a scan of people sitting at a conference table came back with
+  /// "Missing PPE" at MEDIUM, citing Factories Act 1948 s.41C, in the same report
+  /// whose own summary said "no immediate physical hazards are clearly visible in
+  /// the frame". Nobody needs a helmet to attend a meeting. This is not a hazard
+  /// that might be true and cannot be confirmed — the category of requirement
+  /// does not apply — and the damage is specific: a safety officer who is handed
+  /// a non-conformance for not wearing a hard hat indoors learns to skim the
+  /// table, and the next report's real finding is skimmed with it.
+  ///
+  /// **How to apply:** this is the ONE exception to "nothing here removes a
+  /// hazard", and it is narrowed until it can only catch that mistake — the
+  /// frame must carry a non-industrial cue, carry NO industrial cue, and the
+  /// finding must be in a PPE family. Even then the row is not destroyed: it
+  /// moves to `result['withdrawnHazards']` with `withdrawnReason`, so it remains
+  /// in the saved record and can be shown behind a disclosure. The report also
+  /// gets [kNonIndustrialFlag] and a `sceneNote`, so a reader can see that the
+  /// app made a judgement rather than that the model found nothing.
+  static int auditSceneRelevance(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    if (!sceneIsNonIndustrial(result)) return 0;
+    result[kNonIndustrialFlag] = true;
+
+    final withdrawn = <Map<String, dynamic>>[];
+    hazards.removeWhere((h) {
+      final family = familyOf(h);
+      if (family == null || !_familiesNotRequiredIndoors.contains(family)) {
+        return false;
+      }
+      h['withdrawnReason'] =
+          'Withdrawn by the app: this photograph shows an office or meeting '
+          'setting with no plant or equipment in it, so industrial PPE is not '
+          'required here. The finding was not shown as a non-conformance.';
+      withdrawn.add(h);
+      return true;
+    });
+
+    if (withdrawn.isEmpty) return 0;
+
+    final existing = result[kWithdrawnKey];
+    result[kWithdrawnKey] = <Map<String, dynamic>>[
+      if (existing is List)
+        for (final e in existing)
+          if (e is Map) e.cast<String, dynamic>(),
+      ...withdrawn,
+    ];
+    result['sceneNote'] =
+        '${withdrawn.length} PPE observation${withdrawn.length == 1 ? '' : 's'} '
+        'withdrawn — the frame is an office or meeting area, not a work area '
+        'where PPE is required.';
+
+    // The banner and the score are derived from the rows, so they have to follow
+    // them down or the report contradicts itself: a MEDIUM headline over an
+    // empty table is exactly the output that prompted this rule.
+    if (hazards.isEmpty) {
+      final overall = _str(result['overallRisk']);
+      if (overall.isNotEmpty && severityRank(overall) > severityRank('LOW')) {
+        result['overallRiskBeforeSceneAudit'] = overall;
+        result['overallRisk'] = 'LOW';
+      }
+      final score = _asInt(result['riskScore']);
+      if (score != null && score > 15) {
+        result['riskScoreBeforeSceneAudit'] = score;
+        result['riskScore'] = 15;
+      }
+    }
+    return withdrawn.length;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

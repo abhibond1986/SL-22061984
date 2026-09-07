@@ -2945,6 +2945,7 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
   "riskScore": 0-100,
   "confidence": 0-100,
   "people": <count of ACTUALLY visible persons, 0 if none>,
+  "sceneType": "INDUSTRIAL | OFFICE_OR_MEETING | OUTDOOR_PUBLIC | UNCLEAR",
   "viewType": "CLOSE_UP | WORKING_DISTANCE | GENERAL_VIEW",
   "inspectable": <true only if you can see individual fittings — a rail, a nip
                   point, a person's PPE — well enough to judge them>,
@@ -3005,6 +3006,40 @@ FIELD RULES:
   x1,y1 = source; x2,y2 = person — never swapped. "source" is mandatory.
 • "people" is the count of persons you can actually SEE. If it is 0, every
   "lofZone" must be omitted — an arrow needs a real person at its head.
+• "sceneType" is WHERE the photograph was taken, and it decides which rules can
+  possibly apply. Answer it before you look for a single hazard.
+    INDUSTRIAL       = a shop floor, bay, yard, substation, construction site,
+                       workshop, mine, or any area with plant, machinery,
+                       vehicles, stored material or live services in it.
+    OFFICE_OR_MEETING = a conference hall, meeting room, boardroom, training
+                       hall, auditorium, classroom, office, canteen or corridor.
+                       Furniture, laptops, a projector, carpet, a false ceiling,
+                       people seated at a table — and NO plant in the frame.
+    OUTDOOR_PUBLIC   = a road, gate, garden, township or car park with no work
+                       in progress.
+    UNCLEAR          = you genuinely cannot tell.
+★ On OFFICE_OR_MEETING and OUTDOOR_PUBLIC, DO NOT report absent PPE. Not as a
+  hazard, not as an observation, not at any severity. A person attending a
+  meeting, sitting at a desk or walking down a corridor is not required to wear
+  a helmet, goggles, gloves or safety shoes, so their bare head is not a
+  deviation from anything — it is simply what an office looks like. "Missing PPE"
+  filed against a seated audience is the single most common wrong output from
+  this task, it cites a regulation (FA 1948 s.41C) that does not govern that
+  room, and it teaches the safety officer reading the report to distrust the
+  whole table.
+★ This does NOT silence you in those rooms. Report what is really there and
+  really wrong: a trailing extension lead across a walkway, a cylinder or
+  chemical stored in an office, an obstructed exit or fire door, a missing or
+  blocked extinguisher, overloaded sockets or damaged flexes, an unstable stack
+  on top of a cupboard, a chair used to reach a height, a wet floor with no sign.
+  Those are genuine findings in a conference hall, and they are what a safety
+  officer would actually want flagged.
+★ If a frame is an office AND contains plant — a control room with a view onto
+  the converter, a cutting demonstration set up in a training hall — call it
+  INDUSTRIAL, because then the PPE rules really do apply.
+★ If the room contains nothing wrong, say so: overallRisk "LOW", riskScore
+  under 20, "hazards": []. An empty hazards array is a correct, complete and
+  professional answer. Do not manufacture a finding to fill the table.
 • "viewType" / "inspectable" describe THE PHOTOGRAPH, not the site.
   GENERAL_VIEW = a whole yard, plant or building from a distance; you can see
   layout and large structures but not fittings. On a GENERAL_VIEW, or whenever

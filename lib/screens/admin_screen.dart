@@ -39,6 +39,11 @@ import '../services/admin_audit.dart';
 import '../services/admin_master_data.dart';
 import '../services/admin_alerts.dart';
 import '../services/assign_scope.dart';
+// Read by the Report Sync Health card: countUnscoped names how many rows have a
+// plant nobody's master list resolves. Those rows are shown to EVERY user
+// (hiding a safety report is worse than over-sharing one), so the count is the
+// admin's to-fix list, not a cosmetic statistic.
+import '../services/plant_scope.dart';
 import '../services/kb_seed_data.dart';
 import '../services/knowledge_service.dart';
 import '../services/groq_service.dart';
@@ -191,6 +196,25 @@ class _AdminScreenState extends State<AdminScreen>
   List<ModelHealthEntry> _modelHealth = [];
   bool _modelHealthLoading = false;
   bool _modelHealthLoadedOnce = false;
+
+  // ── Report sync health (System Health module) ────────────────────────────
+  // The diagnostic for the complaint "a scan saved on one phone is invisible on
+  // the other". That symptom has four distinct causes and they need DIFFERENT
+  // fixes, so the card refuses to collapse them into one green tick:
+  //
+  //   • rows sitting in the pending queue        → offline, will self-heal
+  //   • rows never uploaded and not queued       → push failing at save time
+  //   • local count == server count              → upload is fine, the problem
+  //                                                is on the READ side (plant
+  //                                                scope, or "My Reports")
+  //   • incidentSchemaGaps non-empty             → a migration is outstanding
+  //     and PostgREST is silently dropping columns from every row
+  //
+  // Empty until _loadSyncHealth() fills it; every reader must tolerate that.
+  Map<String, dynamic> _syncHealth = const {};
+  bool _syncHealthLoading = false;
+  bool _syncHealthLoadedOnce = false;
+  bool _pushingBacklog = false;
 
   // Free-tier budget for image analysis, read from GeminiVision.freeQuotaSnapshot().
   // Empty until _loadAiRuns() fills it; every reader must handle that, which is
@@ -2177,6 +2201,24 @@ class _AdminScreenState extends State<AdminScreen>
         ])),
 
       const SizedBox(height: 16),
+      _sectionHeader('Report Sync Health', sl,
+          trailing: TextButton.icon(
+            onPressed: _syncHealthLoading ? null : _loadSyncHealth,
+            icon: _syncHealthLoading
+                ? const SizedBox(width: 12, height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.refresh_rounded,
+                    size: 14, color: AppColors.accent),
+            label: const Text('Re-check',
+                style: TextStyle(
+                    color: AppColors.accent,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700)),
+          )),
+      const SizedBox(height: 8),
+      _syncHealthCard(sl),
+
+      const SizedBox(height: 16),
       _sectionHeader('Data Integrity', sl),
       const SizedBox(height: 8),
       _integrityCard(sl),
@@ -2262,6 +2304,327 @@ class _AdminScreenState extends State<AdminScreen>
       const SizedBox(height: 10),
       _deleteAllDataCard(sl),
     ]);
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  REPORT SYNC HEALTH
+  //
+  //  Answers one question: "a scan saved on this phone — did it actually
+  //  reach the server, and if it did, why can't the other device see it?"
+  //
+  //  The reason this is a panel and not a log line: the two halves fail
+  //  independently and look identical from the outside. An upload failure and a
+  //  plant-scope mismatch produce the SAME user report ("it's not on my other
+  //  device"), but one is fixed by pushing a backlog and the other by correcting
+  //  a plant field. So the card always shows the local count AND the server
+  //  count and states which side the evidence points at. A single
+  //  green "Synced" tick is what let this bug survive for weeks.
+  // ══════════════════════════════════════════════════════════════════
+
+  /// Collects the sync picture. Every read is individually guarded — this is a
+  /// diagnostic, and a diagnostic that throws while describing a broken system
+  /// is worse than useless. A field that could not be read is left absent and
+  /// rendered as "unknown" rather than as a reassuring zero.
+  Future<void> _loadSyncHealth() async {
+    if (_syncHealthLoading) return;
+    if (!mounted) return;
+    setState(() => _syncHealthLoading = true);
+
+    final out = <String, dynamic>{
+      'checkedAt': DateTime.now().toIso8601String(),
+      'backend': SupabaseConfig.enabled ? 'supabase' : 'sheets',
+    };
+
+    try {
+      final local = await LocalDB.getIncidents();
+      out['localTotal'] = local.length;
+      // Counted from the SAME source the display filter uses, so the two can
+      // never disagree — see PlantScope.countUnscoped's own note on this.
+      try {
+        out['unscoped'] = await PlantScope.countUnscoped(local);
+      } catch (_) {/* leave absent → "unknown" */}
+    } catch (_) {}
+
+    try {
+      final unsynced = await LocalDB.getUnsyncedIncidents();
+      out['unsynced'] = unsynced.length;
+      out['unsyncedIds'] = unsynced
+          .map((i) => i['id']?.toString() ?? '')
+          .where((s) => s.isNotEmpty)
+          .take(5)
+          .toList();
+    } catch (_) {}
+
+    try {
+      out['pending'] = await SyncService.pendingQueueSize();
+    } catch (_) {}
+
+    // The one network read. `fetchIncidentsOrNull` returns null on failure
+    // rather than an empty list, which matters enormously here: an empty list
+    // would render as "server has 0 reports" and send an admin hunting for a
+    // wipe that never happened.
+    if (SupabaseConfig.enabled) {
+      try {
+        final rows = await SupabaseService.fetchIncidentsOrNull();
+        if (rows != null) out['serverTotal'] = rows.length;
+      } catch (_) {}
+    }
+
+    out['lastError'] = SupabaseService.incidentsLastError;
+    out['schemaGaps'] = SupabaseService.incidentSchemaGaps;
+
+    if (!mounted) return;
+    setState(() {
+      _syncHealth = out;
+      _syncHealthLoading = false;
+      _syncHealthLoadedOnce = true;
+    });
+  }
+
+  /// Runs a full sync and reports what it actually managed to upload.
+  ///
+  /// Deliberately reports the BACKLOG figure separately from the queue drain.
+  /// A non-zero backlog on every run means pushes are failing at the moment of
+  /// saving and the queue is not catching them — a different fault from "this
+  /// device was offline for a while", and one the queue count alone hides.
+  Future<void> _pushAllLocalOnly() async {
+    if (_pushingBacklog) return;
+    setState(() => _pushingBacklog = true);
+    try {
+      final res = await SyncService.fullSync(force: true);
+      final ok = res['ok'] == true;
+      final backlog = res['uploadedBacklog'] as int? ?? 0;
+      final queued  = res['pushed'] as int? ?? 0;
+      final stuck   = res['stillUnsynced'] as int? ?? 0;
+      final err     = (res['lastPushError'] ?? res['error'] ?? '').toString();
+
+      await AdminAudit.log(
+        action: AdminAudit.actSettingsChange,
+        actor: _currentActor,
+        targetName: 'Push local-only reports',
+        meta: {'uploadedBacklog': backlog, 'queued': queued, 'stillUnsynced': stuck});
+
+      if (!mounted) return;
+      if (!ok) {
+        _toast(err.isEmpty ? 'Sync failed' : 'Sync failed — $err',
+            const Color(0xFFD32F2F));
+      } else if (stuck > 0) {
+        _toast(
+            'Uploaded ${backlog + queued}, but $stuck still failed'
+            '${err.isEmpty ? '' : ' — $err'}',
+            AppColors.amber);
+      } else if (backlog + queued == 0) {
+        _toast('Nothing was waiting — every report is already on the server',
+            const Color(0xFF43A047));
+      } else {
+        _toast('Uploaded ${backlog + queued} report'
+            '${backlog + queued == 1 ? '' : 's'} to the server',
+            const Color(0xFF43A047));
+      }
+    } catch (e) {
+      if (mounted) _toast('Sync failed — $e', const Color(0xFFD32F2F));
+    } finally {
+      if (mounted) setState(() => _pushingBacklog = false);
+      // Re-read regardless of the outcome: after a partial success the counts
+      // have moved, and a stale panel next to a success toast is exactly the
+      // kind of contradiction that makes an admin distrust both.
+      await _loadSyncHealth();
+      if (mounted) await _loadAll();
+    }
+  }
+
+  Widget _syncHealthCard(SL sl) {
+    // Guard on the flag, not on isEmpty — a device with nothing recorded would
+    // otherwise re-check (including a network read) on every rebuild.
+    if (!_syncHealthLoadedOnce && !_syncHealthLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadSyncHealth());
+    }
+
+    final h = _syncHealth;
+    if (h.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: sl.card,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: sl.border)),
+        child: Row(children: [
+          const SizedBox(width: 14, height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Checking what has and has not reached the server…',
+              style: TextStyle(color: sl.text3, fontSize: 11))),
+        ]));
+    }
+
+    final localTotal  = h['localTotal']  as int?;
+    final serverTotal = h['serverTotal'] as int?;
+    final unsynced    = h['unsynced']    as int? ?? 0;
+    final pending     = h['pending']     as int? ?? 0;
+    final unscoped    = h['unscoped']    as int?;
+    final lastError   = (h['lastError'] ?? '').toString();
+    final gaps        = (h['schemaGaps'] as List?)?.cast<String>() ?? const [];
+    final ids         = (h['unsyncedIds'] as List?)?.cast<String>() ?? const [];
+    final serverKnown = serverTotal != null;
+
+    // THE READING. Ordered by which fault outranks which, not by severity of
+    // the number: a schema gap is reported first because it breaks every row
+    // regardless of how healthy the counts look, and an unreachable server is
+    // reported before any count because with no server figure the counts cannot
+    // be interpreted at all.
+    final String verdict;
+    final Color verdictTone;
+    if (gaps.isNotEmpty) {
+      verdict = 'A database migration is outstanding. The server has rejected '
+          '${gaps.length} column${gaps.length == 1 ? '' : 's'} '
+          '(${gaps.join(', ')}), so those fields are being DROPPED from every '
+          'report that uploads. Run migration_workflow_fields.sql — pushing '
+          'again will not recover them.';
+      verdictTone = sl.redText;
+    } else if (!SupabaseConfig.enabled) {
+      verdict = 'Supabase is switched off on this build, so reports travel only '
+          'through the legacy Google Sheets backend and cross-device visibility '
+          'depends on it entirely.';
+      verdictTone = sl.amberText;
+    } else if (!serverKnown) {
+      verdict = 'Could not reach the server, so there is nothing to compare the '
+          'local count against. This is a connection result, NOT evidence that '
+          'the server is empty. Try again on a working connection before '
+          'concluding anything.';
+      verdictTone = sl.amberText;
+    } else if (unsynced > 0 || pending > 0) {
+      verdict = '${unsynced + pending} report'
+          '${unsynced + pending == 1 ? '' : 's'} on this device '
+          '${unsynced + pending == 1 ? 'has' : 'have'} not reached the server, '
+          'so ${unsynced + pending == 1 ? 'it is' : 'they are'} invisible on '
+          'every other device. Use "Push all local-only reports now" below. If '
+          'the same number is still here afterwards, the push itself is '
+          'failing — read the last error.';
+      verdictTone = sl.redText;
+    } else if ((unscoped ?? 0) > 0) {
+      verdict = 'Uploading is working — everything on this device is on the '
+          'server. But $unscoped report${unscoped == 1 ? '' : 's'} '
+          'carr${unscoped == 1 ? 'ies' : 'y'} a plant name no master list '
+          'resolves. Those are shown to EVERY user rather than hidden, so if '
+          'somebody reports seeing another plant\'s work, this is why. Fix them '
+          'with Data Management → Normalise plant names below.';
+      verdictTone = sl.amberText;
+    } else {
+      verdict = 'Uploading is working: nothing is waiting and nothing is '
+          'local-only. If a user still cannot see a report on a second device, '
+          'the cause is on the READ side — the plant assigned to their account '
+          'versus the plant on the report — not the upload.';
+      verdictTone = sl.greenText;
+    }
+
+    final checked = DateTime.tryParse(h['checkedAt']?.toString() ?? '');
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: sl.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: sl.border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _healthRow('Reports on this device',
+            localTotal?.toString() ?? 'unknown', AppColors.accent, sl),
+        const SizedBox(height: 6),
+        _healthRow(
+            'Reports on the server',
+            serverKnown
+                ? '$serverTotal'
+                : (SupabaseConfig.enabled ? 'unreachable' : 'not applicable'),
+            serverKnown ? const Color(0xFF43A047) : AppColors.amber, sl),
+        const SizedBox(height: 6),
+        // The number that matters. Named "never uploaded", not "unsynced":
+        // "unsynced" reads as a transient state that will clear itself, and the
+        // whole point of this row is that it may not.
+        _healthRow('Never uploaded (this device only)', '$unsynced',
+            unsynced == 0 ? const Color(0xFF43A047) : const Color(0xFFD32F2F),
+            sl),
+        if (ids.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text('ids: ${ids.join(', ')}${unsynced > ids.length ? ' …' : ''}',
+              style: TextStyle(
+                  color: sl.text4, fontSize: 9, fontFamily: 'monospace')),
+        ],
+        const SizedBox(height: 6),
+        _healthRow('Waiting in the offline queue', '$pending',
+            pending == 0 ? const Color(0xFF43A047) : AppColors.amber, sl),
+        const SizedBox(height: 6),
+        _healthRow('Plant not recognised (shown to all users)',
+            unscoped?.toString() ?? 'unknown',
+            (unscoped ?? 0) == 0 ? const Color(0xFF43A047) : AppColors.amber,
+            sl),
+
+        if (lastError.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(9),
+            decoration: BoxDecoration(
+              color: const Color(0xFFD32F2F).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                  color: const Color(0xFFD32F2F).withOpacity(0.25))),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Last upload error',
+                    style: TextStyle(
+                        color: sl.redText,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800)),
+                const SizedBox(height: 3),
+                // Verbatim, not summarised. The PostgREST code (42703 / PGRST204
+                // / 42P01) is the whole diagnosis and paraphrasing loses it.
+                Text(lastError,
+                    style: TextStyle(
+                        color: sl.text2, fontSize: 9.5, height: 1.4)),
+              ])),
+        ],
+
+        const SizedBox(height: 10),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: sl.glassColor,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: sl.glassBorder)),
+          child: Text(verdict,
+              style: TextStyle(color: verdictTone, fontSize: 10, height: 1.45)),
+        ),
+
+        const SizedBox(height: 10),
+        SizedBox(width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _pushingBacklog ? null : _pushAllLocalOnly,
+            icon: _pushingBacklog
+                ? const SizedBox(width: 12, height: 12,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.cloud_upload_rounded, size: 14),
+            label: Text(_pushingBacklog
+                ? 'Uploading…'
+                : 'Push all local-only reports now'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8))))),
+        const SizedBox(height: 6),
+        Text(
+          'Counts describe THIS device. Every device keeps its own copy, so a '
+          'report stranded on a colleague\'s phone will not appear here — open '
+          'this panel on the device that made the report.',
+          style: TextStyle(color: sl.text4, fontSize: 9, height: 1.4)),
+        if (checked != null) ...[
+          const SizedBox(height: 4),
+          Text('Checked ${_pad(checked.hour)}:${_pad(checked.minute)}',
+              style: TextStyle(color: sl.text4, fontSize: 9)),
+        ],
+      ]));
   }
 
   bool _normalizing = false;

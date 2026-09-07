@@ -2204,12 +2204,30 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
       }
 
       // Start network sync but don't block — show success after max 5s
-      final syncFuture = SyncService.pushIncident(incident).catchError((_) => false);
+      //
+      // ★ 2026-09-07: the failure REASON is logged instead of being swallowed by
+      // a bare `.catchError((_) => false)`. `SupabaseService.incidentsLastError`
+      // holds the server's own words and is what the admin Sync Health panel
+      // shows; without this line there was no record on the device either, so a
+      // report that silently failed to upload left no trace anywhere to explain
+      // why it was missing from the user's other phone.
+      final syncFuture = SyncService.pushIncident(incident).catchError((e) {
+        debugPrint('NearMissTab: push failed for ${incident['id']}: $e');
+        return false;
+      });
       // Only generate/upload PDF in background if user chose Save+PDF
       if (exportAfter) _uploadPdfBackground(incident, user, _imageBytes);
       _lastSubmissionKey = _buildSubmissionKey();
+      // A timeout is NOT a failure — the push carries on in the background and
+      // `_synced` will be set when it lands. Kept separate from `synced` so the
+      // dialog can say "still uploading" rather than accusing a slow connection
+      // of having lost the report.
+      var stillUploading = false;
       final synced = await syncFuture.timeout(
-        const Duration(seconds: 5), onTimeout: () => false);
+        const Duration(seconds: 5), onTimeout: () {
+          stillUploading = true;
+          return false;
+        });
 
       if (exportAfter) {
         try {
@@ -2239,7 +2257,11 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           _savedReporterPno = user?['pno']?.toString() ?? '';
           _savedImageBytes = preservedImageBytes;
         });
-        _showSaveSuccessDialog(incident, synced, exportAfter, preservedImageBytes);
+        // Positional, not named: Dart does not allow optional positional and
+        // named parameters in the same signature, and `savedImageBytes` was
+        // already positional.
+        _showSaveSuccessDialog(
+            incident, synced, exportAfter, preservedImageBytes, stillUploading);
       }
       return true;
     } catch (e) {
@@ -2275,7 +2297,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   //  SHARE HELPERS
   // ═══════════════════════════════════════════════════════════════
 
-  void _showSaveSuccessDialog(Map<String, dynamic> incident, bool synced, bool exported, [Uint8List? savedImageBytes]) {
+  void _showSaveSuccessDialog(Map<String, dynamic> incident, bool synced,
+      bool exported, [Uint8List? savedImageBytes, bool stillUploading = false]) {
     final sl = SL.of(context);
     showDialog(context: context, builder: (ctx) => Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -2293,8 +2316,23 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           Text(exported ? 'Saved + PDF Exported' : 'Near Miss Saved!',
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
-          Text(synced ? 'Synced to cloud ☁️' : 'Saved locally (will sync later)',
-            style: TextStyle(fontSize: 13, color: sl.text3)),
+          // Three states, not two. "Saved locally (will sync later)" was shown
+          // both for a push that failed and for one that merely took longer than
+          // 5s, and in neither case did it say the report was not yet on the
+          // user's other devices — which is the one consequence they noticed.
+          Text(
+            synced
+                ? 'Synced — visible on your other devices ☁️'
+                : stillUploading
+                    ? 'Still uploading in the background…'
+                    : 'Saved on this device only — not uploaded yet. It will '
+                        'sync automatically when the connection returns.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                fontSize: 13,
+                color: synced
+                    ? sl.text3
+                    : (stillUploading ? sl.text3 : sl.redText))),
           const SizedBox(height: 20),
           // Share buttons — always show for Save, show for PDF too
           Text('Share Report', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: sl.text3)),

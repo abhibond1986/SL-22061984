@@ -1238,7 +1238,20 @@ class _AIScanTabState extends State<AIScanTab> {
     }
 
     await LocalDB.saveIncident(dbInc);
-    SyncService.pushIncident(dbInc).catchError((_) => false);
+    // ★ 2026-09-07: the result of this push is now WATCHED, not discarded.
+    //
+    // It used to be `SyncService.pushIncident(dbInc).catchError((_) => false);` —
+    // a bare fire-and-forget whose false was thrown away — while the dialog below
+    // showed a green tick reading "Synced to Google Sheets · Visible to admin"
+    // unconditionally. So a report that never reached the server told the user it
+    // had, and the user's own report was then invisible on their other device with
+    // nothing anywhere on screen to suggest why. The push still does not block the
+    // save (the worker is standing in front of the hazard); the difference is that
+    // the dialog now waits on this future and says what actually happened.
+    final uploadResult = SyncService.pushIncident(dbInc).catchError((e) {
+      debugPrint('AiScanTab: push failed for ${dbInc['id']}: $e');
+      return false;
+    });
     _uploadPdfBackground(dbInc, user);
 
     // ★ v35: Trigger background AI audit (silently cross-verifies with another model)
@@ -1283,11 +1296,12 @@ class _AIScanTabState extends State<AIScanTab> {
     });
 
     if (mounted) {
-      _showSaveSuccessDialog(dbInc);
+      _showSaveSuccessDialog(dbInc, uploadResult);
     }
   }
 
-  void _showSaveSuccessDialog(Map<String, dynamic> incident) {
+  void _showSaveSuccessDialog(
+      Map<String, dynamic> incident, Future<bool> uploadResult) {
     final sl = SL.of(context);
     final id = incident['id']?.toString() ?? '';
     final shortId = id.length > 8 ? id.substring(id.length - 8) : id;
@@ -1331,8 +1345,31 @@ class _AIScanTabState extends State<AIScanTab> {
                 _saveRow(Icons.save_outlined, 'Saved locally',
                     'Available offline', AppColors.green, sl),
                 const SizedBox(height: 8),
-                _saveRow(Icons.cloud_upload_outlined, 'Synced to Google Sheets',
-                    'Visible to admin', AppColors.cyan, sl),
+                // Reports the REAL outcome of the upload. The three states are
+                // deliberately distinct — and the failed state is not phrased as
+                // an error, because nothing was lost: the report is safe on this
+                // device and the next sync will carry it up. What the user needs
+                // to know is only that it is not on their other device YET.
+                FutureBuilder<bool>(
+                  future: uploadResult,
+                  builder: (_, snap) {
+                    if (snap.connectionState != ConnectionState.done) {
+                      return _saveRow(Icons.cloud_sync_outlined,
+                          'Uploading to server', 'Please wait…',
+                          AppColors.amber, sl);
+                    }
+                    if (snap.data == true) {
+                      return _saveRow(Icons.cloud_done_outlined,
+                          'Synced to server',
+                          'Visible on your other devices', AppColors.green, sl);
+                    }
+                    return _saveRow(Icons.cloud_off_outlined,
+                        'Saved on this device only',
+                        'Not uploaded yet — it will sync automatically when the '
+                            'connection returns',
+                        AppColors.red, sl);
+                  },
+                ),
                 const SizedBox(height: 8),
                 _saveRow(Icons.picture_as_pdf_outlined, 'PDF report',
                     'Uploading in background', AppColors.amber, sl),

@@ -664,10 +664,27 @@ class SyncService {
         row.remove('imageBase64');
         row.remove('shareImageBase64');
         final ok = await SupabaseService.upsertIncident(row);
-        if (!ok && !fromQueue) await _addToPendingQueue('addIncident', incident);
+        // ★ 2026-09-07: record the outcome ON the local row. Until now a push
+        // left no trace either way, so nothing downstream could tell a report
+        // that had reached the server from one that had not — which is what let
+        // the reconcile delete unsynced rows and left the retry loop below with
+        // nothing to work from. The Storage URL is written back for the same
+        // reason: without it, every later push re-uploads the same photo.
+        if (ok && id.isNotEmpty) {
+          await LocalDB.markIncidentSynced(id);
+          final url = row['imageUrl']?.toString() ?? '';
+          if (url.isNotEmpty &&
+              (incident['imageUrl']?.toString() ?? '').isEmpty) {
+            incident['imageUrl'] = url;
+            try {
+              await LocalDB.updateIncidentFields(id, {'imageUrl': url});
+            } catch (_) {}
+          }
+        }
+        if (!ok && !fromQueue) await _queueIncidentForRetry(incident);
         return ok;
       } catch (e) {
-        if (!fromQueue) await _addToPendingQueue('addIncident', incident);
+        if (!fromQueue) await _queueIncidentForRetry(incident);
         return false;
       }
     }
@@ -858,14 +875,69 @@ class SyncService {
   //  PENDING QUEUE (offline writes)
   // ═══════════════════════════════════════════════════════════════
 
+  /// Arrange for a failed incident push to be retried, WITHOUT copying the photo
+  /// into SharedPreferences.
+  ///
+  /// **Why:** `_addToPendingQueue` serialises the payload verbatim into a prefs
+  /// string. On web an AI-scan row carries the full photo in `imageBase64`, so
+  /// every failed push wrote a second copy of a multi-hundred-kilobyte image into
+  /// prefs — inflated again by JSON string escaping — beside the copy already in
+  /// the `incidents` key. A few failures on a poor connection and the prefs write
+  /// itself starts failing, which loses the queue AND can take the incident list
+  /// down with it. That is a data-loss risk created purely by the retry mechanism.
+  ///
+  /// **How to apply:** since 2026-09-07 `fullSync` step 2.5 retries every unsynced
+  /// LocalDB row on every sync, from the row itself — which is strictly better
+  /// than the queue copy, because it still has the image, the thumbnails and any
+  /// later edits. So for a row that is already in LocalDB the queue entry is pure
+  /// redundancy and is skipped. The queue is still used when the caller pushed a
+  /// row it never saved locally, which is the only case where dropping it would
+  /// lose the record.
+  static Future<void> _queueIncidentForRetry(
+      Map<String, dynamic> incident) async {
+    final id = incident['id']?.toString() ?? '';
+    if (id.isNotEmpty) {
+      try {
+        final unsynced = await LocalDB.getUnsyncedIncidents();
+        if (unsynced.any((i) => i['id']?.toString() == id)) {
+          AppLogger.error('SyncService',
+              'pushIncident failed for $id — left for fullSync to retry from '
+              'LocalDB (not queued, to keep the photo out of prefs)',
+              action: 'addIncident');
+          return;
+        }
+      } catch (_) {
+        // Cannot read LocalDB — fall through and queue, which is the safe side.
+      }
+    }
+    await _addToPendingQueue('addIncident', incident);
+  }
+
   static Future<void> _addToPendingQueue(
       String action, Map<String, dynamic> payload) async {
     _prefs ??= await SharedPreferences.getInstance();
     final raw   = _prefs!.getString(_kPendingQueue);
     final queue = raw != null ? (jsonDecode(raw) as List) : [];
+    // Trim the blobs that must never be copied into prefs. See
+    // [_queueIncidentForRetry] for why this matters. `shareImageBase64` goes
+    // unconditionally — it is a second, medium-sized copy of the same photo that
+    // no push path has ever sent. `imageBase64` goes only when the row carries a
+    // durable pointer (`imageRef` on device, `imageUrl` on the server) to recover
+    // the image from; with neither, the base64 IS the only copy and keeping the
+    // queue small is not worth losing the evidence photo.
+    // `thumbnailBase64` stays — 2-4 KB, and the incident log needs it.
+    var body = payload;
+    if (payload['imageBase64'] != null ||
+        payload['shareImageBase64'] != null) {
+      body = Map<String, dynamic>.from(payload)..remove('shareImageBase64');
+      final hasDurableCopy =
+          (body['imageRef']?.toString().trim().isNotEmpty ?? false) ||
+              (body['imageUrl']?.toString().trim().isNotEmpty ?? false);
+      if (hasDurableCopy) body.remove('imageBase64');
+    }
     queue.add({
       'action':    action,
-      'payload':   payload,
+      'payload':   body,
       'queuedAt':  DateTime.now().toIso8601String(),
     });
     await _prefs!.setString(_kPendingQueue, jsonEncode(queue));
@@ -1232,6 +1304,44 @@ class SyncService {
         if (id.isNotEmpty) serverIds.add(id);
       }
 
+      // ★ 2026-09-07 (2.5) Retry every local report that has never reached the
+      // server. The Sheets branch below has always done this; the Supabase
+      // branch did not, and that omission is why reports saved on one device
+      // never appeared on another. The queue drain above only covers rows that
+      // were successfully ENQUEUED — if `_addToPendingQueue` itself failed (a
+      // near-miss payload carries three base64 copies and can exceed the
+      // SharedPreferences limit), or if the row was written by a build before
+      // that queue existed, the only remaining record of it is the local list.
+      // This loop is the backstop that has no such gap: it asks the local store
+      // directly what still owes an upload.
+      //
+      // Tombstones are honoured — re-pushing a deleted row resurrects it and
+      // refills a cleared table. `getUnsyncedIncidents` reads through
+      // getIncidents(), which already excludes tombstoned ids.
+      //
+      // MUST run BEFORE the reconcile below, and every id pushed here MUST be
+      // added to [serverIds]: the set was captured from a fetch that predates
+      // these pushes, and a row that has just been marked synced is no longer
+      // exempt from deletion — so reconciling against the stale set would erase
+      // the very rows we just uploaded.
+      var extraPushed = 0;
+      final pushFailures = <String>[];
+      for (final local in await LocalDB.getUnsyncedIncidents()) {
+        final id = local['id']?.toString() ?? '';
+        if (id.isEmpty || serverIds.contains(id)) continue;
+        final ok = await pushIncident(local, fromQueue: true);
+        if (ok) {
+          extraPushed++;
+          serverIds.add(id);
+          await LocalDB.markIncidentSynced(id);
+        } else {
+          // Keep the id, not just a count: the diagnostic panel names the
+          // reports that are stuck, which is what makes the failure actionable
+          // instead of just visible.
+          pushFailures.add(id);
+        }
+      }
+
       // (3) Drop local incidents that no longer exist on the server.
       final removed = await LocalDB.reconcileWithServer(serverIds);
       // Server confirmed its full set → prune tombstones it no longer knows
@@ -1278,7 +1388,15 @@ class SyncService {
       await _markSyncTime();
       return {
         'ok': true,
+        // `pushed` is the queue drain; `uploadedBacklog` is the local-only
+        // retry. Kept separate because they diagnose different failures — a
+        // non-zero backlog every single sync means pushes are failing at the
+        // moment of saving, which the queue count alone would not reveal.
         'pushed': pushed,
+        'uploadedBacklog': extraPushed,
+        'stillUnsynced': pushFailures.length,
+        'stillUnsyncedIds': pushFailures,
+        'lastPushError': SupabaseService.incidentsLastError,
         'pulled': serverRows.length,
         'removed': removed,
         'users': users.length,

@@ -124,16 +124,85 @@ class PlantScope {
   /// "DSP Durgapur" and "Durgapur Steel Plant". The plant list is fetched once
   /// and reused for the whole list — canonicalising per record would re-read
   /// SharedPreferences thousands of times.
+  /// ★ 2026-09-07: a record whose plant cannot be resolved is now shown to
+  /// everyone in scope instead of to nobody.
+  ///
+  /// Two rows in the live table carry `plant: ""`. Under the old rule they were
+  /// visible only to admins — so a report could sync correctly to every device
+  /// and still be invisible on all of them, including to the person who filed
+  /// it. Hiding a safety report is the worse error of the two available: the
+  /// cost of showing it slightly too widely is that someone reads a report from
+  /// another plant, while the cost of hiding it is that a hazard goes unread.
+  ///
+  /// This is a bridge for existing data, not a permanent policy. New records get
+  /// the reporter's plant stamped at save time in `LocalDB.saveIncident`, so the
+  /// unresolved set can only shrink; [countUnscoped] is what the admin panel
+  /// uses to say how many are left to fix.
+  ///
+  /// Note the deliberate asymmetry with [canActOn], which is NOT relaxed: seeing
+  /// an unscoped report is harmless, whereas being able to close another plant's
+  /// report is the authorisation hole this class was written to remove.
+  /// ★ 2026-09-07 (second half of the same bug): plants are compared by CODE,
+  /// not by canonical label.
+  ///
+  /// `canonicalPlantFrom` returns 'SSO Ranchi' for the name and 'SSO — SSO
+  /// Ranchi' for the code — two different strings for ONE plant, as
+  /// [AdminMasterData.plantEntryFor]'s own doc comment warns. This method
+  /// compared those strings, so a user whose profile says "SSO" could not see a
+  /// report stored as "SSO Ranchi". The live table contains both spellings, and
+  /// this is the failure that looks exactly like "my report didn't sync": the row
+  /// is on the device and on the server, and the filter drops it on the way to
+  /// the screen. Resolving both sides to a plant ENTRY and comparing codes is
+  /// what that helper exists for.
   Future<List<Map<String, dynamic>>> filterIncidents(
       List<Map<String, dynamic>> incidents) async {
     if (seesAllPlants) return incidents;
-    if (plant.isEmpty) return const []; // unresolved scope shows nothing
     final plants = await AdminMasterData.getPlants();
+    final mine = AdminMasterData.plantEntryFor(plant, plants);
+    final myCode = (mine?['code'] ?? '').toUpperCase();
+    // An unresolved viewer scope (no plant on the profile, or one that matches
+    // no configured plant) used to show nothing at all. It now shows the
+    // unscoped records, which is the honest intersection of "we don't know where
+    // this user belongs" and "we don't know where this record belongs" — and the
+    // UI already surfaces [problem] telling them to get their profile fixed.
     return incidents.where((i) {
-      final p = AdminMasterData.canonicalPlantFrom(
-          i['plant']?.toString() ?? '', plants);
-      return p == plant;
+      final raw = i['plant']?.toString() ?? '';
+      final entry = AdminMasterData.plantEntryFor(raw, plants);
+      if (entry == null) {
+        // Either genuinely blank, or a spelling no configured plant matches.
+        // Both are unresolved records and both are now visible to everyone —
+        // see countUnscoped for how the admin gets told to fix them.
+        return true;
+      }
+      if (myCode.isNotEmpty) {
+        return (entry['code'] ?? '').toUpperCase() == myCode;
+      }
+      // Viewer's own plant didn't resolve to a configured entry. Fall back to
+      // the label comparison rather than showing everything: a scope we can't
+      // resolve must not silently widen, which is this class's whole purpose.
+      return plant.isNotEmpty &&
+          AdminMasterData.canonicalPlantFrom(raw, plants) == plant;
     }).toList();
+  }
+
+  /// How many of [incidents] have no resolvable plant.
+  ///
+  /// Surfaced in the admin panel so the blank-plant rows get corrected rather
+  /// than living forever behind the tolerance above.
+  /// Must use the SAME test as [filterIncidents] — `plantEntryFor` returning
+  /// null — not `canonicalPlantFrom(...).isEmpty`. Those differ: canonicalisation
+  /// falls back to the cleaned original, so a row reading "Foobar Plant" produces
+  /// a non-empty label and would be counted as scoped while the filter treats it
+  /// as unresolved and shows it to everyone. The count exists to tell the admin
+  /// how many rows are leaking across plants, so it has to count exactly those.
+  static Future<int> countUnscoped(
+      List<Map<String, dynamic>> incidents) async {
+    final plants = await AdminMasterData.getPlants();
+    return incidents
+        .where((i) =>
+            AdminMasterData.plantEntryFor(i['plant']?.toString() ?? '', plants) ==
+            null)
+        .length;
   }
 
   /// Departments actually present in [incidents], intersected with the admin's
@@ -175,12 +244,29 @@ class PlantScope {
   /// incident_detail_screen previously had NO authorisation check at all —
   /// anyone who could open a record could advance it to CLOSED, including for
   /// another plant.
+  /// ★ 2026-09-07: compares by CODE, for the same reason as [filterIncidents] —
+  /// 'SSO Ranchi' and 'SSO — SSO Ranchi' are one plant under two labels, and the
+  /// old string equality denied a plant user the right to close their OWN plant's
+  /// report whenever the two sides had been spelled differently.
+  ///
+  /// The tolerance added to [filterIncidents] is deliberately NOT mirrored here:
+  /// a record with no resolvable plant stays un-actionable. Reading a report from
+  /// elsewhere is harmless; closing one is not.
   Future<bool> canActOn(Map<String, dynamic> incident) async {
     if (seesAllPlants) return true;
     if (plant.isEmpty) return false;
-    final canon = await AdminMasterData.canonicalPlant(
-        incident['plant']?.toString() ?? '');
-    return canon == plant;
+    final plants = await AdminMasterData.getPlants();
+    final theirs =
+        AdminMasterData.plantEntryFor(incident['plant']?.toString() ?? '', plants);
+    if (theirs == null) return false;
+    final mine = AdminMasterData.plantEntryFor(plant, plants);
+    final myCode = (mine?['code'] ?? '').toUpperCase();
+    if (myCode.isNotEmpty) {
+      return (theirs['code'] ?? '').toUpperCase() == myCode;
+    }
+    return AdminMasterData.canonicalPlantFrom(
+            incident['plant']?.toString() ?? '', plants) ==
+        plant;
   }
 
   /// Short label for the scope banner, e.g. "BSP — Bhilai Steel Plant".

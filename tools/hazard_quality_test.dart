@@ -434,6 +434,160 @@ void main() {
   ok(!HazardQuality.viewIsUninspectable(<String, dynamic>{}, const []),
       'a scan with no hazards is not judged');
 
+  // ── does the rule apply here at all? ──────────────────────────────────
+  //
+  // Fixture is the real report the user complained about: people seated in a
+  // conference hall, "Missing PPE" at MEDIUM citing FA 1948 s.41C, in a scan
+  // whose own summary said nothing hazardous was visible.
+  final hall = <String, dynamic>{
+    'sceneInventory': 'A conference hall with about twelve people seated around '
+        'a long polished table. Laptops, notepads and water bottles on the '
+        'table, a projection screen on the far wall, carpeted floor and a '
+        'false ceiling with recessed lights.',
+    'summary': 'No immediate physical hazards are clearly visible in the frame.',
+    'overallRisk': 'MEDIUM',
+    'riskScore': 38,
+    'people': 12,
+    'hazards': [
+      hz(
+        name: 'Missing PPE',
+        description:
+            'Visible: none of the seated persons is wearing a safety helmet or '
+            'safety shoes, exposing them to head injury.',
+        severity: 'MEDIUM',
+        evidence: 'Bare heads of seated persons',
+      ),
+    ],
+  };
+  final hallReport = HazardQuality.apply(hall);
+  final hallOut = (hall['hazards'] as List).cast<Map<String, dynamic>>();
+  ok(HazardQuality.sceneIsNonIndustrial(hall),
+      'a conference hall with no plant in it reads as non-industrial');
+  ok(hallReport.sceneWithdrawn == 1, 'the PPE row is withdrawn');
+  ok(hallOut.isEmpty, 'nothing is left in the hazard table');
+  ok(hall[HazardQuality.kNonIndustrialFlag] == true, 'the scene flag is set');
+  ok((hall[HazardQuality.kWithdrawnKey] as List).length == 1,
+      'the withdrawn row is kept in the record, not deleted');
+  ok(((hall[HazardQuality.kWithdrawnKey] as List).first
+              as Map)['withdrawnReason']
+          .toString()
+          .contains('not required'),
+      'the withdrawn row says why');
+  ok(hall['overallRisk'] == 'LOW' &&
+          hall['overallRiskBeforeSceneAudit'] == 'MEDIUM',
+      'the banner follows the empty table down, with the original on record');
+  ok(hall['riskScore'] == 15 && hall['riskScoreBeforeSceneAudit'] == 38,
+      'the score follows too');
+  ok(hallReport.changedAnything, 'the report admits it changed something');
+
+  // A real finding in the same room is NOT withdrawn.
+  final hallWithTrip = <String, dynamic>{
+    'sceneInventory': 'A meeting room with a projector, upholstered chairs and '
+        'a carpeted floor. An extension lead runs across the floor between the '
+        'table and the wall socket.',
+    'overallRisk': 'MEDIUM',
+    'hazards': [
+      hz(
+        name: 'Trailing extension lead',
+        description: 'Visible: an extension lead crosses the walkway between '
+            'the table and the socket, a trip hazard for anyone leaving.',
+        severity: 'MEDIUM',
+        evidence: 'Extension lead across the carpet',
+      ),
+      hz(name: 'No safety goggles worn', description: 'Visible: bare eyes.'),
+    ],
+  };
+  final tripReport = HazardQuality.apply(hallWithTrip);
+  final tripOut = (hallWithTrip['hazards'] as List).cast<Map<String, dynamic>>();
+  ok(tripReport.sceneWithdrawn == 1, 'only the PPE row goes');
+  ok(tripOut.length == 1 && tripOut.first['name'] == 'Trailing extension lead',
+      'a genuine office hazard survives');
+  ok(hallWithTrip['overallRisk'] == 'MEDIUM',
+      'the banner is left alone while any finding remains');
+
+  // An industrial cue anywhere in the frame vetoes the whole rule.
+  final controlRoom = <String, dynamic>{
+    'sceneInventory': 'A control room with desks, monitors and office chairs. '
+        'Through the window, an overhead crane is moving a ladle across the bay.',
+    'overallRisk': 'HIGH',
+    'hazards': [hz(name: 'Operators without helmets', severity: 'HIGH')],
+  };
+  final crReport = HazardQuality.apply(controlRoom);
+  ok(!HazardQuality.sceneIsNonIndustrial(controlRoom),
+      'a crane visible through the window vetoes the office reading');
+  ok(crReport.sceneWithdrawn == 0, 'nothing is withdrawn there');
+  ok((controlRoom['hazards'] as List).length == 1, 'the finding stands');
+
+  // The model's own sceneType is believed when it gave one.
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneType': 'INDUSTRIAL',
+        'sceneInventory': 'A conference hall with a projector and carpet.',
+      }),
+      'a declared INDUSTRIAL beats the office cues');
+  ok(HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneType': 'OFFICE_OR_MEETING',
+        'sceneInventory': 'Twelve persons at a table.',
+      }),
+      'a declared OFFICE_OR_MEETING needs no cue of its own');
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneType': 'OFFICE_OR_MEETING',
+        'sceneInventory': 'A training hall with an acetylene cylinder and a '
+            'gas cutting set laid out for a demonstration.',
+      }),
+      'a declared office containing plant is still not trusted');
+
+  // Silence, not suppression: the rule must not fire on a shop floor, on a
+  // scan that says nothing about where it is, or on a plain steel-plant frame.
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{}),
+      'an empty result is never called non-industrial');
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneInventory': 'A worker at a lathe.',
+      }),
+      'a workshop frame is industrial');
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneInventory': 'Two men standing near a stack of steel plates in an '
+            'open area under a clear sky.',
+      }),
+      'no office cue means the rule stays silent, not that it guesses');
+
+  // The rule must not disarm itself: the prompt asks for the primary safety
+  // concern in the summary, so the summary of a bad conference-hall scan says
+  // "not wearing helmets" — and "helmet" is an industrial cue. If the veto read
+  // the summary, every report this rule exists for would veto its own fix.
+  ok(HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneInventory': 'A conference hall, people seated around a long table '
+            'with laptops and a projection screen behind them.',
+        'summary': 'Seated attendees are not wearing safety helmets or shoes, '
+            'contrary to FA 1948 s.41C.',
+      }),
+      'a helmet mentioned only in the summary does not veto the office reading');
+  ok(!HazardQuality.sceneIsNonIndustrial(<String, dynamic>{
+        'sceneInventory': 'A conference hall with a projector, and a row of '
+            'helmets and coveralls laid out on a side table.',
+        'summary': 'Induction briefing before a shutdown.',
+      }),
+      'helmets actually IN the inventory still veto it');
+
+  // "slippery" must not read as "ppe" here either — the same trap as dedupe.
+  final wetOffice = <String, dynamic>{
+    'sceneInventory': 'An office corridor with a carpeted floor and a water '
+        'cooler. A slippery wet patch spreads from under the cooler.',
+    'hazards': [
+      hz(
+        name: 'Slippery wet floor',
+        description: 'Visible: a wet patch under the water cooler, no caution '
+            'sign placed.',
+        severity: 'MEDIUM',
+        absenceCheck: 'Looked around the cooler and along the corridor; no '
+            'caution sign or mat anywhere near the spill.',
+      ),
+    ],
+  };
+  final wetReport = HazardQuality.apply(wetOffice);
+  ok(wetReport.sceneWithdrawn == 0,
+      'a wet floor in an office is not a PPE finding and is not withdrawn');
+  ok((wetOffice['hazards'] as List).length == 1, 'the spill is still reported');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');
