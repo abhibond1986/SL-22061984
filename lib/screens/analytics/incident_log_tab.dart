@@ -88,6 +88,62 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       AdminMasterData.canonicalPlantFrom(
           i['plant']?.toString() ?? '', _plantDefs);
 
+  /// True when [i] belongs to the plant named by [filterLabel].
+  ///
+  /// ★ 2026-09-08. Compares by plant CODE, resolving BOTH sides through
+  /// [AdminMasterData.plantEntryFor], for the reason spelled out in
+  /// PlantScope.filterIncidents: one plant can be spelled two ways, and this
+  /// filter used to be handed `scope.plant` on the left and a canonicalised
+  /// incident on the right. When those spellings disagreed a plant-locked user's
+  /// log came back EMPTY — every row had already passed filterIncidents, then the
+  /// pinned filter dropped all of them again. Same visible symptom as a sync
+  /// failure, same cause as the plant-wise dashboard showing '—'.
+  bool _matchesPlant(Map<String, dynamic> i, String filterLabel) {
+    final raw = i['plant']?.toString() ?? '';
+    final theirs = AdminMasterData.plantEntryFor(raw, _plantDefs);
+    final wanted = AdminMasterData.plantEntryFor(filterLabel, _plantDefs);
+    if (theirs == null) {
+      // No configured plant matches this record. A user whose view is PINNED to
+      // their own plant did not choose this filter, and PlantScope deliberately
+      // lets them see unresolved records — re-dropping them here would undo that
+      // and hide a report from the person who filed it. An admin who actively
+      // picked a plant gets the strict answer.
+      return _scope.isLocked && filterLabel == _scope.plant;
+    }
+    if (wanted != null) {
+      return (theirs['code'] ?? '').toUpperCase() ==
+          (wanted['code'] ?? '').toUpperCase();
+    }
+    return _canonPlant(i) == filterLabel;
+  }
+
+  /// True when [i] was reported by the signed-in user.
+  ///
+  /// Matches on PNO **or** name. `reportedBy` has been written as the display
+  /// name, as the PNO, and as "Name (PNO)" at different points in this app's
+  /// history, so an equality test against the name alone silently emptied "My
+  /// Reports" for anyone whose records were stored either of the other two ways.
+  /// [_canDelete] already resolved authorship this way; the filter did not.
+  bool _isMine(Map<String, dynamic> i) {
+    final byName = (i['reportedBy']?.toString() ?? '').trim().toLowerCase();
+    final byPno = (i['reportedByPno']?.toString() ??
+            i['reporterPno']?.toString() ??
+            '')
+        .trim()
+        .toLowerCase();
+    final myName = _currentUserName.trim().toLowerCase();
+    final myPno = _currentUserPno.trim().toLowerCase();
+    if (myPno.isNotEmpty && byPno.isNotEmpty && myPno == byPno) return true;
+    if (myName.isNotEmpty && byName.isNotEmpty) {
+      if (byName == myName) return true;
+      // "Name (PNO)" and other decorated forms.
+      if (byName.contains(myName)) return true;
+    }
+    // Last resort: the PNO was written into the name field.
+    if (myPno.isNotEmpty && byName.isNotEmpty && byName == myPno) return true;
+    return false;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -171,16 +227,16 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   List<Map<String, dynamic>> get _filtered {
     var list = List<Map<String, dynamic>>.from(_all);
 
-    // ★ v35: My reports filter
-    if (_myReportsOnly && _currentUserName.isNotEmpty) {
-      list = list.where((i) =>
-          (i['reportedBy']?.toString() ?? '') == _currentUserName).toList();
+    // ★ v35: My reports filter. Authorship is resolved by [_isMine] — PNO first,
+    // then name — not by display-name equality.
+    if (_myReportsOnly &&
+        (_currentUserName.isNotEmpty || _currentUserPno.isNotEmpty)) {
+      list = list.where(_isMine).toList();
     }
 
-    // Plant filter — compare on canonical plant name so all format
-    // variants of the same plant are matched together.
+    // Plant filter — by plant CODE via [_matchesPlant], never by spelling.
     if (_plantFilter != 'All') {
-      list = list.where((i) => _canonPlant(i) == _plantFilter).toList();
+      list = list.where((i) => _matchesPlant(i, _plantFilter)).toList();
     }
 
     // ★ NEW: Department filter

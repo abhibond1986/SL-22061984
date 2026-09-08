@@ -55,10 +55,36 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
       AdminMasterData.openStatusesFrom(AdminMasterData.defaultStatuses);
   String _closedStatus = 'CLOSED';
 
-  /// Canonical plant label for an incident (dedupes name variants).
-  String _canonPlant(Map<String, dynamic> i) =>
-      AdminMasterData.canonicalPlantFrom(
-          i['plant']?.toString() ?? '', _plantDefs);
+  /// The bucket an incident belongs in, which MUST be one of [_plantOptions] or
+  /// [kUnassigned] — never a third thing.
+  ///
+  /// ★ 2026-09-08. This used to be `canonicalPlantFrom(...)` alone, and that is
+  /// the whole of the "individual users cannot see plant wise reports as reported
+  /// by them" bug. Buckets were keyed by canonicalisation while options came from
+  /// `plantLabel`, so any record whose two spellings disagreed was counted under a
+  /// key no option carried: the plant showed '—' in the dropdown and selecting it
+  /// showed "No incidents recorded for … yet", on a device that had the row
+  /// stored. It reads as a sync failure and is not one.
+  ///
+  /// Resolving to the ENTRY first is what [AdminMasterData.plantEntryFor] is for
+  /// (PlantScope.filterIncidents and canActOn were converted to it; this screen
+  /// was missed). `canonicalPlantFrom` is now label-consistent too, so the
+  /// fallback below only handles genuinely unresolvable rows.
+  String _canonPlant(Map<String, dynamic> i) {
+    final raw = i['plant']?.toString() ?? '';
+    final entry = AdminMasterData.plantEntryFor(raw, _plantDefs);
+    if (entry != null) return AdminMasterData.plantLabel(entry);
+    // No configured plant matches (blank, or a spelling nobody has fixed yet).
+    // These are NOT dropped: a report that belongs to no bucket is invisible to
+    // every user including the person who filed it, which is the worse of the two
+    // available errors. They collect under one honest heading instead — the same
+    // set PlantScope.countUnscoped reports to the admin.
+    return kUnassigned;
+  }
+
+  /// Bucket for records with no resolvable plant. Prefixed so it can never
+  /// collide with an admin-configured label.
+  static const String kUnassigned = '⚠ Unassigned plant';
 
   @override
   void initState() {
@@ -112,7 +138,20 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         // admin list happens to start with a plant that has reported nothing.
         final options = _plantOptions;
         if (_selectedPlant == null && options.isNotEmpty) {
-          if (scope.plant.isNotEmpty && options.contains(scope.plant)) {
+          // Resolve the viewer's own plant through the ENTRY as well, so this
+          // never depends on `scope.plant` being spelled the same way as the
+          // dropdown label. When it wasn't, a plant user silently opened on
+          // somebody else's plant — the firstWhere below picks the first unit
+          // with data — and concluded their own reports had not arrived.
+          final ownEntry = scope.plant.isEmpty
+              ? null
+              : AdminMasterData.plantEntryFor(scope.plant, plants);
+          final own = ownEntry == null
+              ? ''
+              : AdminMasterData.plantLabel(ownEntry);
+          if (own.isNotEmpty && options.contains(own)) {
+            _selectedPlant = own;
+          } else if (scope.plant.isNotEmpty && options.contains(scope.plant)) {
             _selectedPlant = scope.plant;
           } else {
             final counts = _plantCounts;
@@ -174,10 +213,14 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   /// error state:
   ///   1. A fresh deployment where no plant has reported yet.
   ///   2. Any case where incident `plant` strings do not canonicalise onto an
-  ///      admin label. Counts are keyed by canonicalPlantFrom() output while
-  ///      options come from plantLabel(); a single mismatch drops that plant's
-  ///      count, and if it misses for all of them the dropdown vanishes rather
-  ///      than degrading.
+  ///      admin label. Counts were keyed by canonicalPlantFrom() output while
+  ///      options came from plantLabel(); a single mismatch dropped that plant's
+  ///      count, and if it missed for all of them the dropdown vanished rather
+  ///      than degrading. FIXED 2026-09-08 at both ends — [_canonPlant] resolves
+  ///      to a plant entry and labels it with plantLabel(), and
+  ///      canonicalPlantFrom() no longer returns a bare mapped name — so a
+  ///      mismatch can no longer silently lose a count. Anything still
+  ///      unresolvable is visible under [kUnassigned] rather than nowhere.
   ///
   /// The zero-count case was already handled downstream — the dropdown items
   /// deliberately render a muted row with '—' for `n == 0` — so the filter was
@@ -185,7 +228,15 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   ///
   /// Still admin-only: no data-derived plant names are added, so a plant that is
   /// not in the admin list cannot appear here. Admin remains authoritative.
-  List<String> get _plantOptions => _selectable;
+  /// Plus [kUnassigned], and ONLY when records actually land there. It is
+  /// appended last so it reads as an exception rather than a plant, and it
+  /// disappears by itself once the admin has corrected those rows — an
+  /// always-present "Unassigned" entry would invite selecting an empty view.
+  List<String> get _plantOptions {
+    final base = List<String>.from(_selectable);
+    if ((_plantCounts[kUnassigned] ?? 0) > 0) base.add(kUnassigned);
+    return base;
+  }
 
   /// Incident count per canonical plant, so the dropdown can show which plants
   /// actually have records instead of making the user select each one to find out.
@@ -198,16 +249,11 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
     return m;
   }
 
-  // Unique CANONICAL plants present in the data (each appears once).
-  List<String> get _plants {
-    final s = <String>{};
-    for (final i in _all) {
-      final p = _canonPlant(i);
-      if (p.isNotEmpty) s.add(p);
-    }
-    final list = s.toList()..sort();
-    return list;
-  }
+  // The data-derived plant list that used to live here is gone. Nothing read it
+  // once the dropdown switched to the admin's list (see [_plantOptions]), and
+  // leaving it would offer a second, differently-derived set of plant keys for a
+  // future caller to pick by mistake — which is the class of bug this file has
+  // now been fixed for twice.
 
   /// Everything for the selected plant, BEFORE the department drill-down.
   /// The department option list must come from this — filtering by a department
@@ -365,6 +411,26 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
         // Department drill-down within the plant.
         _deptSelector(sl),
         const SizedBox(height: 14),
+        // Says WHY these records are grouped together, and who can clear it.
+        // Without it the heading looks like a plant nobody has heard of.
+        if (_selectedPlant == kUnassigned) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.amber.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.amber.withOpacity(0.35)),
+            ),
+            child: Text(
+                'These reports carry no plant, or a plant name that matches '
+                'nothing in the admin list, so they belong to no unit. They are '
+                'shown here rather than hidden. Ask your safety admin to correct '
+                'the plant on each one.',
+                style: TextStyle(color: sl.text2, fontSize: 11, height: 1.45)),
+          ),
+          const SizedBox(height: 14),
+        ],
 
         if (_selectedPlant != null && _plantIncidents.isNotEmpty) ...[
           // KPI row
@@ -397,6 +463,9 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
                       'plants in Admin → Plant & Department Master.'
                   : _selectedPlant == null
                       ? 'Select a plant above'
+                      : _selectedPlant == kUnassigned
+                          ? 'No unassigned records — every report now belongs '
+                              'to a plant.'
                       : _dept.isEmpty
                           ? 'No incidents recorded for $_selectedPlant yet'
                           : 'No incidents for $_dept in $_selectedPlant',

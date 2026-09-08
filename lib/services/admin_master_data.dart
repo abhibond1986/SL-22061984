@@ -210,6 +210,11 @@ class AdminMasterData {
     'CORP — RANCHI': 'SSO Ranchi',
     'CORPORATE-RANCHI': 'SSO Ranchi',
     'CO-DELHI': 'Corporate Office-Delhi',
+    // ★ Keys are looked up AFTER dash normalisation, which turns every hyphen
+    // into ' — '. A hyphenated key can therefore never be hit, so each one needs
+    // its normalised twin here. 'CORPORATE-RANCHI' happened to have one already;
+    // 'CO-DELHI' did not, and was dead.
+    'CO — DELHI': 'Corporate Office-Delhi',
     'SAIL SAFETY ORGANISATION': 'SSO Ranchi',
     'SAIL SAFETY ORGANIZATION': 'SSO Ranchi',
   };
@@ -226,9 +231,30 @@ class AdminMasterData {
 
     final upper = cleaned.toUpperCase();
 
-    // Pass 0 — Check hardcoded mappings FIRST (for known problematic variations)
-    if (plantNameMappings.containsKey(upper)) {
-      return plantNameMappings[upper]!;
+    // Pass 0 — Check hardcoded mappings FIRST (for known problematic variations).
+    //
+    // ★ The mapped value is resolved AGAINST THE PLANT LIST and returned as
+    // [plantLabel], never as the bare mapped string. Returning 'SSO Ranchi' here
+    // while every dropdown, chip row and count key elsewhere uses the label
+    // 'SSO — SSO Ranchi' gave one plant two spellings, and any screen that
+    // BUCKETS incidents by this function and then looks the bucket up among
+    // getPlantLabels() lost that plant's records entirely — the plant-wise
+    // dashboard showed '—' beside a unit that had reported. Codes are compared
+    // by entry in PlantScope; labels must be produced by one function too.
+    //
+    // A mapping whose target is not in the active list (e.g. 'Corporate
+    // Office-Delhi') still falls back to the mapped string, which is the old
+    // behaviour and the best available answer.
+    final mapped = plantNameMappings[upper];
+    if (mapped != null) {
+      final m = mapped.toUpperCase();
+      for (final p in plants) {
+        if ((p['name'] ?? '').toUpperCase() == m ||
+            (p['code'] ?? '').toUpperCase() == m) {
+          return plantLabel(p);
+        }
+      }
+      return mapped;
     }
 
     // Word set of the raw string for token matching.
@@ -274,16 +300,13 @@ class AdminMasterData {
       }
     }
 
+    // The label comes from [plantLabel] and nowhere else. This block used to
+    // re-implement it inline; the two then had to be kept in step by hand, which
+    // is how pass 0 above drifted. There must be exactly ONE function that turns
+    // a plant entry into a display string.
     if (match != null) {
-      final code = match['code'] ?? '';
-      final name = match['name'] ?? '';
-      // If the name already carries its own separator (e.g. "SSO Ranchi"),
-      // don't prefix the code again — that would double the dash.
-      if (name.contains('—')) return name;
-      if (code.isNotEmpty && code != 'OTHER' && name.isNotEmpty) {
-        return '$code — $name';
-      }
-      if (name.isNotEmpty) return name;
+      final label = plantLabel(match);
+      if (label.isNotEmpty) return label;
     }
     return cleaned; // no confident match — keep the cleaned original
   }
@@ -292,15 +315,18 @@ class AdminMasterData {
   /// when it cannot be resolved confidently.
   ///
   /// Deliberately NOT implemented as "canonicalPlantFrom(raw) == plantLabel(p)".
-  /// [canonicalPlantFrom] checks [plantNameMappings] first and returns the bare
-  /// mapped name, so 'SSO Ranchi' canonicalises to 'SSO Ranchi' while the code
-  /// 'SSO' canonicalises to 'SSO — SSO Ranchi' — two different strings for one
-  /// plant. Comparing labels would therefore fail for exactly the unit that
-  /// matters most here. This resolves to the ENTRY instead, so callers can
-  /// compare plants by code and never by spelling.
+  /// Comparing plants by their spelling is what this helper exists to avoid: an
+  /// entry has ONE code, whereas a label is a rendering choice that can be
+  /// changed (and was — [canonicalPlantFrom] used to return the bare mapped name
+  /// 'SSO Ranchi' where the label is 'SSO — SSO Ranchi', so 'SSO Ranchi' and
+  /// 'SSO' were two different strings for one plant). That specific divergence is
+  /// fixed, but authorisation and filtering must not depend on it staying fixed:
+  /// resolve to the ENTRY and compare `code`.
   ///
   /// Pass order matters: the exact name check runs before the code-token check
-  /// so 'BSP Mines' resolves to BSP Mines and not to Bhilai Steel Plant.
+  /// so 'BSP Mines' resolves to BSP Mines and not to Bhilai Steel Plant. That
+  /// alone was not enough — see the code-token pass for the label form that got
+  /// through it.
   static Map<String, String>? plantEntryFor(
       String raw, List<Map<String, String>> plants) {
     final cleaned = raw
@@ -321,10 +347,37 @@ class AdminMasterData {
       final name = (p['name'] ?? '').toUpperCase();
       if (cleaned == code || cleaned == name) return p;
     }
+    // Code-token pass, MOST SPECIFIC CODE FIRST.
+    //
+    // ★ 2026-09-08. This used to `return` the first plant whose code appeared as
+    // a word, in admin-list order — and a code containing a separator is split
+    // into words by the line above, so 'BSP_MINES — BSP Mines' became the word
+    // set {BSP, MINES} and matched BSP, which comes first in the list. A BSP
+    // Mines record was therefore attributed to Bhilai Steel Plant by the very
+    // helper that filterIncidents and canActOn use to decide who may READ and
+    // CLOSE it. The doc comment above claimed this pass was already safe because
+    // the exact-name check runs first; that is only true for the bare name
+    // ('BSP MINES'), not for the label form the app itself generates.
+    //
+    // Scoring by number of code tokens matched picks the most specific code, so a
+    // compound code always beats the short one it contains.
+    Map<String, String>? best;
+    var bestScore = 0;
     for (final p in plants) {
       final code = (p['code'] ?? '').toUpperCase();
-      if (code.isNotEmpty && code != 'OTHER' && words.contains(code)) return p;
+      if (code.isEmpty || code == 'OTHER') continue;
+      final codeWords = code
+          .replaceAll(RegExp(r'[^A-Z0-9 ]'), ' ')
+          .split(' ')
+          .where((w) => w.isNotEmpty)
+          .toSet();
+      if (codeWords.isEmpty || !codeWords.every(words.contains)) continue;
+      if (codeWords.length > bestScore) {
+        best = p;
+        bestScore = codeWords.length;
+      }
     }
+    if (best != null) return best;
     for (final p in plants) {
       final name = (p['name'] ?? '').toUpperCase();
       if (name.isEmpty || name == 'OTHERS') continue;
