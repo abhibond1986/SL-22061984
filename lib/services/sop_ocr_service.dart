@@ -189,17 +189,36 @@ class SopOcrService {
   /// slug and no nemotron nano VL variant at all. Since this is the ONLY OCR
   /// model, with no chain behind it, every SOP page scan was failing outright.
   ///
-  /// The reasoning below still holds and still wants a small fast transcription
-  /// model; `minimax/minimax-m3:free` is verified image-capable and free, but it
-  /// is NOT verified as non-reasoning, and no page has been transcribed with it.
-  /// If OCR starts returning truncated page text, that is the first thing to
-  /// suspect — thinking tokens competing for the same output budget — and
-  /// `google/gemma-4-31b-it:free` is the next candidate to try.
+  /// ⚠⚠ CHANGED AGAIN 2026-09-08, FOR THE SAME REASON — AND THAT REPETITION IS
+  /// THE POINT. The replacement chosen above, `minimax/minimax-m3:free`, has
+  /// ITSELF now been withdrawn from OpenRouter: it returns HTTP 404 and is absent
+  /// from a live 428-entry /api/v1/models sweep. So this single constant has been
+  /// killed by an upstream delisting TWICE IN FIVE WEEKS, each time silently
+  /// breaking the only OCR path in the app with no chain behind it.
+  ///
+  /// It was found only incidentally, while retiring the same slug from
+  /// gemini_vision.dart's Tier 2. **The lesson: a dead slug is never confined to
+  /// the file you noticed it in — grep the whole of lib/ for the string before
+  /// calling that job done.**
+  ///
+  /// Now `dots-studio/dots-3-note-preview:free`, which is the model that carries
+  /// the whole of the hazard chain's Tier 2 (AtlasCloud, ~99.99% uptime, verified
+  /// image-capable, reasoning has no `default_enabled`, and — unlike either
+  /// predecessor — it has actually returned parsed output on this codebase's
+  /// vision prompt). Two of its properties matter here specifically: it does not
+  /// emit unsolicited thinking tokens, so the page text keeps the whole output
+  /// budget; and it supports `response_format`.
+  ///
+  /// ★ THE REAL DEFECT IS STRUCTURAL AND IS STILL OPEN: this is one constant with
+  /// no fallback, so any future delisting breaks OCR outright again. The fix is a
+  /// chain, exactly like [_textModels] below already has. Not done here because
+  /// this round's remit was the hazard chain, and quietly rewriting the OCR
+  /// control flow is not a drive-by change.
   ///
   /// Original reasoning, unchanged: the fast small model is the right pick.
   /// Transcription needs no reasoning, and a reasoning model would emit thinking
   /// tokens out of the same output budget the page text has to fit into.
-  static const String _ocrModel = 'minimax/minimax-m3:free';
+  static const String _ocrModel = 'dots-studio/dots-3-note-preview:free';
 
   /// Model chain for the TEXT-only passes (structuring, safety analysis).
   ///

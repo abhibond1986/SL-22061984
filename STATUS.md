@@ -742,6 +742,27 @@ camera/scanner/webrtc plugin in `pubspec.yaml`, and `image_picker_for_web` uses 
 hidden file input that never opens a MediaStream. Almost certainly a browser
 extension; confirm in an extensions-off incognito window. There is no app fix.
 
+*Re-confirmed 2026-09-08* after the warnings appeared twice more, in a scan log
+that also carried `Uncaught (in promise) TypeError: Cannot read properties of
+undefined (reading '0')`. A second full sweep found the same nothing: the only
+media-acquisition mechanism in the app is `image_picker` (`ai_scan_tab.dart`
+L253-267, `near_miss_tab.dart` L1251-1253, `sop_scan_screen.dart` L305-332), which
+is a hidden `<input type="file" capture>`; the only web interop is pdf.js on a
+canvas and a Blob download; the only live stream is `speech_to_text`, which is
+audio-only. `ImagePicker` has no `dispose()` and holds no handles, so creating one
+per pick leaks nothing.
+
+**The TypeError belongs to the same finding, and the stack frame is the reason.**
+Both it and the `VideoFrame` warnings are attributed to `(index):1` — the host
+document. Dart exceptions in a Flutter web build are reported against
+`main.dart.js`, never against `(index)`, and the only script in `web/index.html`
+is the stock Flutter bootstrap. So neither line originates in code this repo
+contains. **Do not "fix" either by adding a guard in Dart:** a guard that cannot
+be reached is worse than the warning, because the next reader will believe the
+cause was found. Reproduce in an extensions-off incognito window before spending
+any more time here; if they persist there, the next step is the Flutter/browser
+version, not `lib/`.
+
 Verified: analyzer baseline diff clean — the only new `code|message` pairs name
 Flutter framework symbols (`FocusNode`, `GlobalKey`, `Color`, `AnimatedContainer`,
 `Flexible`, `Focus`, `KeyedSubtree`, `ScrollController`, `Wrap`, `debugPrint`),

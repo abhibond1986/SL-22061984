@@ -16,21 +16,25 @@
 //            PROMOTED FROM TIER 2 on 2026-09-03: measured ~7s against MiniMax's
 //            best of ~19s, and on one scan it was the only tier that answered.
 //            Full evidence at its banner in analyseImageBytes.
-//   TIER 2 — OpenRouter free vision models, in order:
-//     1. MiniMax M3 (:free)     — LEAD AGAIN as of 2026-09-07. GMICloud endpoint,
-//                                 99.9%/99.92% uptime, reasoning off by default.
-//                                 The only model in this tier that has ever
-//                                 actually answered a scan: 19.0s / 22s / 28.9s /
-//                                 36.5s measured. Keeps its 45s cap.
-//     2. Dots3-Note Preview     — back in the chain 2026-09-07 after leaving it on
-//                                 2026-08-17. AtlasCloud (a THIRD provider, so the
-//                                 tier finally has real diversity), 99.99% uptime
-//                                 both windows, MoE 16B active of 280B, 512k ctx,
-//                                 `response_format` supported, and reasoning has NO
+//   TIER 2 — OpenRouter, now a SINGLE free vision model:
+//     1. Dots3-Note Preview     — sole occupant since 2026-09-08. AtlasCloud, so a
+//                                 different company from Tier 1 (Google) and Tier 3
+//                                 (NaraRouter), 99.99% uptime both windows, MoE 16B
+//                                 active of 280B, 512k ctx, `response_format` and
+//                                 `structured_outputs` supported, reasoning has NO
 //                                 `default_enabled` — so it is not the Inkling /
-//                                 Nemotron failure mode. UNMEASURED on this prompt.
-//                                 It fits now only because the chain is 2 deep; it
-//                                 was budget-unreachable when it was 3rd of 3.
+//                                 Nemotron failure mode. First success 2026-09-08:
+//                                 three hazards, leg bounded at 10-20s.
+//
+//      WHY ONE MODEL. `minimax/minimax-m3:free` led this tier and was WITHDRAWN
+//      from OpenRouter on 2026-09-08 — HTTP 404 on every request, absent from a
+//      428-model catalogue sweep, five days after the check that installed it.
+//      That is the second lead of this tier deleted out from under the app in five
+//      weeks. Only ten free image-capable models remain and eight are ruled out in
+//      writing at _orDotsModel, so this tier has no admissible second model: the
+//      alternatives are Google-hosted (same upstream as Tier 1, therefore not a
+//      fallback) or reasoning-on-by-default. Padding the list would add a round
+//      trip and no resilience; Tier 3 is the independent backstop.
 //
 //   ⛔ REMOVED FROM THIS TIER ON 2026-09-07, both still pinnable from the admin
 //      dropdown (see groqVisionModels) so nothing becomes unreachable:
@@ -168,9 +172,19 @@ class GeminiVision {
   static const String _groqQwenVisionModel = 'qwen/qwen3.6-27b';
 
   // ── TIER 1 — OPENROUTER free vision models, tried in order ─────────────────
-  // MiniMax M3 leads as of 2026-09-03 (admin request). Verified against
-  // OpenRouter /api/v1/models the same day: input_modalities
-  // ['text','image','video'], prompt price 0.
+  // ⛔ RETIRED 2026-09-08 — `minimax/minimax-m3:free` NO LONGER EXISTS.
+  // It led this tier from 2026-09-03 (admin request), verified the same day
+  // against /api/v1/models: input_modalities ['text','image','video'], prompt
+  // price 0, four timed successes (19.0s / 22s / 28.9s / 36.5s). On 2026-09-08 it
+  // began returning HTTP 404 on every request and a fresh sweep of the catalogue
+  // (428 models) found no match for the slug — OpenRouter withdrew it.
+  //
+  // THE CONSTANT IS KEPT ON PURPOSE, and this is the rule for every dead slug
+  // here: it is still needed by [_retiredVisionPins] to rescue devices that pinned
+  // it, and deleting it would drop that migration and leave those devices sending
+  // a 404 forever with the fallback chain disabled. A dead slug is retired from
+  // the CHAIN and kept in the MIGRATION MAP. See [_orDotsModel] for what replaced
+  // it and why the tier is now one model deep.
   static const String _orMinimaxModel  = 'minimax/minimax-m3:free';
   // REMOVED 2026-09-03: `_orNanoVlModel` = 'nvidia/nemotron-nano-12b-v2-vl:free'.
   // It was the PRIMARY model and it no longer exists — a check of OpenRouter's
@@ -260,11 +274,21 @@ class GeminiVision {
   //     this model. See the removal note above.
   //   • `nvidia/nemotron-3-nano-omni-…-reasoning:free` — retired from the chain the
   //     same day; endpoint status -2, ~85% uptime, reasoning on by default.
-  // That leaves [_orMinimaxModel] and [_orDotsModel], which are the two now in the
-  // chain. There is no untried free vision model in reserve — so if BOTH of those
-  // endpoints degrade, the answer is Tier 3 or a paid model, and paid is excluded by
-  // the standing constraint in the file header. Do not go looking for a fifth
-  // option; there isn't one.
+  // ★ RE-SWEPT 2026-09-08 (428 models): the field is now TEN free image-capable
+  // models, and every addition since the last sweep is already excluded above or
+  // here. `minimax/minimax-m3:free` HAS BEEN WITHDRAWN — it is absent from the
+  // listing and 404s on every request — so the exclusions leave exactly ONE
+  // admissible model, [_orDotsModel], and Tier 2 is one deep. The remaining
+  // unlisted entries are `google/lyria-3-clip-preview` / `lyria-3-pro-preview`
+  // (Google's MUSIC family, and previews without a `:free` suffix, so neither the
+  // modality nor the price is dependable) and `openrouter/free`, a meta-router
+  // that hides which model answered — which would make the ModelHealth panel, the
+  // whole point of which is per-model accountability, unable to attribute anything.
+  //
+  // There is no untried free vision model in reserve. If AtlasCloud degrades, the
+  // answer is Tier 3, or the offline checklist — NOT a paid model, which the
+  // standing constraint in the file header excludes. Do not go looking for another
+  // option; the sweep above is the whole field, not a sample.
   //
   // ⚠ THIS MODEL IS UNMEASURED on this prompt. It leads because the incumbent is
   // weak, not because it is known fast: MiniMax M3's BEST measured leg was
@@ -286,15 +310,22 @@ class GeminiVision {
   // was not the diagnosis here. Check the provider's published tokens/sec before
   // assuming a queue.
   static const String _orGemma31bModel = 'google/gemma-4-31b-it:free';
-  // ── Dots3-Note Preview — TIER 2 POSITION 2 as of 2026-09-07 ────────────────
+  // ── Dots3-Note Preview — THE WHOLE OF TIER 2 as of 2026-09-08 ──────────────
   //
   // Mixture-of-experts, 512k context, accepts image input. Confirmed against
   // OpenRouter's /api/v1/models listing rather than assumed from the name.
   //
   // It left the runtime chain on 2026-08-17 for a reason that no longer applies:
-  // as 3rd of 3 it could not be reached inside [_kOrChainBudget]. The chain is now
-  // 2 deep, so position 2 is a slot that actually runs — it is the hedge partner
-  // started at [_kOrHedgeAfter].
+  // as 3rd of 3 it could not be reached inside [_kOrChainBudget]. It returned as
+  // position 2 on 2026-09-07, and became the tier's only model on 2026-09-08 when
+  // [_orMinimaxModel] was withdrawn from OpenRouter. It did not win the lead on
+  // merit; it inherited it by being the last admissible free vision endpoint
+  // standing (see the sweep above).
+  //
+  // WITH NO PARTNER, [_kOrHedgeAfter] HAS NOTHING TO START. The hedge is not dead
+  // code — it fires again the moment a second model becomes admissible — but today
+  // it logs "no remaining model fits the tier's ceiling" and waits this model out.
+  // Do not read that line as a fault.
   //
   // WHY IT EARNS A CHAIN SLOT (all verified 2026-09-07, both required checks):
   //   • `/endpoints` → 1 endpoint, provider **AtlasCloud**, prompt price 0. That is
@@ -310,11 +341,20 @@ class GeminiVision {
   //   • `response_format` and `structured_outputs` both in `supported_parameters`,
   //     so the JSON-shape work this file wants is available on it.
   //
-  // ⚠ UNMEASURED on this prompt. It is position 2, not lead, precisely because of
-  // that: [_orMinimaxModel] has four timed successes behind it and this has none.
-  // Do not promote it, and do not tune any timeout from it, until ModelHealth shows
-  // real successes — 16B active params argues it should be fast, but that is an
-  // argument, not a measurement.
+  // ✓ FIRST SUCCESS 2026-09-08: three hazards including the line-of-fire finding,
+  // on the scan that exposed MiniMax's 404. Read the number carefully — the console
+  // said "SUCCESS in 20183ms" and that is the WHOLE-RUN stopwatch (Tier 0's
+  // pre-flight, Tier 1's Gemini leg and this call), not this model's leg. What is
+  // actually known about the leg is bounded, not measured: it was still running at
+  // [_kOrHedgeAfter] (10s) and it finished inside [kAttemptTimeout] (20s), so the
+  // leg was somewhere in 10-20s. Enough to stop calling this model unproven;
+  // nowhere near enough to retune a timeout from. **Do not quote a run total as a
+  // per-model latency** — that conflation is what put a 45s cap on MiniMax and it
+  // is why ModelHealth records per-attempt durations separately.
+  //
+  // It deliberately does NOT inherit MiniMax's 45s entry in
+  // [_kPerModelAttemptTimeout]: that cap was derived from ~47 tokens/sec on a
+  // different architecture and carries no information about this one.
   static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
 
   /// Models whose request body should carry `reasoning: {enabled: false}`.
@@ -472,6 +512,13 @@ class GeminiVision {
     // in 36,503ms — 7.5s further into the cap than the 28,929ms that justified
     // raising it from 35s that morning. A 35s cap would have discarded that scan's
     // only working provider. Do not lower this without a distribution, not a sample.
+    // ⚠ 2026-09-08: DEAD ENTRY, kept only so a device still pinned to this slug is
+    // not silently given a different cap during the one scan before
+    // [_retiredVisionPins] migrates the pin away. The model no longer exists, so in
+    // the auto chain this line is now unreachable — do not read it as evidence for
+    // any future model's cap. The 45s was sized for MiniMax's ~47 tokens/sec and
+    // means nothing for anything else. Dots3-Note deliberately does NOT inherit it:
+    // it measured 20.1s and keeps [kAttemptTimeout].
     _orMinimaxModel: Duration(seconds: 45),
   };
 
@@ -1030,6 +1077,104 @@ HOW TO USE IT:
       return result;
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  PROVISIONAL CLEAN FRAME — "no hazards" needs a second opinion, not a bin
+    // ══════════════════════════════════════════════════════════════════════════
+    // A provider that ran successfully and reported nothing wrong used to be
+    // treated as a failure by [_isValidResult] and thrown away. Two things were
+    // wrong with that: the answer may well be right (a photo of an empty walkway
+    // has no hazards), and discarding it meant the scan could end on the offline
+    // checklist — which tells the user "AI unavailable" when in fact the AI
+    // answered clearly.
+    //
+    // But it cannot simply be accepted either. See [_isCleanFrameResult] for the
+    // scan where Gemini called a frame clean and Tier 2 then found a HIGH
+    // line-of-fire hazard on it. So: HOLD the answer, keep going, and require one
+    // more provider to agree.
+    //
+    // The three outcomes, and why each is right:
+    //   • a later tier finds hazards        → those win outright and this is
+    //                                         dropped. A finding always beats a
+    //                                         non-finding; they are not
+    //                                         symmetrical claims.
+    //   • a later tier also finds nothing   → two independent providers agree, so
+    //                                         report it and STOP, which also
+    //                                         saves Tier 3's 45s.
+    //   • no later tier can answer at all   → report the single clean answer
+    //                                         rather than the offline checklist,
+    //                                         but with confidence capped, because
+    //                                         nothing corroborated it.
+    Map<String, dynamic>? cleanFrame;
+    String cleanFrameModel = '';
+    String cleanFrameSource = '';
+    String cleanFrameTier = '';
+    // ★ Votes are counted per distinct MODEL, not per attempt. A model is not a
+    // second opinion on itself: the Tier 2 loop walks KEYS on the outside and
+    // MODELS on the inside, so with two OpenRouter keys configured one slug can be
+    // attempted twice in a single scan, and counting both would let a model confirm
+    // its own all-clear and end the scan one tier early. The whole point of the
+    // corroboration rule is that a DIFFERENT machine looked at the photo.
+    final cleanFrameVoters = <String>{};
+
+    void noteCleanFrame(
+        Map<String, dynamic>? result, String tier, String source, String model) {
+      if (!_isCleanFrameResult(result)) return;
+      final voter = model.isEmpty ? tier : model;
+      if (!cleanFrameVoters.add(voter)) {
+        print('GeminiVision: ⊙ $voter reported no hazards again (retry or second '
+            'key) — not counted as corroboration, a model cannot confirm itself');
+        return;
+      }
+      if (cleanFrame != null) {
+        print('GeminiVision: ✓✓ $tier ($model) AGREES there are no hazards — '
+            'that is the corroboration the first clean answer was waiting for');
+        return;
+      }
+      cleanFrame = result;
+      cleanFrameTier = tier;
+      cleanFrameSource = source;
+      cleanFrameModel = model;
+      print('GeminiVision: ⊙ $tier ($model) reported NO hazards. Held as a '
+          'PROVISIONAL clean frame — not a failure, but one more provider must '
+          'agree before it is reported as an all-clear');
+    }
+
+    // Only ever called with [cleanFrame] non-null. Kept as a closure so both exit
+    // points — the confirmed one before Tier 3 and the last-resort one before the
+    // offline checklist — go through identical stamping, caching and logging. Two
+    // hand-written copies of a success path is how `_synced` came to be set in
+    // three places and missed in a fourth.
+    Future<Map<String, dynamic>?> returnCleanFrame(String imgHash) async {
+      final r = cleanFrame!;
+      final confirmed = cleanFrameVoters.length >= 2;
+      print('GeminiVision: ✓ CLEAN FRAME '
+          '${confirmed ? 'CONFIRMED by ${cleanFrameVoters.length} models '
+              '(${cleanFrameVoters.join(', ')})' : 'UNCONFIRMED '
+              '(no other provider could answer)'} — reporting no hazards from '
+          '$cleanFrameTier ($cleanFrameModel) in '
+          '${stopwatch.elapsedMilliseconds}ms');
+      r['_source'] = cleanFrameSource;
+      r['_model'] = cleanFrameModel;
+      r['_isOnline'] = true;
+      r['_cleanFrameVotes'] = cleanFrameVoters.length;
+      r['_cleanFrameVoters'] = cleanFrameVoters.toList();
+      // An uncorroborated all-clear must not present as certainty. The summary
+      // written by the accepting gate already says "verify on site"; this caps the
+      // NUMBER the UI shows beside it, which is the part users read. 60 is below
+      // the threshold at which the scan screen presents a result as reliable.
+      if (!confirmed) {
+        final conf = r['confidence'];
+        if (conf is! num || conf > 60) r['confidence'] = 60;
+      }
+      _lastCallTime = DateTime.now();
+      _isAnalyzing = false;
+      await _writeCachedResult(imgHash, r);
+      return await logged(r,
+          outcome: AiRunLog.outcomeSuccess,
+          model: cleanFrameModel,
+          imageHash: imgHash);
+    }
+
     try {
       print('GeminiVision: ═══ STARTING ANALYSIS ═══ (${bytes.length} bytes)');
 
@@ -1232,8 +1377,19 @@ HOW TO USE IT:
                   model: _groqQwenVisionModel,
                   imageHash: imgHash);
             }
-            print('GeminiVision: ✗ Tier 0 Groq returned no usable hazards '
-                '(HTTP $_lastGroqStatus) — continuing to Tier 1');
+            // A clean answer from Tier 0 is held, not binned — see noteCleanFrame.
+            noteCleanFrame(groqResult, 'Tier 0 Groq', 'groq_client',
+                _groqQwenVisionModel);
+            if (_lastGroqWasPreflightSkip) {
+              // The pre-flight already printed the full arithmetic; do not follow
+              // it with a failure line for a request that was never sent.
+              print('GeminiVision: ⏩ Tier 0 did not run (pre-flight skip, see '
+                  'above) — continuing to Tier 1');
+            } else if (!_isCleanFrameResult(groqResult)) {
+              print('GeminiVision: ✗ Tier 0 Groq returned no usable hazards '
+                  '(HTTP ${_lastGroqStatus ?? 'no response'}) '
+                  '— continuing to Tier 1');
+            }
           } catch (e) {
             // Swallowed on purpose. A new first tier must not be able to take
             // down a chain that worked without it, so ANY failure here — a
@@ -1332,8 +1488,24 @@ HOW TO USE IT:
           // three want the same response: try the next provider. The distinction
           // matters only for the offline message, which is built from the
           // OpenRouter and Nara counters further down.
-          print('GeminiVision: ✗ Tier 1 Direct Gemini returned no usable result '
-              '— continuing to Tier 2 (OpenRouter)');
+          //
+          // ★ EXCEPT for one case that is not a failure at all. Gemini's own gate
+          // accepts an empty hazard list as a clean frame and logs `✓ SUCCESS`;
+          // this gate then rejected it for having no hazards and logged
+          // `✗ returned no usable result` on the very next line. Both lines were
+          // printed on one real scan. The answer is now held for corroboration
+          // instead of discarded — see noteCleanFrame and [_isCleanFrameResult].
+          final gemClean = _isCleanFrameResult(gemResult);
+          final gemModel = (gemResult?['_model'] ?? '').toString();
+          noteCleanFrame(gemResult, 'Tier 1 Direct Gemini', 'gemini_direct',
+              gemModel.isNotEmpty ? gemModel : await GeminiDirectVision.getModel());
+          if (!gemClean) {
+            print('GeminiVision: ✗ Tier 1 Direct Gemini returned no usable result '
+                '— continuing to Tier 2 (OpenRouter)');
+          } else {
+            print('GeminiVision: → continuing to Tier 2 (OpenRouter) for a second '
+                'opinion on the clean frame, NOT because Tier 1 failed');
+          }
         } catch (e) {
           print('GeminiVision: ✗ Tier 1 Direct Gemini exception: $e '
               '— continuing to Tier 2 (OpenRouter)');
@@ -1463,9 +1635,44 @@ HOW TO USE IT:
             // attempts fit, so position 3 is now the slot that almost never
             // runs. Nemotron took it because it was already the least likely to
             // answer in time — the same reason it lost first place in 2026-08.
+            //
+            // ★★ 2026-09-08 — MiniMax M3 IS GONE AND THIS CHAIN IS NOW ONE DEEP.
+            // `minimax/minimax-m3:free` began returning HTTP 404 on every request.
+            // A fresh sweep of `/api/v1/models` (428 models) found no match for the
+            // slug: OpenRouter withdrew it, five days after the 2026-09-03 check
+            // that put it here. That is the SECOND lead model of this tier to be
+            // deleted out from under the app in five weeks (Nemotron Nano 12B VL was
+            // the first), so treat slug existence as a perishable fact, not a
+            // constant — a 404 from OpenRouter means "gone", never "try harder".
+            //
+            // Dots3-Note takes the lead by default, not by promotion: it is the ONLY
+            // free vision endpoint left on OpenRouter that is neither hosted on
+            // Google AI Studio (which is Tier 1's upstream, so it cannot be a
+            // fallback for it — see [_orGemma31bModel]) nor reasoning-on-by-default
+            // (which is what disqualified both Inkling models and Nemotron). The
+            // full ten-model field is enumerated at [_orDotsModel]; eight of the ten
+            // are already ruled out there in writing, and the ninth is the one that
+            // just 404'd.
+            //
+            // A ONE-MODEL TIER IS THE HONEST SHAPE, not a degradation to be padded
+            // out. Adding Gemma 4 26B to make the list look two-deep would add a
+            // round trip to the same Google endpoint Tier 1 just used, which is a
+            // second guess at one machine rather than a fallback. Tier 3 (NaraRouter)
+            // is the genuinely independent backstop and already sits behind this.
+            // The visible consequence is that the 10s hedge now has no partner to
+            // start, which is exactly what the console reported on the scan that
+            // exposed the 404 — `no remaining model fits the tier's 70s ceiling —
+            // waiting it out` — and it still answered in 20.1s.
+            //
+            // Dots3-Note is no longer unproven: it won that scan with three correct
+            // hazards including the line-of-fire finding. Its leg is bounded at
+            // 10-20s (still running at the hedge mark, finished inside
+            // [kAttemptTimeout]); the 20,183ms in the log is the whole-run
+            // stopwatch, not this model's latency. It keeps [kAttemptTimeout] rather
+            // than inheriting MiniMax's 45s, which was sized for a different
+            // architecture's ~47 tokens/sec.
             : const [
-                [_orMinimaxModel, 'MiniMax M3 (primary, free — GMICloud)'],
-                [_orDotsModel,    'Dots3-Note Preview (fallback, free — AtlasCloud)'],
+                [_orDotsModel, 'Dots3-Note Preview (primary, free — AtlasCloud)'],
               ];
         // Drop any slug whose provider told us it was throttling within the last
         // minute — see [_applyOrCooldowns], which refuses to empty the chain and
@@ -1663,6 +1870,18 @@ HOW TO USE IT:
                   imageHash: imgHash);
             }
 
+            // No attempt returned HAZARDS — but one may have returned a considered
+            // "nothing wrong here". [_firstValidOf] cannot surface that, because it
+            // filters on the same [_isValidResult] that rejects an empty table, so
+            // the clean answers have to be read off the attempt objects here. Both
+            // live attempts are inspected: under a hedge either could be the one
+            // that answered, and a clean answer from the partner counts exactly as
+            // much as one from the lead.
+            for (final a in live) {
+              noteCleanFrame(a.result, 'Tier 2 OpenRouter', 'openrouter_client',
+                  a.model);
+            }
+
             // Every live attempt failed. Classify ALL of them, not just the lead:
             // with two requests in flight either one could have hit the account's
             // daily counter, and a key-wide verdict found on the partner is just
@@ -1782,6 +2001,15 @@ HOW TO USE IT:
       // server-side — so a browser needs NO local key and asking for one would
       // skip a provider that works perfectly. [NaraVision.isUsableHere] answers
       // per platform: proxy URL on web, stored key on mobile.
+      // ★ STOP HERE if two independent providers have now agreed the frame is
+      // clean. That is the corroboration the first clean answer was held for, and
+      // there is nothing left for a third provider to add — a hazard it alone
+      // found would be outvoted evidence, not a discovery. Skipping Tier 3 saves
+      // its 45s proxy timeout on exactly the scans that least need it.
+      if (cleanFrame != null && cleanFrameVoters.length >= 2) {
+        return await returnCleanFrame(imgHash);
+      }
+
       final bool naraConfigured = await NaraVision.isConfigured;
       final bool naraUsable = await NaraVision.isUsableHere;
       bool naraRefused = false; // 429 — rate limit or daily token quota
@@ -1823,7 +2051,11 @@ HOW TO USE IT:
               NaraVision.lastStatus == 403) {
             naraKeyRejected = true;
           }
-          print('GeminiVision: ✗ NaraRouter returned no usable result');
+          noteCleanFrame(naraResult, 'Tier 3 NaraRouter', 'nara_router',
+              NaraVision.lastModelUsed ?? naraModel);
+          if (!_isCleanFrameResult(naraResult)) {
+            print('GeminiVision: ✗ NaraRouter returned no usable result');
+          }
         } catch (e) {
           print('GeminiVision: ✗ NaraRouter exception: $e');
         }
@@ -1835,6 +2067,19 @@ HOW TO USE IT:
         // diagnosis. Never state a cause here that this layer cannot verify.
         print('GeminiVision: ⏭ NaraRouter skipped '
             '(${await NaraVision.unusableReason})');
+      }
+
+      // ★ A HELD CLEAN FRAME OUTRANKS THE OFFLINE CHECKLIST, always.
+      // Reaching this point means no provider found hazards. If one of them
+      // nevertheless looked at the photo, described the scene and reported nothing
+      // wrong, that is a real answer from a real model and the user is entitled to
+      // it. The alternative below would tell them "Not Analysed — AI unavailable"
+      // about an image the AI analysed perfectly well, which is both false and the
+      // exact complaint that started this work. Confidence is capped inside
+      // [returnCleanFrame] when nothing corroborated it, so an uncorroborated
+      // all-clear is reported honestly rather than confidently.
+      if (cleanFrame != null) {
+        return await returnCleanFrame(imgHash);
       }
 
       // ══════════════════════════════════════════════════════════════════════
@@ -2003,6 +2248,60 @@ HOW TO USE IT:
     return true;
   }
 
+  /// A model that ran, understood the scene, and reported NOTHING wrong.
+  ///
+  /// ★ WHY THIS EXISTS AS A SECOND, SEPARATE GATE (2026-09-08).
+  /// [GeminiDirectVision._isUsableResult] was fixed to accept an empty hazard
+  /// list as a clean bill of health. That fix was ineffective, and the console
+  /// said so out loud on one scan:
+  ///
+  ///   GeminiDirectVision: ✓ gemini-3.1-flash-lite reported NO hazards, and that
+  ///                         is a valid answer — accepting it as a clean frame
+  ///   GeminiDirectVision: ✓ SUCCESS on gemini-3.1-flash-lite
+  ///   GeminiVision:       ✗ Tier 1 Direct Gemini returned no usable result
+  ///
+  /// Two gates judge the same payload and only the INNER one had been changed;
+  /// [_isValidResult] still rejects anything with an empty `hazards` list, so the
+  /// accepted answer was discarded one stack frame later and the whole rest of
+  /// the chain was spent. **When a contract changes, fix every gate that judges
+  /// it — grep for the predicate, not for the parser.**
+  ///
+  /// WHY THE OUTER GATE IS NOT SIMPLY RELAXED TO MATCH. Because the same scan
+  /// proved the empty answer can be WRONG: Gemini called that frame clean and
+  /// Tier 2 then found three real hazards on it, including a HIGH line-of-fire
+  /// exposure between pressurised flanges and a worker on a staircase. A
+  /// fabricated "all clear" on a shop floor is the worst output this file can
+  /// produce — worse than a slow answer and worse than no answer, because it is
+  /// the only one a user acts on by walking away. So an empty answer is neither
+  /// a failure nor a finish: it is held as a provisional clean frame and needs
+  /// one more provider to agree. See `noteCleanFrame` in [analyseImageBytes].
+  ///
+  /// The test for "understood the scene" is the same one the inner gate uses,
+  /// and for the same reason: a hollow body must not pass as good news. Values
+  /// are checked, never keys, because the parsers default several of these
+  /// fields — testing `summary != null` would let the defaults supply the very
+  /// evidence being looked for.
+  static bool _isCleanFrameResult(Map<String, dynamic>? result) {
+    if (result == null) return false;
+    if (result['error'] != null) return false;
+    final hazards = result['hazards'];
+    if (hazards is! List || hazards.isNotEmpty) return false;
+    final summary = result['summary']?.toString() ?? '';
+    final lower = summary.toLowerCase();
+    if (lower.contains('all providers exhausted') ||
+        lower.contains('temporarily unavailable') ||
+        lower.contains('not analysed')) {
+      return false;
+    }
+    final scored = result['riskScore'];
+    final conf = result['confidence'];
+    return (summary.isNotEmpty && summary != 'Analysis complete.') ||
+        (result['sceneInventory']?.toString().trim().isNotEmpty ?? false) ||
+        (result['sceneType']?.toString().trim().isNotEmpty ?? false) ||
+        (scored is num && scored > 0) ||
+        (conf is num && conf > 0);
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  VISION MODEL SELECTION (OpenRouter)
   //  Admin can pin a specific model, or leave 'auto' to walk the Tier 2 chain
@@ -2027,14 +2326,19 @@ HOW TO USE IT:
     // since the 2026-09-03 reorder promoted Gemini ahead of the OpenRouter chain.
     // Label rewritten again 2026-09-07 for the 2-model Tier 2. Keep it in step with
     // the `attempts` list in analyseImageBytes — this string has drifted twice.
-    {'id': 'auto', 'name': 'Auto (Groq Qwen → Gemini → MiniMax M3 → Dots3-Note) — recommended'},
+    // Rewritten again 2026-09-08: MiniMax M3 was withdrawn from OpenRouter, so it
+    // must not appear in a label that claims to describe what actually runs.
+    {'id': 'auto', 'name': 'Auto (Groq Qwen → Gemini → Dots3-Note → NaraRouter) — recommended'},
     // Tier 0. Pinning it means Groq ONLY — no OpenRouter, no Gemini, no Nara —
     // so a Groq outage becomes a total loss of hazard analysis. 'auto' is the
     // right answer for almost everyone.
     {'id': _groqQwenVisionModel, 'name': 'Qwen 3.6 27B on Groq (primary, separate quota)'},
-    // ── The two models actually in the Tier 2 chain ─────────────────────────
-    {'id': _orMinimaxModel,  'name': 'MiniMax M3 (free, OpenRouter primary)'},
-    {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, OpenRouter fallback, 512k ctx)'},
+    // ── The one model actually in the Tier 2 chain ──────────────────────────
+    // MiniMax M3 is NOT offered any more: it 404s. It is deliberately absent from
+    // this list and present in [_retiredVisionPins] instead, which is the pairing
+    // the ⚠ note above requires — offering a dead slug is how a device ends up
+    // pinned to a model that can only fail, with the fallback chain disabled.
+    {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, OpenRouter primary, 512k ctx)'},
     // ── Pinnable but NOT in the auto chain as of 2026-09-07 ─────────────────
     // Labels say so out loud. An admin comparing this dropdown against the
     // "Model reliability" table needs to know why these show no recent attempts:
@@ -2091,34 +2395,26 @@ HOW TO USE IT:
                 'show no attempts — and after a TOTAL failure the whole tier is '
                 'parked for 90s, so a scan may show no Gemini attempts at all.',
           },
-        // Tier 2 rebuilt 2026-09-07 — two models on two different providers.
-        // Gemma 4 31B and Nemotron 30B are deliberately ABSENT: they are still
-        // pinnable, but they are no longer attempted automatically, and this list is
-        // what lets the panel mark their accumulated health rows as no-longer-in-use
-        // rather than reporting them as failing models.
-        {
-          'model': _orMinimaxModel,
-          'provider': 'openrouter',
-          'tier': '2',
-          'note': 'Free chain LEAD (GMICloud), '
-              '${_attemptTimeoutFor(_orMinimaxModel).inSeconds}s cap — long '
-              'because it generates at ~47 tokens/sec and the hazard schema is '
-              '1,100-1,400 tokens. The only model in this tier with timed '
-              'successes behind it. If it is still silent after '
-              '${_kOrHedgeAfter.inSeconds}s the next model starts alongside it, '
-              'so both may show an attempt for one scan.',
-        },
+        // Tier 2 reduced to ONE model on 2026-09-08 when MiniMax M3 was withdrawn
+        // from OpenRouter. Gemma 4 31B/26B and Nemotron 30B are deliberately
+        // ABSENT: they are still pinnable, but they are no longer attempted
+        // automatically, and this list is what lets the panel mark their
+        // accumulated health rows as no-longer-in-use rather than reporting them as
+        // failing models. MiniMax M3 is absent for a different reason — it no
+        // longer exists at all, and leaving it here would present a permanent 404
+        // as a model with a bad week.
         {
           'model': _orDotsModel,
           'provider': 'openrouter',
           'tier': '2',
-          'note': 'Free chain fallback (AtlasCloud — a different provider from '
-              'both the lead and Tier 1, which is the point of it). '
-              '${kAttemptTimeout.inSeconds}s cap. Normally the hedge partner '
-              'rather than a sequential fallback, so its attempts usually overlap '
-              'the lead\'s. UNMEASURED on this prompt as of 2026-09-07 — a low '
-              'attempt count here means the lead has been answering, not that '
-              'this is broken.',
+          'note': 'The whole of Tier 2 (AtlasCloud — a different provider from '
+              'Tier 1\'s Google and from Tier 3\'s NaraRouter, which is the point '
+              'of it). ${kAttemptTimeout.inSeconds}s cap. First success 2026-09-08, '
+              'three hazards, leg bounded at 10-20s. It leads because it is the '
+              'only free vision endpoint left on OpenRouter that is neither hosted '
+              'on Google AI Studio nor reasoning-on-by-default. With no partner in '
+              'the tier, the ${_kOrHedgeAfter.inSeconds}s hedge has nothing to '
+              'start and this model is simply waited out.',
         },
         for (final m in NaraVision.availableModels)
           {
@@ -2146,6 +2442,11 @@ HOW TO USE IT:
     // Removed from OpenRouter entirely; confirmed absent from /api/v1/models
     // on 2026-09-03. Was the default primary, so a pin on it was plausible.
     'nvidia/nemotron-nano-12b-v2-vl:free': 'auto',
+    // Removed from OpenRouter entirely; HTTP 404 on every request and absent from
+    // a 428-model /api/v1/models sweep on 2026-09-08. It was the Tier 2 LEAD and
+    // the dropdown recommended it by name, so a pin on it is likelier than most —
+    // and a pinned device would 404 every scan with no fallback at all.
+    'minimax/minimax-m3:free': 'auto',
   };
 
   /// Admin-selected preferred vision model ('auto' = try the chain in order).
@@ -2420,6 +2721,23 @@ HOW TO USE IT:
   /// Gemini tiers, which is where the interesting failures are.
   static int? _lastGroqStatus;
 
+  /// True when the most recent Tier 0 call never left the device, because the
+  /// pre-flight token estimate showed the request could not fit the free TPM
+  /// allowance.
+  ///
+  /// ★ Added 2026-09-08. The pre-flight was deliberately made
+  /// "indistinguishable to the caller from any other Tier 0 failure", and that
+  /// cost more than it saved: the caller printed
+  /// `✗ Tier 0 Groq returned no usable hazards (HTTP null)` directly beneath the
+  /// pre-flight's own `⏩ Tier 0 skipped` line, so a healthy tier doing exactly
+  /// what it was designed to do read as an error in every console log — on a
+  /// path that self-skips on essentially every real scan image. **A designed
+  /// skip and a failure must never print the same way; whoever reads the log
+  /// next will spend their time on the wrong tier.** The CONTROL FLOW is
+  /// unchanged (null still means "continue to Tier 1"); only the log can tell
+  /// them apart.
+  static bool _lastGroqWasPreflightSkip = false;
+
   // ── GROQ FREE-TIER TOKENS-PER-MINUTE BUDGET ───────────────────────────────
   //
   // MEASURED FROM A REAL 413, 2026-09-03, on a live web scan:
@@ -2644,6 +2962,9 @@ HOW TO USE IT:
   static Future<Map<String, dynamic>?> _callGroqVision(
       Uint8List bytes, String apiKey, String model,
       {String? kbContext, String sceneContext = ''}) async {
+    // Cleared on entry, not on exit: an exception anywhere below must not leave a
+    // stale `true` behind to mislabel the NEXT scan's real failure as a skip.
+    _lastGroqWasPreflightSkip = false;
     final base64Image = base64Encode(bytes);
     final dataUrl = 'data:image/jpeg;base64,$base64Image';
     final String prompt = await resolvedHazardPrompt(
@@ -2686,6 +3007,7 @@ HOW TO USE IT:
           '${tokensPerMp.round()} tokens/MP) over the Groq free TPM limit of '
           '$_kGroqTpmLimit. Groq cannot serve an image this large on the free '
           'tier — continuing to Tier 1.');
+      _lastGroqWasPreflightSkip = true;
       return null;
     }
 

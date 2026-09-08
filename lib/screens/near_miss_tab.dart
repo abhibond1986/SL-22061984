@@ -1500,6 +1500,25 @@ If the text is already fine, return it unchanged.''';
   }
 
   Future<void> _analyzeImage() async {
+    // ★ Added 2026-09-08. The two calls below null-assert `_imageBytes!` and
+    // `_pickedFile!`, and today that is safe by luck rather than by construction:
+    // there is exactly ONE caller and it runs immediately after a successful pick.
+    // But `_imageBytes` is also CLEARED in two places (the remove-photo action and
+    // the post-save reset), so any future path that re-triggers analysis after a
+    // clear would throw a null-assert here — and `_analyzing` is already true by
+    // then, so the overlay would be left spinning over a crashed future with no
+    // error shown. Fail visibly and reversibly instead.
+    if (_imageBytes == null && (kIsWeb || _pickedFile == null)) {
+      if (mounted) {
+        setState(() {
+          _analyzing = false;
+          _step = '';
+        });
+      }
+      print('NearMiss: ✗ analysis asked for with no image attached — ignoring');
+      return;
+    }
+
     final networkStatus = await NetworkChecker.getNetworkStatus();
 
     if (!networkStatus['hasInternet']!) {
