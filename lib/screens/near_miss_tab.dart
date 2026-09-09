@@ -45,6 +45,7 @@ import '../services/near_miss_prompt.dart';
 import '../services/near_miss_guard.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
+import '../widgets/bottom_nav_gap.dart';
 
 class NearMissTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -3700,12 +3701,23 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     final isActive = _isListening && _activeMicField == field;
     return AnimatedBuilder(
       animation: _micPulse,
-      builder: (_, __) => GestureDetector(
+      builder: (_, __) => Semantics(
+        label: isActive ? 'Stop dictation' : 'Dictate this field',
+        button: true,
+        child: GestureDetector(
         onTap: () => _toggleVoice(field),
         onLongPress: () => _showVoiceLangPicker(),
-        child: Container(
+        // opaque: the transparent 48px ring around the circle must be tappable
+        // too, otherwise widening the box achieves nothing.
+        behavior: HitTestBehavior.opaque,
+        // The PAINTED circle stays 36px — a 48px disc inside a text field looks
+        // like a second button. The TAP TARGET is 48px, which is the number that
+        // matters for a gloved thumb; this was a bare 36x36 before.
+        child: SizedBox(
+          width: SLSpace.tapTarget,
+          height: SLSpace.tapTarget,
+          child: Center(child: Container(
           width: 36, height: 36,
-          margin: const EdgeInsets.only(right: 4),
           decoration: BoxDecoration(
             color: isActive ? Colors.red.withOpacity(0.12) : AppColors.accent.withOpacity(0.08),
             shape: BoxShape.circle,
@@ -3716,9 +3728,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             scale: isActive ? _micPulse.value * 0.85 : 1.0,
             child: Icon(
               isActive ? Icons.mic : Icons.mic_none_rounded,
-              color: isActive ? Colors.red : sl.accentText,
+              // sl.redText, not Colors.red: the material red measures ~3.9:1 on
+              // this card and the mic's colour is the only cue that it is live.
+              color: isActive ? sl.redText : sl.accentText,
               size: 18)),
+          )),
         ),
+      ),
       ),
     );
   }
@@ -4787,7 +4803,9 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             ),
           Expanded(child: SingleChildScrollView(
             controller: _formScroll,
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 100),
+            // MEASURED, not guessed — see BottomNavGap. 100 was a literal.
+            padding: EdgeInsets.fromLTRB(
+                14, 14, 14, BottomNavGap.height(context) + 16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -4837,7 +4855,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       Expanded(child: _postSaveBtn(
                         label: 'Share',
                         icon: Icons.share_rounded,
-                        colors: const [Color(0xFFF59E0B), Color(0xFFF97316)],
+                        // Was #F59E0B→#F97316: white on those is 2.15:1 / 2.80:1,
+                        // the worst pair in the app. #B45309→#C2410C reads
+                        // at 5.02:1 / 5.18:1 and stays visibly amber/orange.
+                        colors: const [Color(0xFFB45309), Color(0xFFC2410C)],
                         onTap: _shareSavedReport,
                         sl: sl,
                       )),
@@ -4868,7 +4889,8 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       label: 'Save',
                       actionId: 'save',
                       icon:  Icons.save_rounded,
-                      colors: const [Color(0xFF16A34A), Color(0xFF059669)],
+                      // #16A34A gives white 3.30:1. #15803D→#047857 is 5.02:1.
+                      colors: const [Color(0xFF15803D), Color(0xFF047857)],
                       onTap: _handleSaveOnly,
                     )),
                     const SizedBox(width: 8),
@@ -4876,7 +4898,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
                       label: 'Share',
                       actionId: 'share',
                       icon:  Icons.share_rounded,
-                      colors: const [Color(0xFFF59E0B), Color(0xFFF97316)],
+                      // Was #F59E0B→#F97316: white on those is 2.15:1 / 2.80:1,
+                      // the worst pair in the app. #B45309→#C2410C reads
+                      // at 5.02:1 / 5.18:1 and stays visibly amber/orange.
+                      colors: const [Color(0xFFB45309), Color(0xFFC2410C)],
                       onTap: _handleShareReport,
                     )),
                     const SizedBox(width: 8),

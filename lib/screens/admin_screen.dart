@@ -2806,7 +2806,10 @@ class _AdminScreenState extends State<AdminScreen>
               : const Icon(Icons.cleaning_services_rounded, size: 16),
             label: Text(_normalizing ? 'Normalizing...' : 'Normalize Plant Names'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.amber,
+              // amberLight, not amber: white on amber is 2.15:1, the worst
+              // contrast in the app, on a button that rewrites the plant field
+              // of every incident in the database. amberLight is 5.02:1.
+              backgroundColor: AppColors.amberLight,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(vertical: 13),
               shape: RoundedRectangleBorder(
@@ -6459,19 +6462,26 @@ class _AdminScreenState extends State<AdminScreen>
                     Expanded(child: Text(active[i],
                         style: TextStyle(color: sl.text1, fontSize: 11.5,
                             fontWeight: FontWeight.w600))),
+                    // 40x40, up from 28x28. Not the full 48 because these sit
+                    // in a dense draggable list, but 28 put a row that DELETES
+                    // master data behind a target smaller than a fingertip.
                     IconButton(
                       padding: EdgeInsets.zero,
+                      tooltip: 'Edit',
                       constraints: const BoxConstraints(
-                          minWidth: 28, minHeight: 28),
+                          minWidth: 40, minHeight: 40),
                       icon: Icon(Icons.edit_outlined,
-                          color: sl.text3, size: 14),
+                          color: sl.text3, size: 16),
                       onPressed: () => _editCustomItem(i)),
                     IconButton(
                       padding: EdgeInsets.zero,
+                      tooltip: 'Delete',
                       constraints: const BoxConstraints(
-                          minWidth: 28, minHeight: 28),
-                      icon: const Icon(Icons.delete_outline_rounded,
-                          color: AppColors.red, size: 14),
+                          minWidth: 40, minHeight: 40),
+                      // sl.redText: bare AppColors.red is a chip FILL and
+                      // measures 3.76:1 light / 4.40:1 dark as a glyph.
+                      icon: Icon(Icons.delete_outline_rounded,
+                          color: sl.redText, size: 16),
                       onPressed: () => _deleteCustomItem(i)),
                   ])),
             ])),
@@ -6561,9 +6571,14 @@ class _AdminScreenState extends State<AdminScreen>
             color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700))),
         IconButton(
           onPressed: () => _adjustScore(level, -5),
+          tooltip: 'Decrease by 5',
           icon: const Icon(Icons.remove_circle_outline_rounded, size: 20),
-          color: AppColors.red,
-          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          // sl.redText / sl.greenText, not the bare fills: these two glyphs are
+          // the entire control, and bare red is 3.76:1.
+          color: sl.redText,
+          // 44, up from 32. A stepper is tapped repeatedly; a small target here
+          // costs more misses than anywhere else on the screen.
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           padding: EdgeInsets.zero,
         ),
         Container(
@@ -6585,17 +6600,21 @@ class _AdminScreenState extends State<AdminScreen>
             children: [
               Text('$score', style: TextStyle(
                   color: sl.textOn(color), fontSize: 16, fontWeight: FontWeight.w800)),
+              // 11px (the floor) and textOn(), not 9px at 70% of the fill
+              // colour — this is the unit that tells the admin the number is
+              // out of 100 and it was the least legible text on the tile.
               Text('/100', style: TextStyle(
-                  color: color.withOpacity(0.7),
-                  fontSize: 9, fontWeight: FontWeight.w600)),
+                  color: sl.textOn(color).withOpacity(0.8),
+                  fontSize: SLText.minHint, fontWeight: FontWeight.w600)),
             ],
           ),
         ),
         IconButton(
           onPressed: () => _adjustScore(level, 5),
+          tooltip: 'Increase by 5',
           icon: const Icon(Icons.add_circle_outline_rounded, size: 20),
-          color: AppColors.green,
-          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          color: sl.greenText,
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           padding: EdgeInsets.zero,
         ),
       ]),

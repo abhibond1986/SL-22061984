@@ -18,6 +18,20 @@ Two failure modes kept coming back and neither is visible in a code review:
 
 2. Micro type. Badge and pill labels drifted down to 6-7px on screen.
 
+2026-09-09: the fill-only scan is now MULTILINE-AWARE. It used to require the
+enclosing `TextStyle`/`Icon(` on the same physical line as `color:`, so it
+reported 2 violations where the tree actually had ~91 — everything wrapped over
+two lines or written as a ternary walked straight past it. Expect the failure
+count to jump the first time you run this after updating; that is the blind spot
+closing, not a regression. See scan_fill_only_as_text() for the heuristic and its
+known limits.
+
+KNOWN BLIND SPOT (still open): every token here is scored against the two GLOBAL
+backgrounds, never against a local card fill. Recolouring a card silently changes
+the contrast of every widget sitting on it and this total does not move. When a
+card fill changes, hand-measure every foreground on it — including widgets your
+diff did not touch.
+
 The script parses the SHIPPED lib/main.dart, so it audits reality rather than a
 copy that can silently diverge.
 
@@ -104,25 +118,85 @@ def rel(p):
     return os.path.relpath(p, REPO).replace(os.sep, '/')
 
 
-def scan_fill_only_as_text():
-    """Flag `AppColors.<fillOnly>` used as a color: on text or icons.
+# Constructors that make a colour a FOREGROUND (text or a meaning-carrying
+# glyph) versus a BACKGROUND/decoration fill, where a fill-only token is fine.
+# Used by the nearest-enclosing-marker heuristic in scan_fill_only_as_text().
+FG_MARKERS = (
+    'TextStyle(', 'Icon(', 'ImageIcon(', 'IconTheme(', 'foregroundColor:',
+    'selectionColor:', 'cursorColor:', 'iconColor:', 'prefixIconColor:',
+    'suffixIconColor:', 'labelStyle:', 'hintStyle:', 'checkColor:',
+)
+BG_MARKERS = (
+    'BoxDecoration(', 'BoxShadow(', 'LinearGradient(', 'RadialGradient(',
+    'SweepGradient(', 'Border.all(', 'BorderSide(', 'backgroundColor:',
+    'fillColor:', 'barrierColor:', 'shadowColor:', 'overlayColor:',
+    'splashColor:', 'highlightColor:', 'indicatorColor:', 'dividerColor:',
+    'trackColor:', 'thumbColor:', 'progressColor:', 'seedColor:',
+    'surfaceTintColor:', 'Container(', 'CircleAvatar(', 'Divider(',
+    'ColorFilter.mode(',
+)
 
-    Deliberately skips equality comparisons (`color == AppColors.x`) — those
-    read the token, they don't render it.
+# How far back to look for the enclosing constructor. Long enough to clear a
+# multi-line TextStyle, short enough not to bleed into the previous widget.
+_LOOKBACK = 260
+
+
+def scan_fill_only_as_text():
+    """Flag `AppColors.<fillOnly>` used as a FOREGROUND colour.
+
+    MULTILINE-AWARE. The original version required `TextStyle`/`Icon(` to appear
+    on the SAME LINE as `color:`, which is how it reported 2 hits while a grep
+    over the same tree found 318 (UI_UX_AUDIT.md §3). Any of these escaped it:
+
+        Text(s, style: TextStyle(
+            color: AppColors.amber,        <- marker one line up
+            fontSize: 11))
+        Icon(i,
+            color: bad ? AppColors.red : AppColors.green)   <- ternary
+
+    So instead of matching line-locally, this reads whole files and classifies
+    each `color:`/`foregroundColor:` site by its NEAREST PRECEDING constructor
+    marker: a TextStyle/Icon nearer than any BoxDecoration/gradient means the
+    token is being painted as a foreground.
+
+    This is a heuristic, not a parser, and it will occasionally misjudge deeply
+    nested builders. It errs toward reporting, because a false positive costs a
+    glance and a false negative costs unreadable safety text.
+
+    Equality comparisons (`color == AppColors.x`) are skipped — they read the
+    token, they don't render it.
     """
     hits = []
-    pat = re.compile(r'color:\s*AppColors\.(\w+)')
+    pat = re.compile(r'(?:color|foregroundColor)\s*:\s*'
+                     r'(?:[^;\n]{0,80}?)?AppColors\.(\w+)')
     for path in dart_files():
-        for n, line in enumerate(open(path, encoding='utf-8'), 1):
-            if '==' in line:
+        src = open(path, encoding='utf-8').read()
+        line_of = _line_index(src)
+        lines = src.splitlines()
+        for m in pat.finditer(src):
+            tok = m.group(1)
+            if tok not in FILL_ONLY:
                 continue
-            ctx = line
-            if not re.search(r'TextStyle|Icon\(|Icon\b', ctx):
+            head = src[max(0, m.start() - _LOOKBACK):m.start()]
+            if '==' in head[-40:] or '!=' in head[-40:]:
                 continue
-            for tok in pat.findall(ctx):
-                if tok in FILL_ONLY:
-                    hits.append((rel(path), n, tok, line.strip()))
+            fg = max((head.rfind(k) for k in FG_MARKERS), default=-1)
+            bg = max((head.rfind(k) for k in BG_MARKERS), default=-1)
+            if fg <= bg:
+                continue                       # decoration fill — legitimate
+            n = line_of(m.start())
+            hits.append((rel(path), n, tok, lines[n - 1].strip()))
     return hits
+
+
+def _line_index(src):
+    """Return a fn mapping a character offset to a 1-based line number."""
+    breaks = [i for i, ch in enumerate(src) if ch == '\n']
+
+    def at(off):
+        import bisect
+        return bisect.bisect_right(breaks, off - 1) + 1
+    return at
 
 
 def scan_type_floor():

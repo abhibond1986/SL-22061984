@@ -40,6 +40,7 @@ import '../services/error_log_service.dart';
 import '../services/scan_jobs.dart';
 import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
+import '../widgets/bottom_nav_gap.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -1006,7 +1007,11 @@ class _AIScanTabState extends State<AIScanTab> {
                     const SizedBox(width: 8),
                     IconButton(
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
+                      // 48x48 hit area (SLSpace.tapTarget) with a 20px glyph. An
+                      // IconButton with a bare BoxConstraints() collapses to the icon
+                      // size, which is below every platform's minimum target.
+                      constraints: const BoxConstraints(
+                          minWidth: SLSpace.tapTarget, minHeight: SLSpace.tapTarget),
                       icon: Icon(Icons.close, color: sl.text4, size: 20),
                       onPressed: () {
                         for (final m in editControllers.values) {
@@ -1870,7 +1875,11 @@ class _AIScanTabState extends State<AIScanTab> {
                   ])),
                   IconButton(
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
+                    // 48x48 hit area (SLSpace.tapTarget) with a 20px glyph. An
+                    // IconButton with a bare BoxConstraints() collapses to the icon
+                    // size, which is below every platform's minimum target.
+                    constraints: const BoxConstraints(
+                        minWidth: SLSpace.tapTarget, minHeight: SLSpace.tapTarget),
                     icon: Icon(Icons.close, color: sl.text4, size: 20),
                     onPressed: () => Navigator.pop(ctx)),
                 ])),
@@ -2639,7 +2648,10 @@ class _AIScanTabState extends State<AIScanTab> {
           ),
         Expanded(child: SingleChildScrollView(
           controller: _scrollController,
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 80),
+          // MEASURED, not guessed: 80 was a literal that under-shot the
+          // 60px bar plus a gesture inset, clipping the last result card.
+          padding: EdgeInsets.fromLTRB(
+              14, 14, 14, BottomNavGap.height(context) + 16),
           child: _analyzing
               ? _analyzingView()
               : _result != null

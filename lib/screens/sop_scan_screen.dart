@@ -42,6 +42,7 @@ import '../widgets/glass_card.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/voice_text_field.dart';
 import '../utils/image_prep.dart';
+import '../widgets/bottom_nav_gap.dart';
 
 enum _Stage { capture, reading, review }
 
@@ -1230,10 +1231,14 @@ class _SopScanScreenState extends State<SopScanScreen> {
   /// The extra bottom space is not cosmetic: as a tab, the translucent nav bar
   /// is drawn OVER the body (extendBody), so without it the "Read N page(s)" and
   /// "Save to Knowledge Base" buttons — the only way forward in each stage — sit
-  /// underneath the bar and cannot be tapped at all. 100 matches the value the
-  /// other tabs use for the same reason.
-  EdgeInsets get _listPadding =>
-      EdgeInsets.fromLTRB(16, 16, 16, widget.isTab ? 100 : 16);
+  /// underneath the bar and cannot be tapped at all.
+  ///
+  /// The value is MEASURED, not guessed: it was a hardcoded 100, which is too
+  /// much on a device with no gesture inset and too little if the bar's height
+  /// ever changes. BottomNavGap reads the one constant both shells build the bar
+  /// from, plus the device's own bottom inset.
+  EdgeInsets get _listPadding => EdgeInsets.fromLTRB(
+      16, 16, 16, widget.isTab ? BottomNavGap.height(context) + 16 : 16);
 
   Widget _captureView(SL sl) {
     return ListView(

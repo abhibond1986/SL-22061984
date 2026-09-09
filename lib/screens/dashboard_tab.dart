@@ -15,6 +15,7 @@ import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
 import '../services/realtime_sync.dart';
 import 'admin_screen.dart';
+import '../widgets/bottom_nav_gap.dart';
 
 class DashboardTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -361,7 +362,9 @@ class _DashboardTabState extends State<DashboardTab> {
                 slivers: [
                   _buildAppBar(sl),
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 100),
+                    // MEASURED, not guessed — see BottomNavGap.
+                    padding: EdgeInsets.fromLTRB(
+                        14, 14, 14, BottomNavGap.height(context) + 16),
                     sliver: SliverList(
                       delegate: SliverChildListDelegate([
                         _scopeBanner(sl),
@@ -1150,7 +1153,11 @@ class _CasesSheet extends StatelessWidget {
                     color: sl.accentText, fontSize: 12, fontWeight: FontWeight.w700))),
               const SizedBox(width: 8),
               IconButton(
-                padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+                padding: EdgeInsets.zero,
+                // 48x48 hit area. A bare BoxConstraints() collapses the
+                // button to its 20px glyph, well under the platform floor.
+                constraints: const BoxConstraints(
+                    minWidth: SLSpace.tapTarget, minHeight: SLSpace.tapTarget),
                 icon: Icon(Icons.close_rounded, color: sl.text3, size: 20),
                 onPressed: () => Navigator.pop(context)),
             ])),
@@ -1512,7 +1519,11 @@ class _PlantSheet extends StatelessWidget {
                 Text('$total total reports', style: TextStyle(color: sl.text4, fontSize: 11)),
               ])),
               IconButton(
-                padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+                padding: EdgeInsets.zero,
+                // 48x48 hit area. A bare BoxConstraints() collapses the
+                // button to its 20px glyph, well under the platform floor.
+                constraints: const BoxConstraints(
+                    minWidth: SLSpace.tapTarget, minHeight: SLSpace.tapTarget),
                 icon: Icon(Icons.close_rounded, color: sl.text3, size: 20),
                 onPressed: () => Navigator.pop(context)),
             ])),
@@ -1587,7 +1598,11 @@ class _AllPlantsSheet extends StatelessWidget {
                   fontSize: 16, fontWeight: FontWeight.w700)),
               const Spacer(),
               IconButton(
-                padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+                padding: EdgeInsets.zero,
+                // 48x48 hit area. A bare BoxConstraints() collapses the
+                // button to its 20px glyph, well under the platform floor.
+                constraints: const BoxConstraints(
+                    minWidth: SLSpace.tapTarget, minHeight: SLSpace.tapTarget),
                 icon: Icon(Icons.close_rounded, color: sl.text3, size: 20),
                 onPressed: () => Navigator.pop(context)),
             ])),

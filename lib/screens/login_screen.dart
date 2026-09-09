@@ -243,7 +243,8 @@ class _LoginScreenState extends State<LoginScreen> {
       if (res.ok) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('${I18n.t('common.success')}! Welcome, $name'),
-          backgroundColor: Colors.green,
+          // Colors.green gives white snackbar text 2.5:1. greenLight is 5.48:1.
+          backgroundColor: AppColors.greenLight,
           duration: const Duration(seconds: 2)));
         _goHome();
       } else {
@@ -286,7 +287,16 @@ class _LoginScreenState extends State<LoginScreen> {
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(
                 horizontal: 24, vertical: 24),
-              child: Column(
+              // Caps the form at a readable column width on desktop browsers.
+              // Without it there is no width constraint anywhere on this screen,
+              // so on a 1920px window the login card, the contractor button and
+              // the download banner each stretched to ~1870px — a single letterbox
+              // strip that made the web build look like a phone screenshot
+              // dragged wider. force_password_change_screen.dart already did this
+              // correctly; this is the same pattern (UI_UX_AUDIT.md §D).
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: SLLayout.form),
+                child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Image.asset(
@@ -312,7 +322,13 @@ class _LoginScreenState extends State<LoginScreen> {
                   GlassCard(
                     padding: const EdgeInsets.all(20),
                     borderRadius: 20,
-                    child: Column(
+                    // AutofillGroup, not just autofillHints on the fields: the
+                    // hints let a manager OFFER a credential, but only a group
+                    // tells the platform that these fields belong to one form,
+                    // which is what makes "save this password?" appear after a
+                    // successful sign-in.
+                    child: AutofillGroup(
+                      child: Column(
                       children: [
                         // Tab toggle
                         Container(
@@ -393,30 +409,32 @@ class _LoginScreenState extends State<LoginScreen> {
                                       fontWeight: FontWeight.w700))))),
                       ],
                     ),
+                    ),
                   ),
 
                   const SizedBox(height: 16),
                   SizedBox(
                     width: double.infinity,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                        child: OutlinedButton.icon(
-                          onPressed: _contractorAccess,
-                          icon: const Icon(Icons.engineering_outlined, size: 18),
-                          label: const Text('Contractor Access'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.cyan,
-                            side: BorderSide(
-                              color: AppColors.cyan.withOpacity(0.5),
-                              width: 1.5,
-                            ),
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
+                    // The BackdropFilter that used to wrap this is gone. It blurred
+                    // behind an OutlinedButton sitting on the page gradient, so it
+                    // had no visible effect at all — and BackdropFilter is the
+                    // expensive path on Flutter web (UI_UX_AUDIT.md §A).
+                    child: OutlinedButton.icon(
+                      onPressed: _contractorAccess,
+                      icon: const Icon(Icons.engineering_outlined, size: 18),
+                      label: const Text('Contractor Access'),
+                      style: OutlinedButton.styleFrom(
+                        // sl.cyanText: bare cyan is 2.97:1 on white, documented in
+                        // AppColors as "unusable as text there".
+                        foregroundColor: sl.cyanText,
+                        side: BorderSide(
+                          color: AppColors.cyan.withOpacity(0.5),
+                          width: 1.5,
+                        ),
+                        minimumSize: const Size(0, SLSpace.tapTarget),
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: SLRadius.rMd,
                         ),
                       ),
                     ),
@@ -441,14 +459,20 @@ class _LoginScreenState extends State<LoginScreen> {
                       child: Container(
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
-                            colors: [Color(0xFF22C55E), Color(0xFF16A34A)],
+                            // Darkened from #22C55E→#16A34A, where white text
+                            // measured 2.28:1. #15803D→#166534 puts the label at
+                            // 5.02:1 and keeps the same green identity.
+                            colors: [Color(0xFF15803D), Color(0xFF166534)],
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
                           ),
                           borderRadius: BorderRadius.circular(16),
                           boxShadow: [
                             BoxShadow(
-                              color: const Color(0xFF22C55E).withOpacity(0.3),
+                              // Follows the button's own gradient (now #15803D)
+                              // so the glow is not a lighter green than the
+                              // surface casting it.
+                              color: const Color(0xFF15803D).withOpacity(0.3),
                               blurRadius: 12,
                               offset: const Offset(0, 4),
                             ),
@@ -529,24 +553,30 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   const SizedBox(height: 20),
 
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(sl.isDark
-                        ? Icons.light_mode_outlined
-                        : Icons.dark_mode_outlined,
-                        color: sl.text4, size: 16),
-                      const SizedBox(width: 6),
-                      GestureDetector(
-                        onTap: widget.toggleTheme,
-                        child: Text(
-                          sl.isDark ? 'Switch to Light Mode'
-                                    : 'Switch to Dark Mode',
-                          style: TextStyle(
-                            color: sl.text4, fontSize: 11,
-                            decoration: TextDecoration.underline))),
-                    ]),
+                  // TextButton, not a GestureDetector around 11px text. The old
+                  // shape gave a ~15px-tall target with no ripple — and this is
+                  // currently the ONLY theme switch anywhere in the app, so it
+                  // has to be hittable. 12px minimum, 48px tall.
+                  TextButton.icon(
+                    onPressed: widget.toggleTheme,
+                    icon: Icon(sl.isDark
+                      ? Icons.light_mode_outlined
+                      : Icons.dark_mode_outlined,
+                      color: sl.text4, size: 18),
+                    label: Text(
+                      sl.isDark ? 'Switch to Light Mode'
+                                : 'Switch to Dark Mode',
+                      style: TextStyle(
+                        color: sl.text4, fontSize: SLText.minLabel)),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, SLSpace.tapTarget),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: SLSpace.lg),
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: SLRadius.rSm)),
+                  ),
                 ],
+              ),
               ),
             ),
           ),
@@ -593,9 +623,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
   List<Widget> _loginFields(SL sl) => [
     _field('Username', _userCtrl, sl,
+      autofillHints: const [AutofillHints.username],
       textInputAction: TextInputAction.next),
     const SizedBox(height: 12),
     _field('Password', _passCtrl, sl, obscure: !_showLoginPass,
+      autofillHints: const [AutofillHints.password],
       textInputAction: TextInputAction.done,
       onToggleObscure: () => setState(() => _showLoginPass = !_showLoginPass),
       obscured: !_showLoginPass,
@@ -603,12 +635,19 @@ class _LoginScreenState extends State<LoginScreen> {
     const SizedBox(height: 8),
     Align(
       alignment: Alignment.centerRight,
-      child: GestureDetector(
-        onTap: _showForgotPassword,
+      // TextButton, not a GestureDetector on 12px text pushed into the corner:
+      // that gave a ~16px-tall target with no ripple. And sl.accentText, not
+      // bare accent, which is 2.99:1 on the dark theme's surface.
+      child: TextButton(
+        onPressed: _showForgotPassword,
+        style: TextButton.styleFrom(
+          minimumSize: const Size(0, SLSpace.tapTarget),
+          padding: const EdgeInsets.symmetric(horizontal: SLSpace.md),
+          shape: const RoundedRectangleBorder(borderRadius: SLRadius.rSm)),
         child: Text('Forgot Password?',
             style: TextStyle(
-              color: AppColors.accent,
-              fontSize: 12,
+              color: sl.accentText,
+              fontSize: SLText.minLabel,
               fontWeight: FontWeight.w600)),
       ),
     ),
@@ -715,7 +754,9 @@ class _LoginScreenState extends State<LoginScreen> {
               content: const Text(
                 'Password updated. You can now log in on any device.',
                 style: TextStyle(fontSize: 12)),
-              backgroundColor: AppColors.green,
+              // green is a FILL for chips; as a snackbar behind white text it is
+              // 2.54:1. greenLight is 5.48:1.
+              backgroundColor: AppColors.greenLight,
               behavior: SnackBarBehavior.floating,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8)),
@@ -832,23 +873,30 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   List<Widget> _registerFields(SL sl) => [
-    _field('Full Name', _regNameCtrl, sl, hint: 'e.g. Rajesh Kumar'),
+    _field('Full Name', _regNameCtrl, sl, hint: 'e.g. Rajesh Kumar',
+      autofillHints: const [AutofillHints.name]),
     const SizedBox(height: 12),
-    _field('Username', _regUserCtrl, sl, hint: 'Choose a username'),
+    _field('Username', _regUserCtrl, sl, hint: 'Choose a username',
+      autofillHints: const [AutofillHints.newUsername]),
     const SizedBox(height: 12),
     _field('Password', _regPassCtrl, sl,
       obscure: !_showRegPass,
       hint: 'At least 6 characters',
+      // newPassword, not password: this tells a password manager to OFFER to
+      // generate and save one rather than to fill an existing credential.
+      autofillHints: const [AutofillHints.newPassword],
       onToggleObscure: () => setState(() => _showRegPass = !_showRegPass),
       obscured: !_showRegPass),
     const SizedBox(height: 12),
     // Confirm field: registration is the one moment a typo is unrecoverable
     // without a reset, because the user never sees what they typed.
     _field('Confirm Password', _regConfirmCtrl, sl,
-      obscure: !_showRegPass, hint: 'Re-enter your password'),
+      obscure: !_showRegPass, hint: 'Re-enter your password',
+      autofillHints: const [AutofillHints.newPassword]),
     const SizedBox(height: 12),
     _field('Designation', _regDesigCtrl, sl,
-      hint: 'e.g. AGM Safety, Safety Officer'),
+      hint: 'e.g. AGM Safety, Safety Officer',
+      autofillHints: const [AutofillHints.jobTitle]),
     const SizedBox(height: 12),
     // P.No. / mobile are no longer cosmetic: they are what the self-service
     // password reset checks against, so the copy says so.
@@ -857,6 +905,7 @@ class _LoginScreenState extends State<LoginScreen> {
     const SizedBox(height: 12),
     _field('Mobile', _regMobileCtrl, sl,
       hint: 'Optional — also usable for password recovery',
+      autofillHints: const [AutofillHints.telephoneNumber],
       keyboardType: TextInputType.phone),
     const SizedBox(height: 12),
 
@@ -931,6 +980,11 @@ class _LoginScreenState extends State<LoginScreen> {
       {bool obscure = false, String? hint,
        VoidCallback? onSubmitted, TextInputAction? textInputAction,
        TextInputType? keyboardType,
+       // Lets the browser's / Android's password manager fill this field. Every
+       // field on this screen was previously unhinted, so a saved credential
+       // could not be offered at all and users retyped their password on every
+       // phone they picked up.
+       List<String>? autofillHints,
        VoidCallback? onToggleObscure, bool obscured = true}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -945,6 +999,7 @@ class _LoginScreenState extends State<LoginScreen> {
           obscureText: obscure,
           textInputAction: textInputAction,
           keyboardType: keyboardType,
+          autofillHints: autofillHints,
           onSubmitted: onSubmitted == null ? null : (_) => onSubmitted(),
           style: TextStyle(color: sl.text1, fontSize: 13),
           decoration: InputDecoration(

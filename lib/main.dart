@@ -194,15 +194,38 @@ class SL {
   /// Foreground for an arbitrary severity/status colour, mapped to the nearest
   /// safe token for the current theme. Use at call sites that receive a colour
   /// as a parameter and cannot know which status it represents.
+  ///
+  /// FAILS SAFE. This used to end in `return fill;`, which meant any colour it
+  /// did not recognise — every hardcoded hex in the analytics screens, and
+  /// `Colors.blueGrey` from the `default:` branch of every severity switch that
+  /// receives an admin-renamed severity — passed straight through unchanged at
+  /// 2.8–4.1:1. The one function whose whole job is to be the safety net was the
+  /// mechanism by which the net was bypassed (UI_UX_AUDIT.md §A). Returning
+  /// `text1` instead means an unmapped colour degrades to plain readable body
+  /// text: it loses its status hue, which is visible and gets reported, rather
+  /// than staying unreadable, which is not.
+  ///
+  /// If you land here because a chip lost its colour: the fill you passed is not
+  /// an AppColors token. Add it to the map below rather than reverting this.
   Color textOn(Color fill) {
     if (fill == AppColors.crit || fill == AppColors.red ||
-        fill == AppColors.critLight) return critText;
+        fill == AppColors.critLight || fill == AppColors.redBeacon) {
+      return critText;
+    }
     if (fill == AppColors.amber || fill == AppColors.amberLight) return amberText;
     if (fill == AppColors.green || fill == AppColors.greenLight) return greenText;
-    if (fill == AppColors.cyan) return cyanText;
+    if (fill == AppColors.cyan || fill == AppColors.cyanInk) return cyanText;
     if (fill == AppColors.accent || fill == AppColors.accentDark ||
-        fill == AppColors.accentGlow) return accentText;
-    return fill;
+        fill == AppColors.accentGlow || fill == AppColors.accentBeacon) {
+      return accentText;
+    }
+    assert(() {
+      // ignore: avoid_print
+      print('SL.textOn(): unmapped fill $fill — falling back to text1. '
+          'Add it to the map in lib/main.dart if it is a real status colour.');
+      return true;
+    }());
+    return text1;
   }
 
   // Glassmorphism properties - improved opacity for better contrast
@@ -243,6 +266,56 @@ class SL {
       color: AppColors.accent.withOpacity(isDark ? 0.2 : 0.12),
       blurRadius: 24,
       spreadRadius: 0);
+}
+
+// ─── GEOMETRY TOKENS ─────────────────────────────────────────────────────────
+/// Corner radii. The tree currently holds 21 distinct `circular()` values
+/// (1 through 999), which is why nothing lines up between two screens built by
+/// different passes. New code uses these four; old code migrates opportunistically.
+///
+/// Deliberately small: four steps plus a pill is enough to express every surface
+/// this app has. If a fifth feels necessary, the surface probably wants a
+/// different elevation rather than a different radius.
+class SLRadius {
+  static const double sm = 8;      // chips, badges, small buttons, inputs
+  static const double md = 12;     // cards, dialogs, sheets — the default
+  static const double lg = 16;     // hero cards, bottom sheets
+  static const double xl = 24;     // full-bleed panels, splash art
+  static const double pill = 999;  // fully rounded
+
+  static BorderRadius all(double r) => BorderRadius.circular(r);
+  static const BorderRadius rSm = BorderRadius.all(Radius.circular(sm));
+  static const BorderRadius rMd = BorderRadius.all(Radius.circular(md));
+  static const BorderRadius rLg = BorderRadius.all(Radius.circular(lg));
+  static const BorderRadius rXl = BorderRadius.all(Radius.circular(xl));
+}
+
+/// Spacing scale. Replaces the ad-hoc 4/6/8/10/12/14/16/20/28 spacers that make
+/// vertical rhythm read as accidental. A 4px base keeps everything on a grid.
+class SLSpace {
+  static const double xs = 4;
+  static const double sm = 8;
+  static const double md = 12;
+  static const double lg = 16;
+  static const double xl = 24;
+  static const double xxl = 32;
+
+  /// Minimum interactive target. 48 is the Material floor and, more to the
+  /// point, the floor for a gloved hand on a plant floor. Grow hit areas with
+  /// padding or `BoxConstraints` — never by scaling the glyph up.
+  static const double tapTarget = 48;
+}
+
+/// Content width caps for the web build. Without these, every screen is a phone
+/// layout stretched edge to edge across a 1920px browser.
+///
+/// Use as: `Center(child: ConstrainedBox(
+///   constraints: BoxConstraints(maxWidth: SLLayout.form), child: ...))`
+class SLLayout {
+  static const double form = 440;    // login, single-column entry screens
+  static const double content = 720; // task screens, reading columns
+  static const double wide = 1100;   // analytics, admin, tables
+  static const double railBreak = 900; // above this, prefer a NavigationRail
 }
 
 // ─── TEXT STYLE HELPERS (WCAG AA Compliant Minimum Sizes) ────────────────────

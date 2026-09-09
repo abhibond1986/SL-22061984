@@ -7,6 +7,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
+import '../widgets/bottom_nav_gap.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
@@ -328,7 +329,11 @@ class _HomeScreenState extends State<HomeScreen>
       // and at 22px the two are near-identical. An SOP is the rule book, so the
       // book reads correctly and stays distinct. Avoid qr_code_scanner — it
       // promises QR codes, which this does not do.
-      _NavItem(Icons.menu_book_outlined,        Icons.menu_book_rounded,        'SOP Scan'),
+      // 'SOP' not 'SOP Scan'. This was the longest label on a six-tab bar and it
+      // was the sole reason every label sat at 9px, below the repo's own floor.
+      // Shortening one word bought all six labels 11px — see the nav label style
+      // below and UI_UX_AUDIT.md §B.
+      _NavItem(Icons.menu_book_outlined,        Icons.menu_book_rounded,        'SOP'),
       _NavItem(Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded,    'Ask AI'),
       _NavItem(Icons.bar_chart_outlined,        Icons.bar_chart_rounded,        'Reports'),
     ];
@@ -365,7 +370,7 @@ class _HomeScreenState extends State<HomeScreen>
           ),
           child: SafeArea(
             child: SizedBox(
-              height: 60,
+              height: BottomNavGap.barHeight,
               child: Row(
                 // Walks the VISIBLE tabs, not 0..items.length. `slot` is the
                 // position in the bar and `i` is the canonical AppTabs index —
@@ -377,12 +382,25 @@ class _HomeScreenState extends State<HomeScreen>
                   final sel  = _shownTab == i;
                   final item = items[i];
                   return Expanded(
-                    child: GestureDetector(
+                    // Semantics, because a screen reader otherwise announces six
+                    // unlabelled tap regions with no indication of which is open.
+                    child: Semantics(
+                      label: item.label,
+                      selected: sel,
+                      button: true,
+                      container: true,
+                      child: InkResponse(
                       // _changeTab, not a bare setState: this is the path the
                       // unsaved-scan guard has to cover, and it is the one users
                       // actually tap.
                       onTap: () => _changeTab(i),
-                      behavior: HitTestBehavior.opaque,
+                      containedInkWell: true,
+                      highlightShape: BoxShape.rectangle,
+                      // Was GestureDetector(behavior: opaque): correct 60px hit
+                      // area but ZERO tap feedback. Paired with the 250ms
+                      // AnimatedSwitcher on tab content, a gloved user could not
+                      // tell a tap had registered and would tap again. Ink gives
+                      // the confirmation; the hit area is unchanged.
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -403,8 +421,12 @@ class _HomeScreenState extends State<HomeScreen>
                             child: Icon(
                               sel ? item.activeIcon : item.icon,
                               size: 22,
+                              // sl.accentText, NOT bare AppColors.accent. This
+                              // sits on the dark indigo nav gradient, where
+                              // accent measures ~2.8:1 — the most-looked-at
+                              // control in the app was its least readable one.
                               color: sel
-                                  ? AppColors.accent
+                                  ? sl.accentText
                                   : sl.isDark
                                       ? const Color(0xFFCBD5E1) // brighter for dark mode nav
                                       : sl.text4,
@@ -414,23 +436,24 @@ class _HomeScreenState extends State<HomeScreen>
                           Text(
                             item.label,
                             maxLines: 1,
-                            overflow: TextOverflow.visible,
-                            softWrap: false,
+                            // ellipsis, not visible+softWrap:false. The old pair
+                            // let a label paint over its neighbours at textScale
+                            // 1.3+ instead of truncating.
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
                             style: TextStyle(
-                              // 9px at your request, to keep the full "SOP Scan"
-                              // label on a six-tab bar. This is below the 10px
-                              // floor tools/audit_contrast.py enforces, so the
-                              // audit will now report 6 nav labels as failures —
-                              // expected, not a regression. If it reads too small
-                              // on the shop floor, the fix is to shorten this one
-                              // label to "SOP" and put all six back to 10px,
-                              // rather than to shrink them further.
-                              fontSize: 9,
+                              // 11px = SLText.minBadge. Previously 9px, which was
+                              // below the repo's own floor and existed only to fit
+                              // the word "Scan" in "SOP Scan"; that label is now
+                              // "SOP", so all six fit at a readable size. Arm's
+                              // length in poor light with gloves is the design
+                              // target — 9px does not clear it.
+                              fontSize: SLText.minBadge,
                               fontWeight: sel
                                   ? FontWeight.w700
                                   : FontWeight.w500,
                               color: sel
-                                  ? AppColors.accent
+                                  ? sl.accentText
                                   : sl.isDark
                                       ? const Color(0xFFCBD5E1) // brighter for dark mode nav
                                       : sl.text4,
@@ -438,6 +461,7 @@ class _HomeScreenState extends State<HomeScreen>
                           ),
                         ],
                       ),
+                    ),
                     ),
                   );
                   // .toList() is required: Row.children is List<Widget> and

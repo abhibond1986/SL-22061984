@@ -28,11 +28,19 @@ class BottomNavGap extends StatelessWidget {
   /// against the bar's hairline border.
   final double extra;
 
+  /// Height of the bar's own row, excluding any device inset.
+  ///
+  /// SINGLE SOURCE OF TRUTH. This 60 was previously duplicated as a literal in
+  /// `home_screen.dart` and `contractor_home_screen.dart` alongside the copy
+  /// here, so changing the bar's height in either shell silently desynced the
+  /// gap and re-clipped the last row. Both shells now read this constant.
+  static const double barHeight = 60;
+
   /// Height of the nav bar itself. Exposed so callers that need the value as
   /// padding (e.g. `ListView(padding: ...)`) can reuse the same measurement
   /// instead of guessing.
   static double height(BuildContext context) =>
-      60 + MediaQuery.of(context).viewPadding.bottom;
+      barHeight + MediaQuery.of(context).viewPadding.bottom;
 
   /// Ready-made bottom inset for a scroll view's `padding`.
   static EdgeInsets padding(BuildContext context, {double extra = 16}) =>

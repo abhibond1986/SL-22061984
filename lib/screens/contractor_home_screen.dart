@@ -7,6 +7,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
+import '../widgets/bottom_nav_gap.dart';
 import '../services/sync_service.dart';
 import '../services/background_sync.dart';
 import 'login_screen.dart';
@@ -118,8 +119,11 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                 Text(
                   'Contractor Access',
                   style: TextStyle(
-                    color: AppColors.accent,
-                    fontSize: 10,
+                    // sl.accentText at 12px: bare accent is 2.99:1 on dark, and
+                    // 10px was below the 11px floor. This is the only label that
+                    // tells a contractor which mode they are in.
+                    color: sl.accentText,
+                    fontSize: SLText.minLabel,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -207,22 +211,34 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
       ),
       child: SafeArea(
         child: SizedBox(
-          height: 60,
+          height: BottomNavGap.barHeight,
           child: Row(
             children: List.generate(items.length, (i) {
               final sel = _tabIndex == i;
               final item = items[i];
               return Expanded(
-                child: GestureDetector(
+                // Kept deliberately in lockstep with home_screen.dart's bar —
+                // these two had already drifted (10px vs 9px labels, 14 vs 10
+                // pill padding). Any change here belongs there too, until the
+                // two are extracted into one SlBottomNav widget.
+                child: Semantics(
+                  label: item.label,
+                  selected: sel,
+                  button: true,
+                  container: true,
+                  child: InkResponse(
                   onTap: () => setState(() => _tabIndex = i),
-                  behavior: HitTestBehavior.opaque,
+                  containedInkWell: true,
+                  highlightShape: BoxShape.rectangle,
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
+                        // 10, matching home_screen: at 14 the selected pill is
+                        // 50px wide and has almost no clearance in a narrow slot.
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 4),
+                            horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
                           color: sel
                               ? AppColors.accent.withOpacity(0.15)
@@ -232,8 +248,9 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                         child: Icon(
                           sel ? item.activeIcon : item.icon,
                           size: 22,
+                          // sl.accentText: bare accent is ~2.8:1 on this bar.
                           color: sel
-                                ? AppColors.accent
+                                ? sl.accentText
                                 : sl.isDark
                                     ? const Color(0xFFCBD5E1)
                                     : sl.text4,
@@ -242,18 +259,22 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                       const SizedBox(height: 2),
                       Text(
                         item.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
                         style: TextStyle(
-                          fontSize: 10,
+                          fontSize: SLText.minBadge,
                           fontWeight:
                               sel ? FontWeight.w700 : FontWeight.w500,
                           color: sel
-                              ? AppColors.accent
+                              ? sl.accentText
                               : sl.isDark
                                   ? const Color(0xFFCBD5E1)
                                   : sl.text4,
                         ),
                       ),
                     ],
+                  ),
                   ),
                 ),
               );
