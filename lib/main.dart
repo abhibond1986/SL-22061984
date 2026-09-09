@@ -15,6 +15,7 @@ import 'services/gemini_vision.dart';
 import 'services/ai_run_log.dart';
 import 'services/visitor_service.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
+import 'widgets/scan_status_overlay.dart';
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
@@ -430,6 +431,20 @@ class _SafetyLensAppState extends State<SafetyLensApp> with WidgetsBindingObserv
           themeMode: _mode,
           theme: _buildTheme(false),
           darkTheme: _buildTheme(true),
+          // Photo analysis now runs in a service that outlives the screen that
+          // started it (see ScanJobs), so its progress and — more importantly —
+          // its failures have to be reachable from anywhere in the app. This
+          // builder is the only place a widget can sit above every route: the
+          // app navigates imperatively with no `navigatorKey` and no global
+          // ScaffoldMessenger key, so a service has no other way to reach a
+          // BuildContext. The overlay renders nothing at all when no job is in
+          // flight, and is IgnorePointer-free only around its own buttons.
+          builder: (context, child) => Stack(
+            children: [
+              child ?? const SizedBox.shrink(),
+              const ScanStatusOverlay(),
+            ],
+          ),
           // ✅ On web, skip Flutter splash — HTML splash (index.html) already
           // shows branding while Flutter loads. Going straight to login/home
           // avoids the double-splash (blue logo → badge logo → app).

@@ -25,7 +25,9 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../main.dart';
-import '../services/gemini_vision.dart';
+// GeminiVision is no longer called from this screen: the photo analysis goes
+// through ScanJobs so it survives the reporter changing section mid-scan.
+import '../services/scan_jobs.dart';
 import '../services/network_checker.dart';
 import '../services/local_db.dart';
 import '../services/pdf_export.dart';
@@ -276,6 +278,74 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     _loadMasterData();
     // Reload dropdowns the moment an admin edits a master list.
     AdminMasterData.revision.addListener(_loadMasterData);
+    // The photo analysis is owned by ScanJobs, not by this widget — the shell
+    // disposes this State on every section change. Listening here is what lets
+    // a scan the reporter walked away from still reach the form.
+    ScanJobs.revision.addListener(_onScanJobChanged);
+    _syncFromJob();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _onScanJobChanged();
+    });
+  }
+
+  /// Id of the [ScanJob] whose photo this State has mirrored, and of the one
+  /// whose result it has already folded into the form.
+  String? _adoptedJobId;
+  String? _appliedJobId;
+
+  /// Restores the attached photo and the spinner for a job still in flight.
+  /// Pure field assignment, so it is safe to call from `initState` — a
+  /// `setState` there runs during `Element.mount` and throws.
+  bool _syncFromJob() {
+    final job = ScanJobs.adoptable(ScanJobKind.nearMissImage);
+    if (job == null) {
+      if (_analyzing) {
+        _analyzing = false;
+        _step = '';
+        return true;
+      }
+      return false;
+    }
+    bool changed = false;
+    if (_adoptedJobId != job.id) {
+      _adoptedJobId = job.id;
+      _pickedFile ??= job.pickedFile;
+      _imageBytes ??= job.previewBytes;
+      changed = true;
+    }
+    if (job.isRunning && (!_analyzing || _step != job.step)) {
+      _analyzing = true;
+      _step = job.step;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /// Drops this screen's claim on the background job.
+  ///
+  /// Only ever clears a job of THIS screen's kind — the reporter removing a
+  /// near-miss photo must not cancel a hazard scan running in the other tab.
+  void _releaseScanJob() {
+    // Ids are cleared unconditionally, before the kind check: this screen's
+    // claim is dropped either way, and leaving a stale id behind would make
+    // _syncFromJob believe it had already mirrored a job it has not.
+    _adoptedJobId = null;
+    _appliedJobId = null;
+    if (ScanJobs.adoptable(ScanJobKind.nearMissImage) == null) return;
+    ScanJobs.clear();
+  }
+
+  void _onScanJobChanged() {
+    if (!mounted) return;
+    if (_syncFromJob()) setState(() {});
+    final job = ScanJobs.adoptable(ScanJobKind.nearMissImage);
+    if (job == null || job.isRunning) return;
+    if (_appliedJobId == job.id) {
+      if (_analyzing) setState(() { _analyzing = false; _step = ''; });
+      return;
+    }
+    _appliedJobId = job.id;
+    _applyImageAiOutcome(job);
   }
 
   Future<void> _loadMasterData() async {
@@ -1224,6 +1294,8 @@ If the text is already fine, return it unchanged.''';
     _micPulseCtrl.dispose();
     _speech.cancel();
     AdminMasterData.revision.removeListener(_loadMasterData);
+    // Only the listener goes — the analysis itself must keep running.
+    ScanJobs.revision.removeListener(_onScanJobChanged);
     _formScroll.dispose();
     _fnDescription.dispose();
     _brief.dispose(); _deptOther.dispose(); _location.dispose();
@@ -1249,13 +1321,30 @@ If the text is already fine, return it unchanged.''';
       Map<String, int>.from(AdminMasterData.defaultSeverityScores);
 
   Future<void> _pickImage(ImageSource source) async {
+    // Refuse before the camera opens, as the scan tab does.
+    //
+    // Checking later was worse than useless: the reporter took the photo, was
+    // offered "AI Scan", and only then got turned down — and by that point the
+    // release below had already abandoned the in-flight job, so its answer was
+    // discarded AND the new photo could not be analysed until the old request
+    // drained GeminiVision's mutex. One refusal up front costs nothing.
+    if (ScanJobs.isRunning) {
+      _snack(ScanJobs.busyMessage(), const Color(0xFFD97706));
+      return;
+    }
     final picker = ImagePicker();
     final picked = await picker.pickImage(source: source, imageQuality: 80, maxWidth: 1024, maxHeight: 1024);
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
+    // The previous photo's job has to go before the new photo is on screen.
+    // Otherwise it stays adoptable and keeps ownership of the app-wide failure
+    // banner, so "Try again" would re-run the OLD image and pour its hazards
+    // into the form the user has now attached a different photo to.
+    _releaseScanJob();
     setState(() {
       _pickedFile = picked; _imageBytes = bytes;
       _aiBrief = null; _aiHazards = const [];
+      _adoptedJobId = null; _appliedJobId = null;
     });
 
     // ★ v32: Try EXIF GPS first (more accurate for gallery photos — exact capture location)
@@ -1292,7 +1381,9 @@ If the text is already fine, return it unchanged.''';
 
     if (shouldScan == true) {
       setState(() => _analyzing = true);
-      await _analyzeImage();
+      // Not awaited any more: _analyzeImage now only *starts* the analysis and
+      // hands ownership to ScanJobs, so there is nothing to wait for here.
+      _analyzeImage();
     }
   }
 
@@ -1508,7 +1599,13 @@ If the text is already fine, return it unchanged.''';
     // clear would throw a null-assert here — and `_analyzing` is already true by
     // then, so the overlay would be left spinning over a crashed future with no
     // error shown. Fail visibly and reversibly instead.
-    if (_imageBytes == null && (kIsWeb || _pickedFile == null)) {
+    // The condition is `_imageBytes == null` alone, not the old
+    // `_imageBytes == null && (kIsWeb || _pickedFile == null)`. That extra
+    // clause let a null `_imageBytes` through on mobile, which was harmless
+    // while mobile read the file from disk — but the call below now passes
+    // `bytes: _imageBytes!` on every platform, so the guard has to cover every
+    // platform too.
+    if (_imageBytes == null) {
       if (mounted) {
         setState(() {
           _analyzing = false;
@@ -1519,7 +1616,28 @@ If the text is already fine, return it unchanged.''';
       return;
     }
 
+    // One analysis at a time. GeminiVision holds a process-wide mutex and a
+    // second concurrent call degrades to the offline fallback — a report with
+    // no hazards — so starting one here while a hazard scan is still running
+    // would fabricate a clean result for a photo nothing examined.
+    if (ScanJobs.isRunning) {
+      if (mounted) {
+        setState(() {
+          _analyzing = false;
+          _step = '';
+        });
+      }
+      _snack(ScanJobs.busyMessage(), const Color(0xFFD97706));
+      return;
+    }
+
     final networkStatus = await NetworkChecker.getNetworkStatus();
+    // The connectivity probe is an await, and this tab is disposed on a section
+    // change, so by here the widget may be gone. Nothing below this point has
+    // been started on the service yet, so there is nothing to hand over —
+    // returning is the whole cleanup. (The setStates below are the ones that
+    // would otherwise throw.)
+    if (!mounted) return;
 
     if (!networkStatus['hasInternet']!) {
       // Recorded here because this path returns BEFORE GeminiVision is called,
@@ -1578,20 +1696,64 @@ If the text is already fine, return it unchanged.''';
     // measured, not scripted, so a slow run is described as a slow run instead of
     // being disguised as a finished one. `_step` is left empty deliberately —
     // the overlay falls back to its own honest heading when it is.
+    //
+    // ── AND THE ANALYSIS IS NO LONGER AWAITED HERE ───────────────────────────
+    // It used to be, and that was the bug: the shell disposes this tab whenever
+    // the user changes section, every continuation after the await was gated on
+    // `mounted`, and so a ~30s analysis the reporter navigated away from
+    // finished and then silently discarded its answer. The form came back empty
+    // with no error, which reads as "the scan did nothing". ScanJobs owns the
+    // future now; [_applyImageAiOutcome] runs whether or not this widget is
+    // still alive to see it.
+    setState(() => _step = '');
+    // runType/plant/dept are passed (via ScanJobKind) so the ONE instrumentation
+    // point inside GeminiVision can attribute this run to near-miss rather than
+    // to a hazard scan.
+    final job = ScanJobs.start(
+      kind: ScanJobKind.nearMissImage,
+      bytes: _imageBytes!,
+      filePath: _pickedFile?.path,
+      pickedFile: _pickedFile,
+      plant: _plant,
+      dept: _effectiveDept,
+    );
+    if (job == null) {
+      setState(() {
+        _analyzing = false;
+        _step = '';
+      });
+      _snack(ScanJobs.busyMessage(), const Color(0xFFD97706));
+      return;
+    }
+    _adoptedJobId = job.id;
+    _appliedJobId = null;
+  }
+
+  /// Folds a finished near-miss photo analysis into the form.
+  ///
+  /// Everything here used to sit inline after the `await` in [_analyzeImage].
+  /// It is a separate method for one reason: it has to be callable when the
+  /// analysis finished while this widget did not exist, which is the normal case
+  /// as soon as the reporter is free to leave the tab mid-scan.
+  Future<void> _applyImageAiOutcome(ScanJob job) async {
+    if (!mounted) return;
+    if (job.isFailed) {
+      _applyImageAiFailure(
+        reason: job.errorIsNetwork
+            ? 'the connection dropped during the scan'
+            : 'the scan hit an unexpected error',
+        hint: job.errorIsNetwork
+            ? 'The photo is saved with the report. Use "Try again" on the '
+                'banner once you have signal, or fill the form manually.'
+            : 'Fill the form manually. If this keeps happening, report it to '
+                'the Safety Lens administrator.',
+        headline: 'Manual entry — Analysis failed',
+      );
+      return;
+    }
+
     try {
-      setState(() => _step = '');
-      // runType/plant/dept are passed so the ONE instrumentation point inside
-      // GeminiVision can attribute this run to near-miss rather than to a
-      // hazard scan.
-      Map<String, dynamic>? result = kIsWeb
-          ? await GeminiVision.analyseImageBytes(_imageBytes!,
-              runType: AiRunLog.typeNearMissImage,
-              plant: _plant,
-              dept: _effectiveDept)
-          : await GeminiVision.analyseImage(File(_pickedFile!.path),
-              runType: AiRunLog.typeNearMissImage,
-              plant: _plant,
-              dept: _effectiveDept);
+      final Map<String, dynamic>? result = job.result;
 
       final hazards = (result?['hazards'] as List?) ?? [];
       final isOnline = result?['_isOnline'] == true;
@@ -1599,6 +1761,9 @@ If the text is already fine, return it unchanged.''';
       // ✅ FIX: If AI failed (offline/exhausted) with no hazards, show clean message
       if (hazards.isEmpty && !isOnline) {
         final user = await LocalDB.getCurrentUser();
+        // The reporter can leave the tab during this read, and the shell
+        // disposes this State when they do.
+        if (!mounted) return;
         setState(() {
           _isOnlineMode = false;
           _aiHazards = const [];
@@ -1671,6 +1836,31 @@ If the text is already fine, return it unchanged.''';
       // isOnline already declared above (line ~381)
 
       final user              = await LocalDB.getCurrentUser();
+      // Same reason as the offline branch above: this await can outlive the
+      // widget now that the reporter is free to navigate away mid-scan.
+      if (!mounted) return;
+
+      // A retry must not silently delete what the reporter wrote in the
+      // meantime. The failure hint tells them to fill the form manually AND
+      // offers "Try again" once they have signal — so typing up the near miss
+      // and then retrying is the flow we invited, and the setState below
+      // rewrites _brief, _description, _immediateAction, _severity, _wsaCause
+      // and _obsType wholesale. Ask first; a near-miss account in the
+      // reporter's own words is worth more than the model's.
+      if (job.attempts > 1 && _hasReporterAuthoredText()) {
+        final replace = await _confirmReplaceTypedReport();
+        if (!mounted) return;
+        if (replace != true) {
+          setState(() {
+            _analyzing = false;
+            _step = '';
+          });
+          _snack('Kept your description. The AI result was discarded.',
+              const Color(0xFF059669));
+          return;
+        }
+      }
+
       String plantFromProfile = user?['plant']?.toString() ?? _plant;
       if (!_plants.contains(plantFromProfile)) plantFromProfile = _plant;
 
@@ -1761,25 +1951,96 @@ If the text is already fine, return it unchanged.''';
         _acceptedAiText = _description.text;
       });
     } catch (e) {
-      setState(() {
-        _isOnlineMode = false;
-        _aiHazards = const [];
-        _aiBrief = {
-          'identified': 'Manual entry — Analysis failed',
-          'statutory':  'Complete form manually',
-          'type':       'Unsafe Condition',
-          'severity':   'MEDIUM',
-          'confidence': 0,
-          // Deliberately does NOT include e.toString(): a Dart exception string
-          // tells a shop-floor reporter nothing and looks like a broken app.
-          'offlineReason': 'the scan hit an unexpected error',
-          'offlineHint':   'Fill the form manually. If this keeps happening, '
-              'report it to the Safety Lens administrator.',
-        };
-        _brief.text = 'Describe the near miss observed.';
-        _analyzing  = false;
-      });
+      // Post-processing itself blew up (a malformed field, a bad cast) — the
+      // network call had already succeeded. Same user-facing outcome.
+      _applyImageAiFailure(
+        reason: 'the scan result could not be read',
+        hint: 'Fill the form manually. If this keeps happening, report it to '
+            'the Safety Lens administrator.',
+        headline: 'Manual entry — Analysis failed',
+      );
     }
+  }
+
+  /// True when the free-text fields hold something the reporter wrote rather
+  /// than something the AI put there.
+  ///
+  /// `_acceptedAiText` is the description as the AI last left it, so anything
+  /// differing from it — including text typed after a failed scan, when it is
+  /// empty — is the reporter's own. The placeholder the offline path writes into
+  /// `_brief` is excluded, or every retry would prompt.
+  bool _hasReporterAuthoredText() {
+    const placeholder = 'Describe the near miss observed.';
+    final desc = _description.text.trim();
+    final brief = _brief.text.trim();
+    final action = _immediateAction.text.trim();
+    final accepted = _acceptedAiText.trim();
+    if (desc.isNotEmpty && desc != accepted) return true;
+    if (brief.isNotEmpty && brief != placeholder && brief != accepted) {
+      return true;
+    }
+    if (action.isNotEmpty && !_actionFromAi) return true;
+    return false;
+  }
+
+  Future<bool?> _confirmReplaceTypedReport() => showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16)),
+          title: const Text('Replace what you typed?',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+          content: const Text(
+              'The photo scan succeeded this time. Applying it will overwrite '
+              'the description and corrective action you entered.',
+              style: TextStyle(fontSize: 12)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep mine',
+                  style: TextStyle(fontSize: 12)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.accent,
+                  foregroundColor: Colors.white),
+              child: const Text('Use AI result',
+                  style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+      );
+
+  /// Puts the form into "fill this in yourself" mode after a failed photo scan.
+  ///
+  /// Deliberately never carries a Dart exception string: it tells a shop-floor
+  /// reporter nothing and makes the app look broken. The cause goes in
+  /// [reason]/[hint], which the AI card's banner renders, while the retry offer
+  /// lives on the app-wide banner so it is reachable from any screen.
+  void _applyImageAiFailure({
+    required String reason,
+    required String hint,
+    required String headline,
+  }) {
+    if (!mounted) return;
+    setState(() {
+      _isOnlineMode = false;
+      _aiHazards = const [];
+      _aiBrief = {
+        'identified': headline,
+        'statutory':  'Complete form manually',
+        'type':       'Unsafe Condition',
+        'severity':   'MEDIUM',
+        'confidence': 0,
+        'offlineReason': reason,
+        'offlineHint':   hint,
+      };
+      _brief.text = 'Describe the near miss observed.';
+      _analyzing  = false;
+      _step       = '';
+    });
   }
 
   /// Resolves any incoming string onto a member of the live [_wsaCauses] master
@@ -1919,6 +2180,10 @@ If the text is already fine, return it unchanged.''';
 
   /// ★ v31: Reset form for a new report
   void _resetForm() {
+    // Release the background job too, or the app-wide banner keeps offering to
+    // retry a photo that is no longer attached, and re-entering this tab would
+    // re-apply the AI answer to the fresh, blank form.
+    _releaseScanJob();
     setState(() {
       _saved = false;
       _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const [];
@@ -2309,6 +2574,13 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
 
       // ★ v30/v31 FIX: Preserve image bytes for share dialog
       final preservedImageBytes = _imageBytes != null ? Uint8List.fromList(_imageBytes!) : null;
+
+      // The report is filed, so the background job is done with. Released here
+      // rather than in _resetForm because the form deliberately stays on screen
+      // after a save — and while the job lives, the app-wide banner would still
+      // offer "Try again" for it, which on success rewrites every field of a
+      // report that is already in the database.
+      _releaseScanJob();
 
       if (mounted) {
         setState(() {
@@ -2780,7 +3052,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         )),
         const SizedBox(width: 10),
         GestureDetector(
-          onTap: () => setState(() { _pickedFile = null; _imageBytes = null; }),
+          onTap: () {
+            _releaseScanJob();
+            setState(() { _pickedFile = null; _imageBytes = null; });
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
@@ -2891,7 +3166,14 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
-          const AnalysisProgress(accent: AppColors.accent, compact: true),
+          AnalysisProgress(
+            accent: AppColors.accent,
+            compact: true,
+            // See the note at the scan tab's copy: the elapsed counter belongs
+            // to the analysis, which outlives this screen.
+            startedAt:
+                ScanJobs.adoptable(ScanJobKind.nearMissImage)?.startedAt,
+          ),
         ]))));
   }
 
@@ -3126,7 +3408,10 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
         ])),
       const SizedBox(height: 10),
       OutlinedButton.icon(
-        onPressed: () => setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _brief.clear(); }),
+        onPressed: () {
+          _releaseScanJob();
+          setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _brief.clear(); });
+        },
         icon: Icon(Icons.delete_outline_rounded, size: 15, color: sl.redText),
         label: Text('Remove Image', style: TextStyle(color: sl.redText, fontSize: 12, fontWeight: FontWeight.w600)),
         style: OutlinedButton.styleFrom(

@@ -12,6 +12,7 @@ import '../services/local_db.dart';
 import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
+import '../services/scan_jobs.dart';
 import 'login_screen.dart';
 import 'home_tab.dart';
 import 'ai_scan_tab.dart';
@@ -121,6 +122,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _signOut() async {
+    // Drop any photo analysis before the session goes.
+    //
+    // The status overlay is mounted from MaterialApp.builder, so it sits above
+    // every route — including the login screen. Without this, a failed scan's
+    // banner survives sign-out and offers the NEXT user a "Try again" that
+    // would re-run the previous user's photo under the previous user's plant
+    // and department, with no screen left to receive the answer.
+    ScanJobs.clear();
     await LocalDB.signOut();
     if (!mounted) return;
     Navigator.pushReplacement(

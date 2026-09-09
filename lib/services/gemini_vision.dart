@@ -956,6 +956,36 @@ HOW TO USE IT:
   // Prevent concurrent AI calls
   static bool _isAnalyzing = false;
 
+  /// When the current holder took [_isAnalyzing], for stale-lock detection.
+  ///
+  /// The flag is cleared at eight separate `return` sites rather than in a
+  /// `finally`, so any exception escaping between them leaks it — and a leaked
+  /// lock is permanent for the life of the process. That was survivable while
+  /// each screen owned its own call: the user restarted the scan and, at worst,
+  /// one scan was lost. It is not survivable now that ScanJobs runs analyses
+  /// process-wide, because EVERY later scan would sit out the 30-second wait
+  /// below and then be answered with the offline fallback — a well-formed report
+  /// stating no hazards were found. Silently telling a plant its photos are
+  /// clean is the worst failure this file can produce, so the lock is now
+  /// treated as advisory past a hard bound instead of absolute.
+  static DateTime? _analyzingSince;
+
+  /// Upper bound on any single legitimate analysis.
+  ///
+  /// Comfortably above the real ceilings — Gemini 3×8s, the OpenRouter chain's
+  /// 70s hard ceiling, Nara's 45s proxy timeout — so a lock older than this
+  /// cannot belong to a live call and is a leak by definition.
+  static const Duration _kLockStaleAfter = Duration(seconds: 180);
+
+  static bool get _lockIsStale {
+    final since = _analyzingSince;
+    if (since == null) return false;
+    final held = DateTime.now().difference(since);
+    // A negative or absurd age means the device clock moved under us; treat
+    // that as stale too rather than trusting it and locking the app out.
+    return held.isNegative || held > _kLockStaleAfter;
+  }
+
   // KB regulation context, cached to avoid re-fetching before every scan.
   //
   // The cache is keyed on LocalDB.kbRevision: it used to be cached for the
@@ -1206,6 +1236,13 @@ HOW TO USE IT:
       }
 
       // Prevent concurrent analysis
+      if (_isAnalyzing && _lockIsStale) {
+        // See _analyzingSince: a lock this old is leaked, not busy. Take it
+        // rather than spend 30s waiting and then answer "no hazards found".
+        print('GeminiVision: ⚠ concurrency lock is stale — reclaiming it');
+        _isAnalyzing = false;
+        _analyzingSince = null;
+      }
       if (_isAnalyzing) {
         print('GeminiVision: ⚠ Another analysis in progress — waiting...');
         for (int i = 0; i < 60; i++) {
@@ -1225,6 +1262,7 @@ HOW TO USE IT:
         }
       }
       _isAnalyzing = true;
+      _analyzingSince = DateTime.now();
 
       // Rate-limit
       if (_lastCallTime != null &&

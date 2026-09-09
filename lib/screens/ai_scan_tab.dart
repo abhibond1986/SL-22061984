@@ -6,7 +6,9 @@
 // ✅ NEW: "Review & Edit AI Findings" hint banner at top of review sheet
 // ✅ Inline edit per hazard preserved
 
-import 'dart:io' show File, Platform;
+// `File` is no longer needed here: the non-web branch that wrapped the picked
+// path in one moved into ScanJobs along with the rest of the call.
+import 'dart:io' show Platform;
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
@@ -15,7 +17,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../main.dart';
-import '../services/gemini_vision.dart';
+// GeminiVision and AiRunLog are no longer referenced from this screen — the
+// call and its telemetry attribution both moved into ScanJobs.
 import '../services/local_ai.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
@@ -33,8 +36,8 @@ import '../widgets/voice_text_field.dart';
 import '../services/i18n.dart';
 import '../services/ai_audit_service.dart';
 import '../services/ai_correction_service.dart';
-import '../services/ai_run_log.dart';
 import '../services/error_log_service.dart';
+import '../services/scan_jobs.dart';
 import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
 
@@ -115,11 +118,203 @@ class _AIScanTabState extends State<AIScanTab> {
   Map<String, int> _severityScores =
       Map<String, int>.from(AdminMasterData.defaultSeverityScores);
 
+  /// Id of the [ScanJob] whose photo/GPS this State has mirrored into its own
+  /// fields, and of the one whose result it has applied.
+  ///
+  /// Two ids rather than one because they happen at different moments: the
+  /// preview is adopted the instant the job is seen (so the user gets their
+  /// photo and a spinner back immediately on re-entering the tab), while the
+  /// result can only be applied once the job has finished.
+  String? _adoptedJobId;
+  String? _appliedJobId;
+
   @override
   void initState() {
     super.initState();
     _loadMasterData();
     AdminMasterData.revision.addListener(_loadMasterData);
+    // The analysis is owned by ScanJobs, not by this widget — the shell
+    // disposes this State on every tab change. Listening here, and syncing in
+    // _onScanJobChanged, is what turns this screen into a *view* of a running
+    // job rather than its owner. Called once immediately so a job started
+    // before this State existed is picked up on the first frame.
+    ScanJobs.revision.addListener(_onScanJobChanged);
+    // Adopt whatever is in flight WITHOUT setState — initState runs inside
+    // Element.mount, i.e. during a build, and markNeedsBuild there throws
+    // "setState() called during build". Direct field writes are correct at this
+    // point because the first build has not happened yet.
+    _syncFromJob();
+    // Applying a finished result does need a frame (it calls setState and can
+    // raise a snackbar), so it is deferred by exactly one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _onScanJobChanged();
+    });
+  }
+
+  /// Copies the background job's photo, GPS and progress caption into this
+  /// State's fields. Pure field assignment — no setState, so it is safe to call
+  /// from `initState` as well as from inside one.
+  ///
+  /// Returns true if anything changed, so the listener knows whether a rebuild
+  /// is warranted.
+  bool _syncFromJob() {
+    final job = ScanJobs.adoptable(ScanJobKind.hazardScan);
+    if (job == null) {
+      // The job was cleared or belongs to another screen. Never leave a spinner
+      // behind — an indefinite one is indistinguishable from a hang.
+      if (_analyzing) {
+        _analyzing = false;
+        return true;
+      }
+      return false;
+    }
+
+    bool changed = false;
+
+    // ── Mirror the photo and GPS (once per job, per State lifetime) ─────────
+    // This is what makes returning to the tab mid-scan show the user's own
+    // photograph again instead of the empty capture prompt.
+    if (_adoptedJobId != job.id) {
+      _adoptedJobId = job.id;
+      _pickedFile ??= job.pickedFile;
+      _imageBytes = job.previewBytes;
+      _analysedBytes = job.bytes;
+      if (job.location != null) {
+        _capturedLocation = job.location;
+        if (job.location!.isValid && _locationController.text.isEmpty) {
+          _locationController.text =
+              GeoService.getDisplayAddress(job.location!);
+        }
+      }
+      if (_currentStep < 2) _currentStep = 2;
+      changed = true;
+    }
+
+    if (job.isRunning && (!_analyzing || _step != job.step)) {
+      _analyzing = true;
+      _step = job.step;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /// Brings this screen into line with whatever the background analysis is
+  /// doing. Safe to call at any time, including for a job this State never
+  /// started.
+  void _onScanJobChanged() {
+    if (!mounted) return;
+    if (_syncFromJob()) setState(() {});
+
+    final job = ScanJobs.adoptable(ScanJobKind.hazardScan);
+    if (job == null || job.isRunning) return;
+
+    // ── Finished: apply once per State lifetime ────────────────────────────
+    if (_appliedJobId == job.id) {
+      if (_analyzing) setState(() => _analyzing = false);
+      return;
+    }
+    _appliedJobId = job.id;
+    _applyJobOutcome(job);
+  }
+
+  /// Folds a finished [ScanJob] into this screen's state.
+  ///
+  /// This is the code that used to sit inline after the `await` in `_analyze`.
+  /// It is a separate method now for one reason: it must be callable when the
+  /// analysis finished while this widget did not exist.
+  void _applyJobOutcome(ScanJob job) {
+    if (!mounted) return;
+
+    // Re-adopt the report the re-analysis was asked to double-check.
+    //
+    // `_result` is null in a `State` that a tab switch rebuilt, so a user who
+    // tapped Re-analyse and then stepped away had nothing left on screen for
+    // the guard below to protect — the very failure the guard exists to
+    // prevent, in the one situation this change makes ordinary. The job carries
+    // the earlier report for exactly this, so put it back before deciding
+    // anything.
+    if (_result == null && job.previousResult != null) {
+      // Both copies are deep, and separately so. The review sheet mutates
+      // `_result` in place, so handing it the job's own map would write the
+      // user's edits back into `previousResult` — and the next restore would
+      // then take the already-edited map as the pristine baseline, silently
+      // erasing every correction from the AI-accuracy diff written on save.
+      _result = jsonDecode(jsonEncode(job.previousResult)) as Map<String, dynamic>;
+      _originalAiResult =
+          jsonDecode(jsonEncode(job.previousResult)) as Map<String, dynamic>;
+      _buildHazardKeys(((_result!['hazards'] as List?) ?? const []).length);
+    }
+
+    // Whether what is ALREADY on screen is a real analysis, as opposed to an
+    // offline placeholder. The "don't destroy the report you were asked to
+    // double-check" guard below keys on this rather than on `_result != null`:
+    // an empty offline map is not a report worth protecting, and treating it as
+    // one meant a retry could never replace it.
+    final bool haveRealReport =
+        _result != null && _result!['_isOnline'] == true;
+
+    if (job.isFailed) {
+      _logAnalysisError(
+          job.error ?? job.errorMessage ?? 'unknown',
+          job.stackTrace ?? StackTrace.current,
+          job.errorIsNetwork);
+      setState(() {
+        _analyzing = false;
+        _currentStep = (job.forceRefresh && haveRealReport) ? 3 : 1;
+      });
+      // Say the report was kept, or "Analysis failed" reads as though the user
+      // just lost it. The app-wide banner carries the retry offer, so this
+      // snack no longer has to be the only chance to see the failure.
+      final kept = job.forceRefresh && haveRealReport
+          ? ' Showing the earlier report.'
+          : '';
+      _snack('⚠️ ${job.errorMessage ?? 'Analysis failed'}$kept', AppColors.red);
+      return;
+    }
+
+    final result = job.result;
+    // A FAILED RE-ANALYSIS MUST NOT DELETE THE REPORT IT WAS ASKED TO
+    // DOUBLE-CHECK. analyseImageBytes never throws and never returns null on
+    // failure — it returns the offline fallback, a well-formed map with no
+    // hazards — so a spent quota or a dead provider chain arrives HERE, not in
+    // the failure branch above. Without this guard it would overwrite a good
+    // analysis with an empty one, dispose the hazard rows, and leave the user
+    // on the "not analysed" empty state with Save still enabled.
+    final analysed = result != null &&
+        result['_imageAnalysed'] != false &&
+        result['_isOnline'] == true;
+    if (job.forceRefresh && !analysed && haveRealReport) {
+      final reason = result?['_offline_reason']?.toString() ?? '';
+      setState(() {
+        _analyzing = false;
+        // A full report is on screen, so the stepper has to say so. In a State
+        // rebuilt by a tab switch _syncFromJob leaves it at 2, which would show
+        // "analysing" progress above a finished report.
+        _currentStep = 3;
+      });
+      _snack(
+          reason.isEmpty
+              ? 'Could not re-analyse just now — showing the earlier report.'
+              : 'Could not re-analyse: $reason. Showing the earlier report.',
+          AppColors.amber);
+      return;
+    }
+
+    final hazards = (result?['hazards'] as List?) ?? [];
+    _buildHazardKeys(hazards.length);
+    setState(() {
+      _result = result;
+      // Deep copy via JSON round-trip so edits to _result never mutate the
+      // pristine snapshot we diff against on save.
+      _originalAiResult = result == null
+          ? null
+          : jsonDecode(jsonEncode(result)) as Map<String, dynamic>;
+      // A row index from the PREVIOUS, possibly longer hazard list must not
+      // survive into a re-analysis.
+      _highlightedRow = null;
+      _analyzing = false;
+      _currentStep = 3;
+    });
   }
 
   Future<void> _loadMasterData() async {
@@ -209,6 +404,10 @@ class _AIScanTabState extends State<AIScanTab> {
   @override
   void dispose() {
     AdminMasterData.revision.removeListener(_loadMasterData);
+    // Only the listener goes. The analysis itself is deliberately NOT touched:
+    // it belongs to ScanJobs and must keep running while the user is elsewhere
+    // in the app. That is the whole change.
+    ScanJobs.revision.removeListener(_onScanJobChanged);
     _scrollController.dispose();
     _locationController.dispose();
     _contextController.dispose();
@@ -251,6 +450,19 @@ class _AIScanTabState extends State<AIScanTab> {
   }
 
   Future<void> _pickImage(ImageSource source) async {
+    // Refuse before the camera opens, not after.
+    //
+    // GeminiVision holds a process-wide `_isAnalyzing` mutex with a 30-second
+    // wait loop, and a second concurrent call that loses that race degrades to
+    // the offline fallback — a well-formed report with NO hazards, logged as
+    // `reasonConcurrent`. In a safety app that is the one output we must never
+    // manufacture: it would hand the user a clean bill of health for a photo
+    // nothing ever looked at. So one analysis at a time, and checked here so
+    // nobody is made to take a photograph we are about to turn down.
+    if (ScanJobs.isRunning) {
+      _snack(ScanJobs.busyMessage(), AppColors.amber);
+      return;
+    }
     // ✅ Step 1: Open camera/gallery IMMEDIATELY — no GPS blocking.
     // For GALLERY, pick at FULL quality (no resize) so the image's EXIF —
     // including embedded GPS — is preserved; image_picker's imageQuality/
@@ -289,46 +501,86 @@ class _AIScanTabState extends State<AIScanTab> {
       _hazardRowKeys.clear();
       _highlightedRow = null;
       _currentStep    = 2;
+      // A new photo means anything the previous job produced is history.
+      _appliedJobId   = null;
+      _adoptedJobId   = null;
     });
 
-    // Step 4: Capture GPS silently in background (non-blocking).
+    // Step 4: Start the analysis, THEN start the GPS capture.
+    //
+    // This order matters. GPS runs for up to 10 seconds and cannot be
+    // cancelled, so its continuation can resume long after the photo it belongs
+    // to has been replaced — and every write it makes has to be addressed to
+    // *that* photo's job, not to "whatever is current". `_analyze` is fully
+    // synchronous and returns the job id, so capturing it here and passing it
+    // down is what pins each GPS write to the right analysis. Reading the
+    // `_adoptedJobId` field instead was the bug: a finished scan (a cache hit,
+    // or a fast failure) followed by a new photo re-pointed that field, and
+    // photo A's image and coordinates were then stamped onto photo B's job —
+    // displayed, saved and exported against B's hazard analysis.
+    final String? jobId = _analyze();
+
     // ★ Try EXIF GPS from the ORIGINAL (metadata-preserving) bytes for
     //   gallery uploads; watermark the downscaled display image.
-    _captureLocationSmart(originalBytes, bytes, source);
-
-    await _analyze();
+    _captureLocationSmart(originalBytes, bytes, source, jobId);
   }
+
+  /// True while [jobId] is still the analysis this screen is showing.
+  ///
+  /// Guards the *local* counterparts of the [ScanJobs] writes, which the
+  /// service cannot protect. Null on both sides is a match: it means no job was
+  /// ever started for this photo (the start was refused), and the photo on
+  /// screen is still the one the caller was working on.
+  bool _stillShowing(String? jobId) => _adoptedJobId == jobId;
 
   /// Captures GPS location silently in background without showing any UI.
   /// [exifBytes] retains EXIF (used for GPS extraction); [displayBytes] is the
   /// downscaled image shown/analyzed and watermarked.
   /// ★ Try EXIF GPS for gallery, device GPS for camera.
-  Future<void> _captureLocationSmart(
-      Uint8List exifBytes, Uint8List displayBytes, ImageSource source) async {
+  /// [jobId] is the analysis this photo belongs to; see [_stillShowing].
+  Future<void> _captureLocationSmart(Uint8List exifBytes,
+      Uint8List displayBytes, ImageSource source, String? jobId) async {
     if (source == ImageSource.gallery) {
       try {
         final exifLocation = await GeoService.getLocationFromExif(exifBytes).timeout(
           const Duration(seconds: 5), onTimeout: () => null);
-        if (!mounted) return;
+        // Recorded on the job BEFORE the mounted gate. GPS capture used to be
+        // orphaned by a tab switch for exactly the same reason the analysis was
+        // — every write was behind `if (mounted)` — so a user who navigated
+        // away came back to an un-watermarked photo and an empty location field
+        // even though the fix had completed. The job outlives the widget, so
+        // the value survives and _onScanJobChanged replays it.
+        //
+        // Keyed to [jobId] — the id captured when THIS photo's analysis
+        // started, not the current value of the field. See the note in
+        // _pickImage: reading the field let a late GPS result be addressed to
+        // whatever photo had replaced this one.
         if (exifLocation != null && exifLocation.isValid) {
-          setState(() {
-            _capturedLocation = exifLocation;
-            _locationController.text = GeoService.getDisplayAddress(exifLocation);
-          });
+          ScanJobs.updateLocation(jobId, exifLocation);
+          if (mounted && _stillShowing(jobId)) {
+            setState(() {
+              _capturedLocation = exifLocation;
+              _locationController.text = GeoService.getDisplayAddress(exifLocation);
+            });
+          }
           // Watermark the DISPLAY image with the EXIF-derived location.
           final watermarked = await GeoService.addWatermarkToImage(displayBytes, exifLocation);
-          if (watermarked != null && mounted) {
-            setState(() => _imageBytes = watermarked);
+          if (watermarked != null) {
+            ScanJobs.updatePreview(jobId, watermarked);
+            if (mounted && _stillShowing(jobId)) {
+              setState(() => _imageBytes = watermarked);
+            }
           }
           return; // EXIF worked
         }
       } catch (_) {}
     }
     // Fallback to device GPS — watermark the display image.
-    _captureGpsInBackground(displayBytes);
+    _captureGpsInBackground(displayBytes, jobId);
   }
 
-  Future<void> _captureGpsInBackground(Uint8List originalBytes) async {
+  Future<void> _captureGpsInBackground(
+      Uint8List originalBytes, String? jobId) async {
     LocationData? location;
     try {
       location = await GeoService.getCurrentLocation().timeout(
@@ -339,23 +591,30 @@ class _AIScanTabState extends State<AIScanTab> {
       location = LocationData(error: 'GPS unavailable');
     }
 
-    if (!mounted) return;
+    // On the job first, for the reason given in _captureLocationSmart: a tab
+    // switch must not lose a location that was successfully captured.
+    ScanJobs.updateLocation(jobId, location);
 
     // Update state silently with location data
-    setState(() {
-      _capturedLocation = location;
-      if (location?.isValid == true) {
-        _locationController.text = GeoService.getDisplayAddress(location!);
-      }
-    });
+    if (mounted && _stillShowing(jobId)) {
+      setState(() {
+        _capturedLocation = location;
+        if (location?.isValid == true) {
+          _locationController.text = GeoService.getDisplayAddress(location!);
+        }
+      });
+    }
 
     // Add watermark silently if GPS was captured successfully
     if (location != null && location.isValid) {
       final watermarked = await GeoService.addWatermarkToImage(originalBytes, location);
-      if (watermarked != null && mounted) {
-        setState(() {
-          _imageBytes = watermarked;
-        });
+      if (watermarked != null) {
+        ScanJobs.updatePreview(jobId, watermarked);
+        if (mounted && _stillShowing(jobId)) {
+          setState(() {
+            _imageBytes = watermarked;
+          });
+        }
       }
     }
   }
@@ -387,139 +646,100 @@ class _AIScanTabState extends State<AIScanTab> {
   /// fresh answer would be filed under a new key while the rejected one stayed
   /// live under the old. The mobile branch re-reads the picked file from disk on
   /// every run and is therefore stable by construction.
-  Future<void> _analyze({bool forceRefresh = false}) async {
+  /// Hands the photo to [ScanJobs] and returns immediately.
+  ///
+  /// **This method no longer awaits the model, and that is the point.** It used
+  /// to `await GeminiVision` directly, which meant the analysis was owned by
+  /// this `State` — and the shell disposes this `State` on every tab change
+  /// (`home_screen.dart` swaps tabs through an `AnimatedSwitcher`, not an
+  /// `IndexedStack`). The request itself kept running, since nothing in the
+  /// vision chain is cancellable, but every line after the await was gated on
+  /// `if (mounted)`, so a user who stepped over to Near Miss mid-scan came back
+  /// to a blank "not analysed" screen: the answer had arrived, been logged, been
+  /// cached, and been dropped on the floor without a word. The natural response
+  /// is to photograph the same hazard again.
+  ///
+  /// Everything after the await now lives in [_applyJobOutcome], reached through
+  /// [_onScanJobChanged], which fires whether or not this widget was alive when
+  /// the answer landed.
+  ///
+  /// [forceRefresh] is set only by the explicit "Re-analyse" action, and skips
+  /// the stored-analysis cache for that one call.
+  ///
+  /// It reuses [_analysedBytes] rather than [_imageBytes] — which matters ON WEB
+  /// ONLY, this being the branch that hashes the in-memory bytes. The GPS
+  /// watermark is applied to [_imageBytes] in the background AFTER the first
+  /// analysis starts, so by the time the user taps re-analyse the bytes on screen
+  /// can hash differently from the ones that produced the cached entry, and the
+  /// fresh answer would be filed under a new key while the rejected one stayed
+  /// live under the old. The mobile branch re-reads the picked file from disk on
+  /// every run and is therefore stable by construction.
+  /// Returns the id of the job that was started, or null if none was — callers
+  /// pass it to the background GPS capture so its late writes stay addressed to
+  /// this photo. Synchronous throughout, so the id is available to the caller
+  /// before any of that work can resume.
+  String? _analyze({bool forceRefresh = false}) {
     final Uint8List? bytes =
         forceRefresh ? (_analysedBytes ?? _imageBytes) : _imageBytes;
-    if (bytes == null) return;
+    if (bytes == null) return null;
     _analysedBytes = bytes;
+
+    // Telemetry (admin AI performance dashboard) is recorded INSIDE
+    // GeminiVision, at every exit point, so failures that quietly return the
+    // offline checklist are still counted. All we do here is tell it which
+    // kind of run this is and who ran it.
+    final tPlant = widget.user?['plant']?.toString() ?? '';
+    final tDept = widget.user?['department']?.toString() ?? '';
+
+    // The observer's optional note about the scene. Read fresh at start time,
+    // not captured when the photo was taken, so a note typed or dictated
+    // before capture and any correction made before "Re-analyse" are both
+    // picked up. Empty is the normal case and costs nothing — the prompt block
+    // disappears entirely rather than saying "no context supplied", which
+    // would invite the model to comment on the absence.
+    final sceneNote = _contextController.text;
+
+    final job = ScanJobs.start(
+      kind: ScanJobKind.hazardScan,
+      bytes: bytes,
+      filePath: _pickedFile?.path,
+      pickedFile: _pickedFile,
+      plant: tPlant,
+      dept: tDept,
+      sceneContext: sceneNote,
+      forceRefresh: forceRefresh,
+      // The photo to SHOW, which is not the photo we sent: by re-analyse time
+      // _imageBytes carries the GPS watermark and `bytes` deliberately does not
+      // (see above). Passed in at construction because ScanJobs.start notifies
+      // before it returns, so this screen mirrors the job synchronously — a
+      // later assignment would arrive after the watermarked image had already
+      // been replaced on screen by the raw analysis bytes, and the watermarked
+      // one is what gets saved and exported.
+      previewBytes: _imageBytes,
+      location: _capturedLocation,
+      // What a failed re-analysis must not be allowed to destroy. The guard for
+      // that used to read this widget's own _result, which is null in the fresh
+      // State a tab switch creates — so the protection evaporated in precisely
+      // the situation this whole change makes routine.
+      previousResult: forceRefresh ? _result : null,
+    );
+    if (job == null) {
+      // Something else is already in the chain's mutex. Do not leave a spinner
+      // running for work that was never started.
+      setState(() => _analyzing = false);
+      _snack(ScanJobs.busyMessage(), AppColors.amber);
+      return null;
+    }
+    _adoptedJobId = job.id;
+    _appliedJobId = null;
+    final step = forceRefresh ? 'Re-analysing hazards…' : 'Analyzing hazards…';
+    // On the job, so the caption survives a tab switch too.
+    ScanJobs.updateStep(job.id, step);
     setState(() {
       _analyzing = true;
-      _step = forceRefresh ? 'Re-analysing hazards…' : 'Analyzing hazards…';
+      _step = step;
     });
-    try {
-      Map<String, dynamic>? result;
-      bool failedDueToInternet = false;
-
-      // Telemetry (admin AI performance dashboard) is recorded INSIDE
-      // GeminiVision, at every exit point, so failures that quietly return the
-      // offline checklist are still counted. All we do here is tell it which
-      // kind of run this is and who ran it.
-      final tPlant = widget.user?['plant']?.toString() ?? '';
-      final tDept = widget.user?['department']?.toString() ?? '';
-
-      // The observer's optional note about the scene. Read fresh at call time,
-      // not captured when the photo was taken, so a note typed or dictated
-      // before capture and any correction made before "Re-analyse" are both
-      // picked up. Empty is the normal case and costs nothing — the prompt block
-      // disappears entirely rather than saying "no context supplied", which
-      // would invite the model to comment on the absence.
-      final sceneNote = _contextController.text;
-
-      try {
-        result = kIsWeb
-            ? await GeminiVision.analyseImageBytes(bytes,
-                runType: AiRunLog.typeHazardScan,
-                plant: tPlant,
-                dept: tDept,
-                sceneContext: sceneNote,
-                forceRefresh: forceRefresh)
-            : await GeminiVision.analyseImage(File(_pickedFile!.path),
-                runType: AiRunLog.typeHazardScan,
-                plant: tPlant,
-                dept: tDept,
-                sceneContext: sceneNote,
-                forceRefresh: forceRefresh);
-      } catch (e, stackTrace) {
-        // ✅ FIX: Check if it's a network/connectivity error
-        final errorStr = e.toString().toLowerCase();
-        if (errorStr.contains('socket') ||
-            errorStr.contains('network') ||
-            errorStr.contains('connection') ||
-            errorStr.contains('timeout') ||
-            errorStr.contains('failed host lookup')) {
-          failedDueToInternet = true;
-        }
-
-        // ✅ LOG ERROR to admin panel
-        _logAnalysisError(e, stackTrace, failedDueToInternet);
-
-        // Show error and stop - don't fall back to demo
-        if (mounted) {
-          // A failed RE-analysis must not throw away the report the user was
-          // already looking at — they asked for a second opinion, not for their
-          // first one to be deleted. Only a failed first pass falls back to the
-          // preview step.
-          setState(() {
-            _analyzing = false;
-            _currentStep = (forceRefresh && _result != null) ? 3 : 1;
-          });
-          // Say the report was kept, for the same reason the guard below does:
-          // otherwise "Analysis failed" reads as though the user just lost it.
-          final kept = forceRefresh && _result != null
-              ? ' Showing the earlier report.'
-              : '';
-          if (failedDueToInternet) {
-            _snack('⚠️ Poor internet connectivity. Please try again later.$kept',
-                AppColors.red);
-          } else {
-            _snack('⚠️ Analysis failed: ${e.toString()}$kept', AppColors.red);
-          }
-        }
-        return; // Stop here, don't continue
-      }
-
-      if (mounted) {
-        // A FAILED RE-ANALYSIS MUST NOT DELETE THE REPORT IT WAS ASKED TO
-        // DOUBLE-CHECK. analyseImageBytes never throws and never returns null on
-        // failure — it returns the offline fallback, a well-formed map with no
-        // hazards — so the catch blocks below are NOT the path a spent quota or
-        // a dead provider chain takes. It arrives here, and without this guard it
-        // would overwrite a good analysis with an empty one, dispose the hazard
-        // rows, and leave the user on the "not analysed" empty state with Save
-        // still enabled. The second opinion simply isn't available; say so and
-        // keep what we have.
-        final analysed = result != null &&
-            result['_imageAnalysed'] != false &&
-            result['_isOnline'] == true;
-        if (forceRefresh && !analysed && _result != null) {
-          final reason = result?['_offline_reason']?.toString() ?? '';
-          setState(() => _analyzing = false);
-          _snack(
-              reason.isEmpty
-                  ? 'Could not re-analyse just now — showing the earlier report.'
-                  : 'Could not re-analyse: $reason. Showing the earlier report.',
-              AppColors.amber);
-          return;
-        }
-        final hazards = (result?['hazards'] as List?) ?? [];
-        _buildHazardKeys(hazards.length);
-        setState(() {
-          _result      = result;
-          // Deep copy via JSON round-trip so edits to _result never mutate the
-          // pristine snapshot we diff against on save.
-          _originalAiResult = result == null
-              ? null
-              : jsonDecode(jsonEncode(result)) as Map<String, dynamic>;
-          // A row index from the PREVIOUS, possibly longer hazard list must not
-          // survive into a re-analysis.
-          _highlightedRow = null;
-          _analyzing   = false;
-          _currentStep = 3;
-        });
-      }
-    } catch (e, stackTrace) {
-      // ✅ LOG ERROR to admin panel
-      _logAnalysisError(e, stackTrace, false);
-
-      if (mounted) {
-        // Same reasoning as the inner catch: keep an existing report on screen.
-        setState(() {
-          _analyzing = false;
-          _currentStep = (forceRefresh && _result != null) ? 3 : 1;
-        });
-        _snack('Analysis failed: $e', AppColors.red);
-      }
-    }
+    return job.id;
   }
 
   /// Asks before re-running the AI, but only when there is something to lose.
@@ -564,10 +784,11 @@ class _AIScanTabState extends State<AIScanTab> {
       );
       if (ok != true) return;
     }
-    // Re-checked after the dialog: an await means the scan state may have moved
-    // on while it was open.
-    if (!mounted || _analyzing || _isSaved) return;
-    await _analyze(forceRefresh: true);
+    // Re-checked against the SERVICE as well as local state: the dialog was
+    // open across an await, and a retry fired from the app-wide failure banner
+    // in the meantime would already hold the chain's mutex.
+    if (!mounted || _analyzing || _isSaved || ScanJobs.isRunning) return;
+    _analyze(forceRefresh: true);
   }
 
   /// Log AI analysis errors to admin panel for tracking
@@ -1292,6 +1513,20 @@ class _AIScanTabState extends State<AIScanTab> {
         imageBase64: _imageBytes != null ? base64Encode(_imageBytes!) : '',
       ).catchError((_) => 0); // Fire-and-forget — never block the save.
     }
+
+    // The report is persisted, so the background job is finished business. It
+    // has to be dropped here or the app-wide failure banner keeps offering
+    // "Try again" for a photo whose report is already in the database: a
+    // successful retry would then replace `_result` and rebuild every hazard
+    // row while `_savedIncidentId` still points at the saved incident, so the
+    // mitigation sheet would close hazards that are not the ones on record.
+    // _reset() is not called here — the user is meant to keep seeing what they
+    // saved — so this is the only place the release can happen.
+    if (ScanJobs.adoptable(ScanJobKind.hazardScan) != null) {
+      ScanJobs.clear();
+    }
+    _adoptedJobId = null;
+    _appliedJobId = null;
 
     setState(() {
       _isSaved         = true;
@@ -2343,6 +2578,19 @@ class _AIScanTabState extends State<AIScanTab> {
   }
 
   void _reset() {
+    // Release the background job as well, or the app-wide banner would keep
+    // offering to retry a photo that is no longer on screen, and re-entering
+    // this tab would re-adopt the report the user just cleared. A job still in
+    // flight is only marked abandoned — its future cannot be cancelled and it
+    // still holds the vision chain's mutex, so pretending it is gone would let
+    // the next scan race into that mutex and degrade to the offline fallback.
+    // Guarded by kind: clearing here must not cancel a Near Miss photo scan
+    // running in the other tab.
+    if (ScanJobs.adoptable(ScanJobKind.hazardScan) != null) {
+      ScanJobs.clear();
+    }
+    _adoptedJobId = null;
+    _appliedJobId = null;
     for (final c in _mitigationControllers.values) { c.dispose(); }
     _mitigationControllers.clear();
     _hazardClosed.clear();
@@ -2562,6 +2810,10 @@ class _AIScanTabState extends State<AIScanTab> {
         AnalysisProgress(
           accent: AppColors.accent,
           title: _step.isEmpty ? 'Analysing the photo' : _step,
+          // From the job, not from this widget's first build: re-entering the
+          // tab 40s into a scan must not show the counter restarting at zero,
+          // which reads as "it started over".
+          startedAt: ScanJobs.adoptable(ScanJobKind.hazardScan)?.startedAt,
         ),
       ]))));
 

@@ -56,7 +56,17 @@ class AnalysisProgress extends StatefulWidget {
     this.expected = const Duration(seconds: 22),
     this.title = 'Analysing the photo',
     this.compact = false,
+    this.startedAt,
   });
+
+  /// When the analysis actually began, if the caller knows.
+  ///
+  /// Needed because the analysis now outlives the screen: a reporter who leaves
+  /// the tab 40 seconds into a scan and comes back gets a brand-new State, and a
+  /// counter that restarted from zero would tell them the scan had started over
+  /// — the "did it freeze / did it restart?" impression this widget exists to
+  /// prevent. Null keeps the old behaviour of timing from first build.
+  final DateTime? startedAt;
 
   /// Brand colour for the bar. Passed in rather than read from the theme so the
   /// widget works unchanged over a darkened photo, which is where both callers
@@ -81,6 +91,17 @@ class AnalysisProgress extends StatefulWidget {
 class _AnalysisProgressState extends State<AnalysisProgress> {
   final _sw = Stopwatch();
   Timer? _ticker;
+
+  /// Elapsed time of the ANALYSIS, not of this widget. Falls back to the
+  /// stopwatch when the caller did not supply a start time. A clock change
+  /// could make the difference negative, so it is floored at the stopwatch's
+  /// own reading rather than allowed to run backwards.
+  Duration get _elapsed {
+    final started = widget.startedAt;
+    if (started == null) return _sw.elapsed;
+    final d = DateTime.now().difference(started);
+    return d > _sw.elapsed ? d : _sw.elapsed;
+  }
 
   @override
   void initState() {
@@ -111,7 +132,7 @@ class _AnalysisProgressState extends State<AnalysisProgress> {
     // and paints nothing in release.
     final ms = widget.expected.inMilliseconds;
     if (ms <= 0) return 0.5;
-    final t = _sw.elapsedMilliseconds / ms;
+    final t = _elapsed.inMilliseconds / ms;
     return (1 - math.exp(-3 * t)) * 0.97;
   }
 
@@ -132,7 +153,7 @@ class _AnalysisProgressState extends State<AnalysisProgress> {
   /// claim that is sometimes simply false, which breaks the same honesty rule as
   /// the fake progress steps removed from near_miss_tab.dart on the same day.
   String get _phase {
-    final s = _sw.elapsed.inSeconds;
+    final s = _elapsed.inSeconds;
     if (s < 3) return 'Preparing the photo…';
     if (s < 10) return 'Sending it to the AI reader…';
     if (s < 20) return 'Looking for hazards in the scene…';
@@ -149,8 +170,8 @@ class _AnalysisProgressState extends State<AnalysisProgress> {
 
   @override
   Widget build(BuildContext context) {
-    final s = _sw.elapsed.inSeconds;
-    final over = _sw.elapsed > widget.expected;
+    final s = _elapsed.inSeconds;
+    final over = _elapsed > widget.expected;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(

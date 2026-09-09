@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../main.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
+import '../services/scan_jobs.dart';
 import '../widgets/modern_bottom_nav.dart';
 import 'login_screen.dart';
 import 'home_tab.dart';
@@ -59,6 +60,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _signOut() async {
+    // See the note in home_screen.dart: the status overlay outlives every
+    // route, so a job left behind would offer the next user a retry of the
+    // previous user's photo.
+    ScanJobs.clear();
     await LocalDB.signOut();
     if (!mounted) return;
     Navigator.pushReplacement(
