@@ -1633,6 +1633,30 @@ class AdminMasterData {
   ///
   /// The mapping is anchored so mid-range confidence lands mid-range on the
   /// matrix rather than skewing high. Retune here and nowhere else.
+  ///
+  /// ── WHY THE RANGE IS 2–4 AND NOT 1–5 (retuned 2026-09-18) ──
+  /// The first cut spread confidence across the full axis (<40→1 … ≥95→5).
+  /// Because a real scan almost always reports 80–95%, that put nearly every
+  /// photograph on likelihood 4 or 5, and since the matrix multiplies, the
+  /// headline then sat a whole band ABOVE the model's own worst severity:
+  /// MEDIUM×4 = 12 = HIGH, HIGH×4 = 16 = CRITICAL, and at ≥95 even a LOW
+  /// severity reached HIGH. A band word that reads CRITICAL on routine work
+  /// tells the officer nothing and trains them to ignore it — worse than the
+  /// /100 figure this replaced.
+  ///
+  /// Two deliberate bounds:
+  /// * **Floor is 2, not 1.** Low confidence means "I may be wrong that this
+  ///   is here", NOT "this is unlikely to hurt anyone". Mapping a shaky
+  ///   detection down to likelihood 1 would make it look SAFE, which is the
+  ///   same conflation as above pointing the dangerous way.
+  /// * **Ceiling is 4, not 5.** "Almost certain" is a claim about exposure
+  ///   over time that no single frame supports. 1 and 5 stay reachable, but
+  ///   only by an officer moving the picker — a human judgement, never a proxy.
+  ///
+  /// Net effect: at typical confidence the matrix band now AGREES with the
+  /// severity word (MEDIUM→MEDIUM, HIGH→HIGH) instead of inflating it, and the
+  /// extremes compress toward the middle, which is the honest behaviour for a
+  /// proxy this weak.
   static int likelihoodFromConfidence(dynamic confidence) {
     // `num.tryParse(...)?.round()`, NOT `int.tryParse`. A model that writes
     // `"confidence": 90.0` produces a double from `jsonDecode`, `int.tryParse`
@@ -1646,11 +1670,9 @@ class AdminMasterData {
                 0)
         .clamp(0, 100);
     if (c <= 0) return 0; // no confidence reported → no derived likelihood
-    if (c < 40) return 1;
-    if (c < 60) return 2;
-    if (c < 80) return 3;
-    if (c < 95) return 4;
-    return 5;
+    if (c < 50) return 2; // shaky detection — 'Unlikely', never 1. See above.
+    if (c < 95) return 3; // the normal case: 'Possible'
+    return 4; // near-certain detection — 'Likely'. 5 is hand-set only.
   }
 
   /// The matrix product. 0 when either axis is unrated, never a guess.

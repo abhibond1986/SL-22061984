@@ -1520,6 +1520,66 @@ class _AIScanTabState extends State<AIScanTab> {
     5: 'Catastrophic',
   };
 
+  /// The 5×5 grid, with a crosshair on the cell the two pickers select.
+  ///
+  /// **Why a grid rather than a number in a circle.** This is the artefact the
+  /// rating actually comes from — the matrix pinned to every plant safety
+  /// noticeboard — so it is the one thing in this card worth being bold with. It
+  /// also says something a lone figure cannot: WHERE the scan sits, and how
+  /// close it is to the next band. "16, one cell from the corner" and "16, two
+  /// steps up from where you'd expect" are different briefings.
+  ///
+  /// Severity runs up the rows and likelihood across the columns, so the worst
+  /// cell is top-right, matching the printed matrices. The axes are deliberately
+  /// unlabelled: a legend at a readable size would be wider than the grid, and
+  /// the two pickers sit directly underneath in the same order (likelihood left,
+  /// severity right). The crosshair — the selected row and column tinted, the
+  /// intersection filled and ringed — is what makes it read as "you are here"
+  /// without a legend.
+  ///
+  /// Cells carry no text, which is what allows the tinted fills: the documented
+  /// trap with `withOpacity` surfaces is that they shift the contrast of any
+  /// FOREGROUND on them, and there is none here. An unrated scan draws the whole
+  /// grid neutral with no cell picked, rather than defaulting to a corner.
+  Widget _matrixGrid({
+    required int likelihood,
+    required int severity,
+    required SL sl,
+  }) {
+    const double cell = 13;
+    const double gap = 2;
+    final rated = likelihood >= 1 && severity >= 1;
+
+    return Column(children: [
+      for (var s = 5; s >= 1; s--) ...[
+        if (s != 5) const SizedBox(height: gap),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          for (var l = 1; l <= 5; l++) ...[
+            if (l != 1) const SizedBox(width: gap),
+            Builder(builder: (_) {
+              final fill = _sevColor(AdminMasterData.matrixBandFor(l * s));
+              final isCell = rated && l == likelihood && s == severity;
+              final onCross = rated && (l == likelihood || s == severity);
+              return Container(
+                width: cell, height: cell,
+                decoration: BoxDecoration(
+                  color: !rated
+                      ? sl.border.withOpacity(0.6)
+                      : isCell
+                          ? fill
+                          : fill.withOpacity(onCross ? 0.34 : 0.13),
+                  borderRadius: BorderRadius.circular(3),
+                  border: isCell
+                      ? Border.all(color: sl.text1, width: 1.6)
+                      : null),
+              );
+            }),
+          ],
+        ]),
+      ],
+    ]);
+  }
+
   /// One axis of the initial risk estimate.
   ///
   /// [value] of 0 means unrated and shows an empty picker rather than a 1 —
@@ -1540,28 +1600,32 @@ class _AIScanTabState extends State<AIScanTab> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // "(est.)" rides on the label rather than the value, so the qualifier
+        // cannot be lost to an ellipsis when the word is long.
         Text(estimated && value > 0 ? '$label (est.)' : label,
           style: TextStyle(
-            color: sl.text3, fontSize: 10, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 4),
+            color: sl.text4, fontSize: 12, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 5),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          // Filled rather than outlined: on a neutral card an inset field reads
+          // as "you can change this", which is the whole point of these two.
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
-            color: sl.isDark ? const Color(0xFF1A1D2E) : Colors.white,
-            borderRadius: BorderRadius.circular(8),
+            color: sl.isDark ? const Color(0xFF1A1D2E) : sl.bg2,
+            borderRadius: BorderRadius.circular(SLRadius.sm),
             border: Border.all(color: sl.border)),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<int>(
               value: value >= 1 && value <= 5 ? value : null,
               isDense: true,
               isExpanded: true,
-              hint: Text('—',
-                style: TextStyle(color: sl.text3, fontSize: 12)),
+              hint: Text('Not set',
+                style: TextStyle(color: sl.text4, fontSize: 13)),
               dropdownColor:
                   sl.isDark ? const Color(0xFF252840) : Colors.white,
               style: TextStyle(
-                color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700),
-              icon: Icon(Icons.arrow_drop_down, color: sl.text3, size: 18),
+                color: sl.text1, fontSize: 13, fontWeight: FontWeight.w700),
+              icon: Icon(Icons.expand_more, color: sl.text4, size: 18),
               items: [
                 for (var i = 1; i <= 5; i++)
                   DropdownMenuItem(
@@ -1569,7 +1633,7 @@ class _AIScanTabState extends State<AIScanTab> {
                     child: Text('$i · ${words[i]}',
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: sl.text1, fontSize: 12,
+                        color: sl.text1, fontSize: 13,
                         fontWeight: FontWeight.w700))),
               ],
               onChanged: (v) { if (v != null) onChanged(v); }))),
@@ -3204,12 +3268,27 @@ class _AIScanTabState extends State<AIScanTab> {
         ? Map<String, dynamic>.from(rawValidation)
         : null;
     final riskColor   = _sevColor(overallRisk);
-    // Colour of the headline number and the card. Taken from the matrix band,
-    // not from `overallRisk`, so the border can never contradict the figure it
-    // frames. An unrated scan is deliberately neutral-grey rather than green.
-    final matrixColor = matrixScore == 0
-        ? sl.text3
-        : _sevColor(_matrixBand);
+    // ── TWO COLOURS PER BAND, AND THEY ARE NOT INTERCHANGEABLE ───────────────
+    //
+    // `_sevColor` returns AppColors.crit/red/cyan/green — tokens tuned as chip
+    // FILLS. Used as text they measure 2.1–4.4:1, under the 4.5:1 AA floor, and
+    // this card was doing exactly that: the score, the "/25" and the band word
+    // were all painted in the fill token. On a plant floor, at arm's length, in
+    // gloves, that is a safety problem rather than a cosmetic one.
+    //
+    // So: `*Fill` paints surfaces (the rail, the matrix cells, a pill wash) and
+    // `*Ink` paints anything with a shape you have to read. `sl.textOn` maps a
+    // fill to the matching readable token for the current theme and fails safe
+    // to `text1` on anything it does not recognise. See lib/main.dart.
+    //
+    // Both are taken from the MATRIX band, never from `overallRisk`, so nothing
+    // framing the figure can contradict it. An unrated scan is neutral grey, not
+    // green: it has not been judged safe, it has not been judged.
+    final matrixFill = matrixScore == 0 ? sl.border : _sevColor(_matrixBand);
+    final matrixInk  = matrixScore == 0
+        ? sl.text4
+        : sl.textOn(_sevColor(_matrixBand));
+    final riskInk    = sl.textOn(riskColor);
     final hasBbox     = hazards.any((h) {
       final bbox = (h as Map)['bbox'];
       if (bbox == null) return false;
@@ -3304,126 +3383,191 @@ class _AIScanTabState extends State<AIScanTab> {
       // beside it cannot disagree. `overallRisk` keeps its own line in its own
       // severity colour: it is the worst hazard's level, a different claim from
       // the matrix band, and collapsing the two would lose one of them.
+      // ── LAYOUT NOTES ─────────────────────────────────────────────────────
+      //
+      // The surface is NEUTRAL and the band colour arrives in exactly three
+      // places: the left rail, the matrix cells, and the ink on the two words
+      // you are meant to read. The previous version washed the whole card in
+      // the severity colour at 0.06 and outlined it 2px, so a routine scan
+      // looked like an alarm and a genuine CRITICAL had nothing left to
+      // escalate with. A tinted card surface is also the documented way to
+      // break every foreground sitting on it without the contrast audit
+      // noticing — it scores tokens against the two global backgrounds, never
+      // against a local card fill.
+      //
+      // Nothing here is below the SLText floors (12 label / 13 body / 11
+      // badge). The card used to set the eyebrow at 9px and the "/25" at 8px.
+      // Those floors exist for a 45-year-old fitter reading a phone at arm's
+      // length in gloves, which is the actual audience.
       if (analysed) Container(
-        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: matrixColor.withOpacity(0.06),
-          border: Border.all(color: matrixColor, width: 2),
-          borderRadius: BorderRadius.circular(14)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-          Row(children: [
-            Container(
-              width: 64, height: 64,
-              decoration: BoxDecoration(
-                color: matrixColor.withOpacity(0.15),
-                shape: BoxShape.circle,
-                border: Border.all(color: matrixColor, width: 2.5)),
-              child: Center(child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                // "—", not "0". An unrated scan has not been judged low; it has
-                // not been judged. See the doc on `_matrixScore`.
-                Text(matrixScore == 0 ? '—' : '$matrixScore',
-                  style: TextStyle(
-                    color: matrixColor, fontSize: 20,
-                    fontWeight: FontWeight.w800)),
-                Text('/25', style: TextStyle(
-                  color: matrixColor, fontSize: 8)),
-              ]))),
-            const SizedBox(width: 12),
-            Expanded(child: Column(
+          color: sl.surface,
+          borderRadius: BorderRadius.circular(SLRadius.lg),
+          border: Border.all(
+            color: matrixScore == 0 ? sl.border : matrixFill.withOpacity(0.45))),
+        // IntrinsicHeight, and it is not optional. `stretch` sizes the rail from
+        // the Row's incoming max height, and this card sits in a scrolling
+        // Column where that is unbounded — a 4px Container told to be infinitely
+        // tall. IntrinsicHeight bounds the Row to the height its content
+        // actually wants first. A non-uniform Border(left: 4px) would express
+        // the same rail with no wrapper, but Flutter forbids borderRadius on a
+        // non-uniform border, and square corners here would not match any other
+        // card in the app.
+        child: IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          // The one piece of chrome that carries the alarm. Full-bleed height,
+          // so the band is legible from a scroll-past without reading a word.
+          Container(
+            width: 4,
+            decoration: BoxDecoration(
+              color: matrixFill,
+              borderRadius: const BorderRadius.horizontal(
+                  left: Radius.circular(3)))),
+          Expanded(child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-              Text('INITIAL RISK ESTIMATE', style: TextStyle(
-                color: sl.text4, fontSize: 9,
-                fontWeight: FontWeight.w600, letterSpacing: 0.4)),
-              // Wrap, not Row: "CRITICAL" at 18pt beside a "WORST HAZARD:
-              // CRITICAL" chip overflows the card on a narrow phone, and a Row
-              // would clip the chip rather than move it to a second line.
-              Wrap(
-                spacing: 8,
-                runSpacing: 2,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                Text(matrixScore == 0 ? 'NOT RATED' : _matrixBand,
-                  style: TextStyle(
-                    color: matrixColor, fontSize: 18,
-                    fontWeight: FontWeight.w800)),
-                // The worst hazard's own severity, shown only when it is a
-                // different word from the matrix band — printing "MEDIUM" twice
-                // in two colours teaches the reader nothing, while hiding a
-                // genuine divergence would hide the more serious of the two.
-                if (matrixScore != 0 && overallRisk.toUpperCase() != _matrixBand)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: riskColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: riskColor)),
-                    child: Text('WORST HAZARD: $overallRisk',
-                      style: TextStyle(color: riskColor, fontSize: 9,
-                          fontWeight: FontWeight.w700))),
+              Text('Initial risk estimate', style: TextStyle(
+                color: sl.text4, fontSize: 12, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 10),
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                // ── The instrument ──────────────────────────────────────────
+                // A 5×5 grid, the score, and the score's name. One self-
+                // contained unit, because that is the artefact this number
+                // comes from — the matrix pinned to every plant noticeboard.
+                // It replaced a big number in a coloured circle, which asserts
+                // a rating without showing where it sits or how close it is to
+                // the next band up.
+                SizedBox(width: 76, child: Column(children: [
+                  _matrixGrid(
+                    likelihood: _matrixLikelihood,
+                    severity: _matrixSeverityRating,
+                    sl: sl),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                    // "—", not "0". An unrated scan has not been judged low; it
+                    // has not been judged. See the doc on `_matrixScore`.
+                    Text(matrixScore == 0 ? '—' : '$matrixScore',
+                      style: TextStyle(
+                        color: matrixInk, fontSize: 32, height: 1,
+                        fontWeight: FontWeight.w800, letterSpacing: -1)),
+                    Text(' /25', style: TextStyle(
+                      color: sl.text4, fontSize: 12,
+                      fontWeight: FontWeight.w600)),
+                  ]),
+                  Text('Risk score', style: TextStyle(
+                    color: sl.text4, fontSize: 12, fontWeight: FontWeight.w600)),
+                ])),
+                const SizedBox(width: 14),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                  // Wrap, not Row: "CRITICAL" at 19pt beside a "Worst hazard"
+                  // pill overflows on a narrow phone, and a Row would clip the
+                  // pill rather than move it to a second line.
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                    Text(matrixScore == 0 ? 'Not rated' : _matrixBand,
+                      style: TextStyle(
+                        color: matrixInk, fontSize: 19,
+                        fontWeight: FontWeight.w800, letterSpacing: 0.2)),
+                    // The worst hazard's own severity, shown only when it is a
+                    // different word from the matrix band — printing "MEDIUM"
+                    // twice in two colours teaches the reader nothing, while
+                    // hiding a genuine divergence would hide the more serious
+                    // of the two.
+                    if (matrixScore != 0 && overallRisk.toUpperCase() != _matrixBand)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: riskColor.withOpacity(0.10),
+                          borderRadius: BorderRadius.circular(SLRadius.sm),
+                          border: Border.all(
+                              color: riskColor.withOpacity(0.55))),
+                        child: Text('Worst hazard: $overallRisk',
+                          style: TextStyle(color: riskInk, fontSize: 11,
+                              fontWeight: FontWeight.w700))),
+                  ]),
+                  const SizedBox(height: 6),
+                  // The verify count is stated separately and never added into
+                  // the hazard count: "0 hazards" under a photo the AI plainly
+                  // had something to say about reads as a failure, and "3
+                  // hazards" would be the false claim this whole feature exists
+                  // to prevent.
+                  Text('${hazards.length} hazards'
+                      '${_verifyOnSiteItems().isEmpty ? '' : ' · ${_verifyOnSiteItems().length} to verify'}'
+                      ' · $confidence% confidence',
+                    style: TextStyle(color: sl.text3, fontSize: 12)),
+                  if (validation != null) _validationStrip(validation, sl),
+                  if (hasBbox)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text('Tap a box on the photo to jump to its row',
+                        style: TextStyle(
+                            color: sl.accentText, fontSize: 11))),
+                ])),
               ]),
-              // The verify count is stated separately and never added into the
-              // hazard count: "0 hazards" under a photo the AI plainly had
-              // something to say about reads as a failure, and "3 hazards" would
-              // be the false claim this whole feature exists to prevent.
-              Text('${hazards.length} hazards'
-                  '${_verifyOnSiteItems().isEmpty ? '' : ' · ${_verifyOnSiteItems().length} to verify'}'
-                  ' · $confidence% confidence',
-                style: TextStyle(color: sl.text3, fontSize: 10)),
-              if (validation != null) _validationStrip(validation, sl),
-              if (hasBbox)
+
+              const SizedBox(height: 14),
+              Container(height: 1, color: sl.border),
+              const SizedBox(height: 12),
+
+              // The two axes, editable. Severity is pre-filled from the report;
+              // likelihood is a proxy derived from the model's confidence and
+              // says so until the officer moves it, because a photograph cannot
+              // show how often anyone is exposed.
+              Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Expanded(child: _matrixAxisPicker(
+                  label: 'Likelihood',
+                  value: _matrixLikelihood,
+                  words: _kLikelihoodWords,
+                  estimated: _matrixIsEstimate,
+                  sl: sl,
+                  onChanged: (v) => setState(() => _likelihoodOverride = v))),
                 Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text('Tap boxes on image → jumps to row',
-                    style: TextStyle(color: sl.accentText,
-                        fontSize: 9, fontStyle: FontStyle.italic))),
-            ])),
-          ]),
-
-          const SizedBox(height: 12),
-          Container(height: 1, color: matrixColor.withOpacity(0.25)),
-          const SizedBox(height: 10),
-
-          // The two axes, editable. Severity is pre-filled from the report;
-          // likelihood is a proxy derived from the model's confidence and says
-          // so until the officer moves it, because a photograph cannot show how
-          // often anyone is exposed.
-          Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Expanded(child: _matrixAxisPicker(
-              label: 'Likelihood',
-              value: _matrixLikelihood,
-              words: _kLikelihoodWords,
-              estimated: _matrixIsEstimate,
-              sl: sl,
-              onChanged: (v) => setState(() => _likelihoodOverride = v))),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Text('×', style: TextStyle(
-                color: sl.text3, fontSize: 16, fontWeight: FontWeight.w700))),
-            Expanded(child: _matrixAxisPicker(
-              label: 'Severity',
-              value: _matrixSeverityRating,
-              words: _kSeverityWords,
-              estimated: false,
-              sl: sl,
-              onChanged: (v) => setState(() => _severityRatingOverride = v))),
-          ]),
-          const SizedBox(height: 8),
-          Text(
-            matrixScore == 0
-                ? 'Set a likelihood and a severity to rate this scan.'
-                : _matrixIsEstimate
-                    ? 'Likelihood is estimated from AI confidence — confirm it '
-                        'against exposure on site. Use your approved plant risk '
-                        'matrix for the final rating.'
-                    : 'Use your approved plant risk matrix for the final rating.',
-            style: TextStyle(color: sl.accentText, fontSize: 10)),
-        ])),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('×', style: TextStyle(
+                    color: sl.text4, fontSize: 15,
+                    fontWeight: FontWeight.w700))),
+                Expanded(child: _matrixAxisPicker(
+                  label: 'Severity',
+                  value: _matrixSeverityRating,
+                  words: _kSeverityWords,
+                  estimated: false,
+                  sl: sl,
+                  onChanged: (v) => setState(() => _severityRatingOverride = v))),
+              ]),
+              const SizedBox(height: 10),
+              // The arithmetic, written out. The officer can disagree with an
+              // axis; they cannot disagree with a total whose factors are not
+              // on the page.
+              if (matrixScore != 0)
+                Text('Risk score = $_matrixLikelihood × $_matrixSeverityRating'
+                    ' = $matrixScore of 25',
+                  style: TextStyle(color: matrixInk, fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+              Padding(
+                padding: EdgeInsets.only(top: matrixScore == 0 ? 0 : 4),
+                child: Text(
+                  matrixScore == 0
+                      ? 'Set a likelihood and a severity to rate this scan.'
+                      : _matrixIsEstimate
+                          ? 'Likelihood is estimated from AI confidence. Confirm '
+                              'it against exposure on site, then rate with your '
+                              'approved plant risk matrix.'
+                          : 'Rate with your approved plant risk matrix.',
+                  style: TextStyle(color: sl.text4, fontSize: 12))),
+            ]))),
+        ]))),
       // The photograph is a general view, so every severity above it was capped
       // and the report says so before anyone acts on a number. Placed directly
       // under the risk card because it qualifies THAT number — a caveat further
