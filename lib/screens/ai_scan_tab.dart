@@ -93,6 +93,22 @@ class _AIScanTabState extends State<AIScanTab> {
   final List<GlobalKey>  _hazardRowKeys    = [];
   int? _highlightedRow;
 
+  // ── Initial risk estimate (5×5 matrix) ─────────────────────────────────
+  //
+  // The officer's own likelihood and severity ratings, 1–5. **Null means "not
+  // overridden"**, not "zero": the getters below fall back to the derived
+  // values, so a scan shows a starting position immediately and these fields
+  // stay null until someone actually moves a picker. Storing the derived number
+  // here instead would make it impossible to tell an accepted default from an
+  // assessed value, which is the distinction the report has to print.
+  //
+  // Both MUST be cleared wherever `_result` is replaced. They describe one
+  // photograph, and carrying a likelihood from the previous scan into the next
+  // one is the same class of bug as a stale `_highlightedRow` — see ScanJobs
+  // job-identity handling in [_syncFromJob].
+  int? _likelihoodOverride;
+  int? _severityRatingOverride;
+
   // GPS geo-tagging
   LocationData? _capturedLocation;
   bool _capturingLocation = false;
@@ -244,6 +260,11 @@ class _AIScanTabState extends State<AIScanTab> {
       _originalAiResult =
           jsonDecode(jsonEncode(job.previousResult)) as Map<String, dynamic>;
       _buildHazardKeys(((_result!['hazards'] as List?) ?? const []).length);
+      // The restored report is a different photograph's from anything this
+      // freshly-rebuilt State might hold, and the ratings are not carried in
+      // `previousResult` — so derive them again rather than keep a stale pick.
+      _likelihoodOverride = null;
+      _severityRatingOverride = null;
     }
 
     // Whether what is ALREADY on screen is a real analysis, as opposed to an
@@ -313,6 +334,11 @@ class _AIScanTabState extends State<AIScanTab> {
       // A row index from the PREVIOUS, possibly longer hazard list must not
       // survive into a re-analysis.
       _highlightedRow = null;
+      // Same reasoning, and it matters more: a likelihood the officer set for
+      // the previous photograph would otherwise sit on this one's risk estimate
+      // looking assessed. Back to derived-from-this-scan.
+      _likelihoodOverride = null;
+      _severityRatingOverride = null;
       _analyzing = false;
       _currentStep = 3;
     });
@@ -401,6 +427,48 @@ class _AIScanTabState extends State<AIScanTab> {
     }
     return label.isEmpty ? 'MEDIUM' : label;
   }
+
+  // ── INITIAL RISK ESTIMATE: likelihood × severity, out of 25 ──────────────
+  //
+  // This is the figure the result card now headlines, because it is the one a
+  // safety officer is trained to read and the one a plant risk register uses.
+  // The 0–100 [_riskScore] above is unchanged and still governs the stored row,
+  // plant averages and admin KPIs, which have history on that scale — see
+  // `_buildIncident`, where both are written.
+  //
+  // Severity comes from the report ([_overallRisk], the worst hazard's level).
+  // Likelihood cannot come from the report: nothing in a photograph shows how
+  // often anyone is exposed. It is ESTIMATED from the model's confidence by
+  // [AdminMasterData.likelihoodFromConfidence] — read the warning on that
+  // method — and the picker stays editable so the officer can replace a proxy
+  // with a judgement. `_matrixIsEstimate` is what the card uses to say which of
+  // the two it is currently showing.
+
+  int get _derivedLikelihood =>
+      AdminMasterData.likelihoodFromConfidence(_result?['confidence'] ?? 0);
+
+  int get _derivedSeverityRating =>
+      AdminMasterData.severityRating(_severityScores, _overallRisk);
+
+  int get _matrixLikelihood => _likelihoodOverride ?? _derivedLikelihood;
+
+  int get _matrixSeverityRating =>
+      _severityRatingOverride ?? _derivedSeverityRating;
+
+  /// 1–25, or **0 when either axis is unrated** — rendered as "—", never as a
+  /// low score. A scan with no confidence figure and no hand-picked likelihood
+  /// has not been rated by anyone, and printing 0/25 beside the word LOW would
+  /// be the unanalysed-photo-shows-MEDIUM bug in a new scale.
+  int get _matrixScore =>
+      AdminMasterData.matrixScore(_matrixLikelihood, _matrixSeverityRating);
+
+  /// The band of [_matrixScore] itself, so the chip and the number cannot
+  /// disagree. Deliberately NOT [_overallRisk]: that is the worst hazard's
+  /// severity, a different statement, and it keeps its own place on the card.
+  String get _matrixBand => AdminMasterData.matrixBandFor(_matrixScore);
+
+  /// True while the likelihood is still the confidence-derived proxy.
+  bool get _matrixIsEstimate => _likelihoodOverride == null;
 
   @override
   void dispose() {
@@ -501,6 +569,13 @@ class _AIScanTabState extends State<AIScanTab> {
       _savedIncidentId = null;
       _hazardRowKeys.clear();
       _highlightedRow = null;
+      // A likelihood or severity the officer picked belongs to the PREVIOUS
+      // photograph. Carried over it would not merely be stale, it would be
+      // stale AND presented as assessed: `_matrixIsEstimate` is false whenever
+      // an override exists, so photo B's report would drop the "(est.)"
+      // qualifier and print photo A's judgement as this scan's own.
+      _likelihoodOverride = null;
+      _severityRatingOverride = null;
       _currentStep    = 2;
       // A new photo means anything the previous job produced is history.
       _appliedJobId   = null;
@@ -827,6 +902,10 @@ class _AIScanTabState extends State<AIScanTab> {
     final sl        = SL.of(context);
     final riskColor = _sevColor(
         _overallRisk);
+    // The matrix band's own colour, for the one chip that prints a 1-25 figure.
+    // Grey when unrated, so "NOT RATED" is never dressed in a severity colour.
+    final matrixChipColor =
+        _matrixScore == 0 ? sl.text3 : _sevColor(_matrixBand);
 
     final List<Map<String, dynamic>> editableHazards =
         ((_result!['hazards'] as List?) ?? [])
@@ -973,24 +1052,63 @@ class _AIScanTabState extends State<AIScanTab> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
                   child: Row(children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: riskColor.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: riskColor)),
-                      child: Text(
-                        '$_overallRisk · $_riskScore/100',
-                        style: TextStyle(color: riskColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800))),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(
-                      '${editableHazards.length} Hazards Identified',
-                      style: TextStyle(color: sl.text1,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700))),
+                    // ★ EVERY SCORE IS PAIRED WITH ITS OWN BAND, in its own
+                    // colour. This chip used to read '$_overallRisk · N/25' in
+                    // the SEVERITY colour, which put "MEDIUM · 12/25" in cyan
+                    // directly above a card reading "12/25 … HIGH" in red — the
+                    // same number carrying two different band words on one
+                    // screen. That is the "RISK: CRITICAL above 23 / 100"
+                    // failure this scale was introduced to end, so the rule is
+                    // absolute: a 1-25 figure may only ever appear beside
+                    // `_matrixBand`, never beside `_overallRisk`.
+                    // Two chips, not one line, because they are two different
+                    // claims: the worst hazard's severity, and the matrix
+                    // rating. Each keeps its own colour.
+                    //
+                    // Wrap inside Expanded, not three fixed Row children. Adding
+                    // the second chip pushed this row to ~345pt of unshrinkable
+                    // width against the 328pt available on a 360dp phone
+                    // (chip + chip + "Tap Edit" + a 48pt tap target), and an
+                    // Expanded can shrink to zero but cannot absorb the
+                    // remainder — so at CRITICAL it was a RenderFlex overflow.
+                    // The result card solved the same problem the same way.
+                    Expanded(child: Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: riskColor.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: riskColor)),
+                        child: Text(_overallRisk,
+                          style: TextStyle(color: riskColor,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800))),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: matrixChipColor.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: matrixChipColor)),
+                        child: Text(
+                          _matrixScore == 0
+                              ? 'NOT RATED'
+                              : '$_matrixBand · $_matrixScore/25',
+                          style: TextStyle(color: matrixChipColor,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800))),
+                      Text(
+                        '${editableHazards.length} Hazards Identified',
+                        style: TextStyle(color: sl.text1,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700)),
+                    ])),
+                    const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 7, vertical: 3),
@@ -1380,6 +1498,82 @@ class _AIScanTabState extends State<AIScanTab> {
                   color: _sevColor(s), fontSize: 9,
                   fontWeight: FontWeight.w800)))).toList(),
           onChanged: (v) { if (v != null) onChanged(v); })));
+  }
+
+  // ── 5×5 matrix axis pickers ──────────────────────────────────────────────
+  //
+  // Words as well as numbers. "3" alone is meaningless to anyone not holding
+  // the plant matrix, and the whole point of the estimate is that the officer
+  // can sanity-check it on site.
+  static const Map<int, String> _kLikelihoodWords = {
+    1: 'Rare',
+    2: 'Unlikely',
+    3: 'Possible',
+    4: 'Likely',
+    5: 'Almost certain',
+  };
+  static const Map<int, String> _kSeverityWords = {
+    1: 'Negligible',
+    2: 'Minor',
+    3: 'Moderate',
+    4: 'Major',
+    5: 'Catastrophic',
+  };
+
+  /// One axis of the initial risk estimate.
+  ///
+  /// [value] of 0 means unrated and shows an empty picker rather than a 1 —
+  /// there is no honest default for "nobody has judged this yet".
+  ///
+  /// [estimated] adds the "(est.)" suffix. It is the visible difference between
+  /// a number the app derived and a number a person assessed, and it must stay
+  /// visible: the derived likelihood comes from AI confidence, which measures
+  /// whether the hazard is *there*, not whether it will *hurt someone*.
+  Widget _matrixAxisPicker({
+    required String label,
+    required int value,
+    required Map<int, String> words,
+    required bool estimated,
+    required SL sl,
+    required ValueChanged<int> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(estimated && value > 0 ? '$label (est.)' : label,
+          style: TextStyle(
+            color: sl.text3, fontSize: 10, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: sl.isDark ? const Color(0xFF1A1D2E) : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: sl.border)),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<int>(
+              value: value >= 1 && value <= 5 ? value : null,
+              isDense: true,
+              isExpanded: true,
+              hint: Text('—',
+                style: TextStyle(color: sl.text3, fontSize: 12)),
+              dropdownColor:
+                  sl.isDark ? const Color(0xFF252840) : Colors.white,
+              style: TextStyle(
+                color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700),
+              icon: Icon(Icons.arrow_drop_down, color: sl.text3, size: 18),
+              items: [
+                for (var i = 1; i <= 5; i++)
+                  DropdownMenuItem(
+                    value: i,
+                    child: Text('$i · ${words[i]}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: sl.text1, fontSize: 12,
+                        fontWeight: FontWeight.w700))),
+              ],
+              onChanged: (v) { if (v != null) onChanged(v); }))),
+      ]);
   }
 
   Widget _reviewRow(String label, String value, SL sl) =>
@@ -2302,9 +2496,24 @@ class _AIScanTabState extends State<AIScanTab> {
       'reportedByPno':   user['pno']?.toString()  ?? '',
       'people':          '0',
       'hazards':         hazards,
-      // The admin-scaled score, not the model's invented one. This is the
-      // number that lands in the incident row, the PDF and the admin KPI.
+      // The admin-scaled 0–100 score. DELIBERATELY STILL WRITTEN even though
+      // the screen now headlines the 1–25 matrix figure: every stored row,
+      // plant average and admin KPI in the app has history on this scale, and
+      // silently starting to write 12 where 30 used to go would not "switch
+      // scales", it would corrupt the series — a 1–25 number is a plausible
+      // 0–100 number, so nothing downstream could detect the change. Analytics
+      // reads this field; the PDF and the screen read the matrix fields below.
       'riskScore':       _riskScore,
+      // The initial risk estimate as shown on screen, stored as three separate
+      // numbers rather than just the product. A stored "12" cannot be audited
+      // or re-derived later; L and S can, and `matrixLikelihoodEstimated` is
+      // what tells a reader months from now whether a person judged the
+      // likelihood or the app inferred it from AI confidence.
+      'matrixLikelihood': _matrixLikelihood,
+      'matrixSeverity':   _matrixSeverityRating,
+      'matrixScore':      _matrixScore,
+      'matrixBand':       _matrixBand,
+      'matrixLikelihoodEstimated': _matrixIsEstimate,
       'confidence':      _result!['confidence']   ?? 0,
       // Carried into the record so the exported PDF and any later reader see the
       // same qualification the screen showed. A general-view scan that is filed
@@ -2500,11 +2709,25 @@ class _AIScanTabState extends State<AIScanTab> {
   String _buildResultShareText() {
     final hazards = (_result!['hazards'] as List?) ?? [];
     final risk = _overallRisk;
-    final score = _riskScore;
+    // Two lines, not one. `Overall Risk: MEDIUM (L4 × S3 = 12/25)` pairs the
+    // matrix product with the SEVERITY word, and 12/25 bands as HIGH — the same
+    // number-beside-the-wrong-band defect that was removed from the review
+    // header chip, just pasted into a WhatsApp group instead of drawn on screen.
+    // So the matrix figure gets its own band, the worst hazard keeps its own
+    // label, and the two factors are stated so the reader can argue with an axis
+    // rather than with the total.
+    final score = _matrixScore;
     final buffer = StringBuffer();
     buffer.writeln('🔴 SAIL SAFETY LENS — HAZARD REPORT');
     buffer.writeln('━━━━━━━━━━━━━━━━━━━━━━━━');
-    buffer.writeln('⚠️ Overall Risk: $risk (Score: $score/100)');
+    if (score == 0) {
+      buffer.writeln('⚠️ Initial Risk Estimate: not rated');
+    } else {
+      buffer.writeln('⚠️ Initial Risk Estimate: $_matrixBand '
+          '(L$_matrixLikelihood × S$_matrixSeverityRating = $score/25)'
+          '${_matrixIsEstimate ? ' — likelihood estimated' : ''}');
+    }
+    buffer.writeln('🔻 Worst Hazard: $risk');
     buffer.writeln('📊 Hazards Found: ${hazards.length}');
     buffer.writeln('');
     for (int i = 0; i < hazards.length; i++) {
@@ -2549,9 +2772,18 @@ class _AIScanTabState extends State<AIScanTab> {
     if (pdfUrl != null && pdfUrl.isNotEmpty) {
       final hazards = (_result!['hazards'] as List?) ?? [];
       final risk = _overallRisk;
-      final score = _riskScore;
+      final score = _matrixScore;
+      // Same rule as _buildResultShareText: the /25 product is paired with the
+      // MATRIX band, never with the worst-hazard severity, which gets its own
+      // line. See the comment there for the defect this avoids.
+      final estimate = score == 0
+          ? 'not rated'
+          : '$_matrixBand (L$_matrixLikelihood × '
+              'S$_matrixSeverityRating = $score/25)'
+              '${_matrixIsEstimate ? ' — likelihood estimated' : ''}';
       text = '⚠️ *SAIL Safety Lens — AI Hazard Report*\n\n'
-          '🔴 *Overall Risk:* $risk (Score: $score/100)\n'
+          '🔴 *Initial Risk Estimate:* $estimate\n'
+          '🔻 *Worst Hazard:* $risk\n'
           '📊 *Hazards Found:* ${hazards.length}\n\n'
           '📄 *Full PDF Report:*\n$pdfUrl\n\n'
           '—\n_Generated by SAIL Safety Lens_';
@@ -2611,6 +2843,11 @@ class _AIScanTabState extends State<AIScanTab> {
       // against if anything ever read it before the next analysis lands.
       _originalAiResult = null;
       _result          = null; _analyzing  = false;
+      // Same rule as _pickImage: the ratings describe one photograph and must
+      // not outlive it. Clearing the report but keeping the rating would leave
+      // the next scan pre-judged.
+      _likelihoodOverride = null;
+      _severityRatingOverride = null;
       _hazardRowKeys.clear(); _highlightedRow = null;
       _isSaved         = false; _savedIncidentId = null;
       _currentStep     = 0;
@@ -2931,8 +3168,18 @@ class _AIScanTabState extends State<AIScanTab> {
 
   Widget _resultView(SL sl) {
     final overallRisk = _overallRisk;
-    final score       = _riskScore;
-    final confidence  = _result!['confidence']   ?? 75;
+    // The headline figure: likelihood × severity, 1–25. The 0–100 `_riskScore`
+    // is still written to the saved row, it is just no longer displayed here.
+    final matrixScore = _matrixScore;
+    // 0, not 75. The old default invented a confidence figure for a report that
+    // never reported one, and once the likelihood is derived from this number
+    // the fabrication becomes visible and self-contradicting: the card printed
+    // "— /25 · NOT RATED" (likelihood derived from an absent confidence) directly
+    // above "75% confidence". The derived likelihood reads the SAME field with
+    // the SAME default — see `_derivedLikelihood` — so the two can no longer
+    // disagree, and a genuinely missing confidence now reads as 0%, which is
+    // what it is.
+    final confidence  = _result!['confidence']   ?? 0;
     final summary     = _result!['summary']?.toString() ?? '';
     final hazards     = List<dynamic>.from((_result!['hazards'] as List?) ?? []);
     // Sort hazards most-severe-first, using the admin's severity order.
@@ -2957,6 +3204,12 @@ class _AIScanTabState extends State<AIScanTab> {
         ? Map<String, dynamic>.from(rawValidation)
         : null;
     final riskColor   = _sevColor(overallRisk);
+    // Colour of the headline number and the card. Taken from the matrix band,
+    // not from `overallRisk`, so the border can never contradict the figure it
+    // frames. An unrated scan is deliberately neutral-grey rather than green.
+    final matrixColor = matrixScore == 0
+        ? sl.text3
+        : _sevColor(_matrixBand);
     final hasBbox     = hazards.any((h) {
       final bbox = (h as Map)['bbox'];
       if (bbox == null) return false;
@@ -3038,54 +3291,138 @@ class _AIScanTabState extends State<AIScanTab> {
         const SizedBox(height: 10),
       ],
 
+      // ★ The headline figure is the 5×5 MATRIX score, out of 25 — likelihood ×
+      // severity, the number a plant risk register is written in. It replaced
+      // the 0–100 score that used to fill this circle. The 0–100 figure is not
+      // gone: it still governs the stored row and the plant averages (see
+      // `_buildIncident`), it is simply no longer what the officer reads here,
+      // because two scales competing for the same headline is how a report ends
+      // up arguing with itself.
+      //
+      // The band chip, the circle and the card border all take their colour and
+      // their word from `_matrixScore` itself, so the number and the label
+      // beside it cannot disagree. `overallRisk` keeps its own line in its own
+      // severity colour: it is the worst hazard's level, a different claim from
+      // the matrix band, and collapsing the two would lose one of them.
       if (analysed) Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: riskColor.withOpacity(0.06),
-          border: Border.all(color: riskColor, width: 2),
+          color: matrixColor.withOpacity(0.06),
+          border: Border.all(color: matrixColor, width: 2),
           borderRadius: BorderRadius.circular(14)),
-        child: Row(children: [
-          Container(
-            width: 64, height: 64,
-            decoration: BoxDecoration(
-              color: riskColor.withOpacity(0.15),
-              shape: BoxShape.circle,
-              border: Border.all(color: riskColor, width: 2.5)),
-            child: Center(child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+          Row(children: [
+            Container(
+              width: 64, height: 64,
+              decoration: BoxDecoration(
+                color: matrixColor.withOpacity(0.15),
+                shape: BoxShape.circle,
+                border: Border.all(color: matrixColor, width: 2.5)),
+              child: Center(child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                // "—", not "0". An unrated scan has not been judged low; it has
+                // not been judged. See the doc on `_matrixScore`.
+                Text(matrixScore == 0 ? '—' : '$matrixScore',
+                  style: TextStyle(
+                    color: matrixColor, fontSize: 20,
+                    fontWeight: FontWeight.w800)),
+                Text('/25', style: TextStyle(
+                  color: matrixColor, fontSize: 8)),
+              ]))),
+            const SizedBox(width: 12),
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-              Text('$score', style: TextStyle(
-                color: riskColor, fontSize: 20,
-                fontWeight: FontWeight.w800)),
-              Text('/100', style: TextStyle(
-                color: riskColor, fontSize: 8)),
-            ]))),
-          const SizedBox(width: 12),
-          Expanded(child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-            Text('OVERALL RISK', style: TextStyle(
-              color: sl.text4, fontSize: 9,
-              fontWeight: FontWeight.w600)),
-            Text(overallRisk, style: TextStyle(
-              color: riskColor, fontSize: 18,
-              fontWeight: FontWeight.w800)),
-            // The verify count is stated separately and never added into the
-            // hazard count: "0 hazards" under a photo the AI plainly had
-            // something to say about reads as a failure, and "3 hazards" would
-            // be the false claim this whole feature exists to prevent.
-            Text('${hazards.length} hazards'
-                '${_verifyOnSiteItems().isEmpty ? '' : ' · ${_verifyOnSiteItems().length} to verify'}'
-                ' · $confidence% confidence',
-              style: TextStyle(color: sl.text3, fontSize: 10)),
-            if (validation != null) _validationStrip(validation, sl),
-            if (hasBbox)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('Tap boxes on image → jumps to row',
-                  style: TextStyle(color: sl.accentText,
-                      fontSize: 9, fontStyle: FontStyle.italic))),
-          ])),
+              Text('INITIAL RISK ESTIMATE', style: TextStyle(
+                color: sl.text4, fontSize: 9,
+                fontWeight: FontWeight.w600, letterSpacing: 0.4)),
+              // Wrap, not Row: "CRITICAL" at 18pt beside a "WORST HAZARD:
+              // CRITICAL" chip overflows the card on a narrow phone, and a Row
+              // would clip the chip rather than move it to a second line.
+              Wrap(
+                spacing: 8,
+                runSpacing: 2,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                Text(matrixScore == 0 ? 'NOT RATED' : _matrixBand,
+                  style: TextStyle(
+                    color: matrixColor, fontSize: 18,
+                    fontWeight: FontWeight.w800)),
+                // The worst hazard's own severity, shown only when it is a
+                // different word from the matrix band — printing "MEDIUM" twice
+                // in two colours teaches the reader nothing, while hiding a
+                // genuine divergence would hide the more serious of the two.
+                if (matrixScore != 0 && overallRisk.toUpperCase() != _matrixBand)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: riskColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: riskColor)),
+                    child: Text('WORST HAZARD: $overallRisk',
+                      style: TextStyle(color: riskColor, fontSize: 9,
+                          fontWeight: FontWeight.w700))),
+              ]),
+              // The verify count is stated separately and never added into the
+              // hazard count: "0 hazards" under a photo the AI plainly had
+              // something to say about reads as a failure, and "3 hazards" would
+              // be the false claim this whole feature exists to prevent.
+              Text('${hazards.length} hazards'
+                  '${_verifyOnSiteItems().isEmpty ? '' : ' · ${_verifyOnSiteItems().length} to verify'}'
+                  ' · $confidence% confidence',
+                style: TextStyle(color: sl.text3, fontSize: 10)),
+              if (validation != null) _validationStrip(validation, sl),
+              if (hasBbox)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('Tap boxes on image → jumps to row',
+                    style: TextStyle(color: sl.accentText,
+                        fontSize: 9, fontStyle: FontStyle.italic))),
+            ])),
+          ]),
+
+          const SizedBox(height: 12),
+          Container(height: 1, color: matrixColor.withOpacity(0.25)),
+          const SizedBox(height: 10),
+
+          // The two axes, editable. Severity is pre-filled from the report;
+          // likelihood is a proxy derived from the model's confidence and says
+          // so until the officer moves it, because a photograph cannot show how
+          // often anyone is exposed.
+          Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Expanded(child: _matrixAxisPicker(
+              label: 'Likelihood',
+              value: _matrixLikelihood,
+              words: _kLikelihoodWords,
+              estimated: _matrixIsEstimate,
+              sl: sl,
+              onChanged: (v) => setState(() => _likelihoodOverride = v))),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text('×', style: TextStyle(
+                color: sl.text3, fontSize: 16, fontWeight: FontWeight.w700))),
+            Expanded(child: _matrixAxisPicker(
+              label: 'Severity',
+              value: _matrixSeverityRating,
+              words: _kSeverityWords,
+              estimated: false,
+              sl: sl,
+              onChanged: (v) => setState(() => _severityRatingOverride = v))),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            matrixScore == 0
+                ? 'Set a likelihood and a severity to rate this scan.'
+                : _matrixIsEstimate
+                    ? 'Likelihood is estimated from AI confidence — confirm it '
+                        'against exposure on site. Use your approved plant risk '
+                        'matrix for the final rating.'
+                    : 'Use your approved plant risk matrix for the final rating.',
+            style: TextStyle(color: sl.accentText, fontSize: 10)),
         ])),
       // The photograph is a general view, so every severity above it was capped
       // and the report says so before anyone acts on a number. Placed directly

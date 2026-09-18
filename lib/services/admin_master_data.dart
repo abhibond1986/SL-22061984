@@ -1527,6 +1527,144 @@ class AdminMasterData {
     return (base + bump).clamp(0, 100);
   }
 
+  // ── 5×5 RISK MATRIX (likelihood × severity) ──────────────────────
+  //
+  // A SECOND, SEPARATE SCALE. Everything above this comment is the 0–100
+  // scale ([severityBands], [scoreFromMap], [combinedScore]); everything below
+  // is the 1–25 matrix. They are NOT interchangeable and no value may be passed
+  // from one set of functions to the other — mixing the two is precisely the
+  // defect that printed "RISK: CRITICAL" above "23 / 100" (see
+  // [scoreForDisplay]). The two scales are bridged in exactly one place,
+  // [severityRating], which converts a LABEL (not a score) into a 1–5 rating.
+  //
+  // The matrix is what a safety officer is trained on and what SAIL's plant
+  // risk registers use: likelihood × severity, read off an approved matrix.
+  // The 0–100 score is retained for stored rows, plant averages and admin KPIs,
+  // because those have history on that scale.
+
+  /// Lowest and highest product the matrix can produce (1×1 … 5×5).
+  static const int kMatrixMin = 1;
+  static const int kMatrixMax = 25;
+
+  /// The band each 1–25 matrix product falls in.
+  ///
+  /// Inclusive, worst-first, abutting with no gaps, same contract as
+  /// [severityBands]: every score maps to exactly one label, so the number and
+  /// the word beside it can never disagree. This is the conventional 5×5
+  /// banding (a 2×2 = 4 is LOW, which is what the design this was taken from
+  /// shows). Not admin-editable, and not a tuning knob.
+  static const Map<String, ({int min, int max})> matrixBands = {
+    'CRITICAL': (min: 16, max: 25),
+    'HIGH': (min: 10, max: 15),
+    'MEDIUM': (min: 5, max: 9),
+    'LOW': (min: 1, max: 4),
+  };
+
+  /// The band label for a 1–25 matrix product. `''` for 0 (no assessment).
+  ///
+  /// Derived FROM the number, never supplied alongside it, so the chip on the
+  /// card is the number's own band by construction. There is no
+  /// `matrixScoreForDisplay` clamp for the same reason: nothing here can drift
+  /// onto a different scale, because the product is recomputed from two 1–5
+  /// pickers on every build.
+  static String matrixBandFor(int score) {
+    if (score <= 0) return '';
+    for (final e in matrixBands.entries) {
+      if (score >= e.value.min && score <= e.value.max) return e.key;
+    }
+    return score > kMatrixMax ? 'CRITICAL' : 'LOW';
+  }
+
+  /// A severity LABEL as a 1–5 matrix rating.
+  ///
+  /// The one bridge between the two scales, and it deliberately crosses via the
+  /// label's 0–100 band rather than by dividing its score by five. A renamed or
+  /// re-weighted admin level therefore still rates correctly: the label is
+  /// scored through [scoreFromMap] exactly as everywhere else, and the band that
+  /// score falls in decides the rating.
+  ///
+  /// Returns **0** for a non-assessment ([_kNoAssessmentLabels], blank) so an
+  /// unanalysed photo cannot acquire a rating — same rule, same reason, as
+  /// [scoreFromMap] returning 0 for those labels. Callers must treat 0 as "no
+  /// rating", not as "lowest rating".
+  ///
+  /// Rating 1 is intentionally unreachable from a label: the app's four
+  /// canonical levels start at LOW, and LOW is a real hazard worth 2. 1 means
+  /// "negligible", which no label in the scale asserts — it is reachable only
+  /// when a user picks it by hand.
+  static const Map<String, int> _kBandRatings = {
+    'CRITICAL': 5,
+    'HIGH': 4,
+    'MEDIUM': 3,
+    'LOW': 2,
+  };
+
+  static int severityRating(Map<String, int> scores, String label) {
+    final key = label.trim().toUpperCase();
+    if (key.isEmpty || _kNoAssessmentLabels.contains(key)) return 0;
+    // Exact canonical label first — avoids a round trip through the scale for
+    // the overwhelmingly common case, and is immune to a broken stored map.
+    final direct = _kBandRatings[key];
+    if (direct != null) return direct;
+    final score = scoreFromMap(scores, key);
+    if (score <= 0) return 0;
+    for (final e in severityBands.entries) {
+      if (score >= e.value.min && score <= e.value.max) {
+        return _kBandRatings[e.key] ?? 3;
+      }
+    }
+    return score > 100 ? 5 : 2;
+  }
+
+  /// Likelihood 1–5 ESTIMATED from the model's confidence percentage.
+  ///
+  /// ⚠️ READ THIS BEFORE TRUSTING THE NUMBER. Confidence answers "how sure is
+  /// the model that this hazard is present in the photograph". Likelihood asks
+  /// "how probable is it that this hazard causes harm". They are different
+  /// quantities, and a photograph cannot answer the second one — exposure
+  /// frequency, duration and existing controls are not visible in a frame.
+  ///
+  /// So this is a PROXY, chosen deliberately over the alternatives (asking the
+  /// vision model for a likelihood it also cannot see, or leaving the field
+  /// blank). It exists to give the officer a starting position, which is why
+  /// every caller must keep the likelihood picker EDITABLE and must present the
+  /// derived value as an estimate. A derived likelihood that is printed as an
+  /// assessed one is a safety document asserting something nothing measured.
+  ///
+  /// The mapping is anchored so mid-range confidence lands mid-range on the
+  /// matrix rather than skewing high. Retune here and nowhere else.
+  static int likelihoodFromConfidence(dynamic confidence) {
+    // `num.tryParse(...)?.round()`, NOT `int.tryParse`. A model that writes
+    // `"confidence": 90.0` produces a double from `jsonDecode`, `int.tryParse`
+    // returns null on "90.0", and the whole card would then silently read
+    // NOT RATED on a report the model was 90% sure of. Silent, because 0 is a
+    // legitimate value here — it means "nothing reported a confidence" — so
+    // nothing downstream could tell a parse failure from an honest absence.
+    final c = (confidence is num
+            ? confidence.round()
+            : num.tryParse('$confidence'.replaceAll('%', '').trim())?.round() ??
+                0)
+        .clamp(0, 100);
+    if (c <= 0) return 0; // no confidence reported → no derived likelihood
+    if (c < 40) return 1;
+    if (c < 60) return 2;
+    if (c < 80) return 3;
+    if (c < 95) return 4;
+    return 5;
+  }
+
+  /// The matrix product. 0 when either axis is unrated, never a guess.
+  ///
+  /// Returning 0 rather than substituting a default for a missing axis is the
+  /// [scoreFromMap] non-assessment rule again: a photo nothing assessed must
+  /// render as nothing, not as a reassuringly low number.
+  static int matrixScore(int likelihood, int severity) {
+    if (likelihood <= 0 || severity <= 0) return 0;
+    final l = likelihood.clamp(1, 5);
+    final s = severity.clamp(1, 5);
+    return (l * s).clamp(kMatrixMin, kMatrixMax);
+  }
+
   // ── RESET to defaults ────────────────────────────────────────────
   /// Clears local overrides AND pushes the defaults to the backend, so a
   /// reset is not silently undone by the next startup pull.

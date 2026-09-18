@@ -88,6 +88,58 @@ class PdfExport {
     final riskScore  =
         AdminMasterData.scoreForDisplay(severity, incident['riskScore'] ?? 0);
     final confidence = incident['confidence'] ?? 0;
+    // ── The 1–25 initial risk estimate, when the row carries one ────────────
+    //
+    // Read from the stored L and S and MULTIPLIED HERE rather than trusting a
+    // stored `matrixScore`, so the printed product always agrees with the two
+    // factors printed beside it — a stored total and stored factors can drift
+    // apart, and on paper there is no way to tell which one is wrong.
+    //
+    // Absent on every row filed before this feature, and on near-miss rows, so
+    // it is strictly additive: `matrixScore == 0` keeps the old 0–100 block
+    // exactly as it was. A legacy report must not silently re-render on a scale
+    // it was never filed against.
+    // `num.tryParse(...)?.round()`, not `int.tryParse`: Apps Script hands back
+    // "4.0" for an integer cell, which `int.tryParse` rejects.
+    int axis(dynamic v) => num.tryParse('${v ?? 0}')?.round() ?? 0;
+    var mL = axis(incident['matrixLikelihood']);
+    var mS = axis(incident['matrixSeverity']);
+    // String-tolerant: the field is a bool in the local row but comes back from
+    // Apps Script as the text "true", and `== true` on a String is silently
+    // false — which would drop the "(est.)" qualifier from every synced report
+    // while keeping it on every local one.
+    final rawEst = incident['matrixLikelihoodEstimated'];
+    var matrixEstimated =
+        rawEst == true || rawEst.toString().toLowerCase() == 'true';
+
+    // ★ RE-DERIVE THE MATRIX WHEN THE ROW DOES NOT CARRY IT.
+    //
+    // The matrix fields are written by the scan screen but they do NOT survive a
+    // server round-trip: `SupabaseService._appToDb` is an allow-list with no
+    // `matrix*` entries, and `_toRow`/`_fromRow` silently drop unmapped keys. So
+    // the same incident would export "12 / 25" on the device that filed it and
+    // "45 / 100" on every other device — the cross-device class of defect this
+    // repo has been bitten by before, and worse here because both numbers look
+    // plausible.
+    //
+    // Rather than add columns, re-derive from the two fields that DO sync:
+    // `severity` gives the severity rating and `confidence` gives the estimated
+    // likelihood, which is exactly how the screen produced the defaults in the
+    // first place. The result is therefore identical to the filing device's
+    // unless the officer hand-picked an axis — and that case is marked, because
+    // a re-derived likelihood is by definition an estimate and says so.
+    //
+    // Gated on `isAiScan`: a near-miss row has a real 0–100 score of its own and
+    // must keep printing it, not acquire a matrix it was never rated on.
+    if (isAiScan && AdminMasterData.matrixScore(mL, mS) == 0) {
+      final scores = await AdminMasterData.getSeverityScores();
+      if (mS == 0) mS = AdminMasterData.severityRating(scores, severity);
+      if (mL == 0) {
+        mL = AdminMasterData.likelihoodFromConfidence(confidence);
+        if (mL > 0) matrixEstimated = true;
+      }
+    }
+    final matrixScore = AdminMasterData.matrixScore(mL, mS);
 
     pdf.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
@@ -121,7 +173,11 @@ class PdfExport {
           w.add(pw.SizedBox(height: 3));
           w.add(_photoAndSummary(imgBytes, hazards.length, summary,
               severity, riskScore, confidence, hazards,
-              verifyCount: _verifyOnSiteCount(incident)));
+              verifyCount: _verifyOnSiteCount(incident),
+              matrixL: mL, matrixS: mS,
+              matrixScore: matrixScore,
+              matrixEstimated: matrixEstimated,
+              matrixApplies: isAiScan));
           w.add(pw.SizedBox(height: 7));
         } else {
           w.add(_sectionTitle('INCIDENT SUMMARY'));
@@ -558,11 +614,31 @@ class PdfExport {
   /// separate is the point of the whole feature — never fold it into [count].
   static pw.Widget _photoAndSummary(Uint8List img, int count, String summary,
       String severity, dynamic score, dynamic conf,
-      List<Map<String, dynamic>> hazards, {int verifyCount = 0}) {
+      List<Map<String, dynamic>> hazards, {int verifyCount = 0,
+      int matrixL = 0, int matrixS = 0, int matrixScore = 0,
+      bool matrixEstimated = false, bool matrixApplies = false}) {
     final sc = _getSevCol(severity);
     final sb = _getSevBg(severity);
     final s  = (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
-    final c  = (conf is int ? conf : int.tryParse('$conf') ?? 0).clamp(0, 100);
+    // Parsed exactly like AdminMasterData.likelihoodFromConfidence, and it has
+    // to stay that way: this prints the confidence, that derives the likelihood
+    // FROM the confidence, and both read the same field. With `int.tryParse`
+    // here a JSON `90.0` printed "0% Confidence" beside "L4 × S3 (L est.)" —
+    // the derived likelihood contradicting the number it was derived from.
+    final c  = (conf is num
+            ? conf.round()
+            : num.tryParse('$conf'.replaceAll('%', '').trim())?.round() ?? 0)
+        .clamp(0, 100);
+    // The headline number takes ITS OWN band's colour. `sc` is the severity
+    // colour and stays on the "RISK: <severity>" line beside it; a matrix score
+    // of 12 (HIGH) printed in the teal of a MEDIUM worst-hazard would be the
+    // same self-contradiction in ink instead of in text.
+    final scNum = matrixApplies
+        ? (matrixScore > 0
+            ? _getSevCol(AdminMasterData.matrixBandFor(matrixScore))
+            // Unrated: grey. A severity colour on a dash would imply a rating.
+            : _textMed)
+        : sc;
 
     const photoH = 132.0; // 185 -> 148 -> 132 toward the one-page target
 
@@ -698,11 +774,39 @@ class PdfExport {
                   pw.Row(children: [
                     pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
                       children: [
-                        pw.Text('$s / 100', style: pw.TextStyle(
+                        // An AI scan prints the 1–25 matrix figure; a near-miss
+                        // row keeps its own 0–100 score. The two factors are
+                        // printed under the number: a reader who disagrees with
+                        // the rating needs to see WHICH axis to argue about, and
+                        // "(est.)" is the only signal that the likelihood was
+                        // inferred from AI confidence rather than assessed by
+                        // the officer who signed the report.
+                        //
+                        // An unrated AI scan prints "— / 25", NOT the 0–100
+                        // score. Falling back to `$s / 100` there was a real
+                        // defect: the screen said NOT RATED while the exported
+                        // PDF of the same scan asserted "70 / 100", so a photo
+                        // nobody had rated acquired a score on paper — the
+                        // fabricated-number class again.
+                        pw.Text(!matrixApplies
+                            ? '$s / 100'
+                            : matrixScore > 0
+                                ? '$matrixScore / 25'
+                                // ASCII hyphen, NOT an em dash. The bundled
+                                // Helvetica is Latin-1 only (see _safe), so
+                                // U+2014 would print as an empty rectangle —
+                                // and this is the largest figure on page 1.
+                                : '-  / 25', style: pw.TextStyle(
                           fontSize: 18, fontWeight: pw.FontWeight.bold,
-                          color: sc)),
-                        pw.Text('Risk Score', style: pw.TextStyle(
-                          fontSize: 6.5, color: _textLight)),
+                          color: scNum)),
+                        pw.Text(!matrixApplies
+                            ? 'Risk Score'
+                            : matrixScore > 0
+                                ? 'Risk Score  ·  L$matrixL × S$matrixS'
+                                    '${matrixEstimated ? '  (L est.)' : ''}'
+                                : 'Risk Score  ·  not rated',
+                          style: pw.TextStyle(
+                            fontSize: 6.5, color: _textLight)),
                       ]),
                     pw.SizedBox(width: 12),
                     pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
