@@ -312,10 +312,12 @@ class _ChatTabState extends State<ChatTab> {
     String? answer;
     List<Map<String, dynamic>>? sources;
 
-    // ★ Filter to clean results for source citations
+    // ★ Filter to clean results for source citations. `_isReadableSnippet`, not
+    // `_isReadableText` — see that method's doc: the ingestion gate silently
+    // dropped any SOP whose best sentence contained a word like "CORRECTIVE".
     final cleanResults = kbResults.where((r) {
       final snippet = r['snippet']?.toString() ?? '';
-      return _isReadableText(snippet) && snippet.trim().length > 30;
+      return _isReadableSnippet(snippet) && snippet.trim().length > 30;
     }).toList();
     if (cleanResults.isNotEmpty) sources = cleanResults;
 
@@ -364,7 +366,7 @@ class _ChatTabState extends State<ChatTab> {
       if (kbResults.isNotEmpty) {
         final cleanKb = kbResults.where((r) {
           final s = r['snippet']?.toString() ?? '';
-          return _isReadableText(s) && s.length > 30;
+          return _isReadableSnippet(s) && s.length > 30;
         }).take(5).toList();
         if (cleanKb.isNotEmpty) {
           // Built by KnowledgeService so admin uploads and unverified user
@@ -410,7 +412,7 @@ class _ChatTabState extends State<ChatTab> {
       if (kbResults.isNotEmpty) {
         final cleanKb = kbResults.where((r) {
           final s = r['snippet']?.toString() ?? '';
-          return _isReadableText(s) && s.length > 30;
+          return _isReadableSnippet(s) && s.length > 30;
         }).take(5).toList();
         if (cleanKb.isNotEmpty) {
           // Same trust-tiered block as the Groq path. The two providers must not
@@ -454,7 +456,7 @@ class _ChatTabState extends State<ChatTab> {
     if (kbResults.isNotEmpty) {
       final cleanResults = kbResults.where((r) {
         final snippet = r['snippet']?.toString() ?? '';
-        return _isReadableText(snippet) && snippet.trim().length > 30;
+        return _isReadableSnippet(snippet) && snippet.trim().length > 30;
       }).toList();
 
       if (cleanResults.isNotEmpty) {
@@ -530,6 +532,62 @@ class _ChatTabState extends State<ChatTab> {
     final avgLen = words.fold(0, (s, w) => s + w.length) / words.length;
     if (avgLen > 25) return false;
     if (RegExp(r'[A-Z]{8,}').hasMatch(text)) return false;
+    return true;
+  }
+
+  /// Readability gate for a snippet that came back from KB *retrieval*, as
+  /// opposed to one that arrived from *file ingestion*.
+  ///
+  /// These are two different jobs and conflating them cost us the whole
+  /// feature. `_isReadableText` is an ingestion heuristic: it decides whether a
+  /// blob of bytes we just scraped out of a PDF is prose or font tables, and its
+  /// `[A-Z]{8,}` rule is there because `FONTDESCRIPTOR` and `WINANSIENCODING`
+  /// are long caps runs. Applied to a retrieved snippet, that same rule rejects
+  /// `CORRECTIVE`, `PROCEDURE`, `MANDATORY`, `PRECAUTIONS`, `ELECTRICAL`,
+  /// `REQUIREMENTS` — which is the native register of a steel-plant SOP heading.
+  /// Measured against the seeded KB: 44 of 49 documents contain an 8+ caps run,
+  /// and because `LocalDB.searchKnowledge` returns the *keyword-densest*
+  /// sentence, the sentence it picks is disproportionately the
+  /// `CORRECTIVE ACTION:` / `CRITICAL:` line — so the real drop rate on
+  /// retrieved snippets was far worse than the 13% of sentences that match.
+  /// Every dropped result vanished from the prompt AND from the on-screen
+  /// "Sources" list with no message, which is why the admin's uploaded document
+  /// appeared to never reach Ask AI.
+  ///
+  /// Retrieved snippets do not need the binary check at all: the content was
+  /// already validated at upload time (`admin_screen.dart`, which refuses to
+  /// save a document whose extraction yielded nothing). What is still worth
+  /// catching is a genuinely broken row — one stored before that validation
+  /// existed. So the markers and the control-character ratio stay, and the caps
+  /// rule is replaced by a *token*-level test: a caps run only counts as noise
+  /// when it sits in a token that also carries digits or slashes
+  /// (`FONTFILE2`, `/TYPE/FONT`), and even then only when such tokens dominate.
+  /// `SECTION 7 CORRECTIVE ACTION` passes; a page of font tables does not.
+  bool _isReadableSnippet(String text) {
+    if (text.trim().length < 20) return false;
+    final lower = text.toLowerCase();
+    const pdfMarkers = ['endobj','lendstream','fontdescriptor','winansienco',
+        'firstchar','lastchar','basefont','subtype truetype','fontname','capheight',
+        'avgwidth','stemv','fontbbox','fontfile2','extgstate','/type /font','endstream'];
+    for (final m in pdfMarkers) { if (lower.contains(m)) return false; }
+    int badChars = 0;
+    final sample = text.length > 300 ? text.substring(0, 300) : text;
+    for (int i = 0; i < sample.length; i++) {
+      final c = sample.codeUnitAt(i);
+      if (c < 9 || (c > 13 && c < 32) || c == 127) badChars++;
+    }
+    if (badChars / sample.length > 0.15) return false;
+    final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    if (words.isEmpty) return false;
+    final avgLen = words.fold(0, (s, w) => s + w.length) / words.length;
+    if (avgLen > 25) return false;
+    // Noise tokens: a long caps run fused with digits or a slash. Requires a
+    // third of the snippet to look like that before rejecting, so a document
+    // that merely cites "IS 14489" or "SOP-BF-014" is never mistaken for one.
+    final noise = RegExp(r'^[/A-Z]*[A-Z]{8,}[/A-Z0-9]*$');
+    final noisy = words.where((w) => noise.hasMatch(w) &&
+        RegExp(r'[0-9/]').hasMatch(w)).length;
+    if (noisy > 2 && noisy / words.length > 0.33) return false;
     return true;
   }
 

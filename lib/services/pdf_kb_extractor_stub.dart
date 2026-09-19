@@ -9,7 +9,20 @@
 import 'dart:typed_data';
 
 class PdfKbExtractor {
+  /// False on mobile. Callers MUST check this before offering a PDF picker or
+  /// before interpreting an empty [extractTextFromPdf] result.
+  ///
+  /// Without it, `admin_screen`'s Knowledge Base upload read the unconditional
+  /// `''` below as "extraction ran and found nothing" and told the admin
+  /// *"No text found in document. It may be image-based."* — a wrong diagnosis
+  /// that sent them off to re-scan a perfectly good text PDF, on every Android
+  /// upload. DOCX was unaffected, which made it look like a per-file problem
+  /// rather than a per-platform one.
+  static bool get isSupported => false;
+
   /// Always returns empty string on mobile — no pdf.js available.
+  /// Check [isSupported] first; an empty result here does NOT mean the PDF is
+  /// image-based.
   static Future<String> extractTextFromPdf(Uint8List pdfBytes) async {
     return '';
   }

@@ -7,7 +7,7 @@
 
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import '../main.dart' show AppColors, SL;
+import '../main.dart' show AppColors, SL, SLRadius, SLSpace, SLText;
 import '../services/i18n.dart';
 import '../services/sync_service.dart';
 import '../services/local_db.dart';
@@ -549,8 +549,11 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
             GestureDetector(
               onTap: _showProfileMenu,
               child: Container(
-                margin: const EdgeInsets.only(left: 4),
-                width: 34, height: 34,
+                // 36, matching the language pill and both IconButtons, so the
+                // four trailing controls form one row of equal boxes instead of
+                // a 30/36/36/34 stagger.
+                margin: const EdgeInsets.only(left: SLSpace.xs),
+                width: 36, height: 36,
                 decoration: const BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: LinearGradient(
@@ -581,19 +584,34 @@ class _IconBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sl = SL.of(context);
+    // Two fixes here, both visible in the header row:
+    //
+    // 1. HEIGHT. This pill was 30px tall and sat between a 36px IconButton and
+    //    a 34px avatar, so three controls on one baseline read as three
+    //    unrelated widgets. It is now 36 — the same box as its neighbours and
+    //    the SLSpace.tapTarget-adjacent size the rest of the app uses.
+    //
+    // 2. FOREGROUND COLOUR. The icon and the label were painted in the bare
+    //    `color` (AppColors.amber) over a 10%-opacity tint of the same hue on
+    //    the header's own gradient. Bare AppColors.amber is a FILL token and
+    //    must never be a foreground — on the light theme amber-on-pale-indigo
+    //    is well under 3:1. `sl.textOn(color)` is the paired ink for a tinted
+    //    chip and is what every other pill in the app already uses.
+    final ink = sl.textOn(color);
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        height: 30, padding: const EdgeInsets.symmetric(horizontal: 8),
+        height: 36, padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.withOpacity(0.3))),
+          color: color.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(SLRadius.pill),
+          border: Border.all(color: color.withOpacity(0.35))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 12),
-          const SizedBox(width: 4),
+          Icon(icon, color: ink, size: 14),
+          const SizedBox(width: SLSpace.xs),
           Text(label,
-              style: TextStyle(color: color, fontSize: 10,
+              style: TextStyle(color: ink, fontSize: SLText.minBadge,
                   fontWeight: FontWeight.w700)),
         ]),
       ),

@@ -345,9 +345,14 @@ COMMON STEEL PLANT HAZARDS:
       if (scanSources.contains(source)) {
         scannedCount++;
         if (doc['verified'] != true) unverifiedScans++;
-      } else if (source == 'uploaded' ||
-          source == 'pdf_upload' ||
-          source == 'docx_upload') {
+      } else if (LocalDB.isPlantDoc(doc)) {
+        // Was a hand-maintained list of three source tags that omitted
+        // `manual_entry`, so every entry an admin typed by hand fell through to
+        // the `else` and was reported as "Pre-loaded". An admin adding knowledge
+        // and watching the Uploaded count stay still is a large part of why this
+        // looked broken. `LocalDB.isPlantDoc` is now the single definition,
+        // shared with the retrieval ranking so the dashboard and the AI agree
+        // about which documents belong to this plant.
         uploadedCount++;
       } else {
         seededCount++;

@@ -8572,6 +8572,17 @@ class _AdminScreenState extends State<AdminScreen>
       String extractedText = '';
 
       if (type == 'pdf') {
+        // PDF text extraction runs through pdf.js and is therefore WEB-ONLY —
+        // `pdf_kb_extractor_stub.dart` returns '' unconditionally on Android and
+        // iOS. Checked up front so the admin gets the real reason and a route
+        // that works, instead of the "may be image-based" message below, which
+        // is a wrong diagnosis of a perfectly good text PDF.
+        if (!PdfKbExtractor.isSupported) {
+          setState(() { _kbUploading = false; });
+          _toast('PDF upload works in the web app only. On mobile, use '
+              'Upload DOCX or Add Text Entry instead.', AppColors.amber);
+          return;
+        }
         // Extract text from PDF
         try {
           extractedText = await PdfKbExtractor.extractTextFromPdf(bytes);
@@ -8635,8 +8646,24 @@ class _AdminScreenState extends State<AdminScreen>
       // KB — against a plain insert, so every upload duplicated every existing
       // row on the server.
       SyncService.pushNewKbDocs(newIds).then((n) {
-        if (n > 0 && mounted) {
+        if (!mounted) return;
+        if (n >= newIds.length) {
           _toast('KB synced to cloud ✓ ($n sections)', const Color(0xFF1565C0));
+        } else {
+          // A failure used to produce NO message at all — this branch only
+          // toasted on success. That silence is what made the KB look wired when
+          // it was not: the admin saw "Uploaded ✓", assumed the cloud had it,
+          // and the document stayed on one device. The push error is recorded in
+          // SupabaseService.knowledgeLastError and was never read by any UI.
+          final err = SupabaseService.knowledgeLastError;
+          _toast(
+            n == 0
+                ? 'Saved on this device, but NOT synced to cloud'
+                  '${err == null || err.isEmpty ? '' : ' — $err'}'
+                  '. Other devices will not see it yet; it will retry on next sync.'
+                : 'Partly synced: $n of ${newIds.length} sections reached the '
+                  'cloud. The rest will retry on next sync.',
+            AppColors.amber);
         }
       });
     } catch (e) {
@@ -8686,14 +8713,33 @@ class _AdminScreenState extends State<AdminScreen>
   List<String> _chunkTextForKb(String text, String fileName) {
     const chunkSize = 2500; // ~625 tokens per chunk — manageable for context
     final chunks = <String>[];
-    final cleanText = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    // Collapse runs of spaces and tabs, and collapse blank lines, but KEEP one
+    // newline. This used to be `\s+` → ' ', which flattened the whole document
+    // into a single line. A bulleted or tabular SOP has no full stops, so the
+    // result was one enormous unsplittable "sentence": retrieval could not
+    // isolate the relevant item and `LocalDB._bestWindow` had nothing to anchor
+    // on, so the snippet was whatever happened to sit at the top of the chunk.
+    // Newlines also give the model the list structure back, which it needs to
+    // tell one requirement from the next.
+    final cleanText = text
+        .replaceAll(RegExp(r'[ \t]+'), ' ')
+        .replaceAll(RegExp(r'\n[ \t]*'), '\n')
+        .replaceAll(RegExp(r'\n{2,}'), '\n')
+        .trim();
     int start = 0;
     while (start < cleanText.length) {
       int end = (start + chunkSize).clamp(0, cleanText.length);
-      // Try to break at sentence boundary
+      // Try to break at a sentence boundary, or failing that a line boundary —
+      // the line break matters for exactly the list-shaped documents above,
+      // which would otherwise always be cut mid-item.
       if (end < cleanText.length) {
         final sentEnd = cleanText.lastIndexOf('.', end);
-        if (sentEnd > start + 500) end = sentEnd + 1;
+        final lineEnd = cleanText.lastIndexOf('\n', end);
+        if (sentEnd > start + 500) {
+          end = sentEnd + 1;
+        } else if (lineEnd > start + 500) {
+          end = lineEnd + 1;
+        }
       }
       final chunk = cleanText.substring(start, end).trim();
       if (chunk.length > 50) chunks.add(chunk); // Skip tiny fragments
@@ -8761,7 +8807,15 @@ class _AdminScreenState extends State<AdminScreen>
     final count = await LocalDB.seedKnowledgeBase(replace: false);
     final updatedDocs = await LocalDB.getKnowledgeDocs();
     setState(() => _kbDocs = updatedDocs);
-    _toast('Seeded $count default entries', const Color(0xFF7E57C2));
+    // Seeds are deduplicated by title now, so a second press legitimately adds
+    // nothing. Saying "Seeded 0 default entries" reads like a failure, so say
+    // what actually happened — otherwise the admin presses it again, and the
+    // old build really did duplicate all 49 entries each time.
+    _toast(
+        count == 0
+            ? 'Default entries are already loaded — nothing to add'
+            : 'Seeded $count default entries',
+        const Color(0xFF7E57C2));
     AdminAudit.log(action: 'kb_seed_defaults', actor: _currentActor,
         meta: {'count': count});
     // ★ v25: Push to cloud

@@ -1011,6 +1011,121 @@ class LocalDB {
     _bumpKb();
   }
 
+  /// Marks [ids] as present in the cloud. Called only after a push actually
+  /// succeeded, and it is what makes [mergeKnowledgeDocs] able to tell a doc
+  /// the admin deleted on another device from a doc whose upload never left
+  /// this one. Without the flag those two cases are indistinguishable and the
+  /// merge has to guess — see that method's doc.
+  static Future<int> markKnowledgeDocsSynced(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final want = ids.toSet();
+    // getKnowledgeDocs(), not _kbDocsParsed(): this method mutates the maps it
+    // gets back, and _kbDocsParsed hands out the live _kbCache entries.
+    final all  = await getKnowledgeDocs();
+    int n = 0;
+    for (final d in all) {
+      if (want.contains(d['id']?.toString()) && d['cloudSynced'] != true) {
+        d['cloudSynced'] = true;
+        n++;
+      }
+    }
+    if (n > 0) {
+      await _prefs.setString(_kKbDocs, jsonEncode(all));
+      _bumpKb();
+    }
+    return n;
+  }
+
+  /// Merges the server's knowledge base into the local one. Server wins for any
+  /// doc that exists on both sides; a doc that exists ONLY locally is kept if it
+  /// has never been confirmed pushed, and dropped if it has.
+  ///
+  /// This replaced a flat `replaceAllKnowledgeDocs(serverDocs)`, which was
+  /// destroying admin uploads. The sequence, which matches the reported
+  /// "I uploaded it, I saw it, now the AI doesn't know it" symptom exactly:
+  /// the admin uploads a document, it saves locally and is immediately
+  /// searchable; the cloud push fails (offline, a missing RLS policy, or a
+  /// Postgres error swallowed in `SupabaseService`); nothing is shown, because
+  /// the old call site only toasted on success; then `syncKnowledgeBase()` runs
+  /// unawaited on the next cold start and overwrites the local KB with the
+  /// server's copy — **deleting the admin's upload from their own device.**
+  ///
+  /// The `cloudSynced` flag is what keeps this a merge rather than a resurrection
+  /// machine. A naive union by id can never forget anything: a doc the admin
+  /// deletes on device A stays alive forever on device B, because "absent from
+  /// the server" reads the same as "not yet pushed". Keying on the flag makes
+  /// those two cases distinguishable — absent from the server AND previously
+  /// confirmed pushed means genuinely deleted, so it goes.
+  ///
+  /// Rows with no `id` are dropped: the narrow-select fallback in
+  /// `SupabaseService.fetchKnowledgeDocs` (used when `migration_sop_scan.sql`
+  /// has not been applied) returns `title, content, source` only, and writing
+  /// id-less rows to local storage silently breaks admin delete-by-id and
+  /// `knowledgeDocsByIds`, which is what `pushNewKbDocs` depends on.
+  ///
+  /// Returns the number of local-only docs preserved, so the caller can log it.
+  static Future<int> mergeKnowledgeDocs(
+      List<Map<String, dynamic>> serverDocs) async {
+    final server = <String, Map<String, dynamic>>{};
+    for (final d in serverDocs) {
+      final id = d['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      final row = Map<String, dynamic>.from(d);
+      // Anything the server returned is by definition in the cloud.
+      row['cloudSynced'] = true;
+      server[id] = row;
+    }
+    if (server.isEmpty) return 0;
+
+    // Copies, not the live _kbCache entries — the loop below writes `uploadedAt`
+    // onto rows it keeps.
+    final local = await getKnowledgeDocs();
+    final merged = <Map<String, dynamic>>[];
+    final seen   = <String>{};
+    int kept = 0;
+
+    // Local order first, so a device's existing list does not reshuffle on
+    // every launch.
+    for (final d in local) {
+      final id = d['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      if (server.containsKey(id)) {
+        final row = server[id]!;
+        // `uploadedAt` is written locally but is not in `SupabaseService`'s
+        // column map, so it never round-trips. Carry the local value forward
+        // rather than letting every doc lose its upload date on each sync.
+        if ((row['uploadedAt']?.toString().isEmpty ?? true) &&
+            (d['uploadedAt']?.toString().isNotEmpty ?? false)) {
+          row['uploadedAt'] = d['uploadedAt'];
+        }
+        merged.add(row);
+      } else if (d['cloudSynced'] != true) {
+        merged.add(d);
+        kept++;
+      }
+      // else: confirmed pushed, now gone from the server → deleted upstream.
+      seen.add(id);
+    }
+    // Docs this device has never seen.
+    for (final e in server.entries) {
+      if (!seen.contains(e.key)) merged.add(e.value);
+    }
+
+    await _prefs.setString(_kKbDocs, jsonEncode(merged));
+    _bumpKb();
+    return kept;
+  }
+
+  /// Docs saved locally that have not been confirmed pushed to the cloud.
+  /// Drives the retry backstop in `SyncService.fullSync` and the warning count
+  /// in the admin Knowledge Base module.
+  static Future<List<Map<String, dynamic>>> unsyncedKnowledgeDocs() async {
+    return _kbDocsParsed()
+        .where((d) => d['cloudSynced'] != true)
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  PLANT STATS
   // ═══════════════════════════════════════════════════════════════
@@ -1371,10 +1486,154 @@ class LocalDB {
   /// the clause. The filter lives HERE, not at the call sites, because there
   /// are already five callers (chat_tab, KnowledgeService ×2, near_miss_tab,
   /// gemini_vision) and a sixth would forget.
+  /// The passage of [content] most relevant to [terms], up to [maxChars].
+  ///
+  /// This used to return the single best-scoring SENTENCE, which starved every
+  /// consumer. A 2,500-char admin upload chunk contributed one sentence to a
+  /// prompt that then told the model those documents "ARE citable" and "TAKE
+  /// PRECEDENCE" — so even when retrieval worked, there was not enough material
+  /// for the model to visibly use it, and the answer looked like the knowledge
+  /// base had been ignored. That is a third, independent cause of the same
+  /// reported symptom, on top of the ranking and the caps-regex filter.
+  ///
+  /// Now it grows a window outward from the best sentence, alternating after and
+  /// before, while the budget lasts. Expanding after first is deliberate: in an
+  /// SOP the sentence that matches is usually the heading or the requirement, and
+  /// what follows it is the detail worth having.
+  ///
+  /// The sentence splitter needs the fallback below because
+  /// `_chunkTextForKb` collapses all whitespace at upload time, so a bulleted or
+  /// tabular SOP with no full stops arrives as one enormous "sentence". In that
+  /// case a head-slice is wrong — it returns the top of the chunk regardless of
+  /// the query — so we slice a window around the first match instead.
+  static String _bestWindow(String content, Set<String> terms, int maxChars) {
+    final text = content.trim();
+    if (text.isEmpty) return '';
+    if (text.length <= maxChars) return text;
+
+    final sentences = text.split(RegExp(r'(?<=[.!?])\s+'));
+
+    if (sentences.length == 1) {
+      // Unsentenced blob. Centre the window on the earliest matching term.
+      final lower = text.toLowerCase();
+      int at = -1;
+      for (final t in terms) {
+        final i = lower.indexOf(t);
+        if (i >= 0 && (at < 0 || i < at)) at = i;
+      }
+      if (at < 0) return '${text.substring(0, maxChars)}...';
+      var start = at - (maxChars ~/ 3);
+      if (start < 0) start = 0;
+      var end = start + maxChars;
+      if (end > text.length) { end = text.length; start = end - maxChars; }
+      final slice = text.substring(start, end).trim();
+      return '${start > 0 ? '...' : ''}$slice${end < text.length ? '...' : ''}';
+    }
+
+    int best = 0, bestScore = -1;
+    for (int i = 0; i < sentences.length; i++) {
+      final sl = sentences[i].toLowerCase();
+      int ss = 0;
+      for (final t in terms) { if (sl.contains(t)) ss++; }
+      if (ss > bestScore) { bestScore = ss; best = i; }
+    }
+
+    int lo = best, hi = best;
+    int used = sentences[best].length;
+    bool grewAfter = true;
+    while (used < maxChars) {
+      final canAfter  = hi + 1 < sentences.length;
+      final canBefore = lo - 1 >= 0;
+      if (!canAfter && !canBefore) break;
+      final takeAfter = grewAfter ? canAfter : !canBefore;
+      final next = takeAfter ? sentences[hi + 1] : sentences[lo - 1];
+      if (used + next.length + 1 > maxChars) break;
+      used += next.length + 1;
+      if (takeAfter) { hi++; } else { lo--; }
+      grewAfter = !grewAfter;
+    }
+
+    final window = sentences.sublist(lo, hi + 1).join(' ').trim();
+    if (window.isEmpty) return sentences[best].trim();
+    final prefix = lo > 0 ? '...' : '';
+    final suffix = hi < sentences.length - 1 ? '...' : '';
+    return '$prefix$window$suffix';
+  }
+
+  /// Sources written by the admin Knowledge Base module and the SOP scanner —
+  /// i.e. documents that describe THIS plant, as opposed to the 49 general
+  /// statutory entries in `KbSeedData`.
+  ///
+  /// `manual_entry` belongs here and was missing from the equivalent list in
+  /// `KnowledgeService.getKbStats`, so anything an admin typed by hand was
+  /// counted as "Pre-loaded" on the admin dashboard — under-reporting their own
+  /// additions and feeding the impression that the upload had not registered.
+  /// How much more a hit in a plant document is worth than the same hit in a
+  /// shipped seed entry. 3 was chosen to clear the measured gap (seed top score
+  /// 32, a realistic plant SOP chunk 8) without letting a barely-relevant plant
+  /// document displace a directly-relevant statutory one — at ×3 the SOP reaches
+  /// 24, which ranks it second rather than first.
+  static const double _kPlantProvenanceBoost = 3.0;
+
+  /// Above this length, fuzzy 1-char variants stop contributing to the score.
+  /// Seed entries run ~1,800 chars and admin upload chunks ~2,500, so this sits
+  /// deliberately below both: fuzzy matching earns its keep on short titles and
+  /// short entries, not on full pages.
+  static const int _kFuzzyMaxContentChars = 1200;
+
+  static const Set<String> plantSources = {
+    'uploaded', 'pdf_upload', 'docx_upload', 'manual_entry',
+    'sop_scan', 'sop_scan_raw',
+  };
+
+  /// True for a document that came from this plant rather than the shipped seed.
+  ///
+  /// Two signals, because neither alone is sufficient: seeded rows carry a
+  /// free-text statutory citation in `source` ("Factories Act 1948, Chapter IV,
+  /// Section 21"), so they cannot be matched by an allow-list of source tags;
+  /// but they DO all get an id prefixed `seed-` from [seedKnowledgeBase].
+  static bool isPlantDoc(Map<String, dynamic> doc) {
+    final id = doc['id']?.toString() ?? '';
+    if (id.startsWith('seed-')) return false;
+    return plantSources.contains(doc['source']?.toString() ?? '');
+  }
+
+  /// Relevance search over the knowledge base.
+  ///
+  /// ── WHY PROVENANCE IS PART OF THE SCORE ──────────────────────────────────
+  /// Scoring used to be raw keyword hit count, and that quietly broke the whole
+  /// feature. The AI Hazard Scan builds its query from the admin's WSA cause and
+  /// observation-type lists (`KnowledgeService.buildImageAnalysisQuery`), which
+  /// yields generic words — procedure, hazard, equipment, housekeeping,
+  /// isolation, loto, condition. The 49 shipped seed documents are long and
+  /// dense in exactly those words, so they always won. Measured by
+  /// reimplementing this scorer against the real seed data and a realistic
+  /// 2500-char plant SOP chunk: the seed top-6 cut-off was 16 and the SOP scored
+  /// 8 — rank 20 of 50, against `maxKbDocs: 6`. The admin's document never
+  /// reached the prompt at all, on every scan, which is precisely the reported
+  /// symptom. Worse, pressing "Seed Default KB" once pushes all 49 to the cloud
+  /// and they then propagate to every device.
+  ///
+  /// Two independent guards, because a multiplier alone can still be out-scored
+  /// by a long enough seed entry:
+  ///   1. [_kPlantProvenanceBoost] — plant documents are worth more per hit.
+  ///   2. Reserved slots — at least half the returned rows are plant documents
+  ///      when any plant document matched at all. This is the guarantee; the
+  ///      multiplier only decides WHICH plant documents win.
+  ///
+  /// Fuzzy-variant hits are also no longer counted for long documents: the
+  /// variants are 1-char misspellings, so their hit count grows with length and
+  /// contributes almost pure noise on a 2,500-char chunk while genuinely helping
+  /// a short query against a short title.
+  ///
+  /// [reserveForPlantDocs] can be set false by a caller that explicitly wants
+  /// pure relevance (e.g. an admin-facing KB search box, where the admin is
+  /// looking for whatever actually matches).
   static Future<List<Map<String, dynamic>>> searchKnowledge(
       String query, {
       int limit = 3,
       int snippetChars = 400,
+      bool reserveForPlantDocs = true,
       }) async {
     final all =
         _kbDocsParsed().where((d) => d['indexed'] != false).toList();
@@ -1423,38 +1682,32 @@ class LocalDB {
         if (contentLower.contains(phrase)) score += 10;
       }
 
-      // ★ Fuzzy matching: allow 1-char difference for words >= 4 chars
-      for (final word in q) {
-        if (word.length >= 4) {
-          final fuzzy = _fuzzyVariants(word);
-          for (final variant in fuzzy) {
-            score += variant.allMatches(contentLower).length;
+      // ★ Fuzzy matching: allow 1-char difference for words >= 4 chars.
+      // Skipped for long documents — see the method doc. A 1-char variant of a
+      // common word hits roughly in proportion to length, so on a 2,500-char
+      // chunk this term was adding noise, not recall.
+      if (content.length <= _kFuzzyMaxContentChars) {
+        for (final word in q) {
+          if (word.length >= 4) {
+            final fuzzy = _fuzzyVariants(word);
+            for (final variant in fuzzy) {
+              score += variant.allMatches(contentLower).length;
+            }
           }
         }
       }
 
+      // Provenance. Applied as a multiplier on the relevance score rather than a
+      // flat bonus, so it cannot promote a plant document that matched nothing.
+      final plantDoc = isPlantDoc(doc);
+      if (plantDoc) score = (score * _kPlantProvenanceBoost).round();
+
       if (score > 0) {
-        final sentences = content.split(RegExp(r'(?<=[.!?])\s+'));
-        String bestSnippet      = '';
-        int    bestSnippetScore = 0;
-        for (final s in sentences) {
-          final sl = s.toLowerCase();
-          int ss = 0;
-          for (final word in expanded) {
-            if (sl.contains(word)) ss++;
-          }
-          if (ss > bestSnippetScore) {
-            bestSnippetScore = ss;
-            bestSnippet      = s.trim();
-          }
-        }
-        if (bestSnippet.isEmpty) bestSnippet = content.trim();
+        final bestSnippet = _bestWindow(content, expanded, snippetChars);
         if (bestSnippet.isEmpty) continue;
         results.add({
           'title':   doc['title'],
-          'snippet': bestSnippet.length > snippetChars
-              ? '${bestSnippet.substring(0, snippetChars)}...'
-              : bestSnippet,
+          'snippet': bestSnippet,
           'score': score,
           // Provenance — lets callers cite a clause and mark unverified scans.
           // Kept nullable: ordinary uploaded/seeded docs have none of these.
@@ -1465,12 +1718,37 @@ class LocalDB {
           'docGroup':  doc['docGroup'],
           'pageFrom':  doc['pageFrom'],
           'verified':  doc['verified'] == true,
+          // Not for display — drives the reserved-slot pass below.
+          '_plantDoc': plantDoc,
         });
       }
     }
     results.sort(
         (a, b) => (b['score'] as int).compareTo(a['score'] as int));
-    return results.take(limit < 1 ? 1 : limit).toList();
+    final take = limit < 1 ? 1 : limit;
+    if (!reserveForPlantDocs || results.length <= take) {
+      return results.take(take).toList();
+    }
+
+    // Reserved slots. Half the slots (rounded up) are held for plant documents
+    // if that many matched; any slot not claimed falls back to pure relevance,
+    // so a KB with no plant documents at all behaves exactly as before.
+    final reserved = (take / 2).ceil();
+    final picked   = <Map<String, dynamic>>[];
+    final pickedIds = <int>{};
+    for (int i = 0; i < results.length && picked.length < reserved; i++) {
+      if (results[i]['_plantDoc'] == true) {
+        picked.add(results[i]);
+        pickedIds.add(i);
+      }
+    }
+    for (int i = 0; i < results.length && picked.length < take; i++) {
+      if (!pickedIds.contains(i)) picked.add(results[i]);
+    }
+    // Re-sort so the prompt still reads best-first; the reservation decided
+    // membership, not order.
+    picked.sort((a, b) => (b['score'] as int).compareTo(a['score'] as int));
+    return picked;
   }
 
   // ★ Safety synonym map for KB search expansion
@@ -1531,15 +1809,42 @@ class LocalDB {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  ✅ NEW: SEED KNOWLEDGE BASE
-  //  Wipes existing KB (if replace=true), loads 38 default entries
-  //  covering Factories Act 1948 + Chhattisgarh/Odisha/TN/Bihar rules.
-  //  Returns count of entries added.
+  //  SEED KNOWLEDGE BASE
+  //  Loads the default entries covering Factories Act 1948 +
+  //  Chhattisgarh/Odisha/TN/Bihar rules. Returns count of entries added.
+  //
+  //  TWO THINGS THIS USED TO DO, BOTH OF WHICH LOST OR BURIED UPLOADS
+  //
+  //  1. `replace` defaulted to TRUE and `replace: true` did
+  //     `_prefs.remove(_kKbDocs)` — it deleted the WHOLE key, so every PDF,
+  //     DOCX, scan and hand-typed entry the admin had ever added went with the
+  //     old seeds. The single live caller passes `replace: false`, so this never
+  //     fired in production; it was simply armed, and `seedKnowledgeBase()`
+  //     written without arguments by a future caller would have wiped the plant's
+  //     own library. Replacing now means "replace the SEED docs" — identified by
+  //     the `seed-` id prefix that `isPlantDoc` already relies on — and the
+  //     default is false.
+  //
+  //  2. `replace: false` appended all ~49 seeds again, with fresh ids, on every
+  //     press of the admin's "Load default knowledge" button. Nothing deduplicated
+  //     them. Two presses gave ~98 statutory documents competing with a handful of
+  //     uploads for six retrieval slots, which is one of the ways an upload that
+  //     WAS stored still never reached the model. Seeds are now matched by title
+  //     and skipped if already present.
   // ═══════════════════════════════════════════════════════════════
-  static Future<int> seedKnowledgeBase({bool replace = true}) async {
-    if (replace) {
-      await _prefs.remove(_kKbDocs);
-    }
+  static Future<int> seedKnowledgeBase({bool replace = false}) async {
+    // Read through the public accessor: it returns copies, so nothing here can
+    // mutate `_kbCache` behind the revision notifier's back.
+    final existing = await getKnowledgeDocs();
+    final kept = replace
+        ? existing
+            .where((d) => !(d['id']?.toString() ?? '').startsWith('seed-'))
+            .toList()
+        : existing;
+    final haveTitles = kept
+        .map((d) => (d['title']?.toString() ?? '').trim().toLowerCase())
+        .where((t) => t.isNotEmpty)
+        .toSet();
 
     final all      = <Map<String, dynamic>>[];
     final userName = (await getCurrentUser())?['name'] ?? 'system-seed';
@@ -1547,6 +1852,9 @@ class LocalDB {
 
     for (final entry in KbSeedData.entries) {
       try {
+        final title = (entry['title'] ?? 'Untitled').toString();
+        if (haveTitles.contains(title.trim().toLowerCase())) continue;
+        haveTitles.add(title.trim().toLowerCase());
         all.add({
           'id':         'seed-${DateTime.now().millisecondsSinceEpoch}-$added',
           'title':      entry['title']  ?? 'Untitled',
@@ -1561,11 +1869,10 @@ class LocalDB {
       }
     }
 
-    // If not replacing, merge with existing KB first
-    if (!replace) {
-      final existing = await getKnowledgeDocs();
-      all.insertAll(0, existing);
-    }
+    // Everything that survived the `replace` filter goes back in front of the
+    // new seeds — uploads keep their position, and in the `replace` case the
+    // plant's own documents are the ones that were never candidates for removal.
+    all.insertAll(0, kept);
 
     await _prefs.setString(_kKbDocs, jsonEncode(all));
     _bumpKb();

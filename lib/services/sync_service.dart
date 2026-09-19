@@ -334,11 +334,38 @@ class SyncService {
     final docs = await LocalDB.knowledgeDocsByIds(ids);
     if (docs.isEmpty) return 0;
     int ok = 0;
+    // Only the ids that actually landed. This list is what protects them from
+    // `LocalDB.mergeKnowledgeDocs`: a doc that is absent from the server and was
+    // never confirmed pushed is preserved on the next sync, whereas one that was
+    // confirmed pushed and has since vanished is treated as deleted upstream.
+    // Flagging the whole batch regardless of outcome would re-create the
+    // data-loss bug this replaced.
+    final pushed = <String>[];
     for (int i = 0; i < docs.length; i++) {
-      if (await pushKbDocs([docs[i]])) ok++;
+      if (await pushKbDocs([docs[i]])) {
+        ok++;
+        final id = docs[i]['id']?.toString() ?? '';
+        if (id.isNotEmpty) pushed.add(id);
+      }
       onProgress?.call(i + 1, docs.length);
     }
+    if (pushed.isNotEmpty) await LocalDB.markKnowledgeDocsSynced(pushed);
     return ok;
+  }
+
+  /// Retries KB docs that were saved locally but never confirmed pushed.
+  /// Mirrors the incident backstop in [fullSync]: without it, a doc whose upload
+  /// failed while offline is preserved locally but never reaches the cloud, so
+  /// it stays invisible to every other device indefinitely.
+  static Future<int> retryUnsyncedKbDocs() async {
+    final pending = await LocalDB.unsyncedKnowledgeDocs();
+    if (pending.isEmpty) return 0;
+    final ids = pending
+        .map((d) => d['id']?.toString() ?? '')
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (ids.isEmpty) return 0;
+    return pushNewKbDocs(ids);
   }
 
   /// ★ FIX: Delete a single KB doc from the cloud.
@@ -403,16 +430,24 @@ class SyncService {
           timeout: const Duration(seconds: 30));
       if (resp != null && resp.statusCode == 200) {
         final parsed = jsonDecode(resp.body);
-        if (parsed is Map && parsed['rows'] != null) {
-          return (parsed['rows'] as List)
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList();
-        }
-        // Alternate response format
-        if (parsed is Map && parsed['data'] != null) {
-          return (parsed['data'] as List)
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList();
+        // `items` FIRST, because that is the only key the server actually sends:
+        // the Apps Script `listKnowledge` handler goes through `listSheet`, which
+        // returns `{ ok, items, count }`. This function used to check `rows` and
+        // then `data` and fall through to `null`, so on the Apps Script backend
+        // it returned null unconditionally — which silently made
+        // syncKnowledgeBase, deleteKnowledgeDocCloud and clearKnowledgeBaseCloud
+        // all no-ops. A correct parser already existed in `fetchKnowledgeDocs`
+        // but had no callers: the right code was dead and the broken code live.
+        // Dormant today only because Supabase is enabled; it becomes the whole
+        // bug the moment anyone uses the documented rollback switch in
+        // SupabaseConfig. `rows`/`data` are kept as tolerated aliases.
+        for (final key in const ['items', 'rows', 'data']) {
+          if (parsed is Map && parsed[key] is List) {
+            return (parsed[key] as List)
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+          }
         }
       }
       return null;
@@ -421,14 +456,31 @@ class SyncService {
     }
   }
 
-  /// Sync KB: pull from server and merge into local (server wins).
-  /// Called on app startup and after admin uploads.
+  /// Sync KB: pull from server and merge into local (server wins per-doc).
+  /// Called unawaited on app startup and after admin uploads.
+  ///
+  /// This used to call `LocalDB.replaceAllKnowledgeDocs(serverDocs)` — "server
+  /// is source of truth" — which silently deleted any locally-saved document
+  /// whose cloud push had failed. Since the push failure itself was never
+  /// surfaced, the admin's own upload disappeared from their own device on the
+  /// next cold start with no message at either end. See
+  /// `LocalDB.mergeKnowledgeDocs` for how a local-only doc is now distinguished
+  /// from one deleted upstream.
+  ///
+  /// It also retries anything still unpushed, so a document added offline
+  /// eventually reaches the other devices instead of living on one phone.
   static Future<bool> syncKnowledgeBase() async {
     try {
       final serverDocs = await pullKbDocs();
-      if (serverDocs == null || serverDocs.isEmpty) return false;
-      // Server is source of truth — replace local KB with server version
-      await LocalDB.replaceAllKnowledgeDocs(serverDocs);
+      if (serverDocs == null || serverDocs.isEmpty) {
+        // No server copy is not a reason to touch local. Still worth draining
+        // the pending queue — this is the exact state a first-ever upload from
+        // an offline device is in.
+        await retryUnsyncedKbDocs();
+        return false;
+      }
+      await LocalDB.mergeKnowledgeDocs(serverDocs);
+      await retryUnsyncedKbDocs();
       return true;
     } catch (_) {
       return false;
@@ -820,32 +872,17 @@ class SyncService {
     }
   }
 
-  /// ★ v30: Sync knowledge docs from cloud. Now deduplicates — checks if a doc
-  /// with the same title already exists before adding. Previous version appended
-  /// blindly, creating duplicates on every sync cycle.
-  static Future<void> syncKnowledgeFromCloud() async {
-    final docs = await fetchKnowledgeDocs();
-    if (docs.isEmpty) return;
-
-    // ★ Build a set of existing titles to prevent duplicates
-    final existing = await LocalDB.getKnowledgeDocs();
-    final existingTitles = existing
-        .map((d) => (d['title']?.toString() ?? '').toLowerCase().trim())
-        .toSet();
-
-    int added = 0;
-    for (final doc in docs) {
-      final title = (doc['title']?.toString() ?? 'Untitled').trim();
-      if (existingTitles.contains(title.toLowerCase())) continue;
-      await LocalDB.addKnowledgeDoc(
-        title:   title,
-        content: doc['content']?.toString() ?? '',
-        source:  doc['source']?.toString()  ?? 'cloud',
-      );
-      existingTitles.add(title.toLowerCase());
-      added++;
-    }
-  }
+  // REMOVED 2026-09-19: `syncKnowledgeFromCloud()`. It was a second,
+  // title-deduplicating cloud→local KB importer with ZERO callers (grep-verified
+  // across lib/), while the live path — [syncKnowledgeBase] — was the one with
+  // the broken response parser. The right code was dead and the broken code was
+  // running, which is a trap worth not re-laying: two implementations of one
+  // sync means the next person fixes whichever they find first. [pullKbDocs] now
+  // reads `items` (the shape the server actually sends, and the only thing this
+  // function did better), and [LocalDB.mergeKnowledgeDocs] dedupes by id rather
+  // than by title — titles are not unique, since a 60-section upload produces
+  // "file.pdf — Section 1..60" and a re-upload of a corrected file would have
+  // been silently discarded here.
 
   static Future<List<Map<String, dynamic>>> fetchKnowledgeDocs() async {
     if (SupabaseConfig.enabled) {

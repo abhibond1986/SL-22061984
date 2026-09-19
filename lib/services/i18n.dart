@@ -138,7 +138,13 @@ class I18n extends ChangeNotifier {
     'home.topHazards'      : 'Top Hazards',
 
     'aiScan.title'         : 'AI Hazard Scan',
-    'aiScan.subtitle'      : 'Gemini Vision · IS 14489 · WSA 13 · Factories Act',
+    // Was 'Gemini Vision · IS 14489 · WSA 13 · Factories Act'. Four
+    // dot-separated tokens in an 11px line under the title is the densest text
+    // in the app and it told the reader nothing they could act on: the statutes
+    // are cited per hazard in the report itself, where they can be checked, and
+    // "Gemini Vision" names a vendor that the tier chain may not even have used
+    // for this photograph. The subtitle now says what the screen does.
+    'aiScan.subtitle'      : 'Photo-based hazard identification',
     'aiScan.capture'       : 'Capture',
     'aiScan.aiScan'        : 'AI Scan',
     'aiScan.review'        : 'Review',
@@ -317,7 +323,7 @@ class I18n extends ChangeNotifier {
     'home.topHazards'      : 'मुख्य खतरे',
 
     'aiScan.title'         : 'AI ख़तरा स्कैन',
-    'aiScan.subtitle'      : 'जेमिनी विज़न · IS 14489 · WSA 13',
+    'aiScan.subtitle'      : 'फ़ोटो से ख़तरे की पहचान',
     'aiScan.capture'       : 'फोटो',
     'aiScan.aiScan'        : 'AI स्कैन',
     'aiScan.review'        : 'समीक्षा',

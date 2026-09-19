@@ -74,13 +74,24 @@ class NearMissPrompt {
     // The knowledge bank is framed as authoritative. It used to be dumped in
     // unlabelled, which gave the model no reason to prefer this plant's own
     // uploaded standards over its general training.
+    // The header no longer claims the whole block was uploaded by the admin.
+    // `kbContext` arrives from `KnowledgeService.getContextForPrompt`, whose
+    // `includeExpertPrompt` defaults to TRUE — so the near-miss route was
+    // prefixing ~4.5 KB of the app's own built-in expert prompt and then
+    // labelling all of it "uploaded by this plant's safety admin —
+    // AUTHORITATIVE". That dilutes the signal the admin's real document is meant
+    // to carry: the model cannot tell which lines it is being told to follow over
+    // its own knowledge when 90% of the block is that knowledge restated.
+    // Retrieved documents carry their own per-document headers from
+    // `KnowledgeService.renderKbBlocks`, which is where the trust tier belongs.
     final kb = kbContext.trim();
     final kbBlock = kb.isEmpty
         ? ''
-        : "PLANT SAFETY KNOWLEDGE (uploaded by this plant's safety admin — "
-            'AUTHORITATIVE. Where it conflicts with your general knowledge, '
-            'follow it, and cite clause/section numbers exactly as written):\n'
-            '$kb\n\n';
+        : 'SAFETY REFERENCE MATERIAL (general guidance plus any documents '
+            "uploaded by this plant's safety admin, which are individually "
+            'labelled below and take precedence where they conflict with your '
+            'general knowledge — cite clause/section numbers exactly as '
+            'written):\n$kb\n\n';
 
     final categoryRule = obsTypes.isEmpty
         ? '"category": ""'

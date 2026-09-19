@@ -23,6 +23,11 @@ class PdfKbExtractor {
   // `sync_backend_url` override and could not carry the `_appSecret` the
   // `gemini` action now requires.
 
+  /// True here — pdf.js is available in a browser context. Mirrors the getter in
+  /// `pdf_kb_extractor_stub.dart`, which returns false; both halves of the
+  /// conditional export must expose it or the mobile build cannot ask.
+  static bool get isSupported => true;
+
   static const int _chunkSize = 3000;
   static bool _pdfJsLoaded = false;
 

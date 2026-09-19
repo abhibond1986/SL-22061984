@@ -41,6 +41,7 @@ import '../services/scan_jobs.dart';
 import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/content_width.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -2953,17 +2954,68 @@ class _AIScanTabState extends State<AIScanTab> {
           // 60px bar plus a gesture inset, clipping the last result card.
           padding: EdgeInsets.fromLTRB(
               14, 14, 14, BottomNavGap.height(context) + 16),
-          child: _analyzing
-              ? _analyzingView()
-              : _result != null
-                  ? _resultView(sl)
-                  : _emptyView(sl),
+          // Capped and centred, because this tab is used by safety officers on
+          // desktop browsers as well as on phones, and uncapped it stretched a
+          // phone layout across the full window — 500px-wide Likelihood and
+          // Severity dropdowns, the 73px risk matrix marooned in whitespace, and
+          // summary copy running past 130 characters a line. Wraps the CHILD, not
+          // the scroll view, so the scroll gesture stays full-bleed. Below
+          // SLLayout.content this is a no-op, so phones are unaffected.
+          child: ContentWidth(
+            child: _analyzing
+                ? _analyzingView()
+                : _result != null
+                    ? _resultView(sl)
+                    : _emptyView(sl),
+          ),
         )),
       ])));
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  //  TYPE FLOOR ON THE RESULTS PAGE
+  //
+  //  Everything from here to the end of the results helpers used literal font
+  //  sizes between 8 and 10.5, chosen one widget at a time: the hazard table's
+  //  three column headers were 9, the title above them 10, the body cells 10.5,
+  //  the severity pill 8, the validation strip 9. Eleven distinct sizes inside
+  //  one screen is not a hierarchy — it is noise, and the small end of it is
+  //  below what a reader can take in on a phone held at arm's length in a plant.
+  //
+  //  The scale is now the two existing tokens and nothing else:
+  //    SLText.minLabel (12) — section eyebrows, table headers, body cells
+  //    SLText.minBadge (11) — pills, counts, chips, per-hazard annotations
+  //  Anything tracked (letterSpacing set) is an eyebrow and takes minLabel.
+  //  Icons that sit inside a badge went from 8/9 to 12 so the glyph and its
+  //  label are the same optical weight.
+  //
+  //  If a row overflows after a text change, widen the row — do not reach for a
+  //  smaller size. That is exactly how the eleven sizes accumulated.
+  // ─────────────────────────────────────────────────────────────────
+
+  /// The one card shadow used by every card in the results column.
+  ///
+  /// It was inlined verbatim on some cards and simply absent on others, so the
+  /// SUMMARY card floated while the hazard-map card directly above it sat flat —
+  /// which reads as two different elevations for two things at the same level in
+  /// the hierarchy. Deliberately shallow: on a plant floor in daylight a heavy
+  /// drop shadow just muddies the card edge, and the 1px border is doing the real
+  /// separating work.
+  static BoxShadow _cardShadow(SL sl) => BoxShadow(
+      color: Colors.black.withOpacity(sl.isDark ? 0.15 : 0.04),
+      blurRadius: 6,
+      offset: const Offset(0, 2));
+
   Widget _emptyView(SL sl) {
-    final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;
+    // sl.surface, not a local 0xFF252840. Five copies of that literal lived in
+    // this file and it was a DIFFERENT dark surface from AppColors.darkCard that
+    // sl.surface returns, so adjacent cards in one scrolling column sat on two
+    // different greys. Moving to the token also measurably improves every
+    // foreground on these cards, because darkCard (0xFF171F2C) is darker than the
+    // literal was: text4 goes 4.15 -> 4.77:1, crossing the AA floor it was failing,
+    // and redBeacon/accentBeacon land on 5.98/5.55:1 — the exact figures their own
+    // comments in main.dart claim, since both were calibrated ON darkCard.
+    final cardBg = sl.surface;
     return Column(children: [
       GestureDetector(
         onTap: () => _pickImage(ImageSource.camera),
@@ -3092,7 +3144,7 @@ class _AIScanTabState extends State<AIScanTab> {
       borderRadius: BorderRadius.circular(99),
       border: Border.all(color: AppColors.accent.withOpacity(0.2))),
     child: Text(label, style: const TextStyle(
-        color: AppColors.accent, fontSize: 9,
+        color: AppColors.accent, fontSize: SLText.minBadge,
         fontWeight: FontWeight.w600)));
 
   Widget _analyzingView() => Container(
@@ -3184,7 +3236,7 @@ class _AIScanTabState extends State<AIScanTab> {
             if (online && fromCache) Text(
               'This photo was analysed before, so the saved report is shown '
               'to keep repeat scans consistent. No AI ran just now.',
-              style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w500)),
+              style: TextStyle(color: sl.text3, fontSize: SLText.minLabel, fontWeight: FontWeight.w500)),
             if (!online) Text(
               [
                 // Lower-cased at the join, not at the source: the reason is
@@ -3200,7 +3252,7 @@ class _AIScanTabState extends State<AIScanTab> {
                     ? hint
                     : 'Connect to the internet and rescan.',
               ].join(' '),
-              style: TextStyle(color: sl.text3, fontSize: 10, fontWeight: FontWeight.w500)),
+              style: TextStyle(color: sl.text3, fontSize: SLText.minLabel, fontWeight: FontWeight.w500)),
           ],
         )),
         // Second opinion. Offered on ANY successful analysis, not just a cached
@@ -3216,7 +3268,7 @@ class _AIScanTabState extends State<AIScanTab> {
             onPressed: _analyzing ? null : () => _confirmReanalyse(),
             icon: const Icon(Icons.refresh_rounded, size: 14),
             label: const Text('Re-analyse',
-                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+                style: TextStyle(fontSize: SLText.minLabel, fontWeight: FontWeight.w700)),
             style: TextButton.styleFrom(
               // textOn, not the bare fill colour: AppColors.green measures
               // 2.54:1 on white, which main.dart forbids for text.
@@ -3301,7 +3353,8 @@ class _AIScanTabState extends State<AIScanTab> {
       if (bbox is List && bbox.length >= 4) return true;
       return false;
     });
-    final cardBg      = sl.isDark ? const Color(0xFF252840) : Colors.white;
+    // The shared card surface — see the note in `_emptyView`.
+    final cardBg      = sl.surface;
 
     return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3334,7 +3387,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 borderRadius: BorderRadius.circular(6)),
               child: const Text('View Sheet →',
                 style: TextStyle(color: Colors.white,
-                    fontSize: 10, fontWeight: FontWeight.w700)))),
+                    fontSize: SLText.minLabel, fontWeight: FontWeight.w700)))),
         ])),
 
       if (_imageBytes != null) ...[
@@ -3402,9 +3455,13 @@ class _AIScanTabState extends State<AIScanTab> {
       if (analysed) Container(
         decoration: BoxDecoration(
           color: sl.surface,
-          borderRadius: BorderRadius.circular(SLRadius.lg),
+          // SLRadius.md, like every other card here — this was .lg (16) while its
+          // neighbours were 12 and 10, so the most important card on the page was
+          // also the one that looked like it came from a different screen.
+          borderRadius: BorderRadius.circular(SLRadius.md),
           border: Border.all(
-            color: matrixScore == 0 ? sl.border : matrixFill.withOpacity(0.45))),
+            color: matrixScore == 0 ? sl.border : matrixFill.withOpacity(0.45)),
+          boxShadow: [_cardShadow(sl)]),
         // IntrinsicHeight, and it is not optional. `stretch` sizes the rail from
         // the Row's incoming max height, and this card sits in a scrolling
         // Column where that is unbounded — a 4px Container told to be infinitely
@@ -3603,18 +3660,22 @@ class _AIScanTabState extends State<AIScanTab> {
           color: cardBg,
           border: Border.all(color: sl.border.withOpacity(0.4)),
           borderRadius: BorderRadius.circular(12),
-          boxShadow: [BoxShadow(
-            color: Colors.black.withOpacity(sl.isDark ? 0.15 : 0.04),
-            blurRadius: 6, offset: const Offset(0, 2))]),
+          boxShadow: [_cardShadow(sl)]),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+          // 12/13, not 9/11. The risk card immediately above this sets its own
+          // eyebrow at 12 and its band copy at 12, so a 9px eyebrow here made two
+          // section headers at the same level of the hierarchy look like different
+          // kinds of thing. Both sizes were also under the SLText floors, which
+          // exist for a 45-year-old fitter reading a phone at arm's length in
+          // gloves — the actual audience — not as a style preference.
           Text('SUMMARY', style: TextStyle(
-            color: sl.text4, fontSize: 9,
+            color: sl.text4, fontSize: SLText.minLabel,
             fontWeight: FontWeight.w700, letterSpacing: 0.9)),
-          const SizedBox(height: 6),
+          const SizedBox(height: SLSpace.sm),
           Text(summary, style: TextStyle(
-            color: sl.text2, fontSize: 11, height: 1.5)),
+            color: sl.text2, fontSize: SLText.minBody, height: 1.5)),
         ])),
       const SizedBox(height: 10),
 
@@ -3699,14 +3760,14 @@ class _AIScanTabState extends State<AIScanTab> {
                 const SizedBox(width: 6),
                 Expanded(child: Text(
                   'TO VERIFY ON SITE · ${_verifyOnSiteItems().length}',
-                  style: TextStyle(color: sl.amberText, fontSize: 9,
+                  style: TextStyle(color: sl.amberText, fontSize: SLText.minLabel,
                       fontWeight: FontWeight.w700, letterSpacing: 0.9))),
               ]),
               const SizedBox(height: 6),
               Text('Not counted as hazards. The AI stated it could not confirm '
                   'these from the photograph — check them at close range '
                   'before recording a finding.',
-                style: TextStyle(color: sl.text3, fontSize: 10, height: 1.35)),
+                style: TextStyle(color: sl.text3, fontSize: SLText.minLabel, height: 1.35)),
               const SizedBox(height: 8),
               for (var i = 0; i < _verifyOnSiteItems().length; i++)
                 Padding(
@@ -3732,7 +3793,7 @@ class _AIScanTabState extends State<AIScanTab> {
                             const SizedBox(height: 2),
                             Text(
                               _str(_verifyOnSiteItems()[i]['description']),
-                              style: TextStyle(color: sl.text3, fontSize: 10.5,
+                              style: TextStyle(color: sl.text3, fontSize: SLText.minLabel,
                                   height: 1.35)),
                           ],
                         ])),
@@ -3841,16 +3902,15 @@ class _AIScanTabState extends State<AIScanTab> {
   //  Severity + Type badge next to hazard name, regulation bold below
   // ═══════════════════════════════════════════════════════════════
   Widget _hazardTable(List hazards, SL sl) {
-    final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;
+    // The shared card surface — see the note in `_emptyView`.
+    final cardBg = sl.surface;
     final headerBg = sl.isDark ? const Color(0xFF2A2D42) : const Color(0xFFF5F6FA);
     return Container(
       decoration: BoxDecoration(
         color: cardBg,
         border: Border.all(color: sl.border.withOpacity(0.4)),
         borderRadius: BorderRadius.circular(12),
-        boxShadow: [BoxShadow(
-          color: Colors.black.withOpacity(sl.isDark ? 0.15 : 0.04),
-          blurRadius: 6, offset: const Offset(0, 2))]),
+        boxShadow: [_cardShadow(sl)]),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -3861,7 +3921,7 @@ class _AIScanTabState extends State<AIScanTab> {
             Icon(Icons.table_view_outlined, size: 14, color: sl.redText),
             const SizedBox(width: 6),
             Text('HAZARD ANALYSIS', style: TextStyle(
-              color: sl.text4, fontSize: 10,
+              color: sl.text4, fontSize: SLText.minLabel,
               fontWeight: FontWeight.w700, letterSpacing: 0.9)),
             const Spacer(),
             Container(
@@ -3872,7 +3932,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 border: Border.all(color: AppColors.red.withOpacity(0.3))),
               child: Text('${hazards.length} hazards',
                 style: TextStyle(color: sl.redText,
-                    fontSize: 9, fontWeight: FontWeight.w700))),
+                    fontSize: SLText.minBadge, fontWeight: FontWeight.w700))),
           ])),
         // Column headers
         Container(
@@ -3885,13 +3945,13 @@ class _AIScanTabState extends State<AIScanTab> {
           child: Row(children: [
             SizedBox(width: 28, child: Text('', style: TextStyle(fontSize: 1))),
             Expanded(flex: 3, child: Text('HAZARD',
-              style: TextStyle(color: sl.text4, fontSize: 9,
+              style: TextStyle(color: sl.text4, fontSize: SLText.minLabel,
                 fontWeight: FontWeight.w700, letterSpacing: 0.5))),
             Expanded(flex: 4, child: Text('DESCRIPTION',
-              style: TextStyle(color: sl.text4, fontSize: 9,
+              style: TextStyle(color: sl.text4, fontSize: SLText.minLabel,
                 fontWeight: FontWeight.w700, letterSpacing: 0.5))),
             Expanded(flex: 3, child: Text('ACTION',
-              style: TextStyle(color: sl.text4, fontSize: 9,
+              style: TextStyle(color: sl.text4, fontSize: SLText.minLabel,
                 fontWeight: FontWeight.w700, letterSpacing: 0.5))),
           ]),
         ),
@@ -3928,7 +3988,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 decoration: BoxDecoration(color: color, shape: BoxShape.circle),
                 child: Center(child: Text('${i+1}',
                   style: const TextStyle(
-                    color: Colors.white, fontSize: 9,
+                    color: Colors.white, fontSize: SLText.minBadge,
                     fontWeight: FontWeight.w900)))),
               // Column 1: HAZARD (name + type/severity + regulation)
               Expanded(flex: 3, child: Column(
@@ -3949,7 +4009,7 @@ class _AIScanTabState extends State<AIScanTab> {
                         child: Text(hm['type'].toString(),
                           style: TextStyle(
                             color: _typeTextColor(hm['type'].toString()),
-                            fontSize: 8, fontWeight: FontWeight.w600))),
+                            fontSize: SLText.minBadge, fontWeight: FontWeight.w600))),
                     _sevPill(sev, color),
                   ]),
                   // Regulation — bold, light background, with the outcome of
@@ -3986,7 +4046,7 @@ class _AIScanTabState extends State<AIScanTab> {
                                       ? sl.greenText : sl.amberText)),
                               ],
                               Expanded(child: Text(regText,
-                                style: TextStyle(color: sl.text1, fontSize: 9.5,
+                                style: TextStyle(color: sl.text1, fontSize: SLText.minBadge,
                                   fontWeight: FontWeight.w700, height: 1.3))),
                             ]),
                             if (scored)
@@ -4000,7 +4060,7 @@ class _AIScanTabState extends State<AIScanTab> {
                                         : 'Could not be verified — check before issuing'),
                                   style: TextStyle(
                                     color: regVerified ? sl.greenText : sl.amberText,
-                                    fontSize: 9, height: 1.3,
+                                    fontSize: SLText.minBadge, height: 1.3,
                                     fontWeight: FontWeight.w600))),
                           ]),
                       )),
@@ -4025,7 +4085,7 @@ class _AIScanTabState extends State<AIScanTab> {
                         Expanded(child: Text(
                           hm['kbCorroboration'].toString(),
                           style: TextStyle(color: sl.cyanText,
-                            fontSize: 9, height: 1.3))),
+                            fontSize: SLText.minBadge, height: 1.3))),
                       ])),
                   // An unproven claim that something is MISSING. Shown, never
                   // hidden — the rail may genuinely be absent. But it sits at
@@ -4083,12 +4143,12 @@ class _AIScanTabState extends State<AIScanTab> {
               // Column 2: DESCRIPTION
               Expanded(flex: 4, child: Text(
                 hm['description']?.toString() ?? '',
-                style: TextStyle(color: sl.text2, fontSize: 10.5, height: 1.4))),
+                style: TextStyle(color: sl.text2, fontSize: SLText.minLabel, height: 1.4))),
               const SizedBox(width: 8),
               // Column 3: CORRECTIVE ACTION
               Expanded(flex: 3, child: Text(
                 hm['correctiveAction']?.toString() ?? '',
-                style: TextStyle(color: sl.text1, fontSize: 10.5,
+                style: TextStyle(color: sl.text1, fontSize: SLText.minLabel,
                   fontWeight: FontWeight.w500, height: 1.4))),
             ]),
           );
@@ -4109,21 +4169,45 @@ class _AIScanTabState extends State<AIScanTab> {
     final review   = (v['needsReview'] as num?)?.round() ?? 0;
     if (total == 0) return const SizedBox.shrink();
     final mean = (v['meanConfidence'] as num?)?.round();
-    return Padding(
-      padding: const EdgeInsets.only(top: 3),
-      child: Wrap(spacing: 8, runSpacing: 2, children: [
-        Text('$verified/$total citations verified',
-          style: TextStyle(
-            color: verified == total ? sl.greenText : sl.amberText,
-            fontSize: 9, fontWeight: FontWeight.w600)),
-        if (review > 0)
-          Text('$review need a check',
-            style: TextStyle(color: sl.amberText,
-              fontSize: 9, fontWeight: FontWeight.w600)),
-        if (mean != null)
-          Text('avg $mean% per hazard',
-            style: TextStyle(color: sl.text3, fontSize: 9)),
-      ]));
+    // This strip is how much of the report is corroborated — the one figure that
+    // qualifies everything above it. At 9px, unboxed, and pressed against the
+    // risk headline it read as a rendering artefact. It now sits in its own
+    // ruled band at the shared label size, with dot separators so three
+    // independent facts do not run together into one sentence.
+    Widget item(String s, Color c, {bool strong = true}) => Text(s,
+        style: TextStyle(
+            color: c,
+            fontSize: SLText.minLabel,
+            height: 1.3,
+            fontWeight: strong ? FontWeight.w600 : FontWeight.w400));
+    final dot = Text('·',
+        style: TextStyle(color: sl.text4, fontSize: SLText.minLabel));
+    final parts = <Widget>[
+      item('$verified/$total citations verified',
+          verified == total ? sl.greenText : sl.amberText),
+      if (review > 0) item('$review need a check', sl.amberText),
+      if (mean != null) item('avg $mean% per hazard', sl.text3, strong: false),
+    ];
+    final children = <Widget>[];
+    for (var i = 0; i < parts.length; i++) {
+      if (i > 0) children.add(dot);
+      children.add(parts[i]);
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: SLSpace.md),
+      padding: const EdgeInsets.symmetric(
+          horizontal: SLSpace.md, vertical: SLSpace.sm),
+      decoration: BoxDecoration(
+        color: sl.card2,
+        borderRadius: BorderRadius.circular(SLRadius.sm),
+        border: Border.all(color: sl.border),
+      ),
+      child: Wrap(
+          spacing: SLSpace.sm,
+          runSpacing: SLSpace.xs,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: children),
+    );
   }
 
   /// Colour band for a per-hazard confidence figure. Fill tokens only — every
@@ -4149,13 +4233,13 @@ class _AIScanTabState extends State<AIScanTab> {
           border: Border.all(color: c, width: 1),
           borderRadius: BorderRadius.circular(4)),
         child: Row(children: [
-          Icon(Icons.insights_outlined, size: 9, color: sl.textOn(c)),
+          Icon(Icons.insights_outlined, size: 12, color: sl.textOn(c)),
           const SizedBox(width: 3),
           Text('$conf% confident',
             style: TextStyle(color: sl.textOn(c),
-              fontSize: 8, fontWeight: FontWeight.w800)),
+              fontSize: SLText.minBadge, fontWeight: FontWeight.w800)),
           const SizedBox(width: 2),
-          Icon(Icons.info_outline, size: 8, color: sl.textOn(c)),
+          Icon(Icons.info_outline, size: 12, color: sl.textOn(c)),
         ])));
   }
 
@@ -4177,7 +4261,7 @@ class _AIScanTabState extends State<AIScanTab> {
             padding: const EdgeInsets.only(top: 1.5, right: 3),
             child: Icon(icon, size: 11, color: colour)),
           Expanded(child: Text('$text$trailing',
-            style: TextStyle(color: colour, fontSize: 10.5, height: 1.3,
+            style: TextStyle(color: colour, fontSize: SLText.minLabel, height: 1.3,
               fontWeight: FontWeight.w600))),
         ]));
 
@@ -4188,12 +4272,12 @@ class _AIScanTabState extends State<AIScanTab> {
       border: Border.all(color: AppColors.amber, width: 1),
       borderRadius: BorderRadius.circular(4)),
     child: Row(children: [
-      Icon(Icons.person_search_outlined, size: 9,
+      Icon(Icons.person_search_outlined, size: 12,
         color: sl.textOn(AppColors.amber)),
       const SizedBox(width: 3),
       Text('CHECK ON SITE',
         style: TextStyle(color: sl.textOn(AppColors.amber),
-          fontSize: 8, fontWeight: FontWeight.w800)),
+          fontSize: SLText.minBadge, fontWeight: FontWeight.w800)),
     ]));
 
   /// Explains one hazard's score, item by item, in the validator's own words.
@@ -4250,7 +4334,7 @@ class _AIScanTabState extends State<AIScanTab> {
                       : 'The AI gave no confidence score, so a neutral '
                         'starting point was used and then adjusted by what the '
                         'app could check.',
-                  style: TextStyle(color: sl.text3, fontSize: 10.5, height: 1.45)),
+                  style: TextStyle(color: sl.text3, fontSize: SLText.minLabel, height: 1.45)),
                 const SizedBox(height: 12),
                 ...reasons.whereType<Map>().map((r) {
                   final delta = (r['delta'] as num?)?.round() ?? 0;
@@ -4279,12 +4363,12 @@ class _AIScanTabState extends State<AIScanTab> {
                             : (delta > 0 ? '+$delta' : '$delta'),
                           style: TextStyle(
                             color: delta == 0 ? sl.text3 : toneText,
-                            fontSize: 10, fontWeight: FontWeight.w800)))),
+                            fontSize: SLText.minLabel, fontWeight: FontWeight.w800)))),
                       const SizedBox(width: 9),
                       Expanded(child: Text(r['label']?.toString() ?? '',
                         style: TextStyle(
                           color: severe ? sl.text1 : sl.text2,
-                          fontSize: 10.5, height: 1.4,
+                          fontSize: SLText.minLabel, height: 1.4,
                           fontWeight: severe
                             ? FontWeight.w700 : FontWeight.w400))),
                     ]));
@@ -4302,7 +4386,7 @@ class _AIScanTabState extends State<AIScanTab> {
                     'means the app could not corroborate it, so it is worth '
                     'confirming on site. Nothing is hidden from this report.',
                     style: TextStyle(color: sl.text3,
-                      fontSize: 9.5, height: 1.45))),
+                      fontSize: SLText.minBadge, height: 1.45))),
               ])))));
   }
 
@@ -4313,7 +4397,7 @@ class _AIScanTabState extends State<AIScanTab> {
       border: Border.all(color: color, width: 1),
       borderRadius: BorderRadius.circular(4)),
     child: Text(sev,
-      style: TextStyle(color: SL.of(context).textOn(color), fontSize: 8,
+      style: TextStyle(color: SL.of(context).textOn(color), fontSize: SLText.minBadge,
           fontWeight: FontWeight.w800)));
 
   Color _sevColor(String sev) {
@@ -4350,13 +4434,21 @@ class _AIScanTabState extends State<AIScanTab> {
   // that correlate to bounding boxes on the image. Tapping a chip
   // triggers _onBboxTap which highlights the matching table row.
   Widget _hazardLegendStrip(List hazards, SL sl) {
-    final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;
+    // The shared card surface — see the note in `_emptyView`.
+    final cardBg = sl.surface;
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      // Same padding, radius, border and shadow as every other card in the
+      // results column. This one was 10/8/10/10 at radius 10 with a 0.35 border
+      // and no shadow, sitting directly above a card at padding 12, radius 12,
+      // border 0.4 and a shadow — three cards in one vertical stack, no two of
+      // them alike. Adjacent cards differing by two pixels of radius does not
+      // read as variety; it reads as unfinished.
+      padding: const EdgeInsets.all(SLSpace.md),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: sl.border.withOpacity(0.35)),
+        borderRadius: BorderRadius.circular(SLRadius.md),
+        border: Border.all(color: sl.border.withOpacity(0.4)),
+        boxShadow: [_cardShadow(sl)],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4365,11 +4457,17 @@ class _AIScanTabState extends State<AIScanTab> {
           const Icon(Icons.my_location_rounded,
               size: 12, color: AppColors.accent),
           const SizedBox(width: 5),
-          Text('HAZARD MAP — TAP A CHIP OR BOX TO LOCATE',
-            style: TextStyle(color: sl.text4, fontSize: 9,
-                fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+          // Matches the SUMMARY eyebrow: same level in the hierarchy, same size.
+          // Also shortened — "TAP A CHIP OR BOX TO LOCATE" is an instruction that
+          // belongs on the thing being tapped, not in the section label, and at
+          // 12px the old wording no longer fits a phone width.
+          Expanded(child: Text('HAZARD MAP',
+            style: TextStyle(color: sl.text4, fontSize: SLText.minLabel,
+                fontWeight: FontWeight.w700, letterSpacing: 0.9))),
+          Text('Tap to locate',
+            style: TextStyle(color: sl.text4, fontSize: SLText.minBadge)),
         ]),
-        const SizedBox(height: 7),
+        const SizedBox(height: SLSpace.sm),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(
@@ -4383,40 +4481,48 @@ class _AIScanTabState extends State<AIScanTab> {
               return GestureDetector(
                 onTap: () => _onBboxTap(i),
                 child: Container(
-                  margin: const EdgeInsets.only(right: 6),
-                  padding: const EdgeInsets.fromLTRB(5, 4, 8, 4),
+                  margin: const EdgeInsets.only(right: SLSpace.sm),
+                  padding: const EdgeInsets.fromLTRB(
+                      SLSpace.xs, SLSpace.xs, SLSpace.sm, SLSpace.xs),
                   decoration: BoxDecoration(
                     color: isHighlighted
                         ? color.withOpacity(0.18)
                         : color.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(SLRadius.sm),
                     border: Border.all(
                         color: color,
                         width: isHighlighted ? 1.5 : 1),
                   ),
                   child: Row(children: [
                     Container(
-                      width: 20, height: 20,
+                      width: 22, height: 22,
                       decoration: BoxDecoration(
                           color: color, shape: BoxShape.circle),
                       child: Center(child: Text('${i+1}',
                         style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 9,
+                          fontSize: SLText.minBadge,
                           fontWeight: FontWeight.w800))),
                     ),
-                    const SizedBox(width: 7),
+                    const SizedBox(width: SLSpace.sm),
+                    // 150px was a phone-era guess applied at every window size,
+                    // so "Suspended load over process area" truncated to
+                    // "Suspended load over proc…" on a 1900px desktop with the
+                    // rest of the row empty. Scale the cap with the viewport and
+                    // keep the old value as the phone floor.
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 150),
+                      constraints: BoxConstraints(
+                          maxWidth: (MediaQuery.of(context).size.width * 0.32)
+                              .clamp(150.0, 300.0)),
                       child: Text(
                         name,
                         overflow: TextOverflow.ellipsis,
                         maxLines: 1,
                         style: TextStyle(
-                            color: sl.text1, fontSize: 10.5,
+                            color: sl.text1, fontSize: SLText.minBadge,
                             fontWeight: FontWeight.w600)),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: SLSpace.sm),
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 5, vertical: 1),
@@ -4427,7 +4533,8 @@ class _AIScanTabState extends State<AIScanTab> {
                       child: Text(
                         sev.substring(0, sev.length > 4 ? 4 : sev.length),
                         style: TextStyle(
-                            color: sl.textOn(color), fontSize: 8,
+                            color: sl.textOn(color),
+                            fontSize: SLText.minBadge,
                             fontWeight: FontWeight.w800)),
                     ),
                   ]),
@@ -4455,7 +4562,7 @@ class _AIScanTabState extends State<AIScanTab> {
                 : 'Dashed red box = DANGER ZONE: where this energy would strike. '
                   'No person is visible in this photo, so no arrow is drawn and '
                   'nobody is being reported as exposed.',
-              style: TextStyle(color: sl.redText, fontSize: 9.5, height: 1.35,
+              style: TextStyle(color: sl.redText, fontSize: SLText.minBadge, height: 1.35,
                   fontWeight: FontWeight.w600))),
           ]),
         ],
@@ -4475,16 +4582,15 @@ class _AIScanTabState extends State<AIScanTab> {
       LineOfFireGeometry.pickOne(hazards);
 
   Widget _infoBox(SL sl) {
-    final cardBg = sl.isDark ? const Color(0xFF252840) : Colors.white;
+    // The shared card surface — see the note in `_emptyView`.
+    final cardBg = sl.surface;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cardBg,
         border: Border.all(color: AppColors.accent.withOpacity(0.35)),
         borderRadius: BorderRadius.circular(12),
-        boxShadow: [BoxShadow(
-          color: Colors.black.withOpacity(sl.isDark ? 0.15 : 0.04),
-          blurRadius: 6, offset: const Offset(0, 2))]),
+        boxShadow: [_cardShadow(sl)]),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
