@@ -411,7 +411,19 @@ class _AIScanTabState extends State<AIScanTab> {
   /// a renamed or re-weighted level still orders correctly.
   String get _overallRisk {
     final r = _result;
-    if (r == null) return 'MEDIUM';
+    // ★ NO RESULT IS NOT A MEDIUM RESULT — 2026-09-21.
+    //
+    // Both exits below returned 'MEDIUM', which invented a severity band for a
+    // report that never carried one, and the invented band then propagated: it
+    // is stored as the incident's `severity`, it drives `_riskScore` through
+    // scoreForDisplay, and it becomes the S axis of the L×S matrix. A scan whose
+    // AI failed would therefore file as a mid-risk finding.
+    //
+    // 'UNKNOWN' is the repo's existing non-assessment label, not a new one —
+    // AdminMasterData._kNoAssessmentLabels contains it and both scoreFromMap and
+    // severityRating already return 0 for it, so an unrated scan renders as "—"
+    // / NOT RATED instead of as a reassuring middle number.
+    if (r == null) return 'UNKNOWN';
     var label = r['overallRisk']?.toString().trim() ?? '';
     var best = label.isEmpty
         ? -1
@@ -426,7 +438,7 @@ class _AIScanTabState extends State<AIScanTab> {
         label = s;
       }
     }
-    return label.isEmpty ? 'MEDIUM' : label;
+    return label.isEmpty ? 'UNKNOWN' : label;
   }
 
   // ── INITIAL RISK ESTIMATE: likelihood × severity, out of 25 ──────────────
@@ -898,6 +910,9 @@ class _AIScanTabState extends State<AIScanTab> {
   // ─── STEP 3: REVIEW (with inline edit per hazard) ───────────
   void _openReviewSheet() {
     if (_result == null) return;
+    // The review sheet's own "Save with edits" / "Save as-is" buttons call
+    // _save() directly, so closing the sheet is what keeps those two paths shut.
+    if (!_imageWasAnalysed) { _notAnalysedSnack(); return; }
     setState(() => _currentStep = 3);
 
     final sl        = SL.of(context);
@@ -1650,9 +1665,68 @@ class _AIScanTabState extends State<AIScanTab> {
             color: sl.text1, fontSize: 10, height: 1.4))),
       ]));
 
+  /// True when the current result came from the failure path and nothing ever
+  /// looked at the photograph — `GeminiVision._offlineFallback` sets
+  /// `_imageAnalysed: false` and is the only writer of it.
+  ///
+  /// Read as `!= false`, never as `== true`: a real scan result does not carry
+  /// the key at all, and `== true` would classify every genuine report as
+  /// unanalysed and block the whole feature.
+  bool get _imageWasAnalysed => _result?['_imageAnalysed'] != false;
+
+  /// Why Review / Save / PDF / Share are inert on a failed scan. A greyed
+  /// button with no explanation reads as a bug and invites a retry loop, so the
+  /// buttons stay tappable and answer instead of doing nothing.
+  void _notAnalysedSnack() {
+    final reason = _result?['_offline_reason']?.toString().trim() ?? '';
+    _snack(
+        reason.isEmpty
+            ? 'This photo was not analysed, so there is nothing to file. '
+                'Tap "New" to rescan.'
+            : 'Not analysed — $reason. Nothing to file; tap "New" to rescan.',
+        const Color(0xFFD97706));
+  }
+
+  /// The banner above the action row on a failed scan, stating plainly that no
+  /// report exists and pointing at the two things that DO work offline.
+  Widget _notAnalysedBar(SL sl) => Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: AppColors.amber.withOpacity(0.07),
+        border: Border.all(color: AppColors.amber.withOpacity(0.45)),
+        borderRadius: BorderRadius.circular(10)),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(Icons.block_outlined, size: 15, color: sl.amberText),
+        const SizedBox(width: 7),
+        Expanded(child: Text(
+          'Cannot be filed. The AI never assessed this photo, so there is no '
+          'risk rating and no hazard list to save, export or share. Rescan when '
+          'you are back online, or record the observation on the Near Miss '
+          'form — that works fully offline.',
+          style: TextStyle(color: sl.text2, fontSize: 10.5, height: 1.4))),
+      ]));
+
   // ─── STEP 4: SAVE ────────────────────────────────────────────
   Future<void> _save() async {
     if (_result == null) return;
+
+    // ★ THE GUARD THAT ACTUALLY ENFORCES IT — 2026-09-21.
+    //
+    // The button styling above is cosmetic; this is the rule. `_save` is
+    // reached from three places (the two buttons in the review sheet and the
+    // Save button), and the review sheet's own buttons were never gated, so a
+    // UI-only fix leaves a live path. Anything that files an incident has to
+    // re-check the condition itself rather than trust that the widget that
+    // called it was drawn in the right state.
+    //
+    // This is the boundary the register depends on: past this line the row
+    // gets a severity, a risk score, an L×S matrix and a PDF, and none of
+    // those mean anything for an image no model ever read.
+    if (!_imageWasAnalysed) {
+      _notAnalysedSnack();
+      return;
+    }
 
     if (_imageBytes != null) {
       final hash = _computeHash(_imageBytes!);
@@ -2580,6 +2654,14 @@ class _AIScanTabState extends State<AIScanTab> {
       'matrixBand':       _matrixBand,
       'matrixLikelihoodEstimated': _matrixIsEstimate,
       'confidence':      _result!['confidence']   ?? 0,
+      // Whether anything actually read the photograph. `_save` now refuses to
+      // file a row where this is false, so in normal operation it is always
+      // true — it is written anyway because _buildIncident also feeds
+      // `_exportPdf` and the share text, and because a row that reaches another
+      // device has no other way to tell: the screen's in-memory
+      // `_imageAnalysed` is not part of the stored incident, which is how an
+      // unanalysed scan used to export a full risk banner from the incident log.
+      'aiAnalysed':      _imageWasAnalysed,
       // Carried into the record so the exported PDF and any later reader see the
       // same qualification the screen showed. A general-view scan that is filed
       // without it becomes, months later, an unqualified severity.
@@ -2672,6 +2754,9 @@ class _AIScanTabState extends State<AIScanTab> {
 
   Future<void> _exportPdf() async {
     if (_result == null) return;
+    // Same rule as _save: a PDF is the most quotable artefact the app produces,
+    // and an unanalysed scan exported to paper loses every on-screen caveat.
+    if (!_imageWasAnalysed) { _notAnalysedSnack(); return; }
     final user     = await LocalDB.getCurrentUser() ?? {};
     final incident = _buildIncident(user);
     try {
@@ -2692,6 +2777,7 @@ class _AIScanTabState extends State<AIScanTab> {
 
   void _shareReport() {
     if (_result == null) return;
+    if (!_imageWasAnalysed) { _notAnalysedSnack(); return; }
     final sl = SL.of(context);
     showModalBottomSheet(
       context: context,
@@ -3804,60 +3890,84 @@ class _AIScanTabState extends State<AIScanTab> {
       ],
       const SizedBox(height: 12),
 
+      // ── NOTHING LEAVES THIS SCREEN WHEN THE IMAGE WAS NEVER ANALYSED ─────
+      //
+      // 2026-09-21. The hazard table and the OVERALL RISK card were already
+      // suppressed on `!analysed` (see above), but Review / Save / PDF / Share
+      // stayed live, so a failed scan could still be filed and exported. The
+      // report that prompted this carried "AI Vision models unavailable
+      // (46503ms)" and was nonetheless saved as "AI Hazard Scan: Head
+      // Protection — Helmet · HIGH" with 12 hazards — those rows came from an
+      // older build's knowledge-bank checklist, but the SAVE PATH that let it
+      // into the register is still here and would happily file today's empty
+      // failed scan as an AI_SCAN incident with a severity and a PDF.
+      //
+      // Suppressing the display while leaving the exits open is not a fix: the
+      // PDF and the WhatsApp share are generated from `_result`/the incident
+      // map, not from what the screen drew, so they re-print exactly what the
+      // screen refused to show. An unanalysed photo has no findings to file, so
+      // all four exits close together. `_notAnalysedSnack` says why.
+      if (!analysed) _notAnalysedBar(sl),
+
       // ✅ v23: Two-row button layout for proper alignment
       Row(children: [
         Expanded(child: ElevatedButton.icon(
-          onPressed: _result != null
-              ? (_isSaved ? null : _openReviewSheet) : null,
+          onPressed: (_result != null && analysed)
+              ? (_isSaved ? null : _openReviewSheet)
+              : (analysed ? null : _notAnalysedSnack),
           icon: const Icon(Icons.fact_check_outlined,
               size: 14, color: Colors.white),
           label: const Text('Review',
               style: TextStyle(color: Colors.white,
                   fontSize: 11, fontWeight: FontWeight.w700)),
           style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.amber,
+            backgroundColor: analysed ? AppColors.amber : Colors.grey,
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10))),
         )),
         const SizedBox(width: 6),
         Expanded(child: ElevatedButton.icon(
-          onPressed: _isSaved ? null : _save,
+          onPressed: !analysed
+              ? _notAnalysedSnack
+              : (_isSaved ? null : _save),
           icon: Icon(_isSaved ? Icons.check_rounded : Icons.save_outlined,
               size: 14, color: Colors.white),
           label: Text(_isSaved ? 'Saved ✓' : 'Save',
               style: const TextStyle(color: Colors.white,
                   fontSize: 11, fontWeight: FontWeight.w700)),
           style: ElevatedButton.styleFrom(
-            backgroundColor: _isSaved ? Colors.grey : AppColors.green,
+            backgroundColor:
+                (_isSaved || !analysed) ? Colors.grey : AppColors.green,
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10))),
         )),
         const SizedBox(width: 6),
         Expanded(child: ElevatedButton.icon(
-          onPressed: _exportPdf,
+          onPressed: analysed ? _exportPdf : _notAnalysedSnack,
           icon: const Icon(Icons.picture_as_pdf,
               size: 14, color: Colors.white),
           label: const Text('PDF',
               style: TextStyle(color: Colors.white,
                   fontSize: 11, fontWeight: FontWeight.w700)),
           style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.accent,
+            backgroundColor: analysed ? AppColors.accent : Colors.grey,
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10))),
         )),
         const SizedBox(width: 6),
         Expanded(child: ElevatedButton.icon(
-          onPressed: _shareReport,
+          onPressed: analysed ? _shareReport : _notAnalysedSnack,
           icon: const Icon(Icons.share_rounded,
               size: 14, color: Colors.white),
           label: const Text('Share',
               style: TextStyle(color: Colors.white,
                   fontSize: 11, fontWeight: FontWeight.w700)),
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF25D366),
+            backgroundColor:
+                analysed ? const Color(0xFF25D366) : Colors.grey,
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10))),

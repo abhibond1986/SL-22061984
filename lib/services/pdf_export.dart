@@ -78,16 +78,95 @@ class PdfExport {
     List<Map<String, dynamic>> hazards = _parseHazards(incident['hazards']);
     String summary = _cleanSummary(incident);
 
-    final severity   = incident['severity']?.toString() ?? 'MEDIUM';
+    // ?? 'MEDIUM' until 2026-09-21. A row with no stored severity printed a
+    // MEDIUM badge and a MEDIUM-banded score on paper — the one copy of the
+    // report that outlives the app and carries no caveat. 'UNKNOWN' is the
+    // canonical non-assessment label (AdminMasterData._kNoAssessmentLabels) and
+    // scores 0, so an unrated row prints as unrated.
+    var severity     = () {
+      final s = incident['severity']?.toString().trim() ?? '';
+      return s.isEmpty ? 'UNKNOWN' : s;
+    }();
     final isAiScan   = incident['type']?.toString() == 'AI_SCAN';
+    // ── WAS THIS PHOTO ACTUALLY ANALYSED? ────────────────────────────────────
+    //
+    // Defence in depth for rows the app can no longer refuse to create: reports
+    // already filed by an older build, and rows arriving from another device.
+    // The scan screen now blocks saving an unanalysed scan at source, but this
+    // exporter is reached by the incident log's own PDF button, where the only
+    // evidence available is the stored row.
+    //
+    // Three independent tells, any one of which is sufficient:
+    //
+    //  1. `aiAnalysed == false` — the flag, for rows written after this change.
+    //     String-tolerant because Apps Script hands booleans back as "false",
+    //     and `== false` on a String is silently untrue.
+    //  2. An AI_SCAN with no hazards and no real severity — today's failure
+    //     shape, for any row that slipped through before the save guard existed.
+    //  3. The failure sentence in the summary. This is the only tell that
+    //     catches the reports that caused this work: they were filed by a build
+    //     whose offline fallback emitted a generic 12-item checklist, so they
+    //     carry HIGH severity and 12 hazard rows and look fully analysed by
+    //     tells 1 and 2. Their summary still says so, in either the old wording
+    //     ("AI Vision models unavailable") or the current one ("This image was
+    //     NOT analysed"), and matching it demotes those rows on re-export.
+    //
+    //     ⚠ MATCH THE WHOLE SENTENCE, NOT "WAS NOT ANALYSED". The loose
+    //     substring was tried first and is wrong: a GENUINE report whose summary
+    //     reads "...the far bay was not analysed in detail" matches it, and this
+    //     predicate then voids a real severity and drops a real hazard table —
+    //     the mirror image of the bug being fixed, and worse, because it hides
+    //     findings that exist. These two strings are emitted verbatim by
+    //     GeminiVision._offlineFallback and by the pre-2026-08-14 build; if that
+    //     wording changes, tells 1 and 2 are what carry the load, so this stays
+    //     narrow on purpose. Also gated on `isAiScan` — a near-miss narrative is
+    //     free text and must never be pattern-matched for a failure sentence.
+    final summaryTell = summary.toUpperCase();
+    final summarySaysFailed = isAiScan &&
+        (summaryTell.contains('AI VISION MODELS UNAVAILABLE') ||
+         summaryTell.contains('THIS IMAGE WAS NOT ANALYSED'));
+    final notAnalysed = incident['aiAnalysed'] == false ||
+        incident['aiAnalysed']?.toString().toLowerCase() == 'false' ||
+        summarySaysFailed ||
+        (isAiScan &&
+            hazards.isEmpty &&
+            AdminMasterData.severityRating(const {}, severity) == 0);
+
+    // ★ NEUTRALISE AT SOURCE, DO NOT BRANCH AT EVERY WIDGET.
+    //
+    // Every figure below is derived from `severity`, `hazards` and `confidence`,
+    // and the page is assembled from ~8 widgets that each read some of them. If
+    // this were an `if (notAnalysed)` at each render site, the next section
+    // someone adds would print the un-neutralised value by default and nobody
+    // would notice — which is precisely how the original defect survived: the
+    // screen suppressed the hazard table while the PDF and the share text, built
+    // from the same map, kept printing it.
+    //
+    // Zeroing here means the existing "unrated" rendering does the work: the
+    // severity pill reads UNKNOWN, `matrixScore == 0` prints "—  NOT RATED",
+    // `scoreForDisplay` returns 0, and `hazards.isEmpty` takes the no-table
+    // branch. The reader is told why by `_notAnalysedNotice` below.
+    if (notAnalysed) {
+      severity = 'UNKNOWN';
+      // Dropped, not printed under a caveat. These rows are either absent
+      // (today's failure) or generic checklist items an older build synthesised
+      // without ever reading the photograph; on paper, beside an evidence
+      // photograph and above a signature block, a labelled list of severities
+      // and regulations still reads as findings about that photograph.
+      hazards = <Map<String, dynamic>>[];
+    }
     // Reconciled ONCE, here, so the banner, the score block and anything added
     // later all print the same figure. See AdminMasterData.scoreForDisplay for the
     // "23 / 100 beside RISK: CRITICAL" report that made this necessary — the rule
     // lives there because the screens have to obey it too, and a stored incident
     // exported months later still carries the number it was filed with.
-    final riskScore  =
-        AdminMasterData.scoreForDisplay(severity, incident['riskScore'] ?? 0);
-    final confidence = incident['confidence'] ?? 0;
+    final riskScore  = notAnalysed
+        ? 0
+        : AdminMasterData.scoreForDisplay(severity, incident['riskScore'] ?? 0);
+    // 0, never the stored figure: confidence also feeds the likelihood axis via
+    // likelihoodFromConfidence, so a stale 35 here would rebuild a real-looking
+    // L×S score for a photo nothing assessed.
+    final confidence = notAnalysed ? 0 : (incident['confidence'] ?? 0);
     // ── The 1–25 initial risk estimate, when the row carries one ────────────
     //
     // Read from the stored L and S and MULTIPLIED HERE rather than trusting a
@@ -131,7 +210,16 @@ class PdfExport {
     //
     // Gated on `isAiScan`: a near-miss row has a real 0–100 score of its own and
     // must keep printing it, not acquire a matrix it was never rated on.
-    if (isAiScan && AdminMasterData.matrixScore(mL, mS) == 0) {
+    //
+    // ALSO gated on `!notAnalysed` — 2026-09-21. This block exists to RECOVER a
+    // matrix that a sync dropped, and it is the one place that would rebuild one
+    // from nothing: a legacy unanalysed row carries a stored mL/mS of 0, which is
+    // exactly the trigger condition, so without this gate the re-derivation would
+    // hand an unassessed photo a fresh L×S score and mark it merely "(est.)".
+    // Neutralising `severity` and `confidence` above already starves it — both
+    // helpers return 0 — but relying on that would make the guard depend on two
+    // distant assignments staying zero.
+    if (isAiScan && !notAnalysed && AdminMasterData.matrixScore(mL, mS) == 0) {
       final scores = await AdminMasterData.getSeverityScores();
       if (mS == 0) mS = AdminMasterData.severityRating(scores, severity);
       if (mL == 0) {
@@ -139,6 +227,7 @@ class PdfExport {
         if (mL > 0) matrixEstimated = true;
       }
     }
+    if (notAnalysed) { mL = 0; mS = 0; matrixEstimated = false; }
     final matrixScore = AdminMasterData.matrixScore(mL, mS);
 
     pdf.addPage(pw.MultiPage(
@@ -158,8 +247,16 @@ class PdfExport {
         // photograph is a general view, the severity above it is capped and
         // provisional, and the reader has to know that before reading anything
         // else. See HazardQuality.capSeverityForView.
+        // Before the view caveat and before the details grid: if nothing
+        // assessed this photograph, that fact outranks every other qualification
+        // on the page, including the general-view caveat (which qualifies a
+        // severity that no longer exists here).
+        if (notAnalysed) {
+          w.add(pw.SizedBox(height: 5));
+          w.add(_notAnalysedNotice());
+        }
         final viewCaveat = incident['viewCaveat']?.toString().trim() ?? '';
-        if (viewCaveat.isNotEmpty) {
+        if (viewCaveat.isNotEmpty && !notAnalysed) {
           w.add(pw.SizedBox(height: 5));
           w.add(_caveatBar(viewCaveat));
         }
@@ -314,6 +411,39 @@ class PdfExport {
     child: pw.Text(_safe(text), style: pw.TextStyle(
       fontSize: 7.5, color: PdfColor.fromHex('#7A4F01'), lineSpacing: 1.2,
       fontWeight: pw.FontWeight.bold)),
+  );
+
+  /// The notice that replaces every rating on a report whose photograph was
+  /// never assessed. Red rather than the amber of [_caveatBar], because this is
+  /// not a qualification on a finding — it is the statement that there is no
+  /// finding, and it has to survive being photocopied and initialled.
+  ///
+  /// Wording rule: say what did NOT happen, then what the reader should do.
+  /// "Analysis unavailable" alone gets read as "analysed, nothing found".
+  static pw.Widget _notAnalysedNotice() => pw.Container(
+    width: double.infinity,
+    padding: const pw.EdgeInsets.fromLTRB(9, 6, 9, 6),
+    decoration: pw.BoxDecoration(
+      color: PdfColor.fromHex('#FDECEA'),
+      border: pw.Border.all(color: PdfColor.fromHex('#C62828'), width: 1.0)),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text('THIS PHOTOGRAPH WAS NOT ANALYSED — NOT A HAZARD ASSESSMENT',
+          style: pw.TextStyle(
+            fontSize: 8, color: PdfColor.fromHex('#8E1B16'),
+            fontWeight: pw.FontWeight.bold, letterSpacing: 0.3)),
+        pw.SizedBox(height: 2),
+        pw.Text(
+          'The AI hazard scan did not complete, so no risk rating, risk score '
+          'or hazard list has been produced for this image. Any rating shown '
+          'elsewhere on this page is void. This document records only that a '
+          'photograph was taken and that the scan failed — it must not be '
+          'signed off as an inspection. Rescan the location, or raise the '
+          'observation on the Near Miss form.',
+          style: pw.TextStyle(
+            fontSize: 7.2, color: PdfColor.fromHex('#7A1512'), lineSpacing: 1.2)),
+      ]),
   );
 
   // ─── TO VERIFY ON SITE ───────────────────────────────────────────────────

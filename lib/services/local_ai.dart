@@ -7,9 +7,14 @@
 //   • Factories Act 1948 (all safety sections)
 //   • IS 14489:2018, CEA Regulations 2023, BIS PPE Standards
 //   • WSA 13 Causes, ILO Code of Practice
-// Used by: Ask AI (Suraksha Saathi) chatbot + offline fallback
+// Used by: Ask AI (Suraksha Saathi) chatbot + near-miss text processing.
+//
+// NOT an image-analysis fallback any more — see the tombstone at the foot of
+// this class. Nothing here may invent a hazard row.
 
-import 'dart:io';
+// `dart:io` dropped 2026-09-21: its only use was the `File` parameter of the
+// deleted analyseImage(). It was also the class's one non-web-safe import, and
+// this file is reached from the chat tab on web.
 import 'admin_master_data.dart';
 
 class LocalAI {
@@ -920,114 +925,34 @@ class LocalAI {
     };
   }
 
-  // ══════════════════════════════════════════════════════════════════
-  //  OFFLINE IMAGE FALLBACK (used by GeminiVision when AI unavailable)
-  //  NOTE: This returns example scenarios for demonstration purposes.
-  //  For true offline AI analysis, integrate TensorFlow Lite model.
-  // ══════════════════════════════════════════════════════════════════
-  static Future<Map<String, dynamic>> analyseImage(File imageFile) async {
-    final scenarios = [
-      {
-        'riskScore': 72, 'severity': 'HIGH',
-        'hazardType': 'PPE Non-Compliance',
-        'summary': '⚠️ OFFLINE MODE: Showing example scenario. This is NOT analysis of your photo. AI requires internet connection. Example: Critical PPE violations - Worker without IS 2925 helmet in crane zone.',
-        'confidence': 0,  // Set to 0 to indicate this is example data
-        'hazards': [
-          {'name': 'Missing Safety Helmet', 'severity': 'CRITICAL',
-           'desc': 'Worker without ISI-marked helmet — FA 1948 S35, IS 2925:1984',
-           'ref': 'FA 1948 S35 · IS 2925:1984 · SG/18'},
-          {'name': 'Slip Hazard — Oil Spill', 'severity': 'MEDIUM',
-           'desc': 'Liquid spillage on walkway — FA 1948 S32, IS 14489 Cl.9',
-           'ref': 'FA 1948 S32 · IS 14489:2018 Cl.9 · SG/18'},
-        ],
-        'rules': ['FA 1948 S35 — PPE mandatory in hazardous zones',
-                  'IS 2925:1984 — Safety helmets standard',
-                  'IS 14489:2018 Cl.9 — Housekeeping in steel plants'],
-        'corrective': ['Stop work until PPE compliance achieved',
-                       'Issue IS 2925 helmet from nearest PPE station',
-                       'Clean spillage; place wet floor warning signs'],
-        'preventive': ['Daily PPE check at bay entrance',
-                       'Toolbox talk on PPE before each shift',
-                       'Monthly PPE audit with photographic record (SG/18)'],
-        'wsa': ['3. Improper PPE use', '8. Poor housekeeping'],
-      },
-      {
-        'riskScore': 88, 'severity': 'CRITICAL',
-        'hazardType': 'Working at Height — Fall Risk',
-        'summary': '⚠️ OFFLINE MODE: Showing example scenario. This is NOT analysis of your photo. AI requires internet connection. Example: Worker >1.8m without harness - FA 1948 S32 violation.',
-        'confidence': 0,  // Set to 0 to indicate this is example data
-        'hazards': [
-          {'name': 'No Fall Arrest at Height', 'severity': 'CRITICAL',
-           'desc': 'Worker >1.8m without IS 3521 harness — FA 1948 S32',
-           'ref': 'FA 1948 S32 · IS 3521:1999 · IS 4912:1978 · SG/02'},
-          {'name': 'Unguarded Edge', 'severity': 'HIGH',
-           'desc': 'Open edge — no guardrail or toe board — FA S33, IS 4912',
-           'ref': 'FA 1948 S33 · IS 4912:1978 · SG/02'},
-        ],
-        'rules': ['FA 1948 S32 — Fall protection at height (NOT S36)',
-                  'IS 3521:1999 — Full body harness; anchor min 15kN',
-                  'SG/02 — WAH permit mandatory; 100% tie-off rule'],
-        'corrective': ['Immediate stop-work; evacuate worker from height',
-                       'Issue IS 3521 harness with double lanyard',
-                       'Inspect anchor points (min 15kN) before resuming',
-                       'Obtain WAH permit per SG/04'],
-        'preventive': ['WAH training every 6 months',
-                       'PTW enforcement for all height work',
-                       'Install permanent anchor points per IS 4912 (SG/02)'],
-        'wsa': ['1. Failure to follow procedure', '11. Unauthorized operation'],
-      },
-      {
-        'riskScore': 82, 'severity': 'CRITICAL',
-        'hazardType': 'Gas Cylinder — SMPV Violation',
-        'summary': '⚠️ OFFLINE MODE: Showing example scenario. This is NOT analysis of your photo. AI requires internet connection. Example: Gas cylinders unsecured, O2/acetylene <6m apart - SMPV violation.',
-        'confidence': 0,  // Set to 0 to indicate this is example data
-        'hazards': [
-          {'name': 'Cylinders Not Chained', 'severity': 'CRITICAL',
-           'desc': 'Cylinders not chained upright — SMPV Rule 10(1), IS 15222',
-           'ref': 'SMPV Rules 2016 Rule 10(1) · IS 15222 · SG/01'},
-          {'name': 'O2-Flammable Proximity', 'severity': 'CRITICAL',
-           'desc': 'O2 and acetylene within 6m — SMPV Rule 14 Table-3',
-           'ref': 'SMPV Rules 2016 Rule 14 Table-3 · FA 1948 S37 · SG/01'},
-          {'name': 'Valve Cap Missing', 'severity': 'HIGH',
-           'desc': 'Valve unprotected — IS 8198, SMPV Rule 10(2)',
-           'ref': 'SMPV Rules 2016 Rule 10(2) · IS 8198 · SG/01'},
-        ],
-        'rules': ['SMPV Rules 2016 Rule 10 — No ignition near cylinders',
-                  'SMPV Rule 14 Table-3 — O2 + flammable min 6m separation',
-                  'SG/01 — Gas cylinder storage and handling'],
-        'corrective': ['Chain all cylinders upright to wall or post',
-                       'Separate O2 and flammable >6m or install fire wall',
-                       'Fit valve protection caps on all cylinders',
-                       'Verify ISI mark and last test date on each cylinder'],
-        'preventive': ['Monthly gas cylinder audit (SG/01)',
-                       'Storage area redesign to maintain separation distances',
-                       'Annual SMPV hydraulic testing compliance check'],
-        'wsa': ['8. Poor housekeeping', '2. Lack of hazard awareness'],
-      },
-    ];
-    final idx = DateTime.now().second % scenarios.length;
-    final result = Map<String, dynamic>.from(scenarios[idx]);
-    result['_source'] = 'offline_demo';
-    result['_isOffline'] = true;
-    result['_note'] = 'This is an example scenario shown in offline mode. For real AI analysis of your photo, please connect to the internet.';
-    return result;
-  }
-
-  // ══════════════════════════════════════════════════════════════════
-  //  DEMO ANALYSIS (used when no API key / offline UI testing)
-  // ══════════════════════════════════════════════════════════════════
-  static Map<String, dynamic> demoAnalysis() => {
-    'overallRisk': 'HIGH', 'riskScore': 72, 'confidence': 0,
-    'summary': 'AI analysis not available (no API key or offline). '
-        'This is a demo response. Configure Gemini API key for real AI-powered hazard analysis.',
-    'hazards': [{
-      'name': 'Demo Hazard',
-      'description': 'This is a placeholder. Real analysis requires Gemini API + internet.',
-      'severity': 'MEDIUM', 'type': 'Unsafe condition',
-      'regulation': 'FA 1948 S35 — PPE compliance',
-      'correctiveAction': 'Configure Gemini API key for real AI analysis',
-    }],
-    'preventive': ['Add Gemini API key', 'Ensure internet connection', 'Retry with real photo'],
-    '_source': 'demo_fallback',
-  };
+  // ════════════════════════════════════════════════════════════════════
+  //  REMOVED 2026-09-21 — analyseImage() and demoAnalysis()
+  //
+  //  DO NOT REINSTATE. Both synthesised hazard rows for an image that nothing
+  //  had looked at, and returned them in the same shape as a real scan result.
+  //
+  //  analyseImage() held three canned "scenarios" (PPE / working at height /
+  //  gas cylinders) of 2-3 CRITICAL hazards each, with real IS and Factories
+  //  Act citations and riskScore 72/88/82, and picked between them with
+  //  `DateTime.now().second % scenarios.length` — the severity of a report
+  //  therefore depended on the wall clock. demoAnalysis() returned one
+  //  'Demo Hazard' row at riskScore 72 / overallRisk HIGH.
+  //
+  //  Neither had a caller when they were deleted, but the banner above
+  //  analyseImage() read "used by GeminiVision when AI unavailable", which is an
+  //  instruction to re-wire exactly the defect this removal is part of: a
+  //  September 2026 report reached a plant user headed "AI Hazard Scan: Head
+  //  Protection — Helmet · HIGH · 12 hazards" over the sentence "AI Vision
+  //  models unavailable (46503ms)". The words OFFLINE MODE in each summary were
+  //  not enough then and would not be enough now — the hazard table, the
+  //  severity pill and the risk score are what a reader acts on, and those were
+  //  indistinguishable from a genuine finding.
+  //
+  //  The correct behaviour when vision fails is GeminiVision._offlineFallback:
+  //  an empty hazard list, overallRisk UNKNOWN, riskScore 0, confidence 0,
+  //  `_imageAnalysed: false`, and a summary that says the image was not
+  //  analysed. ai_scan_tab then blocks save / PDF / share outright. Offline
+  //  guidance belongs on the knowledge-base screen, never in a report keyed to
+  //  a photograph.
+  // ════════════════════════════════════════════════════════════════════
 }
