@@ -19,7 +19,6 @@ import 'package:share_plus/share_plus.dart';
 import '../main.dart';
 // GeminiVision and AiRunLog are no longer referenced from this screen — the
 // call and its telemetry attribution both moved into ScanJobs.
-import '../services/local_ai.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
 import '../services/image_storage.dart';
@@ -4540,6 +4539,18 @@ class _AIScanTabState extends State<AIScanTab> {
     }
   }
 
+  /// Width that per-chip caps inside the results column should be measured
+  /// against: the window on a phone, the content cap on anything wider.
+  ///
+  /// Anything in this tab sizing itself as a fraction of
+  /// `MediaQuery.size.width` is measuring the wrong box — the body is wrapped
+  /// in [ContentWidth] at [SLLayout.content], so past that point the window
+  /// keeps growing and the column does not.
+  double _chipBasis(BuildContext context) {
+    final w = MediaQuery.of(context).size.width;
+    return w > SLLayout.content ? SLLayout.content : w;
+  }
+
   // ✅ NEW: Hazard Map Legend — horizontally scrollable numbered chips
   // that correlate to bounding boxes on the image. Tapping a chip
   // triggers _onBboxTap which highlights the matching table row.
@@ -4620,9 +4631,14 @@ class _AIScanTabState extends State<AIScanTab> {
                     // "Suspended load over proc…" on a 1900px desktop with the
                     // rest of the row empty. Scale the cap with the viewport and
                     // keep the old value as the phone floor.
+                    // Scaled off the CONTENT column, not the window: the tab's
+                    // body is capped at SLLayout.content, so a raw window
+                    // fraction kept growing after the column had stopped and
+                    // this chip claimed a third of a 1920px browser inside a
+                    // 720px card.
                     ConstrainedBox(
                       constraints: BoxConstraints(
-                          maxWidth: (MediaQuery.of(context).size.width * 0.32)
+                          maxWidth: (_chipBasis(context) * 0.32)
                               .clamp(150.0, 300.0)),
                       child: Text(
                         name,

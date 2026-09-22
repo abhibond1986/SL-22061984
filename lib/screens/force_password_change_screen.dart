@@ -130,7 +130,8 @@ class _ForcePasswordChangeScreenState extends State<ForcePasswordChangeScreen> {
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 440),
+                // Was a hard 440; SLLayout.form IS 440 and is the shared token.
+                constraints: const BoxConstraints(maxWidth: SLLayout.form),
                 child: Container(
                   padding: const EdgeInsets.all(22),
                   decoration: BoxDecoration(

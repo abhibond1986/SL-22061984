@@ -30,6 +30,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
+import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
 // All credential reads/writes go through AuthService so the admin panel can't
@@ -764,7 +765,16 @@ class _AdminScreenState extends State<AdminScreen>
         : Row(children: [
             if (wideScreen)
               SizedBox(width: 240, child: _navDrawer(sl, pinned: true)),
-            Expanded(child: _moduleBody(active, sl)),
+            // ONE cap for all 17 module panels. Wrapping here rather than inside
+            // each panel keeps the 240px pinned drawer flush-left and leaves the
+            // 900px drawer breakpoint above untouched. `wide` (not `content`)
+            // because most panels are tables.
+            Expanded(
+              child: ContentWidth(
+                maxWidth: SLLayout.wide,
+                child: _moduleBody(active, sl),
+              ),
+            ),
           ]),
     );
   }

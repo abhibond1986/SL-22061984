@@ -25,6 +25,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import '../main.dart';
+import '../widgets/content_width.dart';
 // GeminiVision is no longer called from this screen: the photo analysis goes
 // through ScanJobs so it survives the reporter changing section mid-scan.
 import '../services/scan_jobs.dart';
@@ -4804,8 +4805,11 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
           Expanded(child: SingleChildScrollView(
             controller: _formScroll,
             // MEASURED, not guessed — see BottomNavGap. 100 was a literal.
-            padding: EdgeInsets.fromLTRB(
-                14, 14, 14, BottomNavGap.height(context) + 16),
+            // slGutter only widens the horizontal insets, so the measured bottom
+            // gap is preserved.
+            padding: slGutter(context,
+                base: EdgeInsets.fromLTRB(
+                    14, 14, 14, BottomNavGap.height(context) + 16)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [

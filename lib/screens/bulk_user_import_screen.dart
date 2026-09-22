@@ -23,6 +23,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../main.dart';
+import '../widgets/content_width.dart';
 import '../services/admin_master_data.dart';
 import '../services/supabase_config.dart';
 import '../services/supabase_service.dart';
@@ -350,7 +351,7 @@ class _BulkUserImportScreenState extends State<BulkUserImportScreen> {
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
+          padding: slGutter(context, base: const EdgeInsets.all(16)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [

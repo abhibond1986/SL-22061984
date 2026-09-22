@@ -30,6 +30,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../main.dart' show AppColors, SL, SLText;
+import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/network_checker.dart';
 import '../services/plant_scope.dart';
@@ -1237,8 +1238,11 @@ class _SopScanScreenState extends State<SopScanScreen> {
   /// much on a device with no gesture inset and too little if the bar's height
   /// ever changes. BottomNavGap reads the one constant both shells build the bar
   /// from, plus the device's own bottom inset.
-  EdgeInsets get _listPadding => EdgeInsets.fromLTRB(
-      16, 16, 16, widget.isTab ? BottomNavGap.height(context) + 16 : 16);
+  // All three views (capture / review / save) share this, so the width cap is
+  // applied once here rather than at each ListView.
+  EdgeInsets get _listPadding => slGutter(context,
+      base: EdgeInsets.fromLTRB(
+          16, 16, 16, widget.isTab ? BottomNavGap.height(context) + 16 : 16));
 
   Widget _captureView(SL sl) {
     return ListView(

@@ -12,6 +12,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart' show AppColors, SL;
+import '../widgets/content_width.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
@@ -385,46 +386,51 @@ class _HomeTabState extends State<HomeTab> {
               physics: const AlwaysScrollableScrollPhysics(),
               padding: EdgeInsets.zero,
               child: Column(children: [
+                // The hero stays full-bleed — its gradient is meant to run to
+                // the window edges — so the cap starts BELOW it. Its own text is
+                // capped separately inside _heroSection.
                 _heroSection(sl, firstName),
-                const SizedBox(height: 16),
-                // Above the stats: this is the one thing on the home screen that
-                // is addressed to the person reading it. Renders nothing at all
-                // when they have no assignments, so it costs non-investigators
-                // no vertical space. The padding matches _statsGrid so the card
-                // lines up with the tiles below it.
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: MyAssignmentsCard(
-                    items: _assignments,
-                    unseen: _unseenAssignments,
-                    onOpen: _openAssignment,
+                ContentWidth(child: Column(children: [
+                  const SizedBox(height: 16),
+                  // Above the stats: this is the one thing on the home screen that
+                  // is addressed to the person reading it. Renders nothing at all
+                  // when they have no assignments, so it costs non-investigators
+                  // no vertical space. The padding matches _statsGrid so the card
+                  // lines up with the tiles below it.
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: MyAssignmentsCard(
+                      items: _assignments,
+                      unseen: _unseenAssignments,
+                      onOpen: _openAssignment,
+                    ),
                   ),
-                ),
-                _statsGrid(sl),
-                const SizedBox(height: 18),
-                _safetyScoreCard(sl),
-                const SizedBox(height: 18),
-                // ✅ WSA-13 Bar Chart with plant filter
-                const WsaBarChart(),
-                const SizedBox(height: 18),
-                _quickActionsGrid(sl),
-                const SizedBox(height: 18),
-                _weeklyTrendCard(sl),
-                const SizedBox(height: 18),
-                // "Top 5 plants" compares plants against each other, which is
-                // meaningless once the data is scoped to one plant — it would
-                // render a single full-width bar. Admins keep the comparison.
-                if (!_scope.isLocked) ...[
-                  _topPlantsCard(sl),
+                  _statsGrid(sl),
                   const SizedBox(height: 18),
-                ],
-                _recentActivity(sl),
-                // NOT a fixed spacer: the shell builds its Scaffold with
-                // `extendBody: true` so this column scrolls *behind* the frosted
-                // nav bar. A flat 24 left the final Recent Activity row sitting
-                // under the bar — visible but unreadable. BottomNavGap measures
-                // the bar (60 + gesture inset) instead of guessing.
-                const BottomNavGap(),
+                  _safetyScoreCard(sl),
+                  const SizedBox(height: 18),
+                  // ✅ WSA-13 Bar Chart with plant filter
+                  const WsaBarChart(),
+                  const SizedBox(height: 18),
+                  _quickActionsGrid(sl),
+                  const SizedBox(height: 18),
+                  _weeklyTrendCard(sl),
+                  const SizedBox(height: 18),
+                  // "Top 5 plants" compares plants against each other, which is
+                  // meaningless once the data is scoped to one plant — it would
+                  // render a single full-width bar. Admins keep the comparison.
+                  if (!_scope.isLocked) ...[
+                    _topPlantsCard(sl),
+                    const SizedBox(height: 18),
+                  ],
+                  _recentActivity(sl),
+                  // NOT a fixed spacer: the shell builds its Scaffold with
+                  // `extendBody: true` so this column scrolls *behind* the frosted
+                  // nav bar. A flat 24 left the final Recent Activity row sitting
+                  // under the bar — visible but unreadable. BottomNavGap measures
+                  // the bar (60 + gesture inset) instead of guessing.
+                  const BottomNavGap(),
+                ])),
               ]),
             )),
     );
@@ -447,7 +453,10 @@ class _HomeTabState extends State<HomeTab> {
           ],
           stops: [0.0, 0.6, 1.0],
         )),
-      child: Stack(children: [
+      // The gradient Container above stays full-bleed; only the hero's CONTENT
+      // is capped, so on a wide browser the greeting and the ADMIN pill aren't
+      // flung to opposite ends of a 1920px row.
+      child: ContentWidth(child: Stack(children: [
         // Decorative blurred circles
         Positioned(top: -30, right: -20,
           child: _glow(80, Colors.white.withOpacity(0.18))),
@@ -660,7 +669,7 @@ class _HomeTabState extends State<HomeTab> {
                 ]),
               ))),
         ]),
-      ]),
+      ])),
     );
   }
 

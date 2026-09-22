@@ -1,6 +1,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import '../main.dart' show AppColors, SL;
+import '../main.dart' show AppColors, SL, SLLayout;
+import '../widgets/content_width.dart';
 import '../services/i18n.dart';
 import '../widgets/universal_app_bar.dart';
 import 'analytics/overview_tab.dart';
@@ -74,39 +75,46 @@ class _ReportsTabState extends State<ReportsTab>
               showExport: false,
             ),
             const SizedBox(height: 4),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                child: Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: sl.glassColor,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: sl.glassBorder),
-                  ),
-                  child: TabBar(
-                    controller: _tabController,
-                    labelColor: Colors.white,
-                    unselectedLabelColor: sl.text3,
-                    labelStyle: const TextStyle(
-                        fontSize: 13.5, fontWeight: FontWeight.w700),
-                    unselectedLabelStyle: const TextStyle(fontSize: 13.5),
-                    indicator: BoxDecoration(
-                      color: AppColors.accent,
-                      borderRadius: BorderRadius.circular(10),
+            // `wide`, matching the four analytics tabs below it, so the pill bar
+            // sits directly over its own content instead of four tabs each ~470px
+            // wide on a desktop browser. The TabBarView itself is NOT wrapped —
+            // each tab caps its own scroll view so the swipe stays full-bleed.
+            ContentWidth(
+              maxWidth: SLLayout.wide,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: sl.glassColor,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: sl.glassBorder),
                     ),
-                    indicatorSize: TabBarIndicatorSize.tab,
-                    dividerColor: Colors.transparent,
-                    isScrollable: false,
-                    padding: const EdgeInsets.all(3),
-                    labelPadding: const EdgeInsets.symmetric(vertical: 4),
-                    tabs: [
-                      Tab(text: I18n.t('reports.tab.overview')),
-                      Tab(text: I18n.t('reports.tab.log')),
-                      Tab(text: I18n.t('reports.tab.analysis')),
-                      Tab(text: I18n.t('reports.tab.plantWise')),
-                    ],
+                    child: TabBar(
+                      controller: _tabController,
+                      labelColor: Colors.white,
+                      unselectedLabelColor: sl.text3,
+                      labelStyle: const TextStyle(
+                          fontSize: 13.5, fontWeight: FontWeight.w700),
+                      unselectedLabelStyle: const TextStyle(fontSize: 13.5),
+                      indicator: BoxDecoration(
+                        color: AppColors.accent,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      indicatorSize: TabBarIndicatorSize.tab,
+                      dividerColor: Colors.transparent,
+                      isScrollable: false,
+                      padding: const EdgeInsets.all(3),
+                      labelPadding: const EdgeInsets.symmetric(vertical: 4),
+                      tabs: [
+                        Tab(text: I18n.t('reports.tab.overview')),
+                        Tab(text: I18n.t('reports.tab.log')),
+                        Tab(text: I18n.t('reports.tab.analysis')),
+                        Tab(text: I18n.t('reports.tab.plantWise')),
+                      ],
+                    ),
                   ),
                 ),
               ),

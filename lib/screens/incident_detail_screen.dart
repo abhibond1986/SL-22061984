@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
+import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
@@ -555,7 +556,8 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       bottomNavigationBar: (_isClosed || !_permChecked || !_canAct)
           ? null : _buildBottomBar(sl, bgColor),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 20),
+        padding: slGutter(context,
+            base: const EdgeInsets.fromLTRB(14, 14, 14, 20)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
           // ── STATUS PIPELINE (compact) ─────────────────────────
@@ -1365,7 +1367,10 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
         color: sl.isDark ? const Color(0xFF252840) : Colors.white,
         border: Border(top: BorderSide(
             color: sl.border.withOpacity(0.4)))),
-      child: Row(children: [
+      // The bar keeps its full-width top border; the action buttons are capped
+      // to the same column as the body above, so "Close Case" doesn't end up
+      // half a browser away from the case it closes.
+      child: ContentWidth(child: Row(children: [
         // Save without advancing. Replaces the old hardcoded "Investigate"
         // shortcut, which named a stage the admin may have renamed or removed
         // and duplicated the advance button's job — while the far more useful
@@ -1407,7 +1412,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10))),
           )),
-      ]));
+      ])));
   }
 
   // ─── HELPERS ────────────────────────────────────────────────

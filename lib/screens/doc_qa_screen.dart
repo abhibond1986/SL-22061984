@@ -34,6 +34,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../main.dart' show AppColors, SL, SLText;
+import '../widgets/content_width.dart';
 import '../services/doc_ocr_service.dart';
 import '../services/doc_qa_service.dart';
 import '../widgets/glass_card.dart';
@@ -485,7 +486,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
 
   Widget _pickView(SL sl) {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: slGutter(context, base: const EdgeInsets.all(16)),
       children: [
         if (_serviceProblem != null) _banner(sl, _serviceProblem!, warn: true),
         GlassCard(
@@ -746,7 +747,8 @@ class _DocQaScreenState extends State<DocQaScreen> {
               ? _emptyChat(sl, doc)
               : ListView.builder(
                   controller: _scrollCtrl,
-                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                  padding: slGutter(context,
+                      base: const EdgeInsets.fromLTRB(14, 10, 14, 10)),
                   itemCount: _messages.length,
                   itemBuilder: (_, i) => _bubble(sl, _messages[i], i),
                 ),
@@ -763,7 +765,9 @@ class _DocQaScreenState extends State<DocQaScreen> {
         color: sl.card.withOpacity(0.6),
         border: Border(bottom: BorderSide(color: sl.border)),
       ),
-      child: Column(
+      // Bar keeps its full-width divider; content capped to the transcript's
+      // column.
+      child: ContentWidth(child: Column(
         children: [
           Row(
             children: [
@@ -833,7 +837,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
               ),
             ),
         ],
-      ),
+      )),
     );
   }
 
@@ -847,7 +851,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
             'What are the main hazards?',
           ];
     return ListView(
-      padding: const EdgeInsets.all(20),
+      padding: slGutter(context, base: const EdgeInsets.all(20)),
       children: [
         const SizedBox(height: 12),
         Icon(Icons.question_answer_outlined, size: 40, color: sl.text4),
@@ -981,7 +985,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
         color: sl.card.withOpacity(0.85),
         border: Border(top: BorderSide(color: sl.border)),
       ),
-      child: Row(
+      child: ContentWidth(child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
@@ -1030,7 +1034,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 

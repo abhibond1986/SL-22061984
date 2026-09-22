@@ -1,7 +1,8 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../../main.dart' show AppColors, SL;
+import '../../main.dart' show AppColors, SL, SLLayout;
+import '../../widgets/content_width.dart';
 import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
@@ -235,7 +236,13 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
 
     return SingleChildScrollView(
       // Bottom inset clears the translucent bottom nav bar (`extendBody: true`).
-      padding: EdgeInsets.fromLTRB(16, 16, 16, BottomNavGap.height(context) + 16),
+      // slGutter widens only the horizontal insets, capping the column at
+      // `wide` on a desktop browser while leaving the measured bottom gap and
+      // the full-bleed scroll gesture alone.
+      padding: slGutter(context,
+          maxWidth: SLLayout.wide,
+          base: EdgeInsets.fromLTRB(
+              16, 16, 16, BottomNavGap.height(context) + 16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

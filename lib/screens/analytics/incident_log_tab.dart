@@ -2,7 +2,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import '../../main.dart' show AppColors, SL;
+import '../../main.dart' show AppColors, SL, SLLayout;
+import '../../widgets/content_width.dart';
 import '../../services/local_db.dart';
 import '../../services/image_storage.dart';
 import '../../services/admin_master_data.dart';
@@ -320,38 +321,43 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final filtered = _filtered;
 
     return Column(children: [
-      // Filter section
-      _filterSection(sl),
+      // The filter bar and the summary row live OUTSIDE the ListView below, so
+      // the list's gutter padding can't reach them — they get ContentWidth
+      // instead, at the same `wide` cap, so the three stay in one column.
+      ContentWidth(maxWidth: SLLayout.wide, child: _filterSection(sl)),
       // Summary
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        child: Row(children: [
-          Text('Showing ${filtered.length} of ${_all.length} incidents',
-              style: TextStyle(color: sl.text3, fontSize: 11,
-                  fontWeight: FontWeight.w600)),
-          const Spacer(),
-          // The pinned plant doesn't count as an active filter for a locked
-          // user, and "Clear filters" must not reset it to 'All' — that was the
-          // one control that could have widened the view back out.
-          if (_sevFilter.isNotEmpty || _statusFilter.isNotEmpty ||
-              (!_scope.isLocked && _plantFilter != 'All') ||
-              _departmentFilter != 'All' ||
-              _typeFilter != 'All' || _myReportsOnly)
-            GestureDetector(
-              onTap: () => setState(() {
-                _sevFilter.clear();
-                _statusFilter.clear();
-                if (!_scope.isLocked) _plantFilter = 'All';
-                _departmentFilter = 'All'; // ★ NEW: Clear department filter
-                _typeFilter = 'All';
-                _dateRange = '90 days';
-                _myReportsOnly = false;
-              }),
-              child: Text('Clear filters', style: TextStyle(
-                  color: sl.accentText, fontSize: 11,
-                  fontWeight: FontWeight.w600)),
-            ),
-        ]),
+      ContentWidth(
+        maxWidth: SLLayout.wide,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Row(children: [
+            Text('Showing ${filtered.length} of ${_all.length} incidents',
+                style: TextStyle(color: sl.text3, fontSize: 11,
+                    fontWeight: FontWeight.w600)),
+            const Spacer(),
+            // The pinned plant doesn't count as an active filter for a locked
+            // user, and "Clear filters" must not reset it to 'All' — that was the
+            // one control that could have widened the view back out.
+            if (_sevFilter.isNotEmpty || _statusFilter.isNotEmpty ||
+                (!_scope.isLocked && _plantFilter != 'All') ||
+                _departmentFilter != 'All' ||
+                _typeFilter != 'All' || _myReportsOnly)
+              GestureDetector(
+                onTap: () => setState(() {
+                  _sevFilter.clear();
+                  _statusFilter.clear();
+                  if (!_scope.isLocked) _plantFilter = 'All';
+                  _departmentFilter = 'All'; // ★ NEW: Clear department filter
+                  _typeFilter = 'All';
+                  _dateRange = '90 days';
+                  _myReportsOnly = false;
+                }),
+                child: Text('Clear filters', style: TextStyle(
+                    color: sl.accentText, fontSize: 11,
+                    fontWeight: FontWeight.w600)),
+              ),
+          ]),
+        ),
       ),
       // Incident list
       Expanded(
@@ -366,7 +372,11 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                 onRefresh: _load,
                 color: AppColors.accent,
                 child: ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 80),
+                  // Gutter, not a wrap: this list is the app's longest and must
+                  // stay lazily built.
+                  padding: slGutter(context,
+                      maxWidth: SLLayout.wide,
+                      base: const EdgeInsets.fromLTRB(14, 0, 14, 80)),
                   itemCount: filtered.length,
                   itemBuilder: (_, i) => _incidentCard(sl, filtered[i]),
                 ),

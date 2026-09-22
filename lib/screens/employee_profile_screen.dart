@@ -31,6 +31,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../main.dart';
+import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_config.dart';
@@ -223,7 +224,8 @@ class _EmployeeProfileScreenState extends State<EmployeeProfileScreen> {
                     ),
             )
           : ListView(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 32),
+              padding: slGutter(context,
+                  base: const EdgeInsets.fromLTRB(14, 14, 14, 32)),
               children: [
                 _header(sl, u),
                 if (_loading)

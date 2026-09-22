@@ -3,7 +3,8 @@ import 'dart:convert' show base64Decode;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../../main.dart' show AppColors, SL;
+import '../../main.dart' show AppColors, SL, SLLayout;
+import '../../widgets/content_width.dart';
 import '../../services/local_db.dart';
 import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
@@ -340,7 +341,12 @@ class _OverviewTabState extends State<OverviewTab> {
         // Bottom inset, not a flat 14: the shell sets `extendBody: true`, so the
         // last card would otherwise scroll under the translucent nav bar and be
         // unreadable. BottomNavGap measures the bar instead of guessing.
-        padding: EdgeInsets.fromLTRB(14, 14, 14, BottomNavGap.height(context) + 16),
+        // Horizontal insets widened to cap the column at `wide`; the measured
+        // bottom gap is preserved.
+        padding: slGutter(context,
+            maxWidth: SLLayout.wide,
+            base: EdgeInsets.fromLTRB(
+                14, 14, 14, BottomNavGap.height(context) + 16)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // Every card below is now plant-scoped, so a locked user gets one
           // header naming the scope. Without it these figures read as SAIL-wide,

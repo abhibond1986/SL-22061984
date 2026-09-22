@@ -51,3 +51,44 @@ class ContentWidth extends StatelessWidget {
         ),
       );
 }
+
+/// Symmetric horizontal padding that centres a capped content column *inside* a
+/// scroll view, without touching the widget tree.
+///
+/// WHY A PADDING HELPER AND NOT JUST [ContentWidth]
+/// ------------------------------------------------
+/// Most scroll roots in this app are `ListView(children: [...])` or
+/// `SingleChildScrollView(child: Column(...))`. To apply [ContentWidth] to a
+/// `ListView` you have to collapse its `children` into one wrapped `Column`,
+/// which (a) rewrites dozens of widget trees by hand — every one a chance to
+/// misplace a bracket in a 7,000-line file — and (b) destroys lazy building on
+/// the long lists (incident log, admin tables) that need it most.
+///
+/// Widening the scroll view's own `padding` achieves the identical painted
+/// result: the list stays full-bleed for gestures and its scrollbar keeps the
+/// full track height (the two things `ContentWidth`'s doc warns you not to
+/// constrain), while the content column is capped and centred. It also works
+/// unchanged on `ListView.builder`, `GridView`, `CustomScrollView`
+/// (`SliverPadding`) and `SingleChildScrollView` alike.
+///
+/// Use [ContentWidth] instead for anything that is NOT a scroll view — a
+/// composer bar, a filter row, a `bottomNavigationBar`, a `TabBar` — since those
+/// have no `padding` to widen.
+///
+/// TRAP: this reads the WINDOW width, so it is wrong inside a region that is
+/// already laterally inset (e.g. the admin body, which sits beside a 240px
+/// pinned drawer). Wrap those with [ContentWidth] at the inset region's root
+/// instead, where the real constraints are known.
+///
+/// Below the cap it returns [base] unchanged, so phone layouts are untouched.
+EdgeInsets slGutter(
+  BuildContext context, {
+  double maxWidth = SLLayout.content,
+  EdgeInsets base = EdgeInsets.zero,
+}) {
+  final slack =
+      MediaQuery.of(context).size.width - base.horizontal - maxWidth;
+  if (slack <= 0) return base;
+  final extra = slack / 2;
+  return base.copyWith(left: base.left + extra, right: base.right + extra);
+}

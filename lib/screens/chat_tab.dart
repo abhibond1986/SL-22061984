@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 // backend call goes through SyncService.callAiText, which owns the deployment
 // URL, the prefs override and the app secret. See the note at _backendUrl below.
 import '../main.dart';
+import '../widgets/content_width.dart';
 import '../services/local_ai.dart';
 import '../services/groq_service.dart';
 import '../services/local_db.dart';
@@ -884,7 +885,12 @@ class _ChatTabState extends State<ChatTab> {
         Expanded(
           child: ListView(
             controller: _scrollCtrl,
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+            // Widened, not wrapped: a chat transcript stretched to 1900px puts
+            // the user's own bubbles a screen-width away from the assistant's.
+            // The gutter caps the column while the list stays full-bleed for
+            // the wheel and keeps its scrollbar on the window edge.
+            padding: slGutter(context,
+                base: const EdgeInsets.fromLTRB(14, 14, 14, 6)),
             children: [
               ..._messages.map((m) => _bubble(
                   m['role'].toString(), m['text'].toString(),
@@ -908,7 +914,10 @@ class _ChatTabState extends State<ChatTab> {
           decoration: BoxDecoration(
             color: sl.bg2,
             border: Border(top: BorderSide(color: sl.border, width: 0.8))),
-          child: Row(children: [
+          // The bar keeps its full-width top border; only the field and send
+          // button are capped, so they stay under the transcript column instead
+          // of the send button drifting to the far right of the browser.
+          child: ContentWidth(child: Row(children: [
             Expanded(
               child: TextField(
                 controller: _ctrl,
@@ -945,7 +954,7 @@ class _ChatTabState extends State<ChatTab> {
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.send_rounded, color: Colors.white, size: 18))),
-          ]),
+          ])),
         ),
       ]),
     );
