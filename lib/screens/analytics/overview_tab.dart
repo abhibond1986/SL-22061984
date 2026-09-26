@@ -309,7 +309,7 @@ class _OverviewTabState extends State<OverviewTab> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+      return const SkeletonAnalytics(semanticLabel: 'Loading safety overview');
     }
     // An unresolved scope is reported, not silently widened to all plants.
     if (_scope.problem != null) {

@@ -29,6 +29,7 @@ import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/skeleton.dart';
 
 class HomeTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -367,7 +368,9 @@ class _HomeTabState extends State<HomeTab> {
         isDark: widget.isDark,
       ),
       body: _loading
-        ? Center(child: CircularProgressIndicator(color: AppColors.accent))
+        // The first screen after sign-in, and its loader is time-bounded at 12s,
+        // so the worst case a user can sit in front of this is known.
+        ? const SkeletonDashboard(semanticLabel: 'Loading home')
         // An unresolved scope is reported, not silently widened to all plants.
         : _scope.problem != null
         ? Padding(

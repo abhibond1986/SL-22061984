@@ -25,6 +25,8 @@ import 'services/ai_run_log.dart';
 import 'services/visitor_service.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'widgets/scan_status_overlay.dart';
+import 'widgets/limited_mode_banner.dart';
+import 'services/api_monitor.dart';
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
@@ -213,6 +215,13 @@ void _installErrorHandlers() {
 /// rejection here would reach runZonedGuarded and be logged as a crash, which
 /// would bury real failures in noise from routine offline conditions.
 void _startDeferredWork() {
+  // Deliberately here and not in the guarded pre-runApp block. Loading the
+  // rolling window of API failures is diagnostic; nothing on the first frame
+  // reads it, and recording works before `init` (it just is not durable yet), so
+  // it has no business competing for the SharedPreferences channel while the
+  // engine is trying to paint.
+  ApiMonitor.init().catchError((Object _) {});
+
   // Image maintenance. These two MUST be sequenced, not fired in parallel.
   //
   // Both read-modify-write the same 'incidents' SharedPreferences key:
@@ -781,6 +790,12 @@ class _SafetyLensAppState extends State<SafetyLensApp> with WidgetsBindingObserv
             children: [
               child ?? const SizedBox.shrink(),
               const ScanStatusOverlay(),
+              // Same reasoning as the overlay: this is the only place a widget
+              // can sit above every route. It renders nothing when startup was
+              // clean, which is the overwhelmingly common case, and it is
+              // top-aligned and self-sized so it never intercepts a tap meant
+              // for the screen underneath.
+              const LimitedModeBanner(),
             ],
           ),
           // ✅ On web, skip Flutter splash — HTML splash (index.html) already

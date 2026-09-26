@@ -8,6 +8,9 @@ import '../services/app_updater.dart';
 // hashing scheme, one place that talks to Supabase. See auth_service.dart for
 // why the previous per-screen hashing was broken.
 import '../services/auth_service.dart';
+import '../services/api_monitor.dart';
+import '../services/app_logger.dart';
+import '../services/startup_diagnostics.dart';
 import '../services/validators.dart';
 import '../services/visitor_service.dart';
 import '../services/i18n.dart';
@@ -189,12 +192,29 @@ class _LoginScreenState extends State<LoginScreen> {
             return;
           }
         }
+        ApiMonitor.recordAuthEvent(AuthFlow.signIn, ok: true);
         _goHome();
       } else {
+        // A rejected credential, not a fault. `res.message` is copy AuthService
+        // chose for the user, so it is safe to show as-is.
+        ApiMonitor.recordAuthEvent(AuthFlow.signIn,
+            ok: false, kind: FailureKind.auth);
         setState(() => _err = res.message);
       }
-    } catch (e) {
-      if (mounted) setState(() => _err = 'Login failed: $e');
+    } catch (e, st) {
+      // Was `'Login failed: \$e'`, which put the raw exception on the login
+      // screen — for a Supabase failure that is the project URL and often the
+      // anon key, printed above the password field of a production site.
+      // sanitize() maps the exception to advice the user can act on; the
+      // diagnosable form goes to the local log under a reference they can quote.
+      ApiMonitor.recordAuthEvent(AuthFlow.signIn,
+          ok: false, kind: ApiMonitor.classify(e));
+      AppLogger.error('Login', 'signIn threw '
+          '(ref ${StartupDiagnostics.sessionReference})',
+          error: e, stack: st, action: 'signIn');
+      if (mounted) {
+        setState(() => _err = StartupDiagnostics.sanitize(e));
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -246,12 +266,22 @@ class _LoginScreenState extends State<LoginScreen> {
           // Colors.green gives white snackbar text 2.5:1. greenLight is 5.48:1.
           backgroundColor: AppColors.greenLight,
           duration: const Duration(seconds: 2)));
+        ApiMonitor.recordAuthEvent(AuthFlow.register, ok: true);
         _goHome();
       } else {
+        ApiMonitor.recordAuthEvent(AuthFlow.register,
+            ok: false, kind: FailureKind.rejected);
         setState(() => _err = res.message);
       }
-    } catch (e) {
-      if (mounted) setState(() => _err = 'Registration failed: $e');
+    } catch (e, st) {
+      ApiMonitor.recordAuthEvent(AuthFlow.register,
+          ok: false, kind: ApiMonitor.classify(e));
+      AppLogger.error('Login', 'register threw '
+          '(ref ${StartupDiagnostics.sessionReference})',
+          error: e, stack: st, action: 'register');
+      if (mounted) {
+        setState(() => _err = StartupDiagnostics.sanitize(e));
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -609,8 +639,10 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
+          // Same reason as the two auth handlers: an unfiltered `\$e` here put
+          // the release URL and any redirect token into a snackbar.
           content: Text(
-            'Error: $e',
+            StartupDiagnostics.sanitize(e),
             style: const TextStyle(fontSize: 12),
           ),
           backgroundColor: AppColors.crit,
