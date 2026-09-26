@@ -1520,20 +1520,14 @@ class _AIScanTabState extends State<AIScanTab> {
   // Words as well as numbers. "3" alone is meaningless to anyone not holding
   // the plant matrix, and the whole point of the estimate is that the officer
   // can sanity-check it on site.
-  static const Map<int, String> _kLikelihoodWords = {
-    1: 'Rare',
-    2: 'Unlikely',
-    3: 'Possible',
-    4: 'Likely',
-    5: 'Almost certain',
-  };
-  static const Map<int, String> _kSeverityWords = {
-    1: 'Negligible',
-    2: 'Minor',
-    3: 'Moderate',
-    4: 'Major',
-    5: 'Catastrophic',
-  };
+  //
+  // The maps themselves now live in AdminMasterData because the exported PDF
+  // prints them too, and two copies of the axis labels is two chances for the
+  // paper report and the screen to describe the same rating differently. These
+  // are aliases so the picker call sites below read unchanged.
+  static const Map<int, String> _kLikelihoodWords =
+      AdminMasterData.likelihoodWords;
+  static const Map<int, String> _kSeverityWords = AdminMasterData.severityWords;
 
   /// The 5×5 grid, with a crosshair on the cell the two pickers select.
   ///
@@ -3703,9 +3697,8 @@ class _AIScanTabState extends State<AIScanTab> {
                   matrixScore == 0
                       ? 'Set a likelihood and a severity to rate this scan.'
                       : _matrixIsEstimate
-                          ? 'Likelihood is estimated from AI confidence. Confirm '
-                              'it against exposure on site, then rate with your '
-                              'approved plant risk matrix.'
+                          // Shared with the PDF so both say it the same way.
+                          ? AdminMasterData.matrixEstimateCaveat
                           : 'Rate with your approved plant risk matrix.',
                   style: TextStyle(color: sl.text4, fontSize: 12))),
             ]))),
