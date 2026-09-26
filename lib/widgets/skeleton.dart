@@ -325,6 +325,131 @@ class SkeletonDashboard extends StatelessWidget {
   }
 }
 
+/// The profile shape: an avatar and name header, then labelled field rows.
+class SkeletonProfile extends StatelessWidget {
+  final String semanticLabel;
+  final int fields;
+
+  const SkeletonProfile({
+    super.key,
+    this.semanticLabel = 'Loading profile',
+    this.fields = 6,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final sl = SL.of(context);
+    return SkeletonPanel(
+      semanticLabel: semanticLabel,
+      child: SingleChildScrollView(
+        physics: const NeverScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: const [
+                Skeleton.circle(size: 64),
+                SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Skeleton(width: 160, height: 18),
+                      SizedBox(height: 9),
+                      Skeleton(width: 100, height: 12),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 26),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: sl.card,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: sl.border),
+              ),
+              child: Column(
+                children: [
+                  for (var i = 0; i < fields; i++) ...[
+                    if (i > 0) const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        // Label column narrow, value column wide — the same
+                        // asymmetry the loaded field rows have.
+                        const Skeleton(width: 84, height: 11),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Skeleton(
+                                width: 110 + (i % 3) * 40, height: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The log shape: a search field, filter chips, then record rows.
+///
+/// Distinct from [SkeletonAnalytics] because the incident log and similar
+/// screens have no chart, and drawing a fake chart block above a list would
+/// promise something the loaded screen does not deliver.
+class SkeletonLogList extends StatelessWidget {
+  final String semanticLabel;
+  final int rows;
+  final bool search;
+
+  const SkeletonLogList({
+    super.key,
+    this.semanticLabel = 'Loading records',
+    this.rows = 6,
+    this.search = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SkeletonPanel(
+      semanticLabel: semanticLabel,
+      child: SingleChildScrollView(
+        physics: const NeverScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (search) ...[
+              const Skeleton(height: 44, radius: 12),
+              const SizedBox(height: 14),
+            ],
+            Row(
+              children: const [
+                Skeleton(width: 78, height: 30, radius: 15),
+                SizedBox(width: 10),
+                Skeleton(width: 64, height: 30, radius: 15),
+                SizedBox(width: 10),
+                Skeleton(width: 88, height: 30, radius: 15),
+              ],
+            ),
+            const SizedBox(height: 18),
+            SkeletonList(rows: rows),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The analytics shape: a couple of filter chips, a chart block, then rows.
 class SkeletonAnalytics extends StatelessWidget {
   final String semanticLabel;
