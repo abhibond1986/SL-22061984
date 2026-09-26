@@ -1,8 +1,17 @@
+import 'dart:async' show runZonedGuarded;
+// PlatformDispatcher.onError is the last-resort hook for errors that bypass the
+// zone handler. FontFeature keeps the reference ID monospaced so it is easy to
+// read back over a phone.
+import 'dart:ui' show PlatformDispatcher, FontFeature;
+
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'services/app_logger.dart';
+import 'services/startup_diagnostics.dart';
+import 'services/auth_service.dart';
 import 'services/local_db.dart';
 import 'services/sync_service.dart';
 import 'services/supabase_service.dart';
@@ -20,73 +29,329 @@ import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 
-void main() async {
+// ─── STARTUP ──────────────────────────────────────────────────────────────────
+//
+// STARTUP CONTRACT — read before adding anything here.
+//
+// The single rule: nothing between the first line of main() and runApp() may be
+// unbounded, and nothing may throw past this function. The app previously
+// violated both. Six initialisers were awaited bare, one of them
+// (Supabase.initialize) performed an untimed network round trip, and there was no
+// runZonedGuarded / FlutterError.onError / ErrorWidget.builder anywhere in lib/.
+// A single slow or failing step therefore meant runApp() was never called: the
+// HTML preloader in web/index.html sat on "Initializing…" forever, with no
+// message and no way out. That is the defect this structure exists to prevent.
+//
+// Three invariants enforce it:
+//
+//   1. EVERY pre-runApp step goes through StartupDiagnostics.guard*, which
+//      applies a hard deadline and swallows failures into a recorded degraded
+//      state. Do not add a bare `await` here.
+//   2. ONLY steps whose result the first frame genuinely needs run before
+//      runApp(). Everything else belongs in _startDeferredWork(), which runs
+//      after the first frame so background sync cannot compete with first paint.
+//   3. The app must remain usable when any step fails. Every one of these is
+//      cache- or local-first, so a degraded start means "offline mode", never a
+//      blank screen. StartupDiagnostics.degradedSteps records what was skipped.
+//
+// If you need something available before first paint, give it a deadline and a
+// sensible fallback — not an await.
+void main() {
+  StartupDiagnostics.begin();
+
+  // runZonedGuarded catches async errors that escape a Future with no
+  // .catchError — the class of failure that previously produced a silent blank
+  // screen in release web builds, where there is no console anyone will read.
+  runZonedGuarded(_bootstrap, (error, stack) {
+    AppLogger.critical(
+      'Startup',
+      'Uncaught async error (ref ${StartupDiagnostics.sessionReference})',
+      error: error,
+      stack: stack,
+      action: 'zone',
+    );
+  });
+}
+
+Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await LocaleService().load();
-  await LocalDB.init();
-  // Supabase backend (no-op until configured + enabled in SupabaseConfig).
+
+  // FIRST, before anything that can fail. Adopting the reference the web boot
+  // script already generated is what makes the code on the HTML timeout screen
+  // and the code Dart reports the same string. `adoptBootReference` refuses to
+  // overwrite a reference already in use, and a reference comes into being the
+  // moment ANY error path reads `sessionReference` — so installing the error
+  // handlers first would mean a single early framework error permanently split
+  // the session across two codes, defeating the whole point of having one.
+  // No-op on mobile, where the key does not exist.
+  await StartupDiagnostics.guardVoid(
+    'Boot reference',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      StartupDiagnostics.adoptBootReference(prefs.getString('sl_boot_ref'));
+    },
+    timeout: const Duration(seconds: 1),
+  );
+
+  _installErrorHandlers();
+
+  // ── Steps the first frame actually depends on ───────────────────────────────
+  // Deadlines are generous relative to real cost (these are SharedPreferences
+  // and filesystem calls, i.e. single-digit milliseconds) because the deadline
+  // is a backstop against a wedged platform channel, not a performance budget.
+  // Their sum is the worst-case delay before first paint.
+
+  // Locale must resolve before the first frame or the UI paints in the wrong
+  // language and then visibly re-renders. Falls back to the 'en' default.
+  await StartupDiagnostics.guardVoid(
+    'Locale',
+    () => LocaleService().load(),
+    timeout: const Duration(seconds: 2),
+  );
+
+  // LocalDB is the offline-first store every screen reads. If this fails the app
+  // is genuinely impaired — but the login screen still renders, which is what
+  // lets the user see an error instead of a void.
+  await StartupDiagnostics.guardVoid(
+    'Local database',
+    () => LocalDB.init(),
+    timeout: const Duration(seconds: 3),
+  );
+
+  // Self-bounding (see SupabaseService.kInitDeadline). Returns false rather than
+  // throwing or hanging; a false result simply means offline-first mode.
   await SupabaseService.init();
-  await SyncService.init();
-  await ImageStorage.init();
-  // Migrate legacy base64 images to file storage (one-time, non-blocking)
-  ImageStorage.migrateInlineImages().catchError((_) => 0);
-  // ✅ FIX: Purge bloated imageBase64 from local storage to fix QuotaExceededError
-  LocalDB.purgeStoredImages().catchError((_) => 0);
+
+  await StartupDiagnostics.guardVoid(
+    'Sync service',
+    () => SyncService.init(),
+    timeout: const Duration(seconds: 2),
+  );
+
+  await StartupDiagnostics.guardVoid(
+    'Image storage',
+    () => ImageStorage.init(),
+    timeout: const Duration(seconds: 3),
+  );
+
+  // ★ v24: master data (plants, depts, WSA) — cache-first, no network.
+  //
+  // Warms the synchronous master-data snapshot used by code paths that cannot
+  // await (LocalAI.processText, called inline by the near-miss form).
+  //
+  // ORDER IS LOAD-BEARING. primeSnapshots() and the revision listener must both
+  // be in place BEFORE the network refresh starts in _startDeferredWork(),
+  // otherwise a sync that completes quickly would bump `revision` with no
+  // listener attached and the fresh data would sit unread until the next change.
+  await StartupDiagnostics.guardVoid(
+    'Master data cache',
+    () => AdminMasterData.primeSnapshots(),
+    timeout: const Duration(seconds: 2),
+  );
+  AdminMasterData.revision.addListener(() {
+    AdminMasterData.primeSnapshots();
+  });
+
+  // ── First paint ─────────────────────────────────────────────────────────────
+  runApp(const SafetyLensApp());
+
+  // Everything below used to run BEFORE runApp as unawaited fire-and-forget
+  // calls. They did not block on an await, but they did start half a dozen
+  // network requests and a full local-storage rewrite while the engine was still
+  // trying to render, competing for bandwidth, CPU and the SharedPreferences
+  // channel at the worst possible moment. Deferring to after the first frame
+  // costs these tasks a few hundred milliseconds each — none is user-visible —
+  // and hands first paint an uncontended main isolate.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    StartupDiagnostics.markFirstFrame();
+    _startDeferredWork();
+  });
+}
+
+/// Global error boundaries. Installed before any UI exists so nothing can slip
+/// through during the build of the first frame.
+void _installErrorHandlers() {
+  // Framework errors (build/layout/paint). In release these are otherwise
+  // swallowed entirely, which is how the CrossAxisAlignment.stretch-on-a-Row
+  // layout failure managed to blank a whole screen with no console output.
+  final previousOnError = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    AppLogger.error(
+      'Flutter',
+      'Framework error in ${details.library ?? "widgets"} '
+          '(ref ${StartupDiagnostics.sessionReference})',
+      error: details.exception,
+      stack: details.stack,
+      action: 'build',
+    );
+    if (previousOnError != null) previousOnError(details);
+  };
+
+  // Errors from the platform itself that never reach the zone handler.
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLogger.critical(
+      'Platform',
+      'Uncaught platform error (ref ${StartupDiagnostics.sessionReference})',
+      error: error,
+      stack: stack,
+      action: 'platform',
+    );
+    return true; // handled — do not terminate the isolate
+  };
+
+  // What the user SEES when a widget subtree fails to build. The default is a
+  // red box of exception text in debug and an unstyled grey box in release —
+  // neither is acceptable in front of a plant employee, and the debug one prints
+  // a stack trace, which the brief explicitly forbids exposing.
+  ErrorWidget.builder = (FlutterErrorDetails details) =>
+      _SafeErrorPane(reference: StartupDiagnostics.sessionReference);
+}
+
+/// Background work, started after the first frame is on screen.
+///
+/// Every entry is fire-and-forget WITH an attached error handler. An unhandled
+/// rejection here would reach runZonedGuarded and be logged as a crash, which
+/// would bury real failures in noise from routine offline conditions.
+void _startDeferredWork() {
+  // Image maintenance. These two MUST be sequenced, not fired in parallel.
+  //
+  // Both read-modify-write the same 'incidents' SharedPreferences key:
+  // migrateInlineImages() moves base64 blobs to files and writes back an
+  // imageRef, while purgeStoredImages() strips imageBase64 to fix
+  // QuotaExceededError. Run concurrently, the second read sees a pre-migration
+  // snapshot and the write-back clobbers the imageRef values — a lost update
+  // that silently destroys the link to just-migrated evidence photos. Chaining
+  // them is the fix; the ordering (migrate, then purge) matters because purging
+  // first would delete the blobs the migration needs to read.
+  ImageStorage.migrateInlineImages()
+      .then((_) => LocalDB.purgeStoredImages())
+      .catchError((Object e) {
+    AppLogger.warn('Startup', 'Image maintenance skipped',
+        details: StartupDiagnostics.sanitizeVerbose(e), action: 'deferred');
+    return 0;
+  });
+
   SyncService.drainPendingQueue().catchError((_) => 0);
+
   // AI telemetry backlog. Runs recorded while the device was offline — or while
   // the `ai_runs` table did not exist yet — stay flagged unsynced locally, so
   // the admin dashboard (which reports on ALL devices via Supabase) would show
   // zero for scans that really happened. Draining here means the backlog
   // repairs itself on the next launch instead of being stranded forever.
   AiRunLog.flushUnsynced().catchError((_) => 0);
+
   // ★ Pull ALL shared incidents from the backend into local storage so every
   //   device shows the SAME data for a given user (desktop == mobile).
-  //   Non-blocking: screens refresh when it completes / on pull-to-refresh.
+  //   Screens refresh when it completes / on pull-to-refresh.
   SyncService.fullSync().catchError((_) => <String, dynamic>{});
-  // ★ v24: master data (plants, depts, WSA).
-  //
-  // This block used to `await` syncFromBackend() with a 10s timeout BEFORE
-  // runApp, so on a slow or blocked network every launch stared at a blank
-  // screen for up to ten seconds. Now it is cache-first: prime the snapshot from
-  // local storage (fast, no network), then let the refresh land in the
-  // background and re-prime via the revision listener.
-  //
-  // ORDER IS LOAD-BEARING. primeSnapshots() and the listener must both be in
-  // place BEFORE the unawaited sync starts, otherwise a sync that completes
-  // quickly would bump `revision` with no listener attached and the fresh data
-  // would sit unread until the next change.
-  //
-  // Warms the synchronous master-data snapshot used by code paths that can't
-  // await (LocalAI.processText, called inline by the near-miss form).
-  await AdminMasterData.primeSnapshots();
-  AdminMasterData.revision.addListener(() {
-    AdminMasterData.primeSnapshots();
-  });
-  // Unawaited: screens refresh themselves when this lands.
+
+  // Master-data refresh. The snapshot is already primed from cache, so this only
+  // ever upgrades what is on screen; the revision listener re-primes on arrival.
   AdminMasterData.syncFromBackend()
       .timeout(const Duration(seconds: 10), onTimeout: () => false)
       .catchError((_) => false);
-  // ★ v25: Pull latest Knowledge Base from backend (non-blocking)
+
+  // ★ v25: Pull latest Knowledge Base from backend.
   SyncService.syncKnowledgeBase().catchError((_) => false);
+
   // Any knowledge-base change must reach the AI hazard analyser immediately.
   // It caches the KB context it injects into the vision prompt, and that cache
   // used to live for the whole app session — so a document the admin uploaded
   // was ignored until the next cold start. Dropping the cache here means the
   // very next scan re-reads the knowledge base.
   LocalDB.kbRevision.addListener(GeminiVision.invalidateKbContext);
-  // Silent auto-update: checks GitHub releases and installs APK in background
-  AppUpdater.init();
-  // ★ v25: Periodic background sync — retries pending items every 5 minutes
+
+  // Silent auto-update: checks GitHub releases and installs APK in background.
+  // Previously unawaited with no error handler at all — and its prefs access
+  // sits outside its own internal try, so a failure there became an unhandled
+  // async error.
+  AppUpdater.init().catchError((Object e) {
+    AppLogger.warn('Startup', 'Update check skipped',
+        details: StartupDiagnostics.sanitizeVerbose(e), action: 'deferred');
+  });
+
+  // ★ v25: Periodic background sync — retries pending items every 5 minutes.
   BackgroundSync.start();
+
   // ★ Live cross-device sync: push incident/AI-hazard/near-miss add-edit-delete
-  //   to every connected user in real time (no-op unless Supabase is enabled).
+  //   to every connected user in real time (no-op unless Supabase is ready).
   RealtimeSync.start().catchError((_) {});
-  // Unique-visitor counter for the admin dashboard. Fire-and-forget: it must
-  // never delay first paint, and it no-ops when Supabase isn't configured.
-  // Counts anonymous visitors too; the employee ID is attached here if a session
-  // already exists, and again by login_screen for a fresh sign-in.
+
+  // Unique-visitor counter for the admin dashboard. Counts anonymous visitors
+  // too; the employee ID is attached here if a session already exists, and again
+  // by login_screen for a fresh sign-in.
   VisitorService.recordVisit().catchError((_) {});
-  runApp(const SafetyLensApp());
+}
+
+/// Replacement for Flutter's default error widget.
+///
+/// Shows no exception text, no stack trace and no internal identifiers — only a
+/// support reference that correlates with the detailed local log. Kept
+/// deliberately dependency-free — no SL theme lookup, no Localizations, no
+/// inherited widget of any kind, and it supplies its own Directionality — because
+/// it has to render in exactly the situation where the widget tree is already
+/// misbehaving, possibly above MaterialApp. An error widget that itself throws
+/// produces an infinite rebuild loop, so every colour here is hardcoded and
+/// nothing is read from context.
+class _SafeErrorPane extends StatelessWidget {
+  final String reference;
+  const _SafeErrorPane({required this.reference});
+
+  @override
+  Widget build(BuildContext context) {
+    // Directionality is NOT optional here. Every Text ultimately asserts a
+    // non-null textDirection, resolved from the nearest Directionality ancestor —
+    // and ErrorWidget.builder can be invoked ABOVE MaterialApp (if the theme or
+    // the app's own build throws), where no such ancestor exists. Without this
+    // the error pane throws while rendering the error, which is the infinite
+    // rebuild loop this widget was written to avoid. Flutter's own default error
+    // widget drops to a raw RenderErrorBox for exactly this reason.
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Container(
+        color: const Color(0xFF0D1117),
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.warning_amber_rounded,
+                  color: Color(0xFFF59E0B), size: 40),
+              const SizedBox(height: 12),
+              const Text(
+                'This section could not be displayed.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Color(0xFFF1F5F9),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'The rest of the app is still usable. Please go back and try '
+                'again.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+              ),
+              const SizedBox(height: 14),
+              // Plain Text, not SelectableText: selection drags in EditableText,
+              // focus and a selection toolbar that needs an Overlay — a lot of
+              // machinery to depend on when the tree is already broken. The same
+              // reference is in the log and in window.__slBootRef, so being able
+              // to select it is a nicety, not a requirement.
+              Text(
+                'Reference: $reference',
+                style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 11,
+                    fontFeatures: [FontFeature.tabularFigures()]),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
@@ -548,7 +813,40 @@ class _WebEntryState extends State<_WebEntry> {
   }
 
   Future<void> _resolveDestination() async {
-    final user = await LocalDB.getCurrentUser();
+    Map<String, dynamic>? user;
+
+    // FAIL SAFE TO LOGIN. This method previously had no try/catch, and
+    // `_destination` stays null until it completes — so if getCurrentUser()
+    // threw (a LateInitializationError whenever LocalDB.init() had failed), the
+    // build below returned an empty dark Scaffold FOREVER. On web that is the
+    // blank-screen report: the HTML preloader removes itself as soon as
+    // runApp() resolves, so the user is left looking at an empty dark page with
+    // no spinner, no message and nothing to retry.
+    try {
+      user = await LocalDB.getCurrentUser()
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
+
+      // Enforce the same force-password-change gate the mobile splash applies.
+      // Web skipped it entirely, which meant a restored web session could walk
+      // straight into the dashboard still holding its bulk-import default
+      // password (the employee's own P.no — a value the whole employee list can
+      // look up). Signing the session out puts the gate back in front of them.
+      if (user != null && AuthService.mustChangePassword(user)) {
+        await LocalDB.signOut();
+        user = null;
+      }
+    } catch (e, st) {
+      AppLogger.error(
+        'WebEntry',
+        'Session restore failed — continuing to login '
+            '(ref ${StartupDiagnostics.sessionReference})',
+        error: e,
+        stack: st,
+        action: 'resolveDestination',
+      );
+      user = null;
+    }
+
     if (!mounted) return;
     setState(() {
       _destination = user != null
@@ -559,7 +857,9 @@ class _WebEntryState extends State<_WebEntry> {
 
   @override
   Widget build(BuildContext context) {
-    // Show a minimal container (same bg as HTML splash) until DB check finishes
+    // Held for a single local prefs read (single-digit ms), and now guaranteed to
+    // resolve because _resolveDestination cannot throw or hang. Matches the HTML
+    // preloader background so the handover is not a visible flash.
     if (_destination == null) {
       return const Scaffold(
         backgroundColor: Color(0xFF0A0E1A),
