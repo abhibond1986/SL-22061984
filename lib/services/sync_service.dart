@@ -187,10 +187,15 @@ class SyncService {
           http.get(Uri.parse(url)).timeout(perAttempt),
     );
     final ms = DateTime.now().difference(started).inMilliseconds;
-    if (outcome.ok && outcome.value != null) {
+    // Copied to a local before the null check. `outcome.value` is a field of a
+    // generic type, and field promotion needs language version 3.2+ — this
+    // package is below that, so the null check on the field does not narrow
+    // `T?` to `T` and the return fails to compile against Future<http.Response>.
+    final delivered = outcome.value;
+    if (outcome.ok && delivered != null) {
       ApiMonitor.recordSuccess('appsScript',
           action: action, attempts: outcome.attempts, ms: ms);
-      return outcome.value;
+      return delivered;
     }
     final salvaged = outcome.lastTransportValue;
     ApiMonitor.recordFailure('appsScript',
