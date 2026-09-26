@@ -1099,10 +1099,14 @@ class PdfExport {
 
     return pw.Column(children: [
       for (var s = 5; s >= 1; s--) ...[
-        if (s != 5) const pw.SizedBox(height: gap),
+        // NOT `const`: pw.SizedBox has no const constructor in this version of
+        // package:pdf — every other SizedBox in this file omits it for the same
+        // reason. `dart format` parses a const misuse happily, so only a real
+        // compile catches it.
+        if (s != 5) pw.SizedBox(height: gap),
         pw.Row(children: [
           for (var l = 1; l <= 5; l++) ...[
-            if (l != 1) const pw.SizedBox(width: gap),
+            if (l != 1) pw.SizedBox(width: gap),
             pw.Container(
               width: cell,
               height: cell,
