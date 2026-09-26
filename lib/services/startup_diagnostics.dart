@@ -337,10 +337,16 @@ class StartupDiagnostics {
 
   // ── Safe error presentation ───────────────────────────────────────────────
 
-  // Patterns that must never reach a user-visible string. Applied to the
-  // *verbose* form too, because that is persisted locally and exported from the
-  // admin panel, where a leaked bearer token would be just as bad.
-  static final List<RegExp> _redactions = <RegExp>[
+  // Secrets. Never acceptable anywhere — user-visible text, the verbose form,
+  // the persisted log, the admin export. A leaked bearer token is as bad in a
+  // local log file as it is on screen.
+  //
+  // Split out from the locator patterns below so a stack trace can be stripped
+  // of credentials while keeping its frames: applying the whole list to a stack
+  // replaced every `package:safety_lens/...` line with `[redacted]`, which made
+  // the persisted trace worthless for diagnosis while protecting nothing a user
+  // could not learn by reading the shipped JS.
+  static final List<RegExp> _secretRedactions = <RegExp>[
     // JWTs (the Supabase anon/service keys are JWTs).
     RegExp(r'\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b'),
     // Any URL, which would otherwise expose project refs and internal hosts.
@@ -365,22 +371,72 @@ class StartupDiagnostics {
         r'\b(bearer|apikey|api[_\-]?key|authorization|token)\b'
         r'\s*[:=]?\s*(?:bearer\s+)?\S+',
         caseSensitive: false),
-    // Windows and POSIX source paths from stack traces.
+    // Long hex blobs — password hashes and salts.
+    RegExp(r'\b[0-9a-fA-F]{32,}\b'),
+  ];
+
+  // Not secrets, but not for users either: absolute source paths name the build
+  // machine's directory layout and, in a developer's case, their account name.
+  // Stripped from anything a user or an API response can see, kept in the local
+  // stack traces where they are the entire point.
+  static final List<RegExp> _locatorRedactions = <RegExp>[
+    // Windows source paths from stack traces.
     RegExp(r'''[A-Za-z]:\\[^\s"']+'''),
     // No leading \b here: a path is usually preceded by a space, and space→'/'
     // is not a word boundary, so the match would start after the first segment
     // and leak it (`at /home[redacted]`).
     RegExp(r'(?:/[\w.\-]+){2,}\.dart\b'),
-    // Long hex blobs — password hashes and salts.
-    RegExp(r'\b[0-9a-fA-F]{32,}\b'),
   ];
 
-  static String _redact(String input) {
+  static final List<RegExp> _redactions = <RegExp>[
+    ..._secretRedactions,
+    ..._locatorRedactions,
+  ];
+
+  static String _apply(List<RegExp> patterns, String input) {
     var out = input;
-    for (final re in _redactions) {
+    for (final re in patterns) {
       out = out.replaceAll(re, '[redacted]');
     }
     return out;
+  }
+
+  static String _redact(String input) => _apply(_redactions, input);
+
+  /// Public, total form of the redactor, so anything that writes text to
+  /// client-side storage or a console can share this one pattern list rather
+  /// than growing a second, weaker copy. Used by `AppLogger` before it persists
+  /// error details to SharedPreferences.
+  ///
+  /// This closes an import cycle with `app_logger.dart`. That is safe here:
+  /// neither file reads state from the other at load time, and `_redactions` is
+  /// a lazily-initialised `static final`, so there is no initialisation order to
+  /// get wrong. The alternative — a third file holding the patterns — would
+  /// split the one list that must not drift.
+  static String redact(String input) {
+    try {
+      return _redact(input);
+    } catch (_) {
+      // Same reasoning as sanitizeVerbose: this runs on failure paths, and a
+      // throwing redactor must degrade to withholding rather than to leaking.
+      return '[unavailable]';
+    }
+  }
+
+  /// Secrets only — keeps file paths intact.
+  ///
+  /// For stack traces heading into the local log, where the frames are the
+  /// diagnostic value and the build machine's directory layout is not worth
+  /// destroying them over. Never use this for anything a user sees; use
+  /// [sanitize] for that and [redact] for everything else.
+  static String redactSecrets(String input) {
+    try {
+      return _apply(_secretRedactions, input);
+    } catch (_) {
+      // Same reasoning as sanitizeVerbose: this runs on failure paths, and a
+      // throwing redactor must degrade to withholding rather than to leaking.
+      return '[unavailable]';
+    }
   }
 
   /// Detailed-but-redacted form. For local logs and admin export — NOT for

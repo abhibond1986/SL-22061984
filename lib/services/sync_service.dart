@@ -8,6 +8,8 @@ import 'local_db.dart';
 import 'app_secret.dart';
 import 'auth_token_service.dart';
 import 'app_logger.dart';
+import 'api_monitor.dart';
+import 'net_retry.dart';
 import 'admin_alerts.dart';
 import 'supabase_service.dart';
 import 'supabase_config.dart';
@@ -105,59 +107,163 @@ class SyncService {
       }
 
       final encodedBody = jsonEncode(body);
+      final action = body['action']?.toString();
+      final retryClass = NetRetry.classifyAction(action);
+      final started = DateTime.now();
 
-      if (kIsWeb) {
-        // ═══ WEB PATH ═══
-        // On web, the browser's fetch API follows redirects automatically.
-        // Apps Script processes the POST, redirects to googleusercontent.com
-        // with the JSON result. The browser follows this and we get the
-        // final response (status 200 + JSON body) directly.
-        //
-        // Using 'text/plain' content-type avoids CORS preflight (simple request).
-        final resp = await http
-            .post(
-              Uri.parse(url),
-              body: encodedBody,
-              headers: {'Content-Type': 'text/plain;charset=utf-8'},
-            )
-            .timeout(timeout);
+      // Writes keep their original per-attempt timeout (see `attemptTimeout` on
+      // NetRetry.run); reads divide the caller's timeout across attempts so the
+      // wall-clock envelope every screen was built against does not change.
+      final outcome = await NetRetry.run<http.Response>(
+        label: 'appsScript',
+        action: action,
+        retryClass: retryClass,
+        budget: retryClass == RetryClass.mutating
+            ? timeout + const Duration(seconds: 5)
+            : timeout,
+        attemptTimeout:
+            retryClass == RetryClass.mutating ? timeout : null,
+        maxAttempts: retryClass == RetryClass.mutating ? 2 : 3,
+        statusOf: (resp) => resp.statusCode,
+        attempt: (n, perAttempt) =>
+            _sendOnce(url, encodedBody, perAttempt, action),
+      );
 
-        // Debug: log what we got
-        print('SyncService[web]: POST ${body['action']} → status=${resp.statusCode}, '
-            'bodyLen=${resp.body.length}, '
-            'isHtml=${resp.body.trimLeft().startsWith('<')}');
-
-        return resp;
-      } else {
-        // ═══ MOBILE/DESKTOP PATH ═══
-        // http.Client does not auto-follow redirects, so we must manually
-        // follow the 302 → GET to get the JSON response.
-        final client = http.Client();
-        try {
-          var resp = await client
-              .post(
-                Uri.parse(url),
-                body: encodedBody,
-                headers: {'Content-Type': 'text/plain;charset=utf-8'},
-              )
-              .timeout(timeout);
-
-          // Apps Script always redirects POST → GET result URL
-          if (resp.statusCode == 302 || resp.statusCode == 301) {
-            final loc = resp.headers['location'] ?? '';
-            if (loc.isNotEmpty) {
-              resp = await client.get(Uri.parse(loc)).timeout(timeout);
-            }
-          }
-          return resp;
-        } finally {
-          client.close();
-        }
+      final ms = DateTime.now().difference(started).inMilliseconds;
+      if (outcome.ok && outcome.value != null) {
+        ApiMonitor.recordSuccess('appsScript',
+            action: action, attempts: outcome.attempts, ms: ms);
+        return outcome.value;
       }
-    } catch (e, stack) {
+
+      final err = outcome.error;
+      final salvaged = outcome.lastTransportValue;
+      ApiMonitor.recordFailure('appsScript',
+          action: action,
+          kind: ApiMonitor.classify(err, statusCode: salvaged?.statusCode),
+          statusCode: salvaged?.statusCode,
+          attempts: outcome.attempts,
+          ms: ms);
       AppLogger.error('SyncService', 'POST request failed',
+          error: err ?? 'no response', action: action);
+      // Hand back the real response when there was one. Callers already branch
+      // on `statusCode`, and turning a 503 into `null` would make a backend that
+      // is up but refusing indistinguishable from no connectivity at all — which
+      // is exactly the distinction the operator needs.
+      return salvaged;
+    } catch (e, stack) {
+      // Still needed: everything before the retry runner — auth headers, the
+      // LocalDB lookup, jsonEncode of a body holding an unencodable value — can
+      // throw, and those failures are not transport failures to be retried.
+      ApiMonitor.recordFailure('appsScript',
+          action: body['action']?.toString(), kind: ApiMonitor.classify(e));
+      AppLogger.error('SyncService', 'POST request failed before send',
           error: e, stack: stack, action: body['action']?.toString());
       return null;
+    }
+  }
+
+  /// Retried GET against the Apps Script web app.
+  ///
+  /// The four list endpoints used to call `http.get` inline with a bare
+  /// `.timeout`, so a single dropped response emptied the users dropdown or the
+  /// incident list — and because each caller returns `[]` on failure, an empty
+  /// list from a blip was indistinguishable from a genuinely empty plant.
+  /// These are all reads, so they take the full [RetryClass.safe] policy.
+  ///
+  /// A non-200 response is handed back unchanged so existing `statusCode`
+  /// branches still run; total transport failure throws, exactly as the inline
+  /// `http.get` did, so each caller's existing `catch` keeps its behaviour.
+  static Future<http.Response> _getWithRetry(
+      String url, String action, Duration timeout) async {
+    final started = DateTime.now();
+    final outcome = await NetRetry.run<http.Response>(
+      label: 'appsScript',
+      action: action,
+      retryClass: RetryClass.safe,
+      budget: timeout,
+      statusOf: (resp) => resp.statusCode,
+      attempt: (n, perAttempt) =>
+          http.get(Uri.parse(url)).timeout(perAttempt),
+    );
+    final ms = DateTime.now().difference(started).inMilliseconds;
+    if (outcome.ok && outcome.value != null) {
+      ApiMonitor.recordSuccess('appsScript',
+          action: action, attempts: outcome.attempts, ms: ms);
+      return outcome.value;
+    }
+    final salvaged = outcome.lastTransportValue;
+    ApiMonitor.recordFailure('appsScript',
+        action: action,
+        kind: ApiMonitor.classify(outcome.error,
+            statusCode: salvaged?.statusCode),
+        statusCode: salvaged?.statusCode,
+        attempts: outcome.attempts,
+        ms: ms);
+    if (salvaged != null) return salvaged;
+    // Rethrow so the caller's existing catch block produces exactly the result
+    // it produced before — returning null here would need every call site to
+    // grow a new branch, and this method exists to be a drop-in.
+    throw outcome.error ?? Exception('Request failed');
+  }
+
+  /// One transport round trip. Throws on transport failure; returns whatever
+  /// response arrived otherwise, so [NetRetry] owns the retry decision.
+  static Future<http.Response> _sendOnce(
+      String url, String encodedBody, Duration timeout, String? action) async {
+    if (kIsWeb) {
+      // ═══ WEB PATH ═══
+      // On web, the browser's fetch API follows redirects automatically.
+      // Apps Script processes the POST, redirects to googleusercontent.com
+      // with the JSON result. The browser follows this and we get the
+      // final response (status 200 + JSON body) directly.
+      //
+      // Using 'text/plain' content-type avoids CORS preflight (simple request).
+      final resp = await http
+          .post(
+            Uri.parse(url),
+            body: encodedBody,
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+          )
+          .timeout(timeout);
+
+      // Was a bare `print`, which reaches the browser console in release builds
+      // too. AppLogger.debug routes through debugPrint, which the Flutter web
+      // release build strips — the project rule is that no operational detail
+      // shows up in a production console.
+      AppLogger.debug(
+          'SyncService',
+          'web POST → status=${resp.statusCode} '
+              'bodyLen=${resp.body.length} '
+              'isHtml=${resp.body.trimLeft().startsWith('<')}',
+          action: action);
+
+      return resp;
+    }
+
+    // ═══ MOBILE/DESKTOP PATH ═══
+    // http.Client does not auto-follow redirects, so we must manually
+    // follow the 302 → GET to get the JSON response.
+    final client = http.Client();
+    try {
+      var resp = await client
+          .post(
+            Uri.parse(url),
+            body: encodedBody,
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+          )
+          .timeout(timeout);
+
+      // Apps Script always redirects POST → GET result URL
+      if (resp.statusCode == 302 || resp.statusCode == 301) {
+        final loc = resp.headers['location'] ?? '';
+        if (loc.isNotEmpty) {
+          resp = await client.get(Uri.parse(loc)).timeout(timeout);
+        }
+      }
+      return resp;
+    } finally {
+      client.close();
     }
   }
 
@@ -171,9 +277,8 @@ class SyncService {
     }
     try {
       final url = await getBackendUrl();
-      final response = await http
-          .get(Uri.parse('$url?action=health'))
-          .timeout(const Duration(seconds: 15));
+      final response = await _getWithRetry(
+          '$url?action=health', 'health', const Duration(seconds: 15));
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
       }
@@ -200,9 +305,8 @@ class SyncService {
     if (!await isConfigured) return [];
     try {
       final url = await getBackendUrl();
-      final response = await http
-          .get(Uri.parse('$url?action=listUsers'))
-          .timeout(const Duration(seconds: 20));
+      final response = await _getWithRetry(
+          '$url?action=listUsers', 'listUsers', const Duration(seconds: 20));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -833,9 +937,8 @@ class SyncService {
     if (!await isConfigured) return [];
     try {
       final url = await getBackendUrl();
-      final response = await http
-          .get(Uri.parse('$url?action=listIncidents'))
-          .timeout(const Duration(seconds: 30));
+      final response = await _getWithRetry('$url?action=listIncidents',
+          'listIncidents', const Duration(seconds: 30));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['ok'] == true && data['items'] is List) {
@@ -891,9 +994,8 @@ class SyncService {
     if (!await isConfigured) return [];
     try {
       final url = await getBackendUrl();
-      final response = await http
-          .get(Uri.parse('$url?action=listKnowledge'))
-          .timeout(const Duration(seconds: 30));
+      final response = await _getWithRetry('$url?action=listKnowledge',
+          'listKnowledge', const Duration(seconds: 30));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['ok'] == true && data['items'] is List) {
