@@ -263,7 +263,11 @@ class PdfExport {
         w.add(pw.SizedBox(height: 7));
         w.add(_sectionTitle('INCIDENT DETAILS'));
         w.add(pw.SizedBox(height: 3));
-        w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno));
+        // `hazards`, not `incident['hazards']`: on a not-analysed row the list
+        // above was deliberately emptied, and the Observation Type must not be
+        // derived from findings this report has decided not to print.
+        w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno,
+            hazards: hazards));
         w.add(pw.SizedBox(height: 7));
         if (imgBytes != null) {
           w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
@@ -678,8 +682,56 @@ class PdfExport {
       .replaceAll('•', '-')                                // bullet → hyphen
       .replaceAll('≥', '>=').replaceAll('≤', '<=');
 
+  /// Observation Type for the details grid.
+  ///
+  /// ── WHY THIS IS DERIVED AT PRINT TIME ────────────────────────────────────
+  /// An AI scan is filed with `obsType: 'N/A'` hard-coded (ai_scan_tab, the
+  /// stored-incident map), because the scan screen never asks the reporter to
+  /// choose one. But the analysis *does* classify every hazard it finds —
+  /// "Unsafe Act", "Unsafe Condition" — and that classification is shown on the
+  /// screen on each hazard card. So the exported report printed "OBSERVATION
+  /// TYPE: N/A" over a page whose own hazards table answered the question three
+  /// rows below it.
+  ///
+  /// Derived here rather than back-filled into the stored record ON PURPOSE.
+  /// `obsType` is a reporting dimension: the analytics tabs group and count by
+  /// it, and rewriting 'N/A' to 'Unsafe Condition' on existing rows would move
+  /// history between series with no audit trail — the kind of silent
+  /// reclassification a safety dataset must not do. Print-time derivation
+  /// changes only what this sheet of paper says, from the same data the reader
+  /// can check against the table.
+  ///
+  /// A stored value always wins, so a near-miss report (where a human DID pick
+  /// one) is untouched. When several classifications are present all the
+  /// distinct ones are listed — collapsing "Unsafe Act + Unsafe Condition" to
+  /// whichever came first would assert something the analysis did not.
+  static String _obsType(
+      Map<String, dynamic> inc, List<Map<String, dynamic>> hazards) {
+    final stored = inc['obsType']?.toString().trim() ?? '';
+    if (stored.isNotEmpty &&
+        stored.toUpperCase() != 'N/A' &&
+        stored.toUpperCase() != 'NA' &&
+        stored != '-') {
+      return stored;
+    }
+    final seen = <String>[];
+    for (final h in hazards) {
+      final t = h['type']?.toString().trim() ?? '';
+      if (t.isEmpty || t.toUpperCase() == 'N/A') continue;
+      if (!seen.any((e) => e.toLowerCase() == t.toLowerCase())) seen.add(t);
+    }
+    // Two fit in the cell at 8.5pt; beyond that the honest short answer is that
+    // the scan found more than one kind, and the table lists them per hazard.
+    if (seen.isEmpty) return 'N/A';
+    if (seen.length <= 2) return seen.join(' / ');
+    return 'Mixed (${seen.length} types)';
+  }
+
+  /// [hazards] is used for ONE thing: deriving the Observation Type when the row
+  /// does not carry one. See [_obsType].
   static pw.Widget _detailsGrid(Map<String, dynamic> inc, String date,
-      String reporter, String pno) {
+      String reporter, String pno,
+      {List<Map<String, dynamic>> hazards = const []}) {
     pw.Widget cell(String lbl, String val, {bool hi = false}) =>
       pw.Container(
         // 7pt -> 4pt vertical. 12 cells in 3 rows, so each point of vertical
@@ -718,7 +770,7 @@ class PdfExport {
         pw.TableRow(children: [
           cell('Reported By', reporter),
           cell('Personnel No.', pno),
-          cell('Observation Type', inc['obsType']?.toString() ?? 'N/A'),
+          cell('Observation Type', _obsType(inc, hazards)),
           cell('Status', inc['status']?.toString() ?? 'OPEN', hi: true),
         ]),
         pw.TableRow(children: [
@@ -906,11 +958,10 @@ class PdfExport {
                       children: [
                         // An AI scan prints the 1–25 matrix figure; a near-miss
                         // row keeps its own 0–100 score. The two factors are
-                        // printed under the number: a reader who disagrees with
-                        // the rating needs to see WHICH axis to argue about, and
-                        // "(est.)" is the only signal that the likelihood was
-                        // inferred from AI confidence rather than assessed by
-                        // the officer who signed the report.
+                        // spelled out under the number, in words, and a derived
+                        // likelihood is labelled "(estimated)" there — that
+                        // label is the only thing separating a proxy from an
+                        // assessment on a page somebody signs.
                         //
                         // An unrated AI scan prints "— / 25", NOT the 0–100
                         // score. Falling back to `$s / 100` there was a real
@@ -929,12 +980,16 @@ class PdfExport {
                                 : '-  / 25', style: pw.TextStyle(
                           fontSize: 18, fontWeight: pw.FontWeight.bold,
                           color: scNum)),
-                        pw.Text(!matrixApplies
-                            ? 'Risk Score'
-                            : matrixScore > 0
-                                ? 'Risk Score  ·  L$matrixL × S$matrixS'
-                                    '${matrixEstimated ? '  (L est.)' : ''}'
-                                : 'Risk Score  ·  not rated',
+                        // The two factors used to be crammed in here as
+                        // "L3 × S3 (L est.)". They now get their own line below,
+                        // in words, because "L3" is unreadable to anyone not
+                        // holding the plant matrix — and the people this PDF is
+                        // printed for (a reviewer signing it, an auditor, a
+                        // contractor) are exactly the people not holding it.
+                        pw.Text(
+                          matrixApplies && matrixScore == 0
+                              ? 'Risk Score  ·  not rated'
+                              : 'Risk Score',
                           style: pw.TextStyle(
                             fontSize: 6.5, color: _textLight)),
                       ]),
@@ -947,7 +1002,41 @@ class PdfExport {
                         pw.Text('Confidence', style: pw.TextStyle(
                           fontSize: 6.5, color: _textLight)),
                       ]),
+                    // The matrix itself, right of the figure it came from. Only
+                    // when there is a cell to mark — see _matrixGrid.
+                    if (matrixApplies && matrixScore > 0) ...[
+                      pw.Expanded(child: pw.SizedBox()),
+                      _matrixGrid(matrixL, matrixS),
+                    ],
                   ]),
+                  // ── The arithmetic, in words ──────────────────────────────
+                  // Same sentence the scan screen prints under the grid. A
+                  // reader who disagrees with the rating needs to know WHICH
+                  // axis to argue about, and "estimated" is the only thing
+                  // separating a proxy from an assessment.
+                  if (matrixApplies && matrixScore > 0) ...[
+                    pw.SizedBox(height: 4),
+                    pw.Text(
+                      'Likelihood ${_safe(AdminMasterData.likelihoodLabel(matrixL))}'
+                      '${matrixEstimated ? ' (estimated)' : ''}'
+                      // U+00D7 is inside Helvetica's Latin-1 encoding, so it
+                      // prints (unlike an em dash). Same glyph the old caption
+                      // used.
+                      '   ×   Severity ${_safe(AdminMasterData.severityLabel(matrixS))}'
+                      '   =   $matrixScore of 25',
+                      style: pw.TextStyle(
+                        fontSize: 7, color: _textDark,
+                        fontWeight: pw.FontWeight.bold)),
+                    if (matrixEstimated) ...[
+                      pw.SizedBox(height: 2),
+                      pw.Text(_safe(AdminMasterData.matrixEstimateCaveat),
+                        style: pw.TextStyle(
+                          fontSize: 6.3, color: _textMed,
+                          fontStyle: pw.FontStyle.italic, lineSpacing: 1.0)),
+                    ],
+                  ],
+                  // ── How well the findings hold up ─────────────────────────
+                  ..._citationRollUp(hazards),
                   pw.SizedBox(height: 5),
                   pw.Container(height: 0.5, color: _divider),
                   pw.SizedBox(height: 5),
@@ -973,6 +1062,162 @@ class PdfExport {
         ],
       ),
     );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  THE 5×5 MATRIX, PRINTED
+  //
+  //  The scan screen draws this beside the score (ai_scan_tab._matrixGrid) and
+  //  the PDF printed only the bare product, so the report lost the one thing the
+  //  grid says that a number cannot: WHERE the scan sits, and how close it is to
+  //  the next band. "9, one cell below HIGH" and "9, deep inside MEDIUM" are the
+  //  same figure and a different conversation.
+  //
+  //  Same orientation as the screen and as the matrices pinned up in the plants:
+  //  severity up the rows, likelihood across the columns, worst cell top-right.
+  //
+  //  Cells carry NO text, deliberately — the tinted fills would sit under a
+  //  foreground and change its contrast. The selected cell is marked by a heavy
+  //  dark ring, not by colour alone (WCAG 1.4.1), which also means it survives
+  //  the mono laser printers these reports are actually printed on, where every
+  //  pale band tint reduces to much the same grey.
+  // ─────────────────────────────────────────────────────────────────────────
+  /// Only ever called with a rated cell — an unrated scan prints no grid at all
+  /// rather than an empty one, which would read as a failed render sitting next
+  /// to "- / 25".
+  static pw.Widget _matrixGrid(int likelihood, int severity) {
+    const double cell = 9;
+    const double gap = 1.2;
+
+    // A tint of the band colour over white. `withOpacity` has no meaning in a
+    // printed PDF (there is nothing behind it but paper), so the blend is done
+    // here, arithmetically, against white.
+    PdfColor tint(PdfColor c, double t) => PdfColor(
+        c.red + (1 - c.red) * (1 - t),
+        c.green + (1 - c.green) * (1 - t),
+        c.blue + (1 - c.blue) * (1 - t));
+
+    return pw.Column(children: [
+      for (var s = 5; s >= 1; s--) ...[
+        // NOT `const`: pw.SizedBox has no const constructor in this version of
+        // package:pdf — every other SizedBox in this file omits it for the same
+        // reason. `dart format` parses a const misuse happily, so only a real
+        // compile catches it.
+        if (s != 5) pw.SizedBox(height: gap),
+        pw.Row(children: [
+          for (var l = 1; l <= 5; l++) ...[
+            if (l != 1) pw.SizedBox(width: gap),
+            pw.Container(
+              width: cell,
+              height: cell,
+              decoration: pw.BoxDecoration(
+                color: (l == likelihood && s == severity)
+                    ? _getSevCol(AdminMasterData.matrixBandFor(l * s))
+                    : tint(_getSevCol(AdminMasterData.matrixBandFor(l * s)),
+                        // The selected row and column are the crosshair that
+                        // lets the eye find the cell without axis labels.
+                        (l == likelihood || s == severity) ? 0.34 : 0.13),
+                border: (l == likelihood && s == severity)
+                    ? pw.Border.all(color: _textDark, width: 1.2)
+                    : null),
+            ),
+          ],
+        ]),
+      ],
+      pw.SizedBox(height: 2),
+      // The screen can leave the axes unlabelled because the two pickers sit
+      // under the grid in the same order. On paper there are no pickers, so the
+      // shortest possible legend goes here — anything longer is wider than the
+      // grid it labels.
+      pw.Text('L across / S up',
+        style: pw.TextStyle(fontSize: 5.2, color: _textLight)),
+    ]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  HOW WELL THE FINDINGS HOLD UP (citation + confidence roll-up)
+  //
+  //  HazardValidator checks every citation against the regulation catalogue and
+  //  the knowledge base, scores each finding's confidence from its own signals,
+  //  and flags the ones that need a human look. The scan screen shows that as a
+  //  strip under the risk card ("2/3 citations verified · 1 need a check ·
+  //  avg 88% per hazard"). The exported PDF showed none of it — so the sheet of
+  //  paper that gets signed asserted the findings with more certainty than the
+  //  screen the officer approved them on. That is the wrong direction for this
+  //  error to point.
+  //
+  //  ── DERIVED HERE, NOT READ FROM A STORED FIELD ──
+  //  HazardValidator also writes a report-level `validation` map, and reading it
+  //  would be less code. But `validation` is not in SupabaseService's column
+  //  allow-list, so like the `matrix*` keys it is silently dropped by
+  //  `_toRow`/`_fromRow`: the same incident would print the roll-up on the
+  //  device that filed it and nothing anywhere else. The per-hazard fields DO
+  //  survive, because they ride inside the `hazards` JSON list — so the figures
+  //  are recomputed from those, which also means they cannot drift out of step
+  //  with the hazards table printed below them.
+  // ─────────────────────────────────────────────────────────────────────────
+  static List<pw.Widget> _citationRollUp(List<Map<String, dynamic>> hazards) {
+    // String-tolerant: a bool round-trips through Apps Script as the text
+    // "true", and `== true` on a String is silently false — which would report
+    // "0 of 3 citations verified" on every synced report. Same bug class as
+    // `matrixLikelihoodEstimated` above.
+    bool flag(dynamic v) =>
+        v == true || v.toString().trim().toLowerCase() == 'true';
+
+    var scored = 0, verified = 0, review = 0, confSum = 0;
+    for (final h in hazards) {
+      // `needsReview` is written for every hazard the validator scored, so its
+      // PRESENCE is the marker of "this finding was checked". Counting hazards
+      // instead would print "0 of 3 citations verified" for a report the
+      // validator never ran on (an older row, or a run that threw) — reading as
+      // three citations checked and failed, which is a fabricated finding about
+      // the finding. Unchecked hazards are excluded, and if none was checked the
+      // roll-up is omitted entirely.
+      if (!h.containsKey('needsReview')) continue;
+      scored++;
+      if (flag(h['regulationVerified'])) verified++;
+      if (flag(h['needsReview'])) review++;
+      confSum += num.tryParse('${h['confidence'] ?? 0}')?.round() ?? 0;
+    }
+    if (scored == 0) return const <pw.Widget>[];
+
+    final mean = (confSum / scored).round().clamp(0, 100);
+    final parts = <String>[
+      '$verified of $scored citations verified',
+      'avg $mean% confidence per hazard',
+      review > 0
+          ? '$review need${review == 1 ? 's' : ''} a check'
+          : 'none flagged for review',
+    ];
+
+    // Slate, not amber. Amber means MEDIUM severity everywhere else in this
+    // report, and "1 needs a check" is a statement about the evidence, not about
+    // how dangerous the plant is.
+    final ink = review > 0 ? _textDark : _textMed;
+
+    return <pw.Widget>[
+      pw.SizedBox(height: 5),
+      pw.Container(
+        padding: const pw.EdgeInsets.fromLTRB(5, 2.5, 5, 2.5),
+        color: PdfColor.fromHex('#F1F3F5'),
+        child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Container(width: 2, height: 15, color: _divider),
+            pw.SizedBox(width: 4),
+            pw.Expanded(
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text('FINDING CHECKS', style: pw.TextStyle(
+                    fontSize: 5.6, color: _textLight,
+                    fontWeight: pw.FontWeight.bold, letterSpacing: 0.4)),
+                  pw.SizedBox(height: 1),
+                  pw.Text(_safe(parts.join('  ·  ')), style: pw.TextStyle(
+                    fontSize: 6.6, color: ink,
+                    fontWeight: pw.FontWeight.bold)),
+                ])),
+          ])),
+    ];
   }
 
   // ─────────────────────────────────────────────────────────────────────────

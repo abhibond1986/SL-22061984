@@ -16,6 +16,7 @@ import '../services/plant_scope.dart';
 import '../services/realtime_sync.dart';
 import 'admin_screen.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/skeleton.dart';
 
 class DashboardTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -353,7 +354,10 @@ class _DashboardTabState extends State<DashboardTab> {
       backgroundColor: sl.bg,
       body: SafeArea(
         child: _loading
-          ? Center(child: CircularProgressIndicator(color: AppColors.accent))
+          // A skeleton rather than a spinner: this panel's shape is known before
+          // the data lands, so reserving it stops the whole dashboard jumping
+          // into place and tells the user what is coming.
+          ? const SkeletonDashboard(semanticLabel: 'Loading dashboard')
           : RefreshIndicator(
               onRefresh: _onRefresh,
               color: AppColors.accent,

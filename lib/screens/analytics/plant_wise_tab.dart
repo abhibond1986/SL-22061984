@@ -9,6 +9,7 @@ import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/skeleton.dart';
 
 /// Plant dashboard — cross-plant, for everyone.
 ///
@@ -369,7 +370,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+      return const SkeletonAnalytics(semanticLabel: 'Loading plant comparison');
     }
     // Only a missing SESSION blocks this screen now.
     //

@@ -4,8 +4,10 @@
 // Stores last 200 log entries in SharedPreferences for admin inspection.
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'startup_diagnostics.dart';
 
 enum LogLevel { debug, info, warn, error, critical }
 
@@ -71,20 +73,49 @@ class AppLogger {
 
   /// Log an error (operation failed)
   static void error(String source, String message, {Object? error, StackTrace? stack, String? action}) {
-    final det = [
-      if (error != null) error.toString(),
-      if (stack != null) stack.toString().split('\n').take(5).join('\n'),
-    ].join('\n');
-    _log(LogLevel.error, source, message, details: det.isEmpty ? null : det, action: action);
+    _log(LogLevel.error, source, message,
+        details: _details(error, stack, 5), action: action);
   }
 
   /// Log a critical error (data loss, security, crash)
   static void critical(String source, String message, {Object? error, StackTrace? stack, String? action}) {
-    final det = [
-      if (error != null) error.toString(),
-      if (stack != null) stack.toString().split('\n').take(10).join('\n'),
-    ].join('\n');
-    _log(LogLevel.critical, source, message, details: det.isEmpty ? null : det, action: action);
+    _log(LogLevel.critical, source, message,
+        details: _details(error, stack, 10), action: action);
+  }
+
+  /// Builds the detail blob, redacted.
+  ///
+  /// Details end up in SharedPreferences — localStorage on web — and an HTTP
+  /// failure's `toString()` carries the full Apps Script deployment URL, while a
+  /// Supabase error can carry the anon key from a request header. Storing those
+  /// unredacted put credentials somewhere any script on the origin could read
+  /// them, against the rule that no sensitive operational data lives in
+  /// client-side storage.
+  ///
+  /// Total by construction: a hostile `toString()` must not turn a logged error
+  /// into an unlogged crash.
+  static String? _details(Object? error, StackTrace? stack, int stackLines) {
+    String safe(Object o, String Function(String) clean) {
+      try {
+        return clean(o.toString());
+      } catch (_) {
+        return '[unavailable]';
+      }
+    }
+
+    final parts = <String>[
+      // The message gets the full treatment. The trace keeps its frames and
+      // loses only secrets — redacting paths there would leave `[redacted]`
+      // repeated ten times and nothing to diagnose from.
+      if (error != null) safe(error, StartupDiagnostics.redact),
+      if (stack != null)
+        safe(stack, StartupDiagnostics.redactSecrets)
+            .split('\n')
+            .take(stackLines)
+            .join('\n'),
+    ];
+    final det = parts.join('\n');
+    return det.isEmpty ? null : det;
   }
 
   static void _log(LogLevel level, String source, String message,
@@ -103,8 +134,16 @@ class AppLogger {
       _memoryLog.removeRange(0, _memoryLog.length - _maxEntries);
     }
 
-    // Also print for debug console
-    debugPrint(entry.toString());
+    // Debug builds only. `debugPrint` is not stripped from a release build — it
+    // is an ordinary function that calls `print` — so this line was putting
+    // backend URLs, auth-failure details and truncated stack traces into the
+    // browser console of the live site. The project rule is that no operational
+    // detail reaches a production console; the persisted log plus the admin
+    // panel are the production diagnostic path, and `sessionReference` is what a
+    // user reads out over the phone.
+    if (kDebugMode) {
+      debugPrint(entry.toString());
+    }
 
     // Persist errors and above
     if (level.index >= LogLevel.error.index) {

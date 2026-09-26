@@ -224,6 +224,70 @@
       animation: blink 1.5s ease-in-out infinite;
     }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ── Timeout / failure state ──────────────────────────────────────────────
+       Hidden until the boot watchdog fires. Before this existed the preloader
+       only ever removed itself on SUCCESS, so a failed boot left the user on
+       "Initializing…" indefinitely with no message and no way to retry. */
+    #boot-error { display: none; max-width: 340px; text-align: center; }
+    #boot-error.show { display: block; animation: fadeIn 0.4s ease; }
+    /* Collapse the optimistic UI once we have given up on it, so the progress
+       bar is not still creeping forward under an error message. */
+    body.boot-failed .progress-track,
+    body.boot-failed .status,
+    body.boot-failed .tagline { display: none; }
+    /* Stop the pulse — a "still working" animation under a failure message is
+       a mixed signal. */
+    body.boot-failed .logo-ring { animation: none; }
+
+    #boot-error h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #F1F5F9;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    #boot-error p {
+      font-size: 12.5px;
+      line-height: 1.6;
+      color: #94A3B8;
+      margin-bottom: 8px;
+    }
+    #boot-error ul {
+      text-align: left;
+      font-size: 12.5px;
+      line-height: 1.7;
+      color: #94A3B8;
+      margin: 0 0 16px 18px;
+    }
+    #boot-retry {
+      /* 44px min height — same touch-target floor as the rest of the app, and
+         this button in particular gets pressed with gloves on. */
+      min-height: 44px;
+      min-width: 140px;
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 600;
+      font-family: inherit;
+      color: #fff;
+      background: #2196F3;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    #boot-retry:hover { background: #1976D2; }
+    /* Visible focus ring: this screen must be operable by keyboard alone, and it
+       may be the only thing on screen. */
+    #boot-retry:focus-visible { outline: 3px solid #90CAF9; outline-offset: 2px; }
+    .boot-ref {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #64748B;
+      /* Tabular + selectable: this gets read aloud down a phone line or pasted
+         into a support email. */
+      font-variant-numeric: tabular-nums;
+      user-select: all;
+    }
   </style>
 </head>
 <body>
@@ -244,7 +308,24 @@
       <div class="progress-track">
         <div class="progress-fill"></div>
       </div>
-      <div class="status">Initializing...</div>
+      <!-- aria-live so a screen reader announces the change from loading to the
+           error state; without it the swap below is silent to assistive tech. -->
+      <div class="status" role="status" aria-live="polite">Initializing...</div>
+
+      <div id="boot-error" role="alert">
+        <h2>SafetyLens is taking longer than expected to start.</h2>
+        <p>Check your connection and try again:</p>
+        <ul>
+          <li>Confirm you are connected to Wi-Fi or mobile data</li>
+          <li>If you are on the plant network, check that access to
+              <strong>safetylens.in</strong> is permitted</li>
+          <li>Try again on mobile data to rule out a network block</li>
+        </ul>
+        <button id="boot-retry" type="button">Retry</button>
+        <div class="boot-ref">
+          Reference for support: <span id="boot-ref-id">—</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -255,32 +336,197 @@
     // the engine sat idle behind assets it does not need. 'DOMContentLoaded'
     // fires as soon as the document is parsed, which is the earliest point
     // flutter.js (deferred) is guaranteed to have run.
-    //
-    // Both listeners are attached and boot() is idempotent via `started`,
-    // because this inline script runs BEFORE the deferred loader tag above, so
-    // window._flutter does not exist yet at this point. Whichever event finds
-    // the loader first wins; the second call returns immediately.
     (function () {
       var started = false;
-      function boot() {
-        if (started || !window._flutter) return;
-        started = true;
-        _flutter.loader.loadEntrypoint({
-          onEntrypointLoaded: function (engineInitializer) {
-            engineInitializer.initializeEngine().then(function (appRunner) {
-              appRunner.runApp().then(function () {
-                var loading = document.getElementById('loading');
-                if (!loading) return;
-                loading.style.opacity = '0';
-                setTimeout(function () { loading.remove(); }, 600);
-              });
+      // Two INDEPENDENT states, deliberately not one `settled` flag. A single
+      // flag meant that once the 8s watchdog fired, an engine that finished at
+      // 9s could no longer remove the preloader — #loading is fixed at
+      // z-index 9999, so a working app sat permanently unreachable behind an
+      // error message, and the only way out was a Retry that could hit the same
+      // 8s wall again. A merely-slow boot must never become an impossible one.
+      var shownError = false;    // watchdog fired
+      var loaderRemoved = false; // engine won; preloader is gone
+      var bootStart = Date.now();
+
+      // ── Support reference ID ────────────────────────────────────────────────
+      // Generated up front so it is available no matter how early the boot fails
+      // — including a failure before any Dart code runs, which is precisely when
+      // the Dart-side generator in StartupDiagnostics is unreachable. Same
+      // format and same ambiguity-free alphabet (no O/0/I/1/L) as the Dart one,
+      // because a user may quote either to support.
+      var bootRef = (function () {
+        var alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        var d = new Date();
+        var p = function (n) { return (n < 10 ? '0' : '') + n; };
+        var s = '';
+        for (var i = 0; i < 4; i++) {
+          s += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+        }
+        return 'SL-' + p(d.getFullYear() % 100) + p(d.getMonth() + 1) +
+               p(d.getDate()) + '-' + s;
+      })();
+      // Handed to the Dart side so a single session has one reference end to end.
+      window.__slBootRef = bootRef;
+
+      // Cross-language handoff WITHOUT needing dart:html in the Flutter code.
+      // shared_preferences on web is backed by localStorage under a 'flutter.'
+      // key prefix with JSON-encoded values, so writing the key here makes it
+      // readable through the ordinary SharedPreferences API that also compiles on
+      // mobile — no conditional _web.dart/_stub.dart split required.
+      //
+      // Best-effort by design: localStorage can be unavailable (private mode,
+      // blocked third-party storage), and the encoding is an implementation
+      // detail of the plugin. StartupDiagnostics validates the shape of whatever
+      // it reads and falls back to generating its own ID, so a failure or a
+      // future change in that encoding costs nothing more than the two sides
+      // showing different references.
+      try {
+        window.localStorage.setItem('flutter.sl_boot_ref', JSON.stringify(bootRef));
+      } catch (_) {}
+
+      // Collect boot-phase failures for support. Capped, and deliberately only
+      // the message — never a full stack trace, which the brief forbids exposing.
+      window.__slBootErrors = [];
+      function noteError(kind, detail) {
+        if (window.__slBootErrors.length < 10) {
+          window.__slBootErrors.push({
+            kind: kind,
+            detail: String(detail || '').slice(0, 200),
+            atMs: Date.now() - bootStart
+          });
+        }
+      }
+      window.addEventListener('error', function (e) {
+        noteError('error', e && e.message);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        noteError('rejection', e && e.reason && e.reason.message);
+      });
+
+      // ── Watchdog ────────────────────────────────────────────────────────────
+      // 8s per the product requirement. This is a LAST RESORT, not the primary
+      // defence: the Dart side now bounds every startup step (see the startup
+      // contract in lib/main.dart), so in normal operation this never fires. It
+      // covers what Dart cannot — main.dart.js failing to download, a corrupt
+      // service-worker cache, an engine that never initialises, a CSP block.
+      var TIMEOUT_MS = 8000;
+      var watchdog = setTimeout(showTimeout, TIMEOUT_MS);
+
+      function showTimeout() {
+        if (shownError || loaderRemoved) return;
+        shownError = true;
+        document.body.classList.add('boot-failed');
+        var status = document.querySelector('.status');
+        if (status) { status.textContent = ''; }
+        var refEl = document.getElementById('boot-ref-id');
+        if (refEl) { refEl.textContent = bootRef; }
+        var box = document.getElementById('boot-error');
+        if (box) { box.classList.add('show'); }
+        var retry = document.getElementById('boot-retry');
+        if (retry) {
+          // Focus the retry button so a keyboard or screen-reader user lands on
+          // the only available action instead of having to hunt for it.
+          try { retry.focus(); } catch (_) {}
+        }
+      }
+
+      // Wins unconditionally, even if the watchdog already gave up. The error
+      // copy is worded as "taking longer than expected" precisely so that
+      // replacing it with the running app is coherent rather than contradictory.
+      function succeeded() {
+        if (loaderRemoved) return;
+        loaderRemoved = true;
+        clearTimeout(watchdog);
+        if (shownError) {
+          var box = document.getElementById('boot-error');
+          if (box) { box.classList.remove('show'); }
+          document.body.classList.remove('boot-failed');
+        }
+        var loading = document.getElementById('loading');
+        if (!loading) return;
+        loading.style.opacity = '0';
+        setTimeout(function () { loading.remove(); }, 600);
+      }
+
+      // Retry does a full reload rather than re-invoking the loader: whatever
+      // wedged the engine (a half-downloaded main.dart.js, a partly-initialised
+      // engine) is not recoverable in-process, and a second loadEntrypoint on it
+      // fails in more confusing ways.
+      //
+      // A stale service worker is the one cause a plain reload will NOT clear,
+      // since it would just serve the same bad cache again — so unregister first
+      // and reload either way. Bounded, because on a wedged browser these
+      // promises can hang and the user is already waiting.
+      //
+      // Attached directly, not inside a DOMContentLoaded handler: this inline
+      // script sits after the markup, so #boot-retry already exists. Deferring
+      // would only add a way for this to silently stop working.
+      var retryBtn = document.getElementById('boot-retry');
+      if (retryBtn) {
+        retryBtn.addEventListener('click', function () {
+          retryBtn.disabled = true;
+          retryBtn.textContent = 'Retrying…';
+          var reload = function () { window.location.reload(); };
+          var fallback = setTimeout(reload, 1500);
+          try {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              return Promise.all(regs.map(function (r) { return r.unregister(); }));
+            }).then(function () {
+              clearTimeout(fallback);
+              reload();
+            }).catch(function () {
+              clearTimeout(fallback);
+              reload();
             });
+          } catch (_) {
+            clearTimeout(fallback);
+            reload();
           }
         });
       }
+
+      function boot() {
+        if (started || !window._flutter) return;
+        started = true;
+        try {
+          _flutter.loader.loadEntrypoint({
+            onEntrypointLoaded: function (engineInitializer) {
+              engineInitializer.initializeEngine().then(function (appRunner) {
+                // NOTE: runApp() resolving means the Dart `main()` returned and
+                // the first frame is scheduled — it does NOT mean the UI is
+                // functional. The Dart side owns everything past this point; see
+                // the startup contract in lib/main.dart.
+                appRunner.runApp().then(succeeded).catch(function (err) {
+                  noteError('runApp', err && err.message);
+                  showTimeout();
+                });
+              }).catch(function (err) {
+                noteError('initializeEngine', err && err.message);
+                showTimeout();
+              });
+            }
+          });
+        } catch (err) {
+          noteError('loadEntrypoint', err && err.message);
+          showTimeout();
+        }
+      }
+
+      // Both listeners are attached and boot() is idempotent via `started`,
+      // because this inline script runs BEFORE the deferred loader tag above, so
+      // window._flutter does not exist yet at this point. Whichever event finds
+      // the loader first wins; the second call returns immediately.
       if (window._flutter) boot();
       else document.addEventListener('DOMContentLoaded', boot);
       window.addEventListener('load', boot);
+
+      // If flutter.js itself never executes (blocked, 404, offline with a cold
+      // cache), neither event can start the engine and the watchdog is the only
+      // thing that will ever show the user a message. Surface that specific
+      // cause so the log distinguishes it from a slow engine.
+      window.addEventListener('load', function () {
+        if (!window._flutter) noteError('loader', 'flutter.js did not execute');
+      });
     })();
   </script>
 </body>

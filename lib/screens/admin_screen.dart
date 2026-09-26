@@ -67,6 +67,7 @@ import 'bulk_user_import_screen.dart';
 // Searchable, server-side user picker — the in-memory _users list is capped at
 // ~1,000 rows by PostgREST, which is a fraction of the workforce after import.
 import '../widgets/user_picker.dart';
+import '../widgets/skeleton.dart';
 import 'employee_profile_screen.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -761,7 +762,10 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(width: 4),
         ]),
       body: _loading
-        ? Center(child: CircularProgressIndicator(color: AppColors.amber))
+        // Was an amber spinner. Amber means MEDIUM severity in this app, so a
+        // loading state had no business borrowing it.
+        ? const SkeletonLogList(
+            semanticLabel: 'Loading administration', search: false)
         : Row(children: [
             if (wideScreen)
               SizedBox(width: 240, child: _navDrawer(sl, pinned: true)),

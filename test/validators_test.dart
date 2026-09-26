@@ -79,8 +79,24 @@ void main() {
 
   group('Validators.validatePassword', () {
     test('valid passwords pass', () {
-      expect(Validators.validatePassword('demo'), null); // min 4 chars
+      // This case used to assert that 'demo' (4 chars) was accepted. The
+      // minimum was later raised to Validators.minPasswordLength = 6 and the
+      // test was never updated, because `flutter test` had never actually been
+      // run in CI — so this file has been red for as long as the stricter rule
+      // has existed. Fixed by updating the expectation, NOT by lowering the
+      // minimum: 6 is the weaker-of-the-two-evils floor we want to keep.
+      expect(Validators.validatePassword('demo12'), null);
       expect(Validators.validatePassword('sail@123'), null);
+    });
+
+    test('a password at exactly the minimum length is accepted', () {
+      // Pins the boundary so a future change to minPasswordLength has to be
+      // deliberate rather than silently shifting what counts as valid.
+      expect(Validators.validatePassword('a' * Validators.minPasswordLength),
+          null);
+      expect(
+          Validators.validatePassword('a' * (Validators.minPasswordLength - 1)),
+          isNotNull);
     });
 
     test('too short passwords fail', () {

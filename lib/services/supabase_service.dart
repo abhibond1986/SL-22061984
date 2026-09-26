@@ -13,19 +13,72 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'startup_diagnostics.dart';
 import 'supabase_config.dart';
 
 class SupabaseService {
   static bool _initialized = false;
+  static bool _initStarted = false;
 
-  /// Initialize Supabase once at app startup. No-op if disabled/unconfigured.
-  static Future<void> init() async {
-    if (!SupabaseConfig.enabled || _initialized) return;
-    await Supabase.initialize(
-      url: SupabaseConfig.url,
-      anonKey: SupabaseConfig.anonKey,
+  /// Default deadline for [init].
+  ///
+  /// 4 seconds is chosen against the product target of a usable login screen
+  /// within 3 seconds: this call must never be the reason we miss it. Supabase
+  /// init is local work (reading the persisted session) EXCEPT when that session
+  /// needs a token refresh, which is a network round trip — so on a healthy
+  /// network this returns in well under a second and the deadline is never felt.
+  static const Duration kInitDeadline = Duration(seconds: 4);
+
+  /// Initialize Supabase once at app startup.
+  ///
+  /// Returns true when the client is ready to use. **Never throws, and never
+  /// blocks longer than [timeout].**
+  ///
+  /// WHY THE DEADLINE — this was the app's single worst startup defect. The old
+  /// implementation was a bare `await Supabase.initialize(...)` with no timeout
+  /// and no try/catch, awaited before `runApp()`. `Supabase.initialize` restores
+  /// the persisted auth session, and if that session's access token has expired
+  /// it performs a token-refresh POST *inside* this call. That POST had no
+  /// application-level deadline, so on a captive portal or a plant firewall that
+  /// accepts the TCP connection and then silently drops it, the socket waited on
+  /// the OS timeout — minutes on Android, and indefinitely in the pathological
+  /// case. `runApp()` was never reached, which is exactly the reported
+  /// "stuck on Initializing…" symptom. A throw here did the same thing.
+  ///
+  /// Note the asymmetry this fixes: nearly every other network call in the
+  /// codebase is explicitly bounded (15s/20s/30s in SyncService, 10s for the
+  /// master-data sync in main()). The one call that gated first paint was the one
+  /// without a limit.
+  ///
+  /// Returning false is a supported state, not a failure to handle later:
+  /// `isReady` stays false, callers fall back to the local SharedPreferences
+  /// cache, and the app runs offline-first exactly as it does on a plane. If the
+  /// underlying call completes *after* we gave up, `_initialized` still flips to
+  /// true, so a slow network recovers mid-session instead of needing a restart.
+  static Future<bool> init({Duration timeout = kInitDeadline}) async {
+    if (!SupabaseConfig.enabled) return false;
+    if (_initialized) return true;
+
+    // Guard against a second caller starting a parallel initialize(), which the
+    // Supabase SDK treats as an error.
+    if (_initStarted) return _initialized;
+    _initStarted = true;
+
+    return StartupDiagnostics.guard<bool>(
+      'Supabase init',
+      () async {
+        await Supabase.initialize(
+          url: SupabaseConfig.url,
+          anonKey: SupabaseConfig.anonKey,
+        );
+        // Set inside the action so a late completion still registers: this line
+        // runs whether or not our caller is still waiting.
+        _initialized = true;
+        return true;
+      },
+      timeout: timeout,
+      fallback: false,
     );
-    _initialized = true;
   }
 
   static bool get isReady => SupabaseConfig.enabled && _initialized;
