@@ -15,6 +15,7 @@ import '../services/validators.dart';
 import '../services/visitor_service.dart';
 import '../services/i18n.dart';
 import '../widgets/glass_card.dart';
+import '../widgets/landing_intro.dart';
 import 'home_screen.dart';
 import 'contractor_home_screen.dart';
 import 'force_password_change_screen.dart';
@@ -300,9 +301,40 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  /// Room for the intro column beside the 440px form: 440 + 48 gap + 48
+  /// page padding leaves ≥ 460px for the intro text at this width.
+  static const double _twoColumnBreak = 1000;
+
+  /// Wide: product intro on the left, the existing sign-in column on the
+  /// right. Narrow: the sign-in column alone (it carries the intro inline).
+  /// Row uses the default centre cross-axis — never `stretch` inside this
+  /// scroll view (blanks the page in release web builds).
+  Widget _landingLayout({required bool wide, required Widget login}) {
+    if (!wide) return login;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: SLLayout.wide),
+      child: Row(children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              LandingIntroSentence(prominent: true),
+              SizedBox(height: SLSpace.xl),
+              LandingDetails(),
+            ],
+          ),
+        ),
+        const SizedBox(width: 48),
+        SizedBox(width: SLLayout.form, child: login),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final sl = SL.of(context);
+    final wide = MediaQuery.sizeOf(context).width >= _twoColumnBreak;
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(
@@ -324,7 +356,9 @@ class _LoginScreenState extends State<LoginScreen> {
               // strip that made the web build look like a phone screenshot
               // dragged wider. force_password_change_screen.dart already did this
               // correctly; this is the same pattern (UI_UX_AUDIT.md §D).
-              child: ConstrainedBox(
+              child: _landingLayout(
+                wide: wide,
+                login: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: SLLayout.form),
                 child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -347,7 +381,16 @@ class _LoginScreenState extends State<LoginScreen> {
                     style: TextStyle(
                       color: sl.text4, fontSize: 12,
                       letterSpacing: 1.2)),
-                  const SizedBox(height: 28),
+                  // Narrow screens: the one-line "what is this" sits under the
+                  // brand, and the cards + flow go below the sign-in actions so
+                  // the login card stays near the top on a phone. Wide screens
+                  // show all of it in the left column instead (_landingLayout).
+                  if (!wide) ...[
+                    const SizedBox(height: SLSpace.lg),
+                    const LandingIntroSentence(),
+                    const SizedBox(height: SLSpace.xl),
+                  ] else
+                    const SizedBox(height: 28),
 
                   GlassCard(
                     padding: const EdgeInsets.all(20),
@@ -479,7 +522,12 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
 
-                  const SizedBox(height: 20),
+                  if (!wide) ...[
+                    const SizedBox(height: SLSpace.xxl),
+                    const LandingDetails(),
+                    const SizedBox(height: SLSpace.xl),
+                  ] else
+                    const SizedBox(height: 20),
 
                   // Android App Download Button
                   ClipRRect(
@@ -607,7 +655,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ],
               ),
-              ),
+              )),
             ),
           ),
         ),
