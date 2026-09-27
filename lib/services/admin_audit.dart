@@ -14,6 +14,7 @@
 
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'supabase_service.dart';
 
 class AdminAudit {
   static const String _kKey      = 'admin_audit_log';
@@ -85,6 +86,18 @@ class AdminAudit {
     } catch (_) {
       // Audit log failure should never break the app
     }
+    // Server copy (Phase 1C). The local list above is per-device and can be
+    // cleared by whoever holds the device, so it cannot back an audit claim on
+    // its own. Fire-and-forget: never delays or fails the admin action.
+    SupabaseService.logAuditEvent(
+      actor: actor,
+      action: action,
+      target: target,
+      detail: {
+        if (targetName != null) 'targetName': targetName,
+        if (meta != null) ...meta,
+      },
+    ).ignore();
   }
 
   // ── READ ────────────────────────────────────────────────────────

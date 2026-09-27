@@ -272,10 +272,11 @@ class _ChatTabState extends State<ChatTab> {
     if (!mounted) return;
     setState(() {
       _user = u;
-      final desig = (u?['designation']?.toString() ?? '').toLowerCase();
-      _isAdmin = desig.contains('agm') || desig.contains('gm') ||
-                 desig.contains('manager') || desig.contains('admin') ||
-                 (u?['isAdmin']?.toString().toLowerCase() == 'true');
+      // Admin rights come from the account flag only. The old match on the
+      // free-text designation ("gm", "manager", "admin" …) treated a job
+      // title typed at registration as a permission.
+      _isAdmin = u?['isAdmin'] == true ||
+                 u?['isAdmin']?.toString().toLowerCase() == 'true';
       _kbDocCount = docs.length;
       final firstName = u?['name']?.toString().split(' ').first ?? 'there';
       _messages.add({

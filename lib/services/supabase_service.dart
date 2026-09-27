@@ -1001,6 +1001,74 @@ class SupabaseService {
     }
   }
 
+  // ── SERVER-SIDE LOGIN (Phase 1C — supabase_rbac_phase1c.sql) ─────────────
+  //
+  // The password is checked INSIDE the database by `sl_verify_login`, so the
+  // credential never has to be readable by the anon key. Until that SQL has
+  // been run the function does not exist; [LoginRpcResult.available] is then
+  // false and AuthService falls back to the old direct read. That fallback is
+  // what makes this step non-breaking — and it stops working by itself once
+  // the app_users read policy is closed, which is the intended end state.
+
+  /// Checks [password] server-side. Never throws.
+  static Future<LoginRpcResult> verifyLoginRpc(
+      String username, String password) async {
+    if (!isReady) return const LoginRpcResult.unavailable();
+    try {
+      final res = await _db.rpc('sl_verify_login', params: {
+        'p_username': username.trim().toLowerCase(),
+        'p_password': password,
+      }).timeout(const Duration(seconds: 12));
+      if (res is Map) {
+        final u = _userFromRow(Map<String, dynamic>.from(res));
+        final role = res['role'];
+        if (role != null) u['role'] = role.toString();
+        return LoginRpcResult.matched(u);
+      }
+      return const LoginRpcResult.noMatch();
+    } catch (e) {
+      // Function missing (SQL not run yet) or network error: either way the
+      // caller must use its fallback, never report "wrong password".
+      debugPrint('[Supabase] sl_verify_login unavailable');
+      return const LoginRpcResult.unavailable();
+    }
+  }
+
+  /// 'active' | 'disabled' | 'locked' | 'missing', or null if the function
+  /// is unavailable. Never throws.
+  static Future<String?> accountStatusRpc(String username) async {
+    if (!isReady) return null;
+    try {
+      final res = await _db.rpc('sl_account_status', params: {
+        'p_username': username.trim().toLowerCase(),
+      }).timeout(const Duration(seconds: 8));
+      return res?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Best-effort server-side audit record. Never throws, never blocks on
+  /// failure — the local AdminAudit log is still written either way.
+  static Future<void> logAuditEvent({
+    required String actor,
+    required String action,
+    String? target,
+    Map<String, dynamic>? detail,
+  }) async {
+    if (!isReady) return;
+    try {
+      await _db.rpc('sl_log_audit_event', params: {
+        'p_actor': actor,
+        'p_action': action,
+        'p_target': target,
+        'p_detail': detail,
+      }).timeout(const Duration(seconds: 8));
+    } catch (_) {
+      // Function not installed yet, or offline. Deliberately silent.
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  KNOWLEDGE BASE (knowledge_docs table)
   // ══════════════════════════════════════════════════════════════════════════
@@ -1536,4 +1604,28 @@ class SupabaseService {
     });
     return r;
   }
+}
+
+/// Outcome of [SupabaseService.verifyLoginRpc].
+///
+/// Three states, not two, on purpose: "the server said no" and "the server
+/// could not be asked" must never be confused. Collapsing them would either
+/// lock everyone out before the SQL is run, or accept a password the server
+/// actually rejected.
+class LoginRpcResult {
+  /// False when the function is missing or unreachable — use the fallback.
+  final bool available;
+
+  /// The user row (app-side keys, including passwordHash/salt for the
+  /// offline cache) when the password matched; null otherwise.
+  final Map<String, dynamic>? user;
+
+  const LoginRpcResult.unavailable()
+      : available = false,
+        user = null;
+  const LoginRpcResult.noMatch()
+      : available = true,
+        user = null;
+  const LoginRpcResult.matched(Map<String, dynamic> this.user)
+      : available = true;
 }

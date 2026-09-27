@@ -17,7 +17,9 @@
 //   ⏳ 11 Backup/Restore     — batch 2
 //   ⏳ 12 Compliance         — batch 2
 //
-// Login: admin / admin
+// Login: any account with administrator rights (is_admin / admin role).
+// The built-in admin/admin gate was removed in Phase 1C — it let anyone who
+// read this public repository open the admin panel.
 
 import 'dart:convert';
 import 'dart:math' as math;
@@ -139,10 +141,9 @@ class _AdminScreenState extends State<AdminScreen>
   bool _loggedIn = false;
   bool _loginLoading = false;
   String _loginError = '';
-  final _unameCtrl = TextEditingController(text: 'admin');
+  final _unameCtrl = TextEditingController();
   final _pwCtrl    = TextEditingController();
   bool  _pwVisible = false;
-  String _adminPassword = 'admin';
   String _currentActor = 'admin';
 
   // ── Navigation state ────────────────────────────────────────────
@@ -371,7 +372,9 @@ class _AdminScreenState extends State<AdminScreen>
     final u = _unameCtrl.text.trim().toLowerCase();
     final p = _pwCtrl.text;
 
-    bool ok = (u == 'admin' && p == _adminPassword);
+    // No built-in credential: only a real account with admin rights opens
+    // the panel, verified through AuthService (server-side when available).
+    bool ok = false;
     String resolvedActor = u;
 
     if (!ok) {
@@ -673,7 +676,7 @@ class _AdminScreenState extends State<AdminScreen>
                           color: AppColors.red, fontSize: 11.5),
                       textAlign: TextAlign.center)),
                 const SizedBox(height: 14),
-                Text('Default: admin / admin',
+                Text('Sign in with your administrator account.',
                   style: TextStyle(color: sl.text4, fontSize: 10.5)),
               ]),
             ),

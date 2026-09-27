@@ -337,6 +337,51 @@ class AuthService {
 
     // ── 2. SUPABASE ───────────────────────────────────────────────────────
     if (SupabaseConfig.enabled) {
+      // ── 2a. Server-side password check (Phase 1C) ──────────────────────
+      // The database compares the hash itself (sl_verify_login), so this path
+      // keeps working after the app_users read policy is closed. Until the
+      // SQL is run the RPC is "unavailable" and we drop straight to 2b.
+      final rpc = await SupabaseService.verifyLoginRpc(uname, password);
+      final rpcUser = rpc.user;
+      if (rpcUser != null) {
+        if (_isBlocked(rpcUser)) {
+          return AuthResult.fail(AuthFailure.accountDisabled,
+              'This account has been disabled. Contact your admin.');
+        }
+        // Same caching rule as 2b: store a fresh canonical credential so
+        // offline login works on this device from now on.
+        final cred = _newCredential(password);
+        final cached = Map<String, dynamic>.from(rpcUser)
+          ..remove('password')
+          ..['salt'] = cred['salt']
+          ..['passwordHash'] = cred['passwordHash']
+          ..['username'] = rpcUser['username'] ?? uname
+          ..['status'] = rpcUser['status'] ?? 'active';
+        await LocalDB.upsertUser(cached);
+        final safe = sanitize(cached);
+        if (startSession) {
+          await LocalDB.setCurrentUser(safe);
+          await _issueLocalToken(safe);
+        }
+        return AuthResult.success(safe);
+      }
+      if (rpc.available) {
+        final status = await SupabaseService.accountStatusRpc(uname);
+        if (status == 'locked') {
+          return AuthResult.fail(AuthFailure.badCredentials,
+              'Too many failed attempts. Wait 15 minutes and try again.');
+        }
+        if (status == 'disabled') {
+          return AuthResult.fail(AuthFailure.accountDisabled,
+              'This account has been disabled. Contact your admin.');
+        }
+        // 'active', 'missing' or unknown: continue to 2b. It also accepts the
+        // older password formats and first-login case variants that the SQL
+        // check does not know, so nobody is locked out mid-migration. Once the
+        // read policy closes, 2b finds no row and this becomes a clean fail.
+      }
+
+      // ── 2b. Direct read (legacy; stops working when reads are closed) ──
       final remote = await SupabaseService.getUserByUsername(uname);
       if (remote != null) {
         if (_isBlocked(remote)) {
