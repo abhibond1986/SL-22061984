@@ -19,6 +19,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -195,7 +196,7 @@ class _BulkUserImportScreenState extends State<BulkUserImportScreen> {
     if (plan == null || !plan.canRun) return;
 
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.card,

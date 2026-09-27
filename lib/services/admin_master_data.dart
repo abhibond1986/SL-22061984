@@ -1560,6 +1560,49 @@ class AdminMasterData {
     'LOW': (min: 1, max: 4),
   };
 
+  // ── THE WORDS ON THE TWO 1–5 AXES ─────────────────────────────────────────
+  //
+  // Here, not on the scan screen, because two surfaces now print them and they
+  // must agree. "3" alone is meaningless to anyone not holding the plant matrix,
+  // and the exported PDF is read by people who are not holding it — a reviewer
+  // signing a report, an external auditor, a contractor. The screen used to own
+  // these privately and the PDF printed bare "L3 × S3", so the same assessment
+  // said "Possible × Moderate" on glass and nothing in ink.
+  //
+  // Not admin-editable, deliberately: they are the labels of the 1–5 axes of a
+  // standard 5×5 matrix, not a tuning knob, and [severityRating] /
+  // [likelihoodFromConfidence] map onto these exact rungs.
+  static const Map<int, String> likelihoodWords = {
+    1: 'Rare',
+    2: 'Unlikely',
+    3: 'Possible',
+    4: 'Likely',
+    5: 'Almost certain',
+  };
+  static const Map<int, String> severityWords = {
+    1: 'Negligible',
+    2: 'Minor',
+    3: 'Moderate',
+    4: 'Major',
+    5: 'Catastrophic',
+  };
+
+  /// `"3 · Possible"`, or just `"3"` if the rating is off-scale. `''` for 0, so
+  /// an unrated axis prints nothing rather than a reassuring bottom rung.
+  static String likelihoodLabel(int l, {String sep = ' · '}) =>
+      l <= 0 ? '' : '$l${likelihoodWords[l] == null ? '' : '$sep${likelihoodWords[l]}'}';
+
+  static String severityLabel(int s, {String sep = ' · '}) =>
+      s <= 0 ? '' : '$s${severityWords[s] == null ? '' : '$sep${severityWords[s]}'}';
+
+  /// The sentence that MUST accompany a likelihood that came from
+  /// [likelihoodFromConfidence] rather than from a person. Shared so the screen
+  /// and the PDF carry the identical qualification — see the warning on that
+  /// method for why printing a derived likelihood unqualified is a defect.
+  static const String matrixEstimateCaveat =
+      'Likelihood is estimated from AI confidence. Confirm it against exposure '
+      'on site, then rate with your approved plant risk matrix.';
+
   /// The band label for a 1–25 matrix product. `''` for 0 (no assessment).
   ///
   /// Derived FROM the number, never supplied alongside it, so the chip on the

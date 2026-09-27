@@ -1,0 +1,97 @@
+# Verification-only pipeline. Deliberately does NOT deploy.
+#
+# Why this exists: build-web.yml and build-apk.yml only trigger on main/master,
+# and neither runs `flutter analyze` or `flutter test` — so before this file the
+# repo had no automated verification of any kind, and the only way to find out
+# whether a change compiled was to push to main, which deploys straight to
+# production at safetylens.in.
+#
+# This workflow runs on every branch EXCEPT main/master and gives three things:
+#   1. static analysis            (catches the errors a human reviewer misses)
+#   2. unit tests                 (test/*.dart)
+#   3. a real release web build   (proves it compiles, and is downloadable as a
+#                                  preview artifact for staging review)
+#
+# It never touches GitHub Pages, so a green run here cannot reach production.
+name: Verify (no deploy)
+
+on:
+  push:
+    branches-ignore: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+# No `pages: write`, no `id-token`. Read-only by construction — this workflow is
+# not capable of deploying even if someone adds a deploy step by mistake.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # Pinned to match build-web.yml / build-apk.yml exactly. The project
+          # depends on this: google_mlkit_text_recognition is held at 0.13.x
+          # because 0.14 needs a newer Kotlin/AGP than 3.19.6 ships, and the Dart
+          # language level here predates switch expressions. Bumping this without
+          # bumping the other two workflows would let code through that then
+          # fails the real release build.
+          flutter-version: '3.19.6'
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # `flutter analyze` is advisory for now rather than blocking: this is a
+      # ~80k-line codebase that has never had analysis run in CI, so it starts
+      # with a backlog of pre-existing findings that are not this branch's to
+      # fix. `|| true` keeps the signal visible in the log without failing every
+      # run on inherited warnings. Flip to a hard failure once the backlog is
+      # cleared — that is tracked as a follow-up, not forgotten.
+      - name: Static analysis (advisory)
+        run: flutter analyze --no-pub || true
+
+      # Tests ARE blocking. There are only a handful today
+      # (crypto_utils, validators, near_miss_guard, app_updater, widget_test)
+      # but they must stay green, otherwise adding more is pointless.
+      - name: Unit tests
+        run: flutter test --no-pub
+
+      # The compile gate that matters. `flutter analyze` does not catch
+      # everything the web release compiler rejects (tree-shaking of const
+      # evaluation, dart2js-only failures), and a release build is also the only
+      # way to measure the bundle size this branch is trying to reduce.
+      - name: Build web (release, not deployed)
+        run: flutter build web --release --base-href "/"
+
+      - name: Report bundle size
+        run: |
+          echo "### Web bundle size" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          du -sh build/web >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Largest files:" >> $GITHUB_STEP_SUMMARY
+          find build/web -type f -printf '%s\t%p\n' \
+            | sort -rn | head -15 \
+            | awk -F'\t' '{ printf "%8.1f KB  %s\n", $1/1024, $2 }' \
+            >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # Downloadable preview build for staging review. An artifact is not a
+      # deployment: it has to be fetched and served deliberately, so there is no
+      # path from a green run to safetylens.in.
+      - name: Upload preview build
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-preview-${{ github.sha }}
+          path: build/web
+          retention-days: 14

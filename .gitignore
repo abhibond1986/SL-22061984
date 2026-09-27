@@ -26,3 +26,16 @@ env.local
 *.apk
 *.aab
 *.ipa
+
+# Working trees for deliverables that are not source. The marketing-video
+# build in particular vendors node_modules and pip packages; only the authored
+# documents under deliverables/ belong in version control.
+deliverables/safety_lens_video/node_modules/
+deliverables/safety_lens_video/pydeps/
+deliverables/safety_lens_video/out/
+
+# Editor "- Copy" duplicates. These are byte-identical copies of real Kotlin
+# sources, so committing them would declare the same class twice and fail the
+# Android build.
+*" - Copy".kt
+* - Copy.*

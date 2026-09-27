@@ -8,6 +8,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/side_nav_rail.dart';
 import '../services/sync_service.dart';
 import '../services/background_sync.dart';
 import 'login_screen.dart';
@@ -71,6 +72,10 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
       ),
     ];
 
+    // Wide windows: side rail instead of the bottom bar, as in HomeScreen.
+    final rail = SideNavRail.useRail(context);
+    final inner = _inner(sl, isDark, tabs, rail: rail);
+
     return Scaffold(
       extendBody: true,
       body: Container(
@@ -81,7 +86,24 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
             colors: sl.bgGradient,
           ),
         ),
-        child: Scaffold(
+        child: rail
+            ? SideNavRail.wrapBody(context,
+                rail: SideNavRail(
+                  items: [
+                    for (final n in _navItems)
+                      SideNavItem(n.icon, n.activeIcon, n.label),
+                  ],
+                  selected: _tabIndex,
+                  onTap: (i) => setState(() => _tabIndex = i),
+                ),
+                body: inner)
+            : inner,
+      ),
+    );
+  }
+
+  Widget _inner(SL sl, bool isDark, List<Widget> tabs, {required bool rail}) {
+    return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
@@ -105,11 +127,16 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                 child: const Icon(Icons.shield, color: Colors.white, size: 14)),
             ),
             const SizedBox(width: 10),
-            Column(
+            // Expanded + ellipsis: on a 320px phone the back arrow and the
+            // three actions leave the title about 136px, and the brand name
+            // ran 9px past it.
+            Expanded(child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   'SAIL Safety Lens',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: sl.text1,
                     fontSize: 14,
@@ -118,6 +145,8 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                 ),
                 Text(
                   'Contractor Access',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     // sl.accentText at 12px: bare accent is 2.99:1 on dark, and
                     // 10px was below the 11px floor. This is the only label that
@@ -128,7 +157,7 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                   ),
                 ),
               ],
-            ),
+            )),
           ],
         ),
         actions: [
@@ -169,19 +198,19 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
           child: tabs[_tabIndex],
         ),
       ),
-      bottomNavigationBar: _bottomNav(sl),
-    ),
-      ),
+      bottomNavigationBar: rail ? null : _bottomNav(sl),
     );
   }
 
+  static const _navItems = [
+    _NavItem(Icons.document_scanner_outlined, Icons.document_scanner_rounded,
+        'AI Scan'),
+    _NavItem(
+        Icons.warning_amber_outlined, Icons.warning_amber_rounded, 'Near Miss'),
+  ];
+
   Widget _bottomNav(SL sl) {
-    final items = [
-      _NavItem(Icons.document_scanner_outlined,
-          Icons.document_scanner_rounded, 'AI Scan'),
-      _NavItem(Icons.warning_amber_outlined,
-          Icons.warning_amber_rounded, 'Near Miss'),
-    ];
+    const items = _navItems;
 
     return ClipRRect(
       child: BackdropFilter(

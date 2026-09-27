@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../../widgets/app_dialog.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
 import '../../widgets/content_width.dart';
 import '../../services/local_db.dart';
@@ -13,6 +14,7 @@ import '../../services/sync_service.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 import '../reports_tab.dart';
+import '../../widgets/skeleton.dart';
 
 class IncidentLogTab extends StatefulWidget {
   const IncidentLogTab({super.key});
@@ -304,7 +306,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+      return const SkeletonLogList(semanticLabel: 'Loading incident log');
     }
     // An unresolved scope is reported, not silently widened to all plants.
     if (_scope.problem != null) {
@@ -876,7 +878,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final id = inc['id']?.toString() ?? '';
     if (id.isEmpty) return;
     final title = inc['title']?.toString() ?? 'this report';
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,

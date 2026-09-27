@@ -8,6 +8,7 @@ import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/skeleton.dart';
 
 class DataAnalysisTab extends StatefulWidget {
   const DataAnalysisTab({super.key});
@@ -210,7 +211,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+      return const SkeletonAnalytics(semanticLabel: 'Loading data analysis');
     }
     // An unresolved scope is reported, not silently widened to all plants.
     if (_scope.problem != null) {

@@ -39,8 +39,14 @@ class BottomNavGap extends StatelessWidget {
   /// Height of the nav bar itself. Exposed so callers that need the value as
   /// padding (e.g. `ListView(padding: ...)`) can reuse the same measurement
   /// instead of guessing.
+  ///
+  /// Only the device inset when the shell shows a side rail instead of the
+  /// bottom bar (wide windows, see [BottomNavScope]). There is nothing at the
+  /// bottom to clear then, and reserving 60px would leave a blank band at the
+  /// end of every tab.
   static double height(BuildContext context) =>
-      barHeight + MediaQuery.of(context).viewPadding.bottom;
+      (BottomNavScope.hasBar(context) ? barHeight : 0) +
+      MediaQuery.of(context).viewPadding.bottom;
 
   /// Ready-made bottom inset for a scroll view's `padding`.
   static EdgeInsets padding(BuildContext context, {double extra = 16}) =>
@@ -49,4 +55,28 @@ class BottomNavGap extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       SizedBox(height: height(context) + extra);
+}
+
+/// Tells [BottomNavGap] whether a bottom navigation bar is drawn over the body.
+///
+/// Missing scope means yes. That is the default for every existing screen, so
+/// only the wide-window shells, which swap the bar for a side rail, need to
+/// say otherwise.
+class BottomNavScope extends InheritedWidget {
+  const BottomNavScope({
+    super.key,
+    required this.hasBottomBar,
+    required super.child,
+  });
+
+  final bool hasBottomBar;
+
+  static bool hasBar(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<BottomNavScope>()
+          ?.hasBottomBar ??
+      true;
+
+  @override
+  bool updateShouldNotify(BottomNavScope oldWidget) =>
+      oldWidget.hasBottomBar != hasBottomBar;
 }

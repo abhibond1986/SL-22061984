@@ -31,6 +31,7 @@
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../main.dart' show AppColors, SL, SLText;
@@ -285,7 +286,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
 
   Future<void> _confirmDelete(DocLibraryItem doc) async {
     final sl = SL.of(context);
-    final yes = await showDialog<bool>(
+    final yes = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,
@@ -1082,7 +1083,7 @@ class _DocQaScreenState extends State<DocQaScreen> {
   /// vanishes in four seconds is the wrong place for an instruction.
   void _showProblem(String title, String detail) {
     final sl = SL.of(context);
-    showDialog<void>(
+    showAppDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,

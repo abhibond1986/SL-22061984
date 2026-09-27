@@ -17,13 +17,16 @@
 //   ⏳ 11 Backup/Restore     — batch 2
 //   ⏳ 12 Compliance         — batch 2
 //
-// Login: admin / admin
+// Login: any account with administrator rights (is_admin / admin role).
+// The built-in admin/admin gate was removed in Phase 1C — it let anyone who
+// read this public repository open the admin panel.
 
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
@@ -67,6 +70,7 @@ import 'bulk_user_import_screen.dart';
 // Searchable, server-side user picker — the in-memory _users list is capped at
 // ~1,000 rows by PostgREST, which is a fraction of the workforce after import.
 import '../widgets/user_picker.dart';
+import '../widgets/skeleton.dart';
 import 'employee_profile_screen.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
 import '../services/pdf_export_stub.dart'
@@ -138,10 +142,9 @@ class _AdminScreenState extends State<AdminScreen>
   bool _loggedIn = false;
   bool _loginLoading = false;
   String _loginError = '';
-  final _unameCtrl = TextEditingController(text: 'admin');
+  final _unameCtrl = TextEditingController();
   final _pwCtrl    = TextEditingController();
   bool  _pwVisible = false;
-  String _adminPassword = 'admin';
   String _currentActor = 'admin';
 
   // ── Navigation state ────────────────────────────────────────────
@@ -370,7 +373,9 @@ class _AdminScreenState extends State<AdminScreen>
     final u = _unameCtrl.text.trim().toLowerCase();
     final p = _pwCtrl.text;
 
-    bool ok = (u == 'admin' && p == _adminPassword);
+    // No built-in credential: only a real account with admin rights opens
+    // the panel, verified through AuthService (server-side when available).
+    bool ok = false;
     String resolvedActor = u;
 
     if (!ok) {
@@ -672,7 +677,7 @@ class _AdminScreenState extends State<AdminScreen>
                           color: AppColors.red, fontSize: 11.5),
                       textAlign: TextAlign.center)),
                 const SizedBox(height: 14),
-                Text('Default: admin / admin',
+                Text('Sign in with your administrator account.',
                   style: TextStyle(color: sl.text4, fontSize: 10.5)),
               ]),
             ),
@@ -761,7 +766,10 @@ class _AdminScreenState extends State<AdminScreen>
           const SizedBox(width: 4),
         ]),
       body: _loading
-        ? Center(child: CircularProgressIndicator(color: AppColors.amber))
+        // Was an amber spinner. Amber means MEDIUM severity in this app, so a
+        // loading state had no business borrowing it.
+        ? const SkeletonLogList(
+            semanticLabel: 'Loading administration', search: false)
         : Row(children: [
             if (wideScreen)
               SizedBox(width: 240, child: _navDrawer(sl, pinned: true)),
@@ -1788,7 +1796,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _bulkClose() async {
     final sl = SL.of(context);
     final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1844,7 +1852,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _bulkDelete() async {
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -2118,7 +2126,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _confirmClearAudit() async {
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -2685,7 +2693,7 @@ class _AdminScreenState extends State<AdminScreen>
 
         // Show results
         if (context.mounted) {
-          showDialog(
+          showAppDialog(
             context: context,
             builder: (_) => AlertDialog(
               backgroundColor: SL.of(context).card,
@@ -2926,7 +2934,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _confirmDeleteAllData() async {
     final sl = SL.of(context);
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.card,
@@ -3153,9 +3161,10 @@ class _AdminScreenState extends State<AdminScreen>
         const SizedBox(height: 10),
         // Model selector
         DropdownButtonFormField<String>(
+          isExpanded: true, // fill the field; long names ellipsise instead of overflowing
           value: _groqSelectedModel,
           items: GroqService.availableModels.map((m) => DropdownMenuItem(
-            value: m['id'], child: Text(m['name']!, style: TextStyle(fontSize: 11, color: sl.text1)),
+            value: m['id'], child: Text(m['name']!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: sl.text1)),
           )).toList(),
           onChanged: (v) { if (v != null) setState(() => _groqSelectedModel = v); },
           dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
@@ -3268,6 +3277,7 @@ class _AdminScreenState extends State<AdminScreen>
         // tier at the first model, so the siblings can legitimately show nothing.
         _modelHealthInline(sl, _geminiVisionSelectedModel),
         DropdownButtonFormField<String>(
+          isExpanded: true, // fill the field; long names ellipsise instead of overflowing
           // Dropdown asserts if value is absent from items, which would red-screen
           // this whole card. A saved model can legitimately fall outside the list
           // once Google retires it, so fall back to the default rather than crash.
@@ -3276,7 +3286,7 @@ class _AdminScreenState extends State<AdminScreen>
               ? _geminiVisionSelectedModel
               : GeminiDirectVision.defaultModel,
           items: GeminiDirectVision.availableModels.map((m) => DropdownMenuItem(
-            value: m['id'], child: Text(m['name']!, style: TextStyle(fontSize: 11, color: sl.text1)),
+            value: m['id'], child: Text(m['name']!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: sl.text1)),
           )).toList(),
           onChanged: (v) { if (v != null) setState(() => _geminiVisionSelectedModel = v); },
           dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
@@ -3991,7 +4001,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   void _showSpiFormulaHelp(SL sl) {
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.card,
@@ -4862,7 +4872,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _wfAssignLegacyDialog(Map<String, dynamic> inc) async {
     final sl = SL.of(context);
     String? picked = inc['assignedTo']?.toString();
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       StatefulBuilder(builder: (ctx, setSt) => AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -4950,7 +4960,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _wfAddComment(Map<String, dynamic> inc) async {
     final sl = SL.of(context);
     final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -5472,7 +5482,7 @@ class _AdminScreenState extends State<AdminScreen>
     final sl = SL.of(context);
     final ctrl = TextEditingController(
         text: 'temp@${DateTime.now().millisecondsSinceEpoch % 10000}');
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -5535,7 +5545,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _userChangePlant(Map<String, dynamic> u) async {
     final sl = SL.of(context);
     String? picked = u['plant']?.toString();
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       StatefulBuilder(builder: (ctx, setSt) => AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -5583,7 +5593,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _userDelete(Map<String, dynamic> u) async {
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -5658,7 +5668,7 @@ class _AdminScreenState extends State<AdminScreen>
     bool showOtherDept = false;
     bool makeAdmin = false;
 
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       StatefulBuilder(builder: (ctx, setSt) => AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -5978,7 +5988,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _deletePlant(int idx) async {
     final p = _plantsEditable[idx];
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -6013,7 +6023,7 @@ class _AdminScreenState extends State<AdminScreen>
     final name  = TextEditingController(text: p?['name']  ?? '');
     final state = TextEditingController(text: p?['state'] ?? '');
     final kind  = TextEditingController(text: p?['kind']  ?? 'Plant');
-    return showDialog<Map<String, String>?>(context: context, builder: (_) =>
+    return showAppDialog<Map<String, String>?>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -6078,7 +6088,7 @@ class _AdminScreenState extends State<AdminScreen>
       Color? accent}) {
     return GestureDetector(
       onTap: () async {
-        final result = await showDialog<String>(
+        final result = await showAppDialog<String>(
           context: context,
           builder: (ctx) {
             final dialogCtrl = TextEditingController(text: ctrl.text);
@@ -6355,7 +6365,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<String?> _stringDialog(String title, String initial) async {
     final sl = SL.of(context);
     final ctrl = TextEditingController(text: initial);
-    return showDialog<String?>(context: context, builder: (_) =>
+    return showAppDialog<String?>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -6386,7 +6396,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _resetMasters() async {
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -7115,7 +7125,7 @@ class _AdminScreenState extends State<AdminScreen>
     String department = existing?['department']?.toString() ?? '';
     String channel = existing?['channel']?.toString() ?? 'email';
 
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       StatefulBuilder(builder: (ctx, setSt) => AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -7165,6 +7175,7 @@ class _AdminScreenState extends State<AdminScreen>
                         fontWeight: FontWeight.w700, letterSpacing: 0.5)),
                 const SizedBox(height: 4),
                 DropdownButtonFormField<String>(
+                  isExpanded: true, // fill the field; long names ellipsise instead of overflowing
                   value: plant,
                   dropdownColor: sl.card,
                   style: TextStyle(color: sl.text1, fontSize: 11.5),
@@ -7195,6 +7206,7 @@ class _AdminScreenState extends State<AdminScreen>
                     style: TextStyle(color: sl.text4, fontSize: 9)),
                 const SizedBox(height: 4),
                 DropdownButtonFormField<String>(
+                  isExpanded: true, // fill the field; long names ellipsise instead of overflowing
                   value: department,
                   dropdownColor: sl.card,
                   style: TextStyle(color: sl.text1, fontSize: 11.5),
@@ -7297,7 +7309,7 @@ class _AdminScreenState extends State<AdminScreen>
     final id = r['id']?.toString();
     if (id == null) return;
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -7501,7 +7513,7 @@ class _AdminScreenState extends State<AdminScreen>
         return;
       }
       if (payload['app'] != 'SAIL Safety Lens V2') {
-        final cont = await showDialog<bool>(context: context, builder: (_) =>
+        final cont = await showAppDialog<bool>(context: context, builder: (_) =>
           AlertDialog(
             backgroundColor: sl.card,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -7530,7 +7542,7 @@ class _AdminScreenState extends State<AdminScreen>
           ? (payload['kb'] as List).length : 0;
       final createdAt = payload['createdAt']?.toString() ?? '?';
 
-      final ok = await showDialog<bool>(context: context, builder: (_) =>
+      final ok = await showAppDialog<bool>(context: context, builder: (_) =>
         AlertDialog(
           backgroundColor: sl.card,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -7989,7 +8001,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   void _showScoreFormulaDialog(SL sl) {
-    showDialog(context: context, builder: (_) =>
+    showAppDialog(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -8477,7 +8489,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   Future<void> _deleteScanGroup(_ScanGroup g) async {
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) {
         final sl = SL.of(ctx);
@@ -8761,7 +8773,7 @@ class _AdminScreenState extends State<AdminScreen>
   Future<void> _addKbTextEntry(SL sl) async {
     final titleCtrl = TextEditingController();
     final contentCtrl = TextEditingController();
-    final result = await showDialog<bool>(context: context, builder: (_) =>
+    final result = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -8833,7 +8845,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   Future<void> _clearAllKb() async {
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         title: const Text('Clear Knowledge Base?',
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
@@ -9966,7 +9978,7 @@ class _AdminScreenState extends State<AdminScreen>
   }
 
   Future<void> _confirmClearResultCache() async {
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Theme.of(ctx).colorScheme.surface,
@@ -10827,7 +10839,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _confirmResetModelHealth() async {
     final sl = SL.of(context);
-    final ok = await showDialog<bool>(context: context, builder: (_) =>
+    final ok = await showAppDialog<bool>(context: context, builder: (_) =>
       AlertDialog(
         backgroundColor: sl.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),

@@ -239,7 +239,13 @@ class _WsaBarChartState extends State<WsaBarChart> {
                 ]),
               )
             else
-            Container(
+            // Flexible + a 220px cap + isExpanded: plant names such as
+            // "Rourkela Steel Plant" are wider than a 320px phone leaves beside
+            // the title. The selected name now ellipsises instead of pushing
+            // the header row off the card (it overflowed by 124px at 360px).
+            Flexible(child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
               decoration: BoxDecoration(
                 color: AppColors.accent.withOpacity(0.1),
@@ -249,6 +255,7 @@ class _WsaBarChartState extends State<WsaBarChart> {
                 child: DropdownButton<String>(
                   value: _selectedPlant,
                   isDense: true,
+                  isExpanded: true,
                   dropdownColor: sl.card,
                   style: TextStyle(color: sl.accentText, fontSize: 11,
                     fontWeight: FontWeight.w600),
@@ -260,6 +267,8 @@ class _WsaBarChartState extends State<WsaBarChart> {
                       p['code'] == 'all'
                         ? I18n.t('dashboard.entireSail')
                         : p['name']!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(color: sl.text1, fontSize: 11)),
                   )).toList(),
                   onChanged: (val) {
@@ -267,7 +276,7 @@ class _WsaBarChartState extends State<WsaBarChart> {
                   },
                 ),
               ),
-            ),
+            ))),
           ]),
 
           const SizedBox(height: 4),

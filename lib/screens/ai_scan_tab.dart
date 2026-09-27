@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
@@ -848,7 +849,7 @@ class _AIScanTabState extends State<AIScanTab> {
       edited = false;
     }
     if (edited) {
-      final ok = await showDialog<bool>(
+      final ok = await showAppDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: Theme.of(ctx).colorScheme.surface,
@@ -1520,20 +1521,14 @@ class _AIScanTabState extends State<AIScanTab> {
   // Words as well as numbers. "3" alone is meaningless to anyone not holding
   // the plant matrix, and the whole point of the estimate is that the officer
   // can sanity-check it on site.
-  static const Map<int, String> _kLikelihoodWords = {
-    1: 'Rare',
-    2: 'Unlikely',
-    3: 'Possible',
-    4: 'Likely',
-    5: 'Almost certain',
-  };
-  static const Map<int, String> _kSeverityWords = {
-    1: 'Negligible',
-    2: 'Minor',
-    3: 'Moderate',
-    4: 'Major',
-    5: 'Catastrophic',
-  };
+  //
+  // The maps themselves now live in AdminMasterData because the exported PDF
+  // prints them too, and two copies of the axis labels is two chances for the
+  // paper report and the screen to describe the same rating differently. These
+  // are aliases so the picker call sites below read unchanged.
+  static const Map<int, String> _kLikelihoodWords =
+      AdminMasterData.likelihoodWords;
+  static const Map<int, String> _kSeverityWords = AdminMasterData.severityWords;
 
   /// The 5×5 grid, with a crosshair on the cell the two pickers select.
   ///
@@ -1739,7 +1734,7 @@ class _AIScanTabState extends State<AIScanTab> {
           (inc) => inc['imageHash']?.toString() == hash);
       if (alreadySaved) {
         if (!mounted) return;
-        final confirm = await showDialog<bool>(
+        final confirm = await showAppDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
             backgroundColor: Theme.of(context).colorScheme.surface,
@@ -1882,7 +1877,7 @@ class _AIScanTabState extends State<AIScanTab> {
     final id = incident['id']?.toString() ?? '';
     final shortId = id.length > 8 ? id.substring(id.length - 8) : id;
 
-    showDialog(
+    showAppDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => Dialog(
@@ -3703,9 +3698,8 @@ class _AIScanTabState extends State<AIScanTab> {
                   matrixScore == 0
                       ? 'Set a likelihood and a severity to rate this scan.'
                       : _matrixIsEstimate
-                          ? 'Likelihood is estimated from AI confidence. Confirm '
-                              'it against exposure on site, then rate with your '
-                              'approved plant risk matrix.'
+                          // Shared with the PDF so both say it the same way.
+                          ? AdminMasterData.matrixEstimateCaveat
                           : 'Rate with your approved plant risk matrix.',
                   style: TextStyle(color: sl.text4, fontSize: 12))),
             ]))),
@@ -4871,7 +4865,7 @@ class _AIScanTabState extends State<AIScanTab> {
       text: _capturedLocation?.address ?? '',
     );
 
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Location'),

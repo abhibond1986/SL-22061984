@@ -35,6 +35,7 @@ import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_config.dart';
+import '../widgets/skeleton.dart';
 
 class EmployeeProfileScreen extends StatefulWidget {
   /// Username to display. For imported employees this is the SAIL P.no, lower
@@ -209,10 +210,13 @@ class _EmployeeProfileScreenState extends State<EmployeeProfileScreen> {
         ],
       ),
       body: u == null
-          ? Center(
-              child: _loading
-                  ? const CircularProgressIndicator()
-                  : Padding(
+          // The skeleton is not wrapped in Center — it lays out from the top, in
+          // the position the real profile will occupy. Only the empty/error text
+          // is centred.
+          ? (_loading
+              ? const SkeletonProfile(semanticLabel: 'Loading profile')
+              : Center(
+                  child: Padding(
                       padding: const EdgeInsets.all(28),
                       child: Text(
                         _err.isEmpty
@@ -222,7 +226,7 @@ class _EmployeeProfileScreenState extends State<EmployeeProfileScreen> {
                         style: TextStyle(color: sl.text3, fontSize: 13),
                       ),
                     ),
-            )
+                ))
           : ListView(
               padding: slGutter(context,
                   base: const EdgeInsets.fromLTRB(14, 14, 14, 32)),

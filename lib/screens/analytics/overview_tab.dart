@@ -2,6 +2,7 @@ import 'dart:async' show Timer;
 import 'dart:convert' show base64Decode;
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../../widgets/app_dialog.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
 import '../../widgets/content_width.dart';
@@ -11,6 +12,7 @@ import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/skeleton.dart';
 
 /// Org overview.
 ///
@@ -309,7 +311,7 @@ class _OverviewTabState extends State<OverviewTab> {
   Widget build(BuildContext context) {
     final sl = SL.of(context);
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+      return const SkeletonAnalytics(semanticLabel: 'Loading safety overview');
     }
     // An unresolved scope is reported, not silently widened to all plants.
     if (_scope.problem != null) {
@@ -1232,7 +1234,7 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   void _showScoreFormulaDialog(SL sl) {
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.card,
