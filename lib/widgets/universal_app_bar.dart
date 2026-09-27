@@ -483,7 +483,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
 
             Expanded(child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -599,17 +599,28 @@ class _IconBtn extends StatelessWidget {
     //    is well under 3:1. `sl.textOn(color)` is the paired ink for a tinted
     //    chip and is what every other pill in the app already uses.
     final ink = sl.textOn(color);
+    // 3. NARROW PHONES. At 320-379px the four trailing controls left the
+    //    screen title about 70px ("SAIL ..."). Below 380px the pill drops
+    //    its globe icon and keeps only the language code, which gives the
+    //    title back about 22px. The code alone still identifies the control,
+    //    and the long-press picker is unchanged.
+    final compact = MediaQuery.sizeOf(context).width < 380;
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        height: 36, padding: const EdgeInsets.symmetric(horizontal: 10),
+        height: 36,
+        constraints: const BoxConstraints(minWidth: 36),
+        alignment: Alignment.center,
+        padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10),
         decoration: BoxDecoration(
           color: color.withOpacity(0.12),
           borderRadius: BorderRadius.circular(SLRadius.pill),
           border: Border.all(color: color.withOpacity(0.35))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: ink, size: 14),
-          const SizedBox(width: SLSpace.xs),
+          if (!compact) ...[
+            Icon(icon, color: ink, size: 14),
+            const SizedBox(width: SLSpace.xs),
+          ],
           Text(label,
               style: TextStyle(color: ink, fontSize: SLText.minBadge,
                   fontWeight: FontWeight.w700)),

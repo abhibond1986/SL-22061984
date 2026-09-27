@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 // No `package:http` import: this screen must make no raw network calls. Its one
 // backend call goes through SyncService.callAiText, which owns the deployment
 // URL, the prefs override and the app secret. See the note at _backendUrl below.
@@ -715,7 +716,7 @@ class _ChatTabState extends State<ChatTab> {
 
   void _showPdfHelpDialog(String filename) {
     final sl = SL.of(context);
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,

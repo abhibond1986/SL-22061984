@@ -896,6 +896,10 @@ class BrandTitle extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // scaleDown: on a 320px phone, or with a large system text size, the
+        // wordmark shrinks to fit instead of running off the screen. At normal
+        // sizes it fits already and this changes nothing.
+        FittedBox(fit: BoxFit.scaleDown, child:
         Row(mainAxisSize: MainAxisSize.min, children: [
           Text('SAIL ',
               style: GoogleFonts.poppins(
@@ -921,7 +925,7 @@ class BrandTitle extends StatelessWidget {
                       fontWeight: FontWeight.w800,
                       color: Colors.white,
                       fontStyle: FontStyle.italic))),
-        ]),
+        ])),
       ],
     );
   }

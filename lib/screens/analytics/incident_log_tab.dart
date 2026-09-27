@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../../widgets/app_dialog.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
 import '../../widgets/content_width.dart';
 import '../../services/local_db.dart';
@@ -877,7 +878,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     final id = inc['id']?.toString() ?? '';
     if (id.isEmpty) return;
     final title = inc['title']?.toString() ?? 'this report';
-    final ok = await showDialog<bool>(
+    final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,

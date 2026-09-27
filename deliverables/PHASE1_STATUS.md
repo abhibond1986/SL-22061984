@@ -49,3 +49,16 @@ These are not done, so do not describe the system as locked down yet:
 2. `incidents` policies are still open. Closing them needs a server-issued session token at login.
 3. Passwords are still salted SHA-256, because devices verify offline. Moving to an iterated KDF changes the credential format and is scheduled with step 1.
 4. Contractor Access rate limiting and CAPTCHA belong to Phase 2.
+
+## Screen sizes (all widths, phone to desktop)
+
+Every main screen is now checked at 320, 360, 390, 600, 768, 1024, 1440 and 1920px, in light and dark mode, by `test/responsive/width_sweep_test.dart` (64 cases). It runs in CI as part of `flutter test`. It fails if any screen overflows its width.
+
+What changed:
+
+1. From 900px wide, both shells (employee and contractor) show a side navigation rail on the left instead of the bottom tab bar. Below 900px nothing changes.
+2. Dialogs are capped at 560px wide. Before this, a confirmation dialog on a 1920px monitor stretched almost edge to edge. The full-screen image viewer is exempt.
+3. Fixed overflows on narrow phones: the WSA-13 chart plant picker, the Near Miss dropdowns (long WSA causes and department names), the admin model and alert pickers, and the contractor app-bar title. Long option names now shorten with "…" instead of running off the screen.
+4. Below 380px the language pill in the app bar shows only the language code, which gives the screen title more room. The SAIL Safety Lens wordmark on the login screen shrinks to fit instead of overflowing.
+
+Not covered by the sweep: the admin Command Centre after sign-in (the test sees its login card), and pushed detail screens such as incident detail and Document Q&A. Those screens already sit inside the same width caps.

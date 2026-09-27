@@ -6,8 +6,10 @@
 
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import '../main.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/side_nav_rail.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
@@ -179,7 +181,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<bool?> _confirmDiscardScan() {
     final sl = SL.of(context);
-    return showDialog<bool>(
+    return showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: sl.card,
@@ -288,17 +290,12 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     ];
 
-    return Scaffold(
-      extendBody: true,
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: sl.bgGradient,
-          ),
-        ),
-        child: AnimatedSwitcher(
+    // Wide windows get a side rail instead of the bottom bar (see
+    // SideNavRail). Only the chrome changes: the tabs, their order and
+    // _changeTab's guards are the same in both layouts.
+    final rail = SideNavRail.useRail(context);
+
+    final body = AnimatedSwitcher(
           duration: const Duration(milliseconds: 250),
           child: KeyedSubtree(
             // _shownTab, not _tabIndex. The listener clamps on the events it can
@@ -311,32 +308,72 @@ class _HomeScreenState extends State<HomeScreen>
             key: ValueKey(_shownTab),
             child: tabs[_shownTab],
           ),
+        );
+
+    return Scaffold(
+      extendBody: true,
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: sl.bgGradient,
+          ),
         ),
+        child: rail
+            ? SideNavRail.wrapBody(context, rail: _sideRail(), body: body)
+            : body,
       ),
-      bottomNavigationBar: _bottomNav(sl),
+      bottomNavigationBar: rail ? null : _bottomNav(sl),
     );
   }
+
+  /// The same destinations as [_bottomNav], drawn vertically. [_navItems] is
+  /// shared so the two can't drift apart. It walks [_visibleTabs] the same way:
+  /// `slot` is the position on the rail and the canonical tab is
+  /// `_visibleTabs[slot]`.
+  Widget _sideRail() {
+    final visible = _visibleTabs;
+    final items = _navItems;
+    return SideNavRail(
+      items: [
+        for (final i in visible)
+          SideNavItem(items[i].icon, items[i].activeIcon, items[i].label),
+      ],
+      selected: visible.indexOf(_shownTab),
+      onTap: (slot) => _changeTab(visible[slot]),
+    );
+  }
+
+  /// Indexed by canonical AppTabs value, like `tabs` in build().
+  List<_NavItem> get _navItems => const [
+        _NavItem(Icons.home_outlined, Icons.home_rounded, 'Home'),
+        _NavItem(Icons.document_scanner_outlined,
+            Icons.document_scanner_rounded, 'AI Scan'),
+        _NavItem(Icons.warning_amber_outlined, Icons.warning_amber_rounded,
+            'Near Miss'),
+        // See _bottomNav for why this is a book and why the label is 'SOP'.
+        _NavItem(Icons.menu_book_outlined, Icons.menu_book_rounded, 'SOP'),
+        _NavItem(Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded,
+            'Ask AI'),
+        _NavItem(Icons.bar_chart_outlined, Icons.bar_chart_rounded, 'Reports'),
+      ];
 
   Widget _bottomNav(SL sl) {
     // Indexed by canonical AppTabs value, exactly like `tabs` in build(). The
     // rendered Row below walks _visibleTabs and looks each one up here, so a
     // hidden tab costs a list entry and nothing else.
-    final items = [
-      _NavItem(Icons.home_outlined,             Icons.home_rounded,             'Home'),
-      _NavItem(Icons.document_scanner_outlined, Icons.document_scanner_rounded, 'AI Scan'),
-      _NavItem(Icons.warning_amber_outlined,    Icons.warning_amber_rounded,    'Near Miss'),
-      // menu_book, not document_scanner: AI Scan already owns the scanner glyph
-      // and at 22px the two are near-identical. An SOP is the rule book, so the
-      // book reads correctly and stays distinct. Avoid qr_code_scanner — it
-      // promises QR codes, which this does not do.
-      // 'SOP' not 'SOP Scan'. This was the longest label on a six-tab bar and it
-      // was the sole reason every label sat at 9px, below the repo's own floor.
-      // Shortening one word bought all six labels 11px — see the nav label style
-      // below and UI_UX_AUDIT.md §B.
-      _NavItem(Icons.menu_book_outlined,        Icons.menu_book_rounded,        'SOP'),
-      _NavItem(Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded,    'Ask AI'),
-      _NavItem(Icons.bar_chart_outlined,        Icons.bar_chart_rounded,        'Reports'),
-    ];
+    // The destinations live in [_navItems], shared with the side rail. The
+    // notes on the icon and label choices are kept here where they started:
+    // menu_book, not document_scanner: AI Scan already owns the scanner glyph
+    // and at 22px the two are near-identical. An SOP is the rule book, so the
+    // book reads correctly and stays distinct. Avoid qr_code_scanner — it
+    // promises QR codes, which this does not do.
+    // 'SOP' not 'SOP Scan'. This was the longest label on a six-tab bar and it
+    // was the sole reason every label sat at 9px, below the repo's own floor.
+    // Shortening one word bought all six labels 11px — see the nav label style
+    // below and UI_UX_AUDIT.md §B.
+    final items = _navItems;
 
     return ClipRRect(
       child: BackdropFilter(

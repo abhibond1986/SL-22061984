@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/admin_master_data.dart';
@@ -761,7 +762,7 @@ class _LoginScreenState extends State<LoginScreen> {
       confirmCtrl.dispose();
     }
 
-    showDialog(
+    showAppDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) {

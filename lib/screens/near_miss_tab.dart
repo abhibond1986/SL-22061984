@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 // package:http is deliberately NOT imported here. This screen has no business
 // making raw HTTP calls — every network hop belongs in a service under
 // lib/services/, which is where the backend URL override lives. The one direct
@@ -1355,7 +1356,7 @@ If the text is already fine, return it unchanged.''';
 
     // Ask user: scan with AI or just upload?
     if (!mounted) return;
-    final shouldScan = await showDialog<bool>(
+    final shouldScan = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -1985,7 +1986,7 @@ If the text is already fine, return it unchanged.''';
     return false;
   }
 
-  Future<bool?> _confirmReplaceTypedReport() => showDialog<bool>(
+  Future<bool?> _confirmReplaceTypedReport() => showAppDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
@@ -2157,7 +2158,7 @@ If the text is already fine, return it unchanged.''';
 
     if (found.isNotEmpty) {
       if (!mounted) return true;
-      final confirm = await showDialog<bool>(
+      final confirm = await showAppDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
           backgroundColor: Theme.of(context).colorScheme.surface,
@@ -2639,7 +2640,7 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
   void _showSaveSuccessDialog(Map<String, dynamic> incident, bool synced,
       bool exported, [Uint8List? savedImageBytes, bool stillUploading = false]) {
     final sl = SL.of(context);
-    showDialog(context: context, builder: (ctx) => Dialog(
+    showAppDialog(context: context, builder: (ctx) => Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Padding(padding: const EdgeInsets.all(24), child: Column(
         mainAxisSize: MainAxisSize.min, children: [
@@ -4658,12 +4659,15 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: DropdownButtonFormField<String>(
+        isExpanded: true, // fill the field; long names ellipsise instead of overflowing
         value: currentValue.isEmpty ? null : currentValue,
         hint: Text('Department/Shop', style: TextStyle(color: sl.text3, fontSize: 11.5)),
         items: items.map((e) => DropdownMenuItem(
           value: e,
           child: Text(
             e,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 12,
               fontStyle: e == 'Other' ? FontStyle.italic : FontStyle.normal,
@@ -4745,7 +4749,22 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
             ? Text('Select…', style: TextStyle(
                 color: errorText != null ? sl.redText : sl.text3, fontSize: 12))
             : null,
-        items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 12)))).toList(),
+        // isExpanded gives the field's text a width. Without it the dropdown
+        // sizes itself to its longest option, and long WSA-13 causes and
+        // department names overflowed the form by up to 175px on a 360px
+        // phone. The closed field shows one ellipsised line. The open menu
+        // keeps up to two lines so long options are still readable.
+        isExpanded: true,
+        selectedItemBuilder: (_) => items
+            .map((e) => Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Text(e,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: sl.text1, fontSize: 12)),
+                ))
+            .toList(),
+        items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)))).toList(),
         onChanged: onChanged,
         dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
         style: TextStyle(color: sl.text1, fontSize: 12),

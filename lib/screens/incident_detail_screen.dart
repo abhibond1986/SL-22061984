@@ -8,6 +8,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -764,8 +765,10 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
 
   // Full-screen, pinch-to-zoom viewer for the evidence image.
   void _openFullImage(Uint8List bytes) {
-    showDialog(
+    showAppDialog(
       context: context,
+      // Full-window viewer: no width cap.
+      maxWidth: double.infinity,
       barrierColor: Colors.black.withOpacity(0.9),
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,

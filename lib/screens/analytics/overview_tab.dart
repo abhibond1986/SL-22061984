@@ -2,6 +2,7 @@ import 'dart:async' show Timer;
 import 'dart:convert' show base64Decode;
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../../widgets/app_dialog.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
 import '../../widgets/content_width.dart';
@@ -1233,7 +1234,7 @@ class _OverviewTabState extends State<OverviewTab> {
   }
 
   void _showScoreFormulaDialog(SL sl) {
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.card,

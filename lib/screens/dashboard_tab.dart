@@ -7,6 +7,7 @@
 //   ✅ All original dashboard functionality preserved
 
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import '../main.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
@@ -1241,7 +1242,7 @@ class _CaseCardState extends State<_CaseCard> {
     final actionCtrl   = TextEditingController();
     final closedByCtrl = TextEditingController();
 
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,

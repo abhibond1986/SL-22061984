@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import '../widgets/app_dialog.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
@@ -848,7 +849,7 @@ class _AIScanTabState extends State<AIScanTab> {
       edited = false;
     }
     if (edited) {
-      final ok = await showDialog<bool>(
+      final ok = await showAppDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: Theme.of(ctx).colorScheme.surface,
@@ -1733,7 +1734,7 @@ class _AIScanTabState extends State<AIScanTab> {
           (inc) => inc['imageHash']?.toString() == hash);
       if (alreadySaved) {
         if (!mounted) return;
-        final confirm = await showDialog<bool>(
+        final confirm = await showAppDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
             backgroundColor: Theme.of(context).colorScheme.surface,
@@ -1876,7 +1877,7 @@ class _AIScanTabState extends State<AIScanTab> {
     final id = incident['id']?.toString() ?? '';
     final shortId = id.length > 8 ? id.substring(id.length - 8) : id;
 
-    showDialog(
+    showAppDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => Dialog(
@@ -4864,7 +4865,7 @@ class _AIScanTabState extends State<AIScanTab> {
       text: _capturedLocation?.address ?? '',
     );
 
-    showDialog(
+    showAppDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Location'),
