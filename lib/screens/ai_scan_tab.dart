@@ -4081,6 +4081,16 @@ class _AIScanTabState extends State<AIScanTab> {
                         ? ' (model said ${hm['severityBeforeAudit']})'
                         : '',
                     ),
+                  // The box was moved onto the person the scan's own per-person
+                  // PPE check found without the item (HazardQuality
+                  // .auditPersonAttribution). Said so the move is not silent.
+                  if (hm['attributionNote']?.toString().isNotEmpty == true)
+                    _hazardNote(
+                      sl,
+                      Icons.person_search_outlined,
+                      sl.amberText,
+                      hm['attributionNote'].toString(),
+                    ),
                   // The model marked an area so large it located nothing, so no
                   // box was drawn for this row. Said out loud, because a reader
                   // comparing rows to boxes would otherwise assume one was lost.

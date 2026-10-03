@@ -887,6 +887,12 @@ HOW TO USE IT:
     return s.isEmpty ? imgHash : '${imgHash}_c${_textHash(s)}';
   }
 
+  /// Revision of the hazard prompt's output contract. Bump it whenever a
+  /// prompt change should stop old cached answers being served.
+  ///   2 — 2026-10-03: per-person PPE audit ("persons", "personIds"), after a
+  ///       scan put the chin-strap box on the worker who WAS wearing it.
+  static const int kHazardPromptRev = 2;
+
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -895,6 +901,10 @@ HOW TO USE IT:
       final map = jsonDecode(raw) as Map<String, dynamic>;
       final entry = map[hash];
       if (entry == null) return null;
+      // An answer produced by an older hazard prompt is not served: the
+      // consistency guarantee is "same photo, same prompt, same answer", and
+      // re-scanning is exactly how a user picks up a prompt fix.
+      if (entry is! Map || entry['_promptRev'] != kHazardPromptRev) return null;
       // Deep copy so callers can mutate freely.
       return Map<String, dynamic>.from(jsonDecode(jsonEncode(entry)) as Map);
     } catch (_) {
@@ -911,7 +921,9 @@ HOW TO USE IT:
           ? <String, dynamic>{}
           : Map<String, dynamic>.from(jsonDecode(raw) as Map);
       // Store a lean copy (no bulky transient fields).
-      final lean = Map<String, dynamic>.from(result)..remove('_fromCache');
+      final lean = Map<String, dynamic>.from(result)
+        ..remove('_fromCache')
+        ..['_promptRev'] = kHazardPromptRev;
       map[hash] = lean;
       // Evict oldest if over cap (insertion order preserved by JSON map).
       if (map.length > _kMaxCachedResults) {
@@ -3959,6 +3971,43 @@ two ENDS OF THE PATH, in this order and no other:
 {{OBS_TYPE_RULES}}
 
 ═══════════════════════════════════════════════════════
+PEOPLE AND THEIR PPE — CHECK EACH PERSON BEFORE ANY HAZARD
+═══════════════════════════════════════════════════════
+When more than one person is in the frame, a PPE finding is only useful if it
+names the RIGHT person. A recent scan of two workers in hard hats said "the
+worker on the right has his chin strap hanging loose" and drew the box on his
+head. In the photograph the strap ran from his helmet down along his jaw to
+under his chin — he was WEARING it. His co-worker on the left had no strap at
+all. The report flagged the one compliant worker and cleared the one who wasn't.
+
+So, before writing any hazard, fill "persons": one entry per clearly visible
+person (at most 4, nearest first), each with where they are and what they wear,
+and with "headBox" — a tight box round that person's head and helmet.
+For every PPE item, look at THIS person only and answer:
+  "worn"     — you can see it on them, in place.
+  "not_worn" — the body part is clearly visible and the item is not on it.
+  "loose"    — (chinStrap only) a strap is visible but hangs free below the
+               chin, swings loose, or is pushed up over the brim.
+  "unclear"  — the body part is hidden, cut off, turned away or too small.
+Always answer helmet, chinStrap and eyewear. Add gloves, safetyShoes, harness,
+earProtection or respirator to "ppe" only when a hazard below is about them.
+Chin strap: a dark strap running from the helmet down the cheek or jawline to
+under the chin is "worn", even if it sits slightly off-centre. Do not call a
+strap you CAN see "loose" unless you can see the free end hanging.
+Compare the people side by side: if one has a strap/goggles visible and another
+does not, the one WITHOUT it is the deviation.
+Then, in every hazard that is about a person's PPE or behaviour:
+  • "personIds" lists the ids of the persons it applies to — only persons whose
+    entry for that item is "not_worn" or "loose".
+  • its "bbox" is that person's "headBox" (head/eye/chin items) or a box round
+    that person's relevant body part — never on a person who is compliant.
+  • If the same item is missing on several people, report ONE hazard listing all
+    their ids, and make its bbox enclose all of their heads.
+The app cross-checks every PPE hazard against "persons": a box on a person whose
+own entry says the item is "worn" is moved to the person recorded as not wearing
+it, or withdrawn if there is no such person.
+
+═══════════════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 ═══════════════════════════════════════════════════════
 {
@@ -3971,6 +4020,13 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
   "riskScore": 0-100,
   "confidence": 0-100,
   "people": <count of ACTUALLY visible persons, 0 if none>,
+  "persons": [<ONLY when people > 0; see PEOPLE AND THEIR PPE. One per person, max 4:>
+    {"id": 1, "where": "<position + clothing, e.g. 'left, red shirt'>",
+     "headBox": {"x": 0.2, "y": 0.2, "w": 0.15, "h": 0.15},
+     "ppe": {"helmet": "worn|not_worn|unclear",
+             "chinStrap": "worn|loose|not_worn|unclear",
+             "eyewear": "worn|not_worn|unclear"}}
+  ],
   "sceneType": "INDUSTRIAL | OFFICE_OR_MEETING | OUTDOOR_PUBLIC | UNCLEAR",
   "viewType": "CLOSE_UP | WORKING_DISTANCE | GENERAL_VIEW",
   "inspectable": <true only if you can see individual fittings — a rail, a nip
@@ -3989,6 +4045,7 @@ OUTPUT — VALID JSON ONLY (no markdown, no preamble)
       "absenceCheck": "<REQUIRED ONLY if this hazard claims something is missing.
                         Where you looked and what you found there instead.
                         Omit entirely for hazards that are not absence claims.>",
+      "personIds": [<ids from "persons" this hazard applies to; omit if not about a person>],
       "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
       "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7,
                   "source": "energised 415V panel",

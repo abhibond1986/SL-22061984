@@ -253,7 +253,14 @@ class PdfExport {
     pdf.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
       margin: const pw.EdgeInsets.fromLTRB(32, 32, 32, 32),
-      header: (ctx) => _pageHeader(ctx.pageNumber > 1, _plantName(incident)),
+      // ★ 2026-10-03 (user request): EVERY page carries the same masthead as
+      // page 1 — plant name, risk colour, report type and reference — so a
+      // continued page is never a loose sheet without identification. The
+      // banner therefore lives in `header`, not at the top of `build`.
+      header: (ctx) => pw.Padding(
+          padding: const pw.EdgeInsets.only(bottom: 6),
+          child: _banner(
+              incident, severity, isAiScan, riskScore, confidence, logoImage)),
       footer: (ctx) => _pageFooter(
           ctx.pageNumber, ctx.pagesCount, _refNo(incident), dateStr),
       // ─── ONE-PAGE LAYOUT ───────────────────────────────────────────────
@@ -263,7 +270,6 @@ class PdfExport {
       // page. If you add a section here, keep to the same budget.
       build: (context) {
         final w = <pw.Widget>[];
-        w.add(_banner(incident, severity, isAiScan, riskScore, confidence, logoImage));
         // Immediately under the severity badge, not in a footnote: if the
         // photograph is a general view, the severity above it is capped and
         // provisional, and the reader has to know that before reading anything
@@ -272,16 +278,15 @@ class PdfExport {
         // assessed this photograph, that fact outranks every other qualification
         // on the page, including the general-view caveat (which qualifies a
         // severity that no longer exists here).
+        // The header already leaves 6pt under the masthead.
         if (notAnalysed) {
-          w.add(pw.SizedBox(height: 5));
           w.add(_notAnalysedNotice());
         }
         final viewCaveat = incident['viewCaveat']?.toString().trim() ?? '';
         if (viewCaveat.isNotEmpty && !notAnalysed) {
-          w.add(pw.SizedBox(height: 5));
           w.add(_caveatBar(viewCaveat));
         }
-        w.add(pw.SizedBox(height: 10));
+        w.add(pw.SizedBox(height: w.isEmpty ? 4 : 10));
         w.add(_sectionTitle('INCIDENT DETAILS'));
         w.add(pw.SizedBox(height: 4));
         w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno));
@@ -1797,15 +1802,19 @@ class PdfExport {
     // rules), zebra rows that fill the full row height, a severity-coloured
     // number tag that matches the tag on the photograph, and a pill for the
     // severity itself.
-    return pw.Container(
-      decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: _hair, width: 0.8)),
-      // Zebra fill via TableRow.decoration, NOT per-cell colour + `full`
-      // alignment: `full` re-lays the tallest cell at exactly its own height
-      // and the pdf Flex can then drop its last child on rounding — which
-      // silently removed the "not marked on photo" note in the audit render.
-      child: pw.Table(
+    // ★ 2026-10-03: returned as a BARE Table (no Container around it) so the
+    // MultiPage can split it between rows when the report runs onto page 2;
+    // a Container is not a SpanningWidget, so the whole table used to jump
+    // to the next page as one block. The outer frame is now the table's own
+    // border, and the header row repeats at the top of the continued part.
+    // Zebra fill via TableRow.decoration, NOT per-cell colour + `full`
+    // alignment: `full` re-lays the tallest cell at exactly its own height
+    // and the pdf Flex can then drop its last child on rounding — which
+    // silently removed the "not marked on photo" note in the audit render.
+    final frame = pw.BorderSide(color: _hair, width: 0.8);
+    return pw.Table(
       border: pw.TableBorder(
+        left: frame, right: frame, top: frame, bottom: frame,
         horizontalInside: pw.BorderSide(color: _hair, width: 0.6)),
       // ── COLUMN BUDGET ────────────────────────────────────────────────────
       // Width is taken from the two columns that hold nothing but short labels
@@ -1834,7 +1843,7 @@ class PdfExport {
         5: pw.FlexColumnWidth(2.9),
       },
       children: [
-        pw.TableRow(children: [
+        pw.TableRow(repeat: true, children: [
           hdrCell('#', align: pw.TextAlign.center),
           hdrCell('HAZARD'),
           hdrCell('SEVERITY', align: pw.TextAlign.center),
@@ -1927,7 +1936,7 @@ class PdfExport {
           ]);
         }),
       ],
-    ));
+    );
   }
 
   // _riskScoreBar() was deleted here. It rendered TOTAL RISK SCORE / OVERALL

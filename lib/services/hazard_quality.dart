@@ -31,6 +31,8 @@
 /// see tools/hazard_quality_test.dart.
 library;
 
+import 'dart:math' as math;
+
 /// What happened to one hazard, for logging and for the tests.
 class QualityReport {
   const QualityReport({
@@ -42,6 +44,7 @@ class QualityReport {
     this.sceneWithdrawn = 0,
     this.normalWithdrawn = 0,
     this.unverifiableMoved = 0,
+    this.personsReattributed = 0,
   });
 
   /// Hazards folded into another row.
@@ -77,6 +80,11 @@ class QualityReport {
   /// they print as inspection points. See [HazardQuality.auditUnverifiable].
   final int unverifiableMoved;
 
+  /// PPE findings whose box was moved to (or withdrawn from) a person because
+  /// the model's own per-person check contradicted it. See
+  /// [HazardQuality.auditPersonAttribution].
+  final int personsReattributed;
+
   bool get changedAnything =>
       merged > 0 ||
       absenceDowngraded > 0 ||
@@ -85,7 +93,8 @@ class QualityReport {
       viewCapped > 0 ||
       sceneWithdrawn > 0 ||
       normalWithdrawn > 0 ||
-      unverifiableMoved > 0;
+      unverifiableMoved > 0 ||
+      personsReattributed > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
@@ -95,7 +104,8 @@ class QualityReport {
       'viewCapped: $viewCapped, '
       'sceneWithdrawn: $sceneWithdrawn, '
       'normalWithdrawn: $normalWithdrawn, '
-      'unverifiableMoved: $unverifiableMoved)';
+      'unverifiableMoved: $unverifiableMoved, '
+      'personsReattributed: $personsReattributed)';
 }
 
 class HazardQuality {
@@ -182,6 +192,10 @@ class HazardQuality {
       // something worth checking.
       final unverifiableMoved = auditUnverifiable(result, deduped);
 
+      // Before box precision and the counting loop: it can move a box, withdraw
+      // one, or downgrade a contradicted row, and both of those read the result.
+      final reattributed = auditPersonAttribution(result, deduped);
+
       var downgraded = 0;
       var flagged = 0;
       var boxesWithdrawn = 0;
@@ -218,6 +232,7 @@ class HazardQuality {
         sceneWithdrawn: sceneWithdrawn,
         normalWithdrawn: normalWithdrawn,
         unverifiableMoved: unverifiableMoved,
+        personsReattributed: reattributed,
       );
     } catch (_) {
       return const QualityReport(
@@ -494,6 +509,225 @@ class HazardQuality {
         'it could not show which structure this refers to. The box was not drawn '
         '— identify the exact location on site.';
     return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  WHICH PERSON A PPE FINDING IS ABOUT
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// PPE items the per-person check records, in match priority. `chinStrap`
+  /// comes before `helmet` because every chin-strap finding also says
+  /// "hard hat"; the strap is the claim, the hat is where it hangs.
+  static final List<(String, RegExp)> _ppeItems = [
+    ('chinstrap', RegExp(r'chin[\s-]*strap', caseSensitive: false)),
+    ('eyewear', RegExp(
+        r'goggle|safety (glasses|spectacles)|spectacle|eye[\s-]*(protection|wear)'
+        r'|eyewear|face[\s-]*shield',
+        caseSensitive: false)),
+    ('gloves', RegExp(r'\bgloves?\b|hand protection', caseSensitive: false)),
+    ('safetyshoes', RegExp(r'safety (shoes|boots|footwear)|footwear',
+        caseSensitive: false)),
+    ('harness', RegExp(r'harness|lanyard', caseSensitive: false)),
+    ('earprotection', RegExp(r'ear[\s-]*(plug|muff|protection|defender)',
+        caseSensitive: false)),
+    ('respirator', RegExp(r'respirator|dust mask|face mask',
+        caseSensitive: false)),
+    ('helmet', RegExp(r'helmet|hard[\s-]*hat|head protection|bare[\s-]*headed',
+        caseSensitive: false)),
+  ];
+
+  static const Map<String, String> _ppeKeyAliases = {
+    'chinstrap': 'chinstrap', 'strap': 'chinstrap',
+    'eyewear': 'eyewear', 'eyeprotection': 'eyewear', 'goggles': 'eyewear',
+    'glasses': 'eyewear', 'safetyglasses': 'eyewear',
+    'gloves': 'gloves', 'safetyshoes': 'safetyshoes', 'shoes': 'safetyshoes',
+    'footwear': 'safetyshoes', 'harness': 'harness',
+    'earprotection': 'earprotection', 'respirator': 'respirator',
+    'helmet': 'helmet', 'hardhat': 'helmet',
+  };
+
+  static bool _isDeviating(String v) => const {
+        'not_worn', 'notworn', 'loose', 'missing', 'absent', 'none', 'no',
+        'unfastened', 'unbuckled'
+      }.contains(v);
+  static bool _isCompliant(String v) =>
+      const {'worn', 'fastened', 'yes', 'present', 'on'}.contains(v);
+
+  /// The one PPE item a hazard is about, or null when it names none or more
+  /// than one (a row about "goggles and gloves" cannot be pinned to one
+  /// person's entry, so it is left alone).
+  static String? _ppeItemOf(Map hazard) {
+    final text = '${_str(hazard['name'])} ${_str(hazard['description'])}';
+    final hits = <String>{
+      for (final (key, re) in _ppeItems)
+        if (re.hasMatch(text)) key,
+    };
+    if (hits.contains('chinstrap')) hits.remove('helmet');
+    return hits.length == 1 ? hits.first : null;
+  }
+
+  /// Puts each PPE box on the person the model's OWN per-person check says is
+  /// not wearing that item.
+  ///
+  /// **Why:** a scan of two workers in hard hats said "the worker on the right
+  /// has his chin strap hanging loose" and boxed his head. He was wearing it;
+  /// his co-worker on the left had none. The report and its close-up pointed
+  /// at the one compliant person. The prompt now asks for a `persons` list
+  /// (each person's head box and a worn / not_worn / loose / unclear answer
+  /// per item) BEFORE the hazards. That list, written person by person, is
+  /// the model's most careful look at who wears what. A hazard row that
+  /// disagrees with it is the less careful of the two.
+  ///
+  /// **How to apply:** only for a row about exactly one PPE item, and only
+  /// when the people it points at (its `personIds`, or the heads its box
+  /// covers) are ALL recorded as wearing that item:
+  ///   * if other people are recorded as not wearing it, the box moves to
+  ///     their heads and the row says so in `attributionNote`;
+  ///   * if nobody is, the box is withdrawn and the row is capped at LOW as
+  ///     unconfirmed, like any other unproven absence claim.
+  /// A row with no box gets one on the not-wearing heads. Nothing is deleted
+  /// and "unclear" answers change nothing. Returns rows changed.
+  static int auditPersonAttribution(
+      Map<String, dynamic> result, List<Map<String, dynamic>> hazards) {
+    final people = <({int id, String where, ({double x, double y, double w, double h}) head, Map<String, String> ppe})>[];
+    final raw = result['persons'];
+    if (raw is! List) return 0;
+    for (final p in raw) {
+      if (p is! Map) continue;
+      final id = _asInt(p['id']);
+      final head = _bbox(p['headBox'] ?? p['bbox']);
+      final ppeRaw = p['ppe'];
+      if (id == null || head == null || ppeRaw is! Map) continue;
+      final ppe = <String, String>{};
+      ppeRaw.forEach((k, v) {
+        final key = _ppeKeyAliases[
+            k.toString().toLowerCase().replaceAll(RegExp(r'[^a-z]'), '')];
+        if (key != null) {
+          ppe[key] = v.toString().toLowerCase().trim().replaceAll(' ', '_');
+        }
+      });
+      people.add((id: id, where: _str(p['where']), head: head, ppe: ppe));
+    }
+    if (people.isEmpty) return 0;
+
+    Map<String, double> boxOf(
+        Iterable<({double x, double y, double w, double h})> boxes) {
+      var x1 = 1.0, y1 = 1.0, x2 = 0.0, y2 = 0.0;
+      for (final b in boxes) {
+        x1 = math.min(x1, b.x);
+        y1 = math.min(y1, b.y);
+        x2 = math.max(x2, b.x + b.w);
+        y2 = math.max(y2, b.y + b.h);
+      }
+      return {'x': x1, 'y': y1, 'w': x2 - x1, 'h': y2 - y1};
+    }
+
+    // Share of a person's head box that the hazard box covers.
+    double covers(({double x, double y, double w, double h}) box,
+        ({double x, double y, double w, double h}) head) {
+      final iw = math.min(box.x + box.w, head.x + head.w) - math.max(box.x, head.x);
+      final ih = math.min(box.y + box.h, head.y + head.h) - math.max(box.y, head.y);
+      if (iw <= 0 || ih <= 0) return 0;
+      return (iw * ih) / (head.w * head.h);
+    }
+
+    String names(Iterable<({int id, String where, ({double x, double y, double w, double h}) head, Map<String, String> ppe})> ps) =>
+        ps.map((p) => p.where.isEmpty ? 'person ${p.id}' : 'the worker ${p.where}').join(' and ');
+
+    const label = {
+      'chinstrap': 'chin strap', 'eyewear': 'eye protection',
+      'gloves': 'gloves', 'safetyshoes': 'safety shoes', 'harness': 'harness',
+      'earprotection': 'ear protection', 'respirator': 'respirator',
+      'helmet': 'helmet',
+    };
+
+    var changed = 0;
+    for (final h in hazards) {
+      final item = _ppeItemOf(h);
+      if (item == null) continue;
+      final known = people.where((p) => p.ppe.containsKey(item)).toList();
+      if (known.isEmpty) continue;
+      final deviating =
+          known.where((p) => _isDeviating(p.ppe[item]!)).toList();
+
+      // Who the row points at: its own ids first, else the heads its box covers.
+      final ids = <int>{
+        if (h['personIds'] is List)
+          for (final v in h['personIds'] as List)
+            if (_asInt(v) != null) _asInt(v)!,
+        if (_asInt(h['personId']) != null) _asInt(h['personId'])!,
+      };
+      final box = _bbox(h['bbox']);
+      var claimed = people.where((p) => ids.contains(p.id)).toList();
+      if (claimed.isEmpty && box != null) {
+        claimed = people.where((p) => covers(box, p.head) >= 0.3).toList();
+      }
+
+      if (claimed.isEmpty) {
+        // No box and nobody named: put it where the check says the deviation is.
+        if (box == null && h['bboxRejected'] == null && deviating.isNotEmpty) {
+          h['bbox'] = boxOf(deviating.map((p) => p.head));
+          h['personIds'] = [for (final p in deviating) p.id];
+          h.remove('locationUnpinned');
+          changed++;
+        }
+        continue;
+      }
+
+      final claimedStatus =
+          claimed.map((p) => p.ppe[item] ?? 'unclear').toList();
+      final allCompliant = claimedStatus.every(_isCompliant);
+      if (!allCompliant) {
+        // Pointing at someone recorded as not wearing it (or unclear). If the
+        // ids were explicit but the box sits off their heads, snap it on.
+        final targets = claimed.where((p) => _isDeviating(p.ppe[item] ?? '')).toList();
+        if (targets.isNotEmpty && ids.isNotEmpty &&
+            (box == null || targets.every((p) => covers(box, p.head) < 0.3)) &&
+            h['bboxRejected'] == null) {
+          h['bboxBeforeAttribution'] = h['bbox'];
+          h['bbox'] = boxOf(targets.map((p) => p.head));
+          h.remove('locationUnpinned');
+          changed++;
+        }
+        continue;
+      }
+
+      // Contradiction: everyone this row points at is recorded as WEARING it.
+      final what = label[item] ?? item;
+      h['bboxBeforeAttribution'] = h['bbox'];
+      if (deviating.isNotEmpty) {
+        h['bbox'] = boxOf(deviating.map((p) => p.head));
+        h['personIds'] = [for (final p in deviating) p.id];
+        h.remove('locationUnpinned');
+        h['attributionNote'] =
+            'Marked on ${names(deviating)}: the scan\'s per-person check found '
+            '${names(claimed)} wearing the $what and ${names(deviating)} '
+            'without it. Verify on site.';
+        // Rewrite the row's wording too: it named the wrong person, and the
+        // PDF prints the description, not the note.
+        final desc = _str(h['description']);
+        h['description'] = desc.isEmpty
+            ? h['attributionNote']
+            : '$desc (Correction: ${h['attributionNote']})';
+      } else {
+        h['bboxRejected'] = h['bbox'];
+        h.remove('bbox');
+        h['locationUnpinned'] = true;
+        h['locationIssue'] =
+            'The scan\'s per-person check recorded the $what as worn by '
+            '${names(claimed)}, which contradicts this finding. No box was '
+            'drawn - check on site.';
+        final before = _str(h['severity']);
+        if (severityRank(before) > severityRank(kUnprovenSeverity)) {
+          h['severityBeforeAudit'] = before;
+          h['severity'] = kUnprovenSeverity;
+        }
+        h['absenceUnconfirmed'] = true;
+        h['absenceIssue'] = h['locationIssue'];
+      }
+      changed++;
+    }
+    return changed;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

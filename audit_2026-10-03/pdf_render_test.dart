@@ -66,5 +66,15 @@ void main() {
       ...inc([hz[1]..['severity'] = 'LOW']), 'severity': 'LOW', 'plant': 'RSP', 'title': 'Loose item on bench', 'confidence': 80},
       reporterName: 'Audit', reporterPno: '1', imageBytes: p);
     File('/tmp/out/low.pdf').writeAsBytesSync(e);
+    final many = [
+      for (var i = 0; i < 12; i++)
+        {'name': 'Finding ${i + 1}: ${['Missing chin strap', 'Oil spill on floor', 'Unguarded pulley', 'Hose across walkway'][i % 4]}',
+         'severity': ['HIGH', 'MEDIUM', 'LOW', 'CRITICAL'][i % 4],
+         'description': 'Detailed description of finding ${i + 1}, long enough to wrap onto a second line in the hazards table so the table grows past one page.',
+         'regulation': 'FA 1948 S${20 + i}', 'correctiveAction': 'Corrective action ${i + 1}: isolate, barricade and brief the crew before restart.',
+         'bbox': {'x': 0.05 + (i % 6) * 0.15, 'y': 0.1 + (i ~/ 6) * 0.4, 'w': 0.1, 'h': 0.12}},
+    ];
+    final f = await PdfExport.generateIncidentReportBytes(incident: inc(many), reporterName: 'Audit', reporterPno: '1', imageBytes: p);
+    File('/tmp/out/two_page.pdf').writeAsBytesSync(f);
   });
 }

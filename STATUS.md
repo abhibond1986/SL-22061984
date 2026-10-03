@@ -1,3 +1,7 @@
+## 2026-10-03 (rev. 3)
+- PPE box on the wrong person (chin-strap scan): the prompt now runs a per-person PPE check (`persons`, `personIds`). `HazardQuality.auditPersonAttribution` moves a contradicted box onto the person without the item, or withdraws it and caps the row at LOW. Prompt cache rev bumped to 2, so old photos must be re-scanned. Test: tools/hazard_person_attribution_test.dart.
+- PDF: masthead and title repeat on every page; the hazards table splits with a repeated header row. See AUDIT_2026-10-03_PDF_REPORT_AND_LOG.md Revision 3.
+
 # Safety Lens — current status
 
 > **2026-10-03 (rev. 2) — PDF masthead.** Masthead is now titled with the
