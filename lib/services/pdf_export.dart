@@ -12,6 +12,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:image/image.dart' as img;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
@@ -25,7 +26,6 @@ import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as ht
 
 class PdfExport {
   static final PdfColor _sailBlue    = PdfColor.fromHex('#0D47A1');
-  static final PdfColor _sailLight   = PdfColor.fromHex('#E3F2FD');
   static final PdfColor _critCol     = PdfColor.fromHex('#C62828');
   static final PdfColor _critBg      = PdfColor.fromHex('#FFEBEE');
   static final PdfColor _highCol     = PdfColor.fromHex('#E65100');
@@ -34,12 +34,19 @@ class PdfExport {
   static final PdfColor _medBg       = PdfColor.fromHex('#E0F7FA');
   static final PdfColor _lowCol      = PdfColor.fromHex('#2E7D32');
   static final PdfColor _lowBg       = PdfColor.fromHex('#E8F5E9');
-  static final PdfColor _divider     = PdfColor.fromHex('#9E9E9E');
   static final PdfColor _textDark    = PdfColor.fromHex('#212121');
   static final PdfColor _textMed     = PdfColor.fromHex('#616161');
-  static final PdfColor _textLight   = PdfColor.fromHex('#9E9E9E');
-  static final PdfColor _rowAlt      = PdfColor.fromHex('#F8FAFF');
+  static final PdfColor _rowAlt      = PdfColor.fromHex('#F5F8FC');
   static final PdfColor _rowNorm     = PdfColors.white;
+  // ★ 2026-10-03 report redesign. A restrained ink/navy/steel set: navy for
+  // structure, severity colours ONLY where they carry meaning, and soft
+  // panels + hairlines instead of heavy boxes.
+  static final PdfColor _navyDeep    = PdfColor.fromHex('#0A2E6E');
+  static final PdfColor _ink         = PdfColor.fromHex('#1B2433');
+  static final PdfColor _steel       = PdfColor.fromHex('#5B6B82');
+  static final PdfColor _hair        = PdfColor.fromHex('#D9E0EA');
+  static final PdfColor _panel       = PdfColor.fromHex('#F4F7FB');
+  static const pw.BorderRadius _r3   = pw.BorderRadius.all(pw.Radius.circular(3));
 
   // ─── MAIN ENTRY ──────────────────────────────────────────────────────────
   static Future<Uint8List> generateIncidentReportBytes({
@@ -234,7 +241,8 @@ class PdfExport {
       pageFormat: PdfPageFormat.a4,
       margin: const pw.EdgeInsets.fromLTRB(32, 32, 32, 32),
       header: (ctx) => _pageHeader(ctx.pageNumber > 1),
-      footer: (ctx) => _pageFooter(ctx.pageNumber, ctx.pagesCount, reporterName, dateStr),
+      footer: (ctx) => _pageFooter(
+          ctx.pageNumber, ctx.pagesCount, _refNo(incident), dateStr),
       // ─── ONE-PAGE LAYOUT ───────────────────────────────────────────────
       // Target: the whole report on page 1. Every spacer below is deliberately
       // tight (10pt between sections, 4pt under a section title) — these were
@@ -260,31 +268,36 @@ class PdfExport {
           w.add(pw.SizedBox(height: 5));
           w.add(_caveatBar(viewCaveat));
         }
-        w.add(pw.SizedBox(height: 7));
+        w.add(pw.SizedBox(height: 10));
         w.add(_sectionTitle('INCIDENT DETAILS'));
-        w.add(pw.SizedBox(height: 3));
+        w.add(pw.SizedBox(height: 4));
         w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno));
-        w.add(pw.SizedBox(height: 7));
+        w.add(pw.SizedBox(height: 10));
         if (imgBytes != null) {
           w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
-          w.add(pw.SizedBox(height: 3));
+          w.add(pw.SizedBox(height: 4));
+          // Close-ups sit INSIDE the summary column (which otherwise has
+          // blank space beside a tall photo) rather than in their own band.
+          final closeUps = _closeUps(imgBytes, hazards);
           w.add(_photoAndSummary(imgBytes, hazards.length, summary,
               severity, riskScore, confidence, hazards,
               verifyCount: _verifyOnSiteCount(incident),
               matrixL: mL, matrixS: mS,
               matrixScore: matrixScore,
               matrixEstimated: matrixEstimated,
-              matrixApplies: isAiScan));
-          w.add(pw.SizedBox(height: 7));
+              matrixApplies: isAiScan,
+              analysed: !notAnalysed,
+              closeUps: closeUps));
+          w.add(pw.SizedBox(height: 10));
         } else {
           w.add(_sectionTitle('INCIDENT SUMMARY'));
-          w.add(pw.SizedBox(height: 3));
+          w.add(pw.SizedBox(height: 4));
           w.add(_summaryBox(summary));
-          w.add(pw.SizedBox(height: 7));
+          w.add(pw.SizedBox(height: 10));
         }
         if (hazards.isNotEmpty) {
           w.add(_sectionTitle('HAZARDS IDENTIFIED  —  ${hazards.length} TOTAL'));
-          w.add(pw.SizedBox(height: 3));
+          w.add(pw.SizedBox(height: 4));
           w.add(_hazardsTable(hazards));
           // NOTE: the TOTAL RISK SCORE / OVERALL RISK bar used to be added here.
           // It was a verbatim duplicate of the risk score already shown in the
@@ -292,7 +305,7 @@ class PdfExport {
           // the banner), and being ~100pt tall it was the single biggest reason
           // the report ran to a second page. Removed deliberately — do not
           // re-add it. The page-1 panel is the one source of the score.
-          w.add(pw.SizedBox(height: 7));
+          w.add(pw.SizedBox(height: 10));
           w.addAll(_verifyOnSiteSection(incident));
         } else {
           // No confirmed hazards. The verify list may still have content, and on
@@ -311,9 +324,9 @@ class PdfExport {
               .trim();
           if (action.isNotEmpty) {
             w.add(_sectionTitle('IMMEDIATE CORRECTIVE ACTION TAKEN'));
-            w.add(pw.SizedBox(height: 3));
+            w.add(pw.SizedBox(height: 4));
             w.add(_actionBox(action));
-            w.add(pw.SizedBox(height: 7));
+            w.add(pw.SizedBox(height: 10));
           }
         }
         // GPS is now a single compact strip rather than a ~145pt bordered card
@@ -322,7 +335,7 @@ class PdfExport {
         final gpsSection = _gpsLocationSection(incident);
         if (gpsSection != null) {
           w.add(gpsSection);
-          w.add(pw.SizedBox(height: 7));
+          w.add(pw.SizedBox(height: 10));
         }
         // NOTE: ROOT CAUSE ANALYSIS (WSA 13) and IMMEDIATE CORRECTIVE ACTION
         // used to be a two-column row here (~95pt with its spacer). Both were
@@ -350,9 +363,10 @@ class PdfExport {
   static pw.Widget _pageHeader(bool show) {
     if (!show) return pw.SizedBox();
     return pw.Container(
-      padding: const pw.EdgeInsets.only(bottom: 7),
+      padding: const pw.EdgeInsets.only(bottom: 6),
+      margin: const pw.EdgeInsets.only(bottom: 8),
       decoration: pw.BoxDecoration(
-        border: pw.Border(bottom: pw.BorderSide(color: _sailBlue, width: 1.2))),
+        border: pw.Border(bottom: pw.BorderSide(color: _hair, width: 0.8))),
       child: pw.Row(
         mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
         children: [
@@ -370,31 +384,40 @@ class PdfExport {
             pw.Text('SAFETY LENS', style: pw.TextStyle(
               color: _sailBlue, fontSize: 8, fontWeight: pw.FontWeight.bold)),
           ]),
-          pw.Text('CONFIDENTIAL · INTERNAL USE', style: pw.TextStyle(
-            fontSize: 7, color: _textLight, fontStyle: pw.FontStyle.italic)),
+          pw.Text('Workplace Hazard Report  (continued)', style: pw.TextStyle(
+            fontSize: 7, color: _steel)),
         ],
       ),
     );
   }
 
-  static pw.Widget _pageFooter(int pg, int tot, String reporter, String date) {
+  static pw.Widget _pageFooter(int pg, int tot, String ref, String date) {
+    final st = pw.TextStyle(fontSize: 6.5, color: _steel);
     return pw.Container(
-      padding: const pw.EdgeInsets.only(top: 8),
+      margin: const pw.EdgeInsets.only(top: 8),
+      padding: const pw.EdgeInsets.only(top: 5),
       decoration: pw.BoxDecoration(
-        border: pw.Border(top: pw.BorderSide(color: _sailBlue, width: 0.8))),
+        border: pw.Border(top: pw.BorderSide(color: _hair, width: 0.8))),
       child: pw.Row(
-        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
         children: [
-          pw.Text('SAIL Safety Lens  ·  $date',
-            style: pw.TextStyle(fontSize: 7, color: _textLight)),
-          pw.Text('Page $pg of $tot',
-            style: pw.TextStyle(fontSize: 7, color: _textMed,
-              fontWeight: pw.FontWeight.bold)),
-          pw.Text('CONFIDENTIAL  ·  IS 14489:2018',
-            style: pw.TextStyle(fontSize: 7, color: _textLight)),
+          pw.Expanded(child: pw.Text(
+            _safe('SAIL Safety Lens  ·  Ref. $ref  ·  $date'), style: st)),
+          pw.Text('CONFIDENTIAL - INTERNAL USE', style: pw.TextStyle(
+            fontSize: 6.5, color: _steel, letterSpacing: 0.6)),
+          pw.Expanded(child: pw.Text('Page $pg of $tot',
+            textAlign: pw.TextAlign.right,
+            style: pw.TextStyle(fontSize: 6.5, color: _ink,
+              fontWeight: pw.FontWeight.bold))),
         ],
       ),
     );
+  }
+
+  /// Short reference printed in the banner and on every footer.
+  static String _refNo(Map<String, dynamic> inc) {
+    final id = inc['id']?.toString() ?? '';
+    if (id.isEmpty) return 'N/A';
+    return (id.length > 8 ? id.substring(0, 8) : id).toUpperCase();
   }
 
   // ─── BANNER ──────────────────────────────────────────────────────────────
@@ -407,6 +430,7 @@ class PdfExport {
     padding: const pw.EdgeInsets.fromLTRB(9, 5, 9, 5),
     decoration: pw.BoxDecoration(
       color: PdfColor.fromHex('#FFF8E1'),
+      borderRadius: _r3,
       border: pw.Border.all(color: PdfColor.fromHex('#F9A825'), width: 0.8)),
     child: pw.Text(_safe(text), style: pw.TextStyle(
       fontSize: 7.5, color: PdfColor.fromHex('#7A4F01'), lineSpacing: 1.2,
@@ -425,22 +449,24 @@ class PdfExport {
     padding: const pw.EdgeInsets.fromLTRB(9, 6, 9, 6),
     decoration: pw.BoxDecoration(
       color: PdfColor.fromHex('#FDECEA'),
+      borderRadius: _r3,
       border: pw.Border.all(color: PdfColor.fromHex('#C62828'), width: 1.0)),
     child: pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
-        pw.Text('THIS PHOTOGRAPH WAS NOT ANALYSED — NOT A HAZARD ASSESSMENT',
+        // _safe(): the em dashes in this notice printed as empty boxes.
+        pw.Text(_safe('THIS PHOTOGRAPH WAS NOT ANALYSED — NOT A HAZARD ASSESSMENT'),
           style: pw.TextStyle(
             fontSize: 8, color: PdfColor.fromHex('#8E1B16'),
             fontWeight: pw.FontWeight.bold, letterSpacing: 0.3)),
         pw.SizedBox(height: 2),
-        pw.Text(
+        pw.Text(_safe(
           'The AI hazard scan did not complete, so no risk rating, risk score '
           'or hazard list has been produced for this image. Any rating shown '
           'elsewhere on this page is void. This document records only that a '
           'photograph was taken and that the scan failed — it must not be '
           'signed off as an inspection. Rescan the location, or raise the '
-          'observation on the Near Miss form.',
+          'observation on the Near Miss form.'),
           style: pw.TextStyle(
             fontSize: 7.2, color: PdfColor.fromHex('#7A1512'), lineSpacing: 1.2)),
       ]),
@@ -537,9 +563,10 @@ class PdfExport {
       pw.SizedBox(height: 3),
       pw.Container(
         width: double.infinity,
-        padding: const pw.EdgeInsets.fromLTRB(9, 5, 9, 5),
+        padding: const pw.EdgeInsets.fromLTRB(10, 6, 10, 6),
         decoration: pw.BoxDecoration(
             color: PdfColor.fromHex('#FFF8E1'),
+            borderRadius: _r3,
             border:
                 pw.Border.all(color: PdfColor.fromHex('#F9A825'), width: 0.8)),
         child: pw.Column(
@@ -561,103 +588,144 @@ class PdfExport {
     ];
   }
 
+  /// True for the four rated bands. 'UNKNOWN' / not-rated must never borrow
+  /// a band colour (the default branch of [_getSevCol] is LOW green, which
+  /// on a banner reads as "assessed: low risk").
+  static bool _isRated(String s) =>
+      const {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'}.contains(s.toUpperCase());
+
+  // ─── BANNER (★ 2026-10-03 redesign) ─────────────────────────────────────
+  // One navy masthead + a severity-coloured rule + a white title block, in
+  // place of the old two stacked colour bands. The severity is stated once,
+  // in a single badge, and the report type and reference sit in the
+  // masthead where a filing clerk looks for them.
   static pw.Widget _banner(Map<String, dynamic> inc, String sev, bool isAi,
       dynamic score, dynamic conf, pw.MemoryImage? logoImage) {
-    final sc = _getSevCol(sev);
-    final sb = _getSevBg(sev);
+    final rated = _isRated(sev);
+    final sc = rated ? _getSevCol(sev) : _steel;
+    final title = _safe(inc['title']?.toString().trim().isNotEmpty == true
+        ? inc['title'].toString().trim()
+        : (isAi ? 'AI Hazard Scan' : 'Near Miss Report'));
+    final plant = _safe(inc['plant']?.toString() ?? '');
+    final loc = _safe(inc['location']?.toString() ?? '');
+    final where = [plant, loc].where((s) => s.trim().isNotEmpty).join('  ·  ');
     return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
       pw.Container(
-        padding: const pw.EdgeInsets.fromLTRB(12, 9, 12, 9),
-        color: _sailBlue,
+        padding: const pw.EdgeInsets.fromLTRB(14, 10, 14, 10),
+        decoration: pw.BoxDecoration(
+          color: _navyDeep,
+          borderRadius: const pw.BorderRadius.only(
+            topLeft: pw.Radius.circular(4), topRight: pw.Radius.circular(4))),
         child: pw.Row(children: [
-          // ★ v28: Use actual SAIL Safety Lens badge logo
-          // 46pt -> 36pt. The logo is the tallest child of this row, so it —
-          // not the text beside it (which needs only ~31pt) — sets the whole
-          // banner height. Shrinking it is 10pt of page for no lost legibility;
-          // the badge is still larger than the 11pt title text next to it.
           logoImage != null
             ? pw.Container(
-                width: 36, height: 36,
+                width: 34, height: 34,
+                padding: const pw.EdgeInsets.all(2),
+                decoration: const pw.BoxDecoration(
+                  color: PdfColors.white, shape: pw.BoxShape.circle),
                 child: pw.Image(logoImage, fit: pw.BoxFit.contain))
-            : pw.Container(width: 34, height: 34, color: PdfColors.white,
+            : pw.Container(width: 34, height: 34,
+                decoration: const pw.BoxDecoration(
+                  color: PdfColors.white, shape: pw.BoxShape.circle),
                 alignment: pw.Alignment.center,
-                child: pw.Column(mainAxisAlignment: pw.MainAxisAlignment.center,
-                  children: [
-                    pw.Text('SAIL', style: pw.TextStyle(color: _sailBlue, fontSize: 10,
-                      fontWeight: pw.FontWeight.bold)),
-                    pw.Text('सेल', style: pw.TextStyle(
-                      color: PdfColor.fromHex('#1565C0'), fontSize: 5)),
-                  ])),
-          pw.SizedBox(width: 10),
+                child: pw.Text('SAIL', style: pw.TextStyle(color: _sailBlue,
+                  fontSize: 9, fontWeight: pw.FontWeight.bold))),
+          pw.SizedBox(width: 11),
           pw.Expanded(child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
               pw.Text('STEEL AUTHORITY OF INDIA LIMITED', style: pw.TextStyle(
-                color: PdfColors.white, fontSize: 11,
+                color: PdfColor.fromHex('#9FC2F5'), fontSize: 6.5,
+                fontWeight: pw.FontWeight.bold, letterSpacing: 1.4)),
+              pw.SizedBox(height: 2),
+              pw.Text('Workplace Hazard Report', style: pw.TextStyle(
+                color: PdfColors.white, fontSize: 15,
                 fontWeight: pw.FontWeight.bold)),
-              pw.Text('Safety Lens  ·  Workplace Hazard Report',
+              pw.SizedBox(height: 1.5),
+              pw.Text('Safety Lens  ·  IS 14489:2018  ·  Factories Act 1948',
                 style: pw.TextStyle(
-                  color: PdfColor.fromHex('#BBDEFB'), fontSize: 8)),
+                  color: PdfColor.fromHex('#BBD3F7'), fontSize: 6.5)),
             ])),
           pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
             pw.Container(
-              padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              color: sc,
-              child: pw.Text(sev, style: pw.TextStyle(
-                color: PdfColors.white, fontSize: 11,
-                fontWeight: pw.FontWeight.bold))),
-            pw.SizedBox(height: 3),
-            pw.Text('IS 14489:2018  |  Factories Act 1948',
-              style: pw.TextStyle(
-                color: PdfColor.fromHex('#90CAF9'), fontSize: 6)),
+              padding: const pw.EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: pw.BoxDecoration(
+                borderRadius: _r3,
+                border: pw.Border.all(
+                  color: PdfColor.fromHex('#9FC2F5'), width: 0.7)),
+              child: pw.Text(isAi ? 'AI HAZARD SCAN' : 'NEAR MISS REPORT',
+                style: pw.TextStyle(color: PdfColors.white, fontSize: 7,
+                  fontWeight: pw.FontWeight.bold, letterSpacing: 0.8))),
+            pw.SizedBox(height: 4),
+            pw.Text('REF.  ${_refNo(inc)}', style: pw.TextStyle(
+              color: PdfColor.fromHex('#BBD3F7'), fontSize: 7,
+              letterSpacing: 0.6)),
           ]),
         ]),
       ),
+      // Severity rule: the band colour runs the full width of the masthead,
+      // so the rating is visible even on a thumbnail of the page.
+      pw.Container(height: 3, color: sc),
       pw.Container(
-        padding: const pw.EdgeInsets.fromLTRB(12, 5, 12, 5),
-        color: sb,
-        child: pw.Row(children: [
-          pw.Expanded(child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Text(_safe(inc['title']?.toString() ?? 'Safety Incident Report'),
-                style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold,
-                  color: _textDark)),
-              pw.SizedBox(height: 2),
-              pw.Text(isAi
-                  ? 'AI-Powered Hazard Scan  ·  SAIL Safety Lens'
-                  : 'Near Miss / Unsafe Condition Report',
-                style: pw.TextStyle(fontSize: 8, color: _textMed)),
-            ])),
-          pw.SizedBox(width: 8),
-          pw.Container(
-            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: pw.BoxDecoration(
-              border: pw.Border.all(color: sc, width: 1)),
-            child: pw.Text(isAi ? 'AI HAZARD SCAN' : 'NEAR MISS REPORT',
-              style: pw.TextStyle(color: sc, fontSize: 8,
-                fontWeight: pw.FontWeight.bold))),
-        ]),
+        padding: const pw.EdgeInsets.fromLTRB(2, 8, 0, 7),
+        decoration: pw.BoxDecoration(
+          border: pw.Border(bottom: pw.BorderSide(color: _hair, width: 0.8))),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            pw.Expanded(child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(title, maxLines: 2, style: pw.TextStyle(
+                  fontSize: 13.5, fontWeight: pw.FontWeight.bold, color: _ink)),
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  isAi
+                    ? 'AI-assisted photographic hazard assessment'
+                        '${where.isEmpty ? '' : '  ·  $where'}'
+                    : 'Near miss / unsafe condition report'
+                        '${where.isEmpty ? '' : '  ·  $where'}',
+                  maxLines: 1,
+                  style: pw.TextStyle(fontSize: 7.5, color: _steel)),
+              ])),
+            pw.SizedBox(width: 10),
+            pw.Container(
+              padding: const pw.EdgeInsets.fromLTRB(12, 4, 12, 5),
+              decoration: pw.BoxDecoration(color: sc, borderRadius: _r3),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
+                children: [
+                  pw.Text('RISK LEVEL', style: pw.TextStyle(
+                    color: PdfColor.fromHex('#FFFFFF'), fontSize: 5.5,
+                    fontWeight: pw.FontWeight.bold, letterSpacing: 1.0)),
+                  pw.SizedBox(height: 1),
+                  pw.Text(rated ? sev.toUpperCase() : 'NOT RATED',
+                    style: pw.TextStyle(color: PdfColors.white, fontSize: 11.5,
+                      fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
+                ])),
+          ]),
       ),
     ]);
   }
 
-  // 4pt -> 3pt vertical padding. There are three of these per report, so it is
-  // 6pt of page for no loss of prominence (the blue bar and the fill do the
-  // work, not the padding).
-  // Note the _safe() on the title text: callers pass headings like
-  // 'HAZARDS IDENTIFIED — 6 TOTAL' with an em-dash, and this widget used to print
-  // it raw, which put an empty box in the middle of the largest heading on the
-  // page. Every string that reaches a pw.Text must go through _safe().
-  static pw.Widget _sectionTitle(String t) => pw.Container(
-    padding: const pw.EdgeInsets.fromLTRB(10, 3, 10, 3),
-    decoration: pw.BoxDecoration(
-      color: _sailLight,
-      border: pw.Border(left: pw.BorderSide(color: _sailBlue, width: 3)),
-    ),
-    child: pw.Text(_safe(t), style: pw.TextStyle(
-      fontSize: 8.5, fontWeight: pw.FontWeight.bold,
-      color: _sailBlue, letterSpacing: 0.5)),
+  // ─── SECTION HEADING ────────────────────────────────────────────────────
+  // Small tracked navy caps followed by a hairline to the margin: reads as a
+  // document heading rather than a UI chip, and costs ~12pt of height.
+  // Every string that reaches a pw.Text must go through _safe() — callers
+  // pass headings with em dashes.
+  static pw.Widget _sectionTitle(String t) => pw.Padding(
+    padding: const pw.EdgeInsets.only(top: 2, bottom: 1),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.center,
+      children: [
+        pw.Container(width: 3, height: 9, color: _sailBlue),
+        pw.SizedBox(width: 5),
+        pw.Text(_safe(t), style: pw.TextStyle(
+          fontSize: 7.8, fontWeight: pw.FontWeight.bold,
+          color: _navyDeep, letterSpacing: 1.1)),
+        pw.SizedBox(width: 7),
+        pw.Expanded(child: pw.Container(height: 0.7, color: _hair)),
+      ]),
   );
 
   /// Replace glyphs the bundled PDF font can't render (em/en-dashes, fancy
@@ -680,28 +748,34 @@ class PdfExport {
 
   static pw.Widget _detailsGrid(Map<String, dynamic> inc, String date,
       String reporter, String pno) {
+    // ★ 2026-10-03 redesign: one soft panel with hairline rules between
+    // cells, instead of twelve individually bordered boxes with an uneven
+    // pale-blue fill. `hi` is kept in the signature for the call sites but
+    // now only darkens the value, which is where emphasis belongs.
     pw.Widget cell(String lbl, String val, {bool hi = false}) =>
       pw.Container(
-        // 7pt -> 4pt vertical. 12 cells in 3 rows, so each point of vertical
-        // padding costs 6pt of page. The 2pt label-to-value gap is deliberately
-        // NOT cut: it is what stops the grey caption reading as part of the
-        // value above it, and it is only 6pt of page in total.
-        padding: const pw.EdgeInsets.fromLTRB(8, 4, 8, 4),
-        decoration: pw.BoxDecoration(
-          border: pw.Border.all(color: PdfColor.fromHex('#E0E0E0'), width: 0.5),
-          color: hi ? _sailLight : PdfColors.white),
+        // 4pt vertical: 12 cells in 3 rows, so each point costs 6pt of page.
+        padding: const pw.EdgeInsets.fromLTRB(8, 4.5, 8, 4.5),
         child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
             pw.Text(_safe(lbl).toUpperCase(), style: pw.TextStyle(
-              fontSize: 6.5, color: _textLight,
-              fontWeight: pw.FontWeight.bold, letterSpacing: 0.3)),
+              fontSize: 5.8, color: _steel,
+              fontWeight: pw.FontWeight.bold, letterSpacing: 0.7)),
             pw.SizedBox(height: 2),
-            pw.Text(val.isEmpty ? '-' : _safe(val), style: pw.TextStyle(
-              fontSize: 8.5, color: _textDark,
-              fontWeight: pw.FontWeight.bold)),
+            pw.Text(val.isEmpty ? '-' : _safe(val), maxLines: 2,
+              style: pw.TextStyle(
+                fontSize: 8.3, color: hi ? _navyDeep : _ink,
+                fontWeight: pw.FontWeight.bold)),
           ]));
 
-    return pw.Table(
+    return pw.Container(
+      decoration: pw.BoxDecoration(
+        color: _panel, borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.7)),
+      child: pw.Table(
+      border: pw.TableBorder(
+        horizontalInside: pw.BorderSide(color: _hair, width: 0.6),
+        verticalInside: pw.BorderSide(color: _hair, width: 0.6)),
       columnWidths: const {
         0: pw.FlexColumnWidth(1.6),
         1: pw.FlexColumnWidth(1.4),
@@ -725,13 +799,11 @@ class PdfExport {
           cell('Report Type',
             inc['type'] == 'AI_SCAN' ? 'AI Image Scan' : 'Near Miss'),
           cell('WSA Category', inc['wsaCategory']?.toString() ?? ''),
-          cell('Reference No.', (inc['id']?.toString() ?? 'N/A').length > 8
-              ? inc['id'].toString().substring(0, 8)
-              : inc['id']?.toString() ?? 'N/A'),
+          cell('Reference No.', _refNo(inc)),
           cell('People Involved', inc['people']?.toString() ?? '0'),
         ]),
       ],
-    );
+    ));
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -746,7 +818,8 @@ class PdfExport {
       String severity, dynamic score, dynamic conf,
       List<Map<String, dynamic>> hazards, {int verifyCount = 0,
       int matrixL = 0, int matrixS = 0, int matrixScore = 0,
-      bool matrixEstimated = false, bool matrixApplies = false}) {
+      bool matrixEstimated = false, bool matrixApplies = false,
+      bool analysed = true, pw.Widget? closeUps}) {
     final sc = _getSevCol(severity);
     final sb = _getSevBg(severity);
     final s  = (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
@@ -770,7 +843,11 @@ class PdfExport {
             : _textMed)
         : sc;
 
-    const photoH = 132.0; // 185 -> 148 -> 132 toward the one-page target
+    // 132 -> 175 (★ 2026-10-03). At 132pt the hazard boxes — the report's
+    // primary evidence — were too small to read on the printed page (the
+    // sample's hazard 2 was a few-point outline). Small boxes additionally get
+    // an enlarged crop in the close-up strip (see _closeUps).
+    const photoH = 175.0;
 
     // ── WHY THE PHOTO COLUMN IS SIZED FROM THE IMAGE, NOT BY flex ─────────────
     // This used to be `Expanded(flex: 5)` around a fixed 278pt-wide box. The
@@ -794,8 +871,8 @@ class PdfExport {
     //             tag stops being readable. A very tall portrait photo therefore
     //             keeps a little white space rather than becoming illegible.
     final double photoW = (probeW > 0 && probeH > 0)
-        ? (probeW * (photoH / probeH)).clamp(118.0, 250.0).toDouble()
-        : 250.0;
+        ? (probeW * (photoH / probeH)).clamp(140.0, 300.0).toDouble()
+        : 300.0;
 
     final annotatedPhoto = _buildAnnotatedPhoto(img, hazards, photoW, photoH);
 
@@ -809,168 +886,246 @@ class PdfExport {
     // small to read. So the same one line goes UNDER the picture, at a font size
     // that survives printing, and the image is left alone. One entry only —
     // _buildAnnotatedPhoto draws a single path, the worst one.
-    final lofPick = LineOfFireGeometry.pickOne(hazards);
-    final lofLegend = lofPick == null
-        ? ''
-        : _safe(LineOfFireGeometry.caption(
-            lofPick.index, lofPick.lof, arrow: '->'));
+    // One legend line per drawn path (see _allLofs), and — new — an explicit
+    // "none identified" line when there is no path, so the reader can tell
+    // "no line of fire" apart from "the report doesn't cover line of fire".
+    final lofLines = [
+      for (final e in _allLofs(hazards))
+        _safe(LineOfFireGeometry.caption(e.index, e.lof, arrow: '->')),
+    ];
+    // A hazard the model CALLED line of fire but whose path could not be
+    // located on the photo still has to be said out loud.
+    final claimedUnlocated = <int>[
+      for (var i = 0; i < hazards.length; i++)
+        if (LineOfFireGeometry.claimsLineOfFire(hazards[i]) &&
+            LineOfFireGeometry.parse(hazards[i]) == null)
+          i + 1,
+    ];
+    if (claimedUnlocated.isNotEmpty) {
+      lofLines.add('Line of fire in hazard ${claimedUnlocated.join(', ')} - '
+          'path not locatable on photo, check on site');
+    }
+    final lofNone = lofLines.isEmpty;
+    final lofLocated = _allLofs(hazards).length;
+    // The line-of-fire strip and the at-a-glance figures are FINDINGS. They
+    // are printed only for a photograph the AI actually assessed: on an
+    // unanalysed scan, or a near-miss photo nobody ran through the model,
+    // "Line of fire: none identified" would be a claim about an image that
+    // was never looked at.
+    // An AI scan, or any report that carries AI hazard rows (a near miss
+    // filed with an analysed photo), counts as assessed.
+    final assessed = analysed && (matrixApplies || hazards.isNotEmpty);
+    final rated = _isRated(severity);
+    final scR = rated ? sc : _steel;
+    final sbR = rated ? sb : _panel;
 
-    return pw.Container(
+    pw.Widget metric(String value, String label, {PdfColor? color}) =>
+        pw.Expanded(child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(_safe(value), style: pw.TextStyle(
+              fontSize: 11, fontWeight: pw.FontWeight.bold,
+              color: color ?? _ink)),
+            pw.SizedBox(height: 1),
+            pw.Text(_safe(label).toUpperCase(), style: pw.TextStyle(
+              fontSize: 5.4, color: _steel, letterSpacing: 0.6,
+              fontWeight: pw.FontWeight.bold)),
+          ]));
+
+    final riskCard = pw.Container(
+      padding: const pw.EdgeInsets.fromLTRB(9, 7, 9, 7),
       decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: _divider, width: 0.6)),
+        color: sbR, borderRadius: _r3,
+        border: pw.Border.all(color: scR, width: 0.8)),
       child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.end,
+        children: [
+          pw.Expanded(child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text('OVERALL RISK', style: pw.TextStyle(
+                fontSize: 5.6, color: _steel, letterSpacing: 1.0,
+                fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 1.5),
+              pw.Text(rated ? severity.toUpperCase() : 'NOT RATED',
+                style: pw.TextStyle(fontSize: 12.5,
+                  fontWeight: pw.FontWeight.bold, color: scR)),
+              pw.SizedBox(height: 2),
+              // "0%" on an unanalysed scan reads as a measured confidence.
+              pw.Text(analysed ? 'AI confidence  $c%'
+                  : 'AI confidence  not assessed', style: pw.TextStyle(
+                fontSize: 6.8, color: _textMed)),
+            ])),
+          pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.end,
+            children: [
+              // An AI scan prints the 1-25 matrix figure; a near-miss row keeps
+              // its own 0-100 score. The two factors are printed under the
+              // number so a reader who disagrees knows WHICH axis to argue
+              // about; "(L est.)" marks a likelihood inferred from confidence.
+              // An unrated AI scan prints "- / 25", never the 0-100 score —
+              // falling back to `$s / 100` gave an unrated photo a number on
+              // paper. ASCII hyphen, not an em dash (Latin-1 font, see _safe).
+              pw.Text(!matrixApplies
+                  ? '$s / 100'
+                  : matrixScore > 0
+                      ? '$matrixScore / 25'
+                      : '-  / 25', style: pw.TextStyle(
+                fontSize: 19, fontWeight: pw.FontWeight.bold,
+                color: scNum)),
+              pw.Text(!matrixApplies
+                  ? 'Risk score'
+                  : matrixScore > 0
+                      ? 'L$matrixL × S$matrixS'
+                          '${matrixEstimated ? '  (L est.)' : ''}'
+                      : 'Risk score - not rated',
+                style: pw.TextStyle(fontSize: 6.3, color: _steel)),
+            ]),
+        ]));
+
+    final summaryCol = pw.Padding(
+      padding: const pw.EdgeInsets.fromLTRB(10, 8, 10, 8),
+      child: pw.Column(
+        // spaceBetween: the table cell below is given the PHOTO's height
+        // (TableCellVerticalAlignment.full), so the figures sit on the
+        // bottom edge instead of leaving a blank block under the summary.
+        mainAxisAlignment: assessed
+            ? pw.MainAxisAlignment.spaceBetween
+            : pw.MainAxisAlignment.start,
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
-          // Fixed to the photo's own drawn width (+ 5pt padding each side).
-          pw.SizedBox(
-            width: photoW + 10,
-            child: pw.Column(children: [
-              pw.Container(
-                padding: const pw.EdgeInsets.all(5),
-                child: annotatedPhoto),
-              if (lofLegend.isNotEmpty)
-                pw.Container(
-                  width: double.infinity,
-                  padding: const pw.EdgeInsets.fromLTRB(5, 2.5, 5, 2.5),
-                  // Pale red tint, not the translucent overlay used before: this
-                  // strip is on paper now, so the fill must be opaque and light
-                  // enough for #B3261E text (5.7:1).
-                  color: PdfColor.fromHex('#FDECEA'),
-                  child: pw.Row(children: [
-                    // A short bar in the same red as the shaft on the image, so
-                    // the reader can tie this line to the mark above it without a
-                    // "see the red arrow" instruction.
-                    pw.Container(width: 9, height: 2.4, color: _lofHot),
-                    pw.SizedBox(width: 4),
-                    pw.Expanded(
-                      child: pw.Text(lofLegend,
-                        maxLines: 2,
-                        style: pw.TextStyle(
-                          fontSize: 6.8,
-                          fontWeight: pw.FontWeight.bold,
-                          color: PdfColor.fromHex('#B3261E')))),
-                  ])),
-              pw.Container(
-                width: double.infinity,
-                padding: const pw.EdgeInsets.fromLTRB(5, 2, 5, 3),
-                color: PdfColor.fromHex('#F5F5F5'),
-                // Shortened: the caption now sits in a column as narrow as the
-                // photo, and the old sentence wrapped to three lines there. The
-                // "see table below" instruction was redundant — the table is
-                // directly beneath under its own heading.
-                // A withdrawn box (HazardQuality.auditBoxPrecision) would
-                // otherwise show up here as a silently smaller "marked on photo"
-                // figure, which reads as the drawing having failed. Say instead
-                // that the location could not be pinned, so the reader knows to
-                // look for it on site rather than on the page.
-                child: pw.Text(
-                  (bboxedCount > 0
-                      ? '$count hazard(s) - $bboxedCount marked on photo'
-                          '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'
-                      : unpinnedCount > 0
-                        ? '$count hazard(s) - none locatable in this view'
-                        : '$count hazard(s) identified') +
-                    (verifyCount > 0
-                        ? ', $verifyCount to verify on site'
-                        : ''),
-                  textAlign: pw.TextAlign.center,
-                  style: pw.TextStyle(fontSize: 6.5, color: _textMed,
-                    fontStyle: pw.FontStyle.italic))),
-            ])),
-          pw.Container(width: 0.5, color: _divider),
-          // Takes ALL remaining width, so anything the photo column gives back
-          // becomes summary line-length rather than margin.
-          pw.Expanded(
-            child: pw.Padding(
-              padding: const pw.EdgeInsets.fromLTRB(9, 8, 9, 8),
-              child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Container(
-                    padding: const pw.EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
-                    color: sb,
-                    child: pw.Row(children: [
-                      pw.Container(width: 3, height: 3, color: sc),
-                      pw.SizedBox(width: 4),
-                      pw.Text('RISK: $severity', style: pw.TextStyle(
-                        fontSize: 8, fontWeight: pw.FontWeight.bold, color: sc)),
-                    ])),
-                  pw.SizedBox(height: 5),
-                  // Score and confidence on one baseline. The headline figure
-                  // drops 22pt -> 18pt and confidence 16pt -> 14pt: still by far
-                  // the largest type on the page, so it keeps its job as the
-                  // at-a-glance number, but ~5pt shorter.
-                  pw.Row(children: [
-                    pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        // An AI scan prints the 1–25 matrix figure; a near-miss
-                        // row keeps its own 0–100 score. The two factors are
-                        // printed under the number: a reader who disagrees with
-                        // the rating needs to see WHICH axis to argue about, and
-                        // "(est.)" is the only signal that the likelihood was
-                        // inferred from AI confidence rather than assessed by
-                        // the officer who signed the report.
-                        //
-                        // An unrated AI scan prints "— / 25", NOT the 0–100
-                        // score. Falling back to `$s / 100` there was a real
-                        // defect: the screen said NOT RATED while the exported
-                        // PDF of the same scan asserted "70 / 100", so a photo
-                        // nobody had rated acquired a score on paper — the
-                        // fabricated-number class again.
-                        pw.Text(!matrixApplies
-                            ? '$s / 100'
-                            : matrixScore > 0
-                                ? '$matrixScore / 25'
-                                // ASCII hyphen, NOT an em dash. The bundled
-                                // Helvetica is Latin-1 only (see _safe), so
-                                // U+2014 would print as an empty rectangle —
-                                // and this is the largest figure on page 1.
-                                : '-  / 25', style: pw.TextStyle(
-                          fontSize: 18, fontWeight: pw.FontWeight.bold,
-                          color: scNum)),
-                        pw.Text(!matrixApplies
-                            ? 'Risk Score'
-                            : matrixScore > 0
-                                ? 'Risk Score  ·  L$matrixL × S$matrixS'
-                                    '${matrixEstimated ? '  (L est.)' : ''}'
-                                : 'Risk Score  ·  not rated',
-                          style: pw.TextStyle(
-                            fontSize: 6.5, color: _textLight)),
-                      ]),
-                    pw.SizedBox(width: 12),
-                    pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text('$c%', style: pw.TextStyle(
-                          fontSize: 14, fontWeight: pw.FontWeight.bold,
-                          color: _textMed)),
-                        pw.Text('Confidence', style: pw.TextStyle(
-                          fontSize: 6.5, color: _textLight)),
-                      ]),
-                  ]),
-                  pw.SizedBox(height: 5),
-                  pw.Container(height: 0.5, color: _divider),
-                  pw.SizedBox(height: 5),
-                  pw.Text('SUMMARY', style: pw.TextStyle(
-                    fontSize: 7, fontWeight: pw.FontWeight.bold,
-                    color: _sailBlue, letterSpacing: 0.5)),
-                  pw.SizedBox(height: 3),
-                  // lineSpacing 1.5 -> 1.1. At fontSize 8 that is still clear
-                  // leading, and on an 8-line summary it saves ~3pt per line.
-                  // _safe() matters here: AI summaries routinely contain em
-                  // dashes and curly quotes, and the offline-fallback summary
-                  // starts with one. The bundled font has no glyph for them, so
-                  // without this they render as tofu boxes.
-                  pw.Text(
-                    summary.isEmpty
-                        ? 'See hazards table below.'
-                        : _safe(summary),
-                    style: pw.TextStyle(fontSize: 8, color: _textDark,
-                      lineSpacing: 1.1)),
-                ],
-              ),
-            )),
-        ],
+          pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              riskCard,
+              pw.SizedBox(height: 8),
+              pw.Text('SUMMARY', style: pw.TextStyle(
+                fontSize: 6.5, fontWeight: pw.FontWeight.bold,
+                color: _navyDeep, letterSpacing: 1.1)),
+              pw.SizedBox(height: 3),
+              // _safe(): AI summaries routinely contain em dashes and curly
+              // quotes, which the bundled font cannot draw.
+              pw.Text(
+                summary.isEmpty ? 'See hazards table below.' : _safe(summary),
+                style: pw.TextStyle(fontSize: 8, color: _ink,
+                  lineSpacing: 1.6)),
+              if (closeUps != null) ...[
+                pw.SizedBox(height: 8),
+                closeUps,
+              ],
+            ]),
+          if (assessed)
+            pw.Container(
+              margin: const pw.EdgeInsets.only(top: 8),
+              padding: const pw.EdgeInsets.only(top: 6),
+              decoration: pw.BoxDecoration(
+                border: pw.Border(top: pw.BorderSide(color: _hair, width: 0.7))),
+              child: pw.Row(children: [
+                metric('$count', count == 1 ? 'Hazard' : 'Hazards'),
+                metric('$bboxedCount', 'Marked on photo'),
+                metric(
+                  lofLocated > 0
+                      ? '$lofLocated'
+                      : claimedUnlocated.isNotEmpty ? '?' : 'None',
+                  'Line of fire',
+                  color: (lofLocated > 0 || claimedUnlocated.isNotEmpty)
+                      ? _lofHot
+                      : _lowCol),
+                metric('$verifyCount', 'To verify'),
+              ])),
+          // Sacrificial 1pt spacer: under TableCellVerticalAlignment.full the
+          // tallest cell is re-laid at exactly its own height and the pdf
+          // Flex may drop its LAST child on float rounding. Let it be this.
+          pw.SizedBox(height: 1),
+        ]));
+
+    final photoCol = pw.Column(children: [
+      pw.Container(
+        padding: const pw.EdgeInsets.all(5),
+        child: annotatedPhoto),
+      if (assessed)
+        pw.Container(
+          width: double.infinity,
+          margin: const pw.EdgeInsets.fromLTRB(5, 0, 5, 0),
+          padding: const pw.EdgeInsets.fromLTRB(6, 3, 6, 3),
+          // Pale tint, opaque: on paper, so it must be light enough for the
+          // #B3261E text (5.7:1). Pale green when no path was found.
+          decoration: pw.BoxDecoration(
+            borderRadius: _r3,
+            color: PdfColor.fromHex(lofNone ? '#EEF6EE' : '#FDECEA')),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: lofNone
+              ? [pw.Text('LINE OF FIRE: none identified in this photo',
+                  style: pw.TextStyle(fontSize: 6.8,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColor.fromHex('#2E7D32')))]
+              : [
+                  pw.Text('LINE OF FIRE  (red arrow / dashed zone on photo)',
+                    style: pw.TextStyle(fontSize: 6.2,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColor.fromHex('#B3261E'),
+                      letterSpacing: 0.4)),
+                  for (final line in lofLines)
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.only(top: 1.5),
+                      child: pw.Row(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          // Short bar in the shaft's red ties each line to
+                          // the mark above it.
+                          pw.Padding(
+                            padding: const pw.EdgeInsets.only(top: 3),
+                            child: pw.Container(
+                              width: 9, height: 2.4, color: _lofHot)),
+                          pw.SizedBox(width: 4),
+                          pw.Expanded(
+                            child: pw.Text(line,
+                              maxLines: 2,
+                              style: pw.TextStyle(
+                                fontSize: 6.8,
+                                fontWeight: pw.FontWeight.bold,
+                                color: PdfColor.fromHex('#B3261E')))),
+                        ])),
+                ])),
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.fromLTRB(5, 3, 5, 4),
+        // A withdrawn box (HazardQuality.auditBoxPrecision) is reported as
+        // "not locatable in this view" rather than silently missing, so the
+        // reader knows to look on site rather than on the page.
+        child: pw.Text(
+          (bboxedCount > 0
+              ? '$count hazard(s) - $bboxedCount marked on photo'
+                  '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'
+              : unpinnedCount > 0
+                ? '$count hazard(s) - none locatable in this view'
+                : '$count hazard(s) identified') +
+            (verifyCount > 0 ? ', $verifyCount to verify on site' : ''),
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(fontSize: 6.3, color: _steel,
+            fontStyle: pw.FontStyle.italic))),
+      pw.SizedBox(height: 1), // sacrificial, see summaryCol
+    ]);
+
+    // A one-row Table rather than a Row: with TableCellVerticalAlignment.full
+    // both cells are laid out at the height of the taller one, which a Row
+    // cannot do inside a MultiPage (its `stretch` would take the whole page).
+    return pw.Container(
+      decoration: pw.BoxDecoration(
+        borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.8)),
+      child: pw.Table(
+        defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
+        border: pw.TableBorder(
+          verticalInside: pw.BorderSide(color: _hair, width: 0.8)),
+        columnWidths: {
+          // Fixed to the photo's own drawn width (+ 5pt padding each side),
+          // so every spare point becomes summary line-length.
+          0: pw.FixedColumnWidth(photoW + 10),
+          1: const pw.FlexColumnWidth(1),
+        },
+        children: [pw.TableRow(children: [photoCol, summaryCol])],
       ),
     );
   }
@@ -999,18 +1154,15 @@ class PdfExport {
       if (hazards[i]['bbox'] is Map) bboxed.add(i);
     }
 
-    // THE line of fire — one per photograph, chosen by the shared contract so
-    // this page and the AI Scan screen annotate the same hazard. Its number is
-    // the hazards-table row number.
+    // EVERY line of fire the analysis located, primary first.
     //
-    // It used to draw one per hazard. On a wide plant view with three paths the
-    // result was three arrows and three full-width caption plates crossing a
-    // picture about 60mm wide on the printed page.
-    final pick = LineOfFireGeometry.pickOne(hazards);
-    final lofs = <({int index, LineOfFire lof})>[
-      if (pick != null) (index: pick.index, lof: pick.lof),
-    ];
-
+    // ★ 2026-10-03: this used to draw only LineOfFireGeometry.pickOne() — one
+    // arrow per photograph — because at the old 118-250pt photo size three
+    // arrows and three caption plates buried the picture. Captions now live in
+    // the strip under the photo and the photo is larger, so each located path
+    // is drawn (capped at [_maxLofDrawn]); a second energy path that goes
+    // unmarked is a hazard the reader never sees.
+    final lofs = _allLofs(hazards);
     // Nothing to annotate, or undecodable image → plain image. A hazard can
     // carry a line of fire without a bbox, so the LOF list has to be consulted
     // too — otherwise the one annotation that shows WHO is in danger is the one
@@ -1028,6 +1180,7 @@ class PdfExport {
     final displayedH = imgH * scale;
     final offsetX   = (containerW - displayedW) / 2;
     final offsetY   = (containerH - displayedH) / 2;
+    final rects = _boxRects(hazards, offsetX, offsetY, displayedW, displayedH);
 
     return pw.SizedBox(
       width: containerW,
@@ -1040,6 +1193,19 @@ class PdfExport {
               width: displayedW, height: displayedH,
               fit: pw.BoxFit.fill)),
 
+          // Spotlight dim, painted UNDER the line-of-fire arrow so the arrow
+          // keeps its full red (it used to be painted after it and darkened it).
+          if (rects.isNotEmpty)
+            pw.Positioned(
+              left: 0, top: 0,
+              child: pw.CustomPaint(
+                size: PdfPoint(containerW, containerH),
+                painter: (canvas, size) =>
+                    _paintDim(canvas, rects, containerH,
+                        offsetX, offsetY, displayedW, displayedH),
+              ),
+            ),
+
           // LINE OF FIRE — a tapered corridor from the energy source to the
           // person in its path, with an arrowhead giving the DIRECTION of
           // travel. It used to be an axis-aligned rectangle from min/max of the
@@ -1049,57 +1215,312 @@ class PdfExport {
               ? const <pw.Widget>[]
               : _lofLayers(lofs, offsetX, offsetY, displayedW, displayedH)),
 
-          ...bboxed.map((i) {
-            final h     = hazards[i];
-            final bbMap = h['bbox'] as Map;
-
-            final bx = _asDouble(bbMap['x']);
-            final by = _asDouble(bbMap['y']);
-            // ✅ Accept BOTH "width"/"height" AND "w"/"h" key conventions
-            final bw = _asDouble(bbMap['width']  ?? bbMap['w']);
-            final bh = _asDouble(bbMap['height'] ?? bbMap['h']);
-
-            if (bw <= 0 || bh <= 0) return pw.SizedBox();
-
-            final sev   = h['severity']?.toString() ?? 'MEDIUM';
-            final color = _getSevCol(sev);
-
-            // Clamp to [0,1]
-            final cx = bx.clamp(0.0, 1.0);
-            final cy = by.clamp(0.0, 1.0);
-            final cw = (bx + bw > 1.0 ? 1.0 - cx : bw).clamp(0.0, 1.0);
-            final ch = (by + bh > 1.0 ? 1.0 - cy : bh).clamp(0.0, 1.0);
-
-            final rectLeft = offsetX + (cx * displayedW);
-            final rectTop  = offsetY + (cy * displayedH);
-            final rectW    = cw * displayedW;
-            final rectH    = ch * displayedH;
-
-            return pw.Positioned(
-              left: rectLeft, top: rectTop,
-              child: pw.Container(
-                width: rectW, height: rectH,
-                decoration: pw.BoxDecoration(
-                  border: pw.Border.all(color: color, width: 1.4)),
-                child: pw.Stack(children: [
-                  pw.Positioned(
-                    left: -1, top: -1,
-                    child: pw.Container(
-                      width: 13, height: 13,
-                      color: color,
-                      alignment: pw.Alignment.center,
-                      child: pw.Text('${i + 1}',
-                        style: pw.TextStyle(
-                          color: PdfColors.white,
-                          fontSize: 7,
-                          fontWeight: pw.FontWeight.bold)))),
-                ]),
+          // Hazard boxes. Painted, not built from bordered Containers: a
+          // Container border is one flat stroke, which vanished on the sample
+          // report (a thin teal outline over teal-grey plant). Each box now gets
+          // a white halo under a heavier severity-colour stroke, so it reads over
+          // light AND dark backgrounds, in colour AND on a mono printer.
+          if (rects.isNotEmpty)
+            pw.Positioned(
+              left: 0, top: 0,
+              child: pw.CustomPaint(
+                size: PdfPoint(containerW, containerH),
+                painter: (canvas, size) =>
+                    _paintBoxes(canvas, rects, containerH),
               ),
+            ),
+
+          // Number tags, OUTSIDE the box where there is room (above its
+          // top-left corner, else below its bottom-left), so the tag never
+          // covers the thing it labels. Same number as the hazards-table row.
+          ...rects.map((r) {
+            const t = _tagSize;
+            final imgTop = offsetY, imgBottom = offsetY + displayedH;
+            double top;
+            if (r.top - t >= imgTop) {
+              top = r.top - t;
+            } else if (r.top + r.h + t <= imgBottom) {
+              top = r.top + r.h;
+            } else {
+              top = r.top; // box fills the frame: tag inside its corner
+            }
+            // Upper bound never below the lower one: clamp() throws if a
+            // very narrow image (displayedW < tag size) inverts them.
+            final left = r.left
+                .clamp(offsetX, math.max(offsetX, offsetX + displayedW - t))
+                .toDouble();
+            return pw.Positioned(
+              left: left, top: top,
+              child: pw.Container(
+                width: t, height: t,
+                alignment: pw.Alignment.center,
+                decoration: pw.BoxDecoration(
+                  color: r.color,
+                  border: pw.Border.all(color: PdfColors.white, width: 1)),
+                child: pw.Text('${r.index + 1}',
+                  style: pw.TextStyle(
+                    color: PdfColors.white,
+                    fontSize: 8,
+                    fontWeight: pw.FontWeight.bold))),
             );
           }),
         ],
       ),
     );
+  }
+
+  static const double _tagSize = 14;
+  static const int _maxLofDrawn = 3;
+
+  /// Smallest a box is drawn, in points. A 0.02 x 0.03 box from the model is a
+  /// 4pt speck on the page — accurate and useless. It is grown about its own
+  /// centre; the close-up strip shows the real crop.
+  static const double _minBoxPt = 14;
+
+  /// Every located line of fire, the [LineOfFireGeometry.pickOne] choice first,
+  /// then by severity, capped at [_maxLofDrawn].
+  static List<({int index, LineOfFire lof})> _allLofs(
+      List<Map<String, dynamic>> hazards) {
+    final pick = LineOfFireGeometry.pickOne(hazards);
+    final out = <({int index, LineOfFire lof})>[
+      if (pick != null) (index: pick.index, lof: pick.lof),
+    ];
+    for (var i = 0; i < hazards.length; i++) {
+      if (pick != null && i == pick.index) continue;
+      final lof = LineOfFireGeometry.parse(hazards[i]);
+      if (lof != null) out.add((index: i, lof: lof));
+    }
+    return out.take(_maxLofDrawn).toList();
+  }
+
+  /// Hazard boxes in CONTAINER points, already clamped to the image and grown
+  /// to [_minBoxPt]. Null-box and zero-size entries are skipped.
+  static List<({int index, double left, double top, double w, double h,
+      PdfColor color})> _boxRects(List<Map<String, dynamic>> hazards,
+      double offsetX, double offsetY, double displayedW, double displayedH) {
+    final out = <({int index, double left, double top, double w, double h,
+        PdfColor color})>[];
+    for (var i = 0; i < hazards.length; i++) {
+      final bb = hazards[i]['bbox'];
+      if (bb is! Map) continue;
+      final rx = _asDouble(bb['x']), ry = _asDouble(bb['y']);
+      // Accept BOTH "width"/"height" AND "w"/"h" key conventions.
+      var bw = _asDouble(bb['width'] ?? bb['w']);
+      var bh = _asDouble(bb['height'] ?? bb['h']);
+      // NaN/Infinity from a malformed model reply would poison every
+      // coordinate below (NaN survives clamp) and break the page stream.
+      if (!rx.isFinite || !ry.isFinite || !bw.isFinite || !bh.isFinite) {
+        continue;
+      }
+      final bx = rx.clamp(0.0, 1.0).toDouble();
+      final by = ry.clamp(0.0, 1.0).toDouble();
+      if (bw <= 0 || bh <= 0) continue;
+      bw = math.min(bw, 1.0 - bx);
+      bh = math.min(bh, 1.0 - by);
+      if (bw <= 0 || bh <= 0) continue;
+
+      var left = offsetX + bx * displayedW;
+      var top = offsetY + by * displayedH;
+      var w = bw * displayedW;
+      var h = bh * displayedH;
+      if (w < _minBoxPt) {
+        left -= (_minBoxPt - w) / 2;
+        w = math.min(_minBoxPt, displayedW);
+      }
+      if (h < _minBoxPt) {
+        top -= (_minBoxPt - h) / 2;
+        h = math.min(_minBoxPt, displayedH);
+      }
+      left = left.clamp(offsetX, offsetX + displayedW - w).toDouble();
+      top = top.clamp(offsetY, offsetY + displayedH - h).toDouble();
+      out.add((
+        index: i, left: left, top: top, w: w, h: h,
+        color: _getSevCol(hazards[i]['severity']?.toString() ?? 'MEDIUM'),
+      ));
+    }
+    return out;
+  }
+
+  /// Mild spotlight: the image OUTSIDE the boxes is dimmed slightly so the
+  /// eye lands on the marked areas. Skipped when the boxes already cover most
+  /// of the frame — dimming the remainder would then hide context for no gain.
+  /// Overlapping boxes are cut out individually (non-zero winding would undo
+  /// the overlap), so a region inside two boxes is not re-dimmed.
+  static void _paintDim(
+      PdfGraphics canvas,
+      List<({int index, double left, double top, double w, double h,
+          PdfColor color})> rects,
+      double ch,
+      double offsetX, double offsetY, double displayedW, double displayedH) {
+    double fy(double v) => ch - v;
+    final covered = rects.fold<double>(0, (a, r) => a + r.w * r.h);
+    if (covered >= displayedW * displayedH * 0.55) return;
+    // Outer rectangle clockwise, each box counter-clockwise: with the
+    // non-zero rule every box is a hole, including where boxes overlap
+    // (even-odd re-filled those intersections).
+    canvas
+      ..saveContext()
+      ..setGraphicState(PdfGraphicState(opacity: 0.30))
+      ..setFillColor(PdfColors.black);
+    final x0 = offsetX, x1 = offsetX + displayedW;
+    final yT = fy(offsetY), yB = fy(offsetY + displayedH);
+    canvas
+      ..moveTo(x0, yB)..lineTo(x0, yT)..lineTo(x1, yT)..lineTo(x1, yB)
+      ..closePath();
+    for (final r in rects) {
+      final l = r.left, rr = r.left + r.w;
+      final t = fy(r.top), b = fy(r.top + r.h);
+      canvas
+        ..moveTo(l, b)..lineTo(rr, b)..lineTo(rr, t)..lineTo(l, t)
+        ..closePath();
+    }
+    canvas
+      ..fillPath()
+      ..restoreContext();
+  }
+
+  static void _paintBoxes(
+      PdfGraphics canvas,
+      List<({int index, double left, double top, double w, double h,
+          PdfColor color})> rects,
+      double ch) {
+    double fy(double v) => ch - v;
+
+    for (final r in rects) {
+      // halo, then colour, then a thin inner white line: three passes so the
+      // box edge survives any background.
+      canvas
+        ..setLineJoin(PdfLineJoin.miter)
+        ..setStrokeColor(PdfColors.white)
+        ..setLineWidth(4.2)
+        ..drawRect(r.left, fy(r.top + r.h), r.w, r.h)
+        ..strokePath()
+        ..setStrokeColor(r.color)
+        ..setLineWidth(2.4)
+        ..drawRect(r.left, fy(r.top + r.h), r.w, r.h)
+        ..strokePath();
+      // Heavier corner brackets: they still identify the box if a printer
+      // drops the thinner edge strokes.
+      final arm = math.min(9.0, math.min(r.w, r.h) * 0.35);
+      final x0 = r.left, x1 = r.left + r.w;
+      final y0 = fy(r.top), y1 = fy(r.top + r.h);
+      canvas
+        ..setStrokeColor(r.color)
+        ..setLineWidth(3.6)
+        ..setLineCap(PdfLineCap.butt)
+        ..moveTo(x0, y0 - arm)..lineTo(x0, y0)..lineTo(x0 + arm, y0)
+        ..moveTo(x1 - arm, y0)..lineTo(x1, y0)..lineTo(x1, y0 - arm)
+        ..moveTo(x0, y1 + arm)..lineTo(x0, y1)..lineTo(x0 + arm, y1)
+        ..moveTo(x1 - arm, y1)..lineTo(x1, y1)..lineTo(x1, y1 + arm)
+        ..strokePath();
+    }
+  }
+
+  /// Enlarged crops of the SMALL marked areas, printed under the photo row.
+  ///
+  /// A box that covers a few percent of the frame is correct but cannot be
+  /// read on paper — the sample report's hazard 2 was such a box. Each crop is
+  /// the box plus a margin, bordered in its severity colour and numbered like
+  /// the table. Returns null when no box is small or the image cannot be
+  /// decoded (the report is then exactly as before).
+  static pw.Widget? _closeUps(Uint8List imgBytes,
+      List<Map<String, dynamic>> hazards) {
+    try {
+      final small = <int>[];
+      for (var i = 0; i < hazards.length; i++) {
+        final bb = hazards[i]['bbox'];
+        if (bb is! Map) continue;
+        final w = _asDouble(bb['width'] ?? bb['w']);
+        final h = _asDouble(bb['height'] ?? bb['h']);
+        final x = _asDouble(bb['x']), y = _asDouble(bb['y']);
+        if (!w.isFinite || !h.isFinite || !x.isFinite || !y.isFinite) continue;
+        if (w <= 0 || h <= 0) continue;
+        if (w * h < 0.12 || math.min(w, h) < 0.22) small.add(i);
+      }
+      if (small.isEmpty) return null;
+      // Decoding a full-resolution phone photo in pure Dart runs on the UI
+      // isolate on web and can freeze the tab for seconds. Above ~3 MB the
+      // close-ups are skipped there; the boxes on the main photo still show.
+      if (kIsWeb && imgBytes.lengthInBytes > 3 * 1024 * 1024) return null;
+      final src = img.decodeImage(imgBytes);
+      if (src == null) return null;
+      final oriented = img.bakeOrientation(src);
+      final iw = oriented.width.toDouble(), ih = oriented.height.toDouble();
+
+      final tiles = <pw.Widget>[];
+      for (final i in small.take(4)) {
+        final bb = hazards[i]['bbox'] as Map;
+        final bx = _asDouble(bb['x']).clamp(0.0, 1.0);
+        final by = _asDouble(bb['y']).clamp(0.0, 1.0);
+        final bw = _asDouble(bb['width'] ?? bb['w']);
+        final bh = _asDouble(bb['height'] ?? bb['h']);
+        // 35% margin each side, and never narrower than 12% of the frame,
+        // so the crop shows what the hazard is attached to.
+        final mw = math.max(bw * 0.35, (0.12 - bw) / 2).clamp(0.0, 1.0);
+        final mh = math.max(bh * 0.35, (0.12 - bh) / 2).clamp(0.0, 1.0);
+        final x0 = ((bx - mw).clamp(0.0, 1.0) * iw).round();
+        final y0 = ((by - mh).clamp(0.0, 1.0) * ih).round();
+        final x1 = ((bx + bw + mw).clamp(0.0, 1.0) * iw).round();
+        final y1 = ((by + bh + mh).clamp(0.0, 1.0) * ih).round();
+        if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+        var crop = img.copyCrop(oriented,
+            x: x0, y: y0, width: x1 - x0, height: y1 - y0);
+        if (crop.width > 480 || crop.height > 480) {
+          crop = crop.width >= crop.height
+              ? img.copyResize(crop, width: 480)
+              : img.copyResize(crop, height: 480);
+        }
+        final jpg = Uint8List.fromList(img.encodeJpg(crop, quality: 82));
+        const tileH = 54.0;
+        // Width follows the crop's own aspect so BoxFit.contain shows ALL of
+        // it (cover cut the head off a tall person box in the audit render).
+        final tileW = (tileH * crop.width / crop.height).clamp(30.0, 110.0)
+            .toDouble();
+        final sev = hazards[i]['severity']?.toString() ?? 'MEDIUM';
+        final col = _getSevCol(sev);
+        tiles.add(pw.Container(
+          width: math.max(tileW + 4, 60),
+          margin: const pw.EdgeInsets.only(right: 6),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Container(
+                decoration: pw.BoxDecoration(
+                  border: pw.Border.all(color: col, width: 2)),
+                child: pw.Stack(children: [
+                  pw.Image(pw.MemoryImage(jpg),
+                      width: tileW, height: tileH, fit: pw.BoxFit.contain),
+                  pw.Positioned(left: 0, top: 0, child: pw.Container(
+                    width: _tagSize, height: _tagSize, color: col,
+                    alignment: pw.Alignment.center,
+                    child: pw.Text('${i + 1}', style: pw.TextStyle(
+                      color: PdfColors.white, fontSize: 8,
+                      fontWeight: pw.FontWeight.bold)))),
+                ])),
+              pw.SizedBox(height: 2),
+              pw.Text(_safe(hazards[i]['name']?.toString() ?? ''),
+                maxLines: 2,
+                style: pw.TextStyle(fontSize: 6.3, color: _textDark,
+                  fontWeight: pw.FontWeight.bold)),
+            ])));
+      }
+      if (tiles.isEmpty) return null;
+      return pw.Container(
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text('CLOSE-UP OF MARKED AREAS', style: pw.TextStyle(
+              fontSize: 6.5, fontWeight: pw.FontWeight.bold,
+              color: _navyDeep, letterSpacing: 1.1)),
+            pw.SizedBox(height: 4),
+            // Wrap, not Row: four wide crops can exceed the 531pt content
+            // width, and a Row would overflow the page edge.
+            pw.Wrap(spacing: 0, runSpacing: 4, children: tiles),
+          ]));
+    } catch (_) {
+      // A crop is a convenience. Never let it cost the report.
+      return null;
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1341,14 +1762,26 @@ class PdfExport {
           // and 'REGULATION' are the tightest; 4pt padding buys each of them
           // 4pt of clearance without touching the body cells' width.
           padding: const pw.EdgeInsets.fromLTRB(4, 5, 4, 5),
-          color: _sailBlue,
+          color: _navyDeep,
           child: pw.Text(t, style: pw.TextStyle(
-            color: PdfColors.white, fontSize: 7.5,
-            fontWeight: pw.FontWeight.bold, letterSpacing: 0.3),
+            color: PdfColors.white, fontSize: 6.6,
+            fontWeight: pw.FontWeight.bold, letterSpacing: 0.4),
             textAlign: align));
 
-    return pw.Table(
-      border: pw.TableBorder.all(color: PdfColor.fromHex('#BDBDBD'), width: 0.5),
+    // ★ 2026-10-03 redesign: horizontal hairlines only (no cage of vertical
+    // rules), zebra rows that fill the full row height, a severity-coloured
+    // number tag that matches the tag on the photograph, and a pill for the
+    // severity itself.
+    return pw.Container(
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: _hair, width: 0.8)),
+      // Zebra fill via TableRow.decoration, NOT per-cell colour + `full`
+      // alignment: `full` re-lays the tallest cell at exactly its own height
+      // and the pdf Flex can then drop its last child on rounding — which
+      // silently removed the "not marked on photo" note in the audit render.
+      child: pw.Table(
+      border: pw.TableBorder(
+        horizontalInside: pw.BorderSide(color: _hair, width: 0.6)),
       // ── COLUMN BUDGET ────────────────────────────────────────────────────
       // Width is taken from the two columns that hold nothing but short labels
       // and given to the two that hold sentences, because row height is driven
@@ -1391,52 +1824,85 @@ class PdfExport {
           final sb  = _getSevBg(sev);
           final bg  = i % 2 == 0 ? _rowNorm : _rowAlt;
 
-          return pw.TableRow(children: [
+          return pw.TableRow(
+            decoration: pw.BoxDecoration(color: bg),
+            children: [
             pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(4, 4, 4, 4),
-              color: PdfColor.fromHex('#E3F2FD'),
-              alignment: pw.Alignment.center,
-              child: pw.Text('${i + 1}', style: pw.TextStyle(
-                fontSize: 9, fontWeight: pw.FontWeight.bold,
-                color: _sailBlue),
-                textAlign: pw.TextAlign.center)),
-            pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(6, 4, 6, 4),
-              color: bg,
-              child: pw.Text(_safe(h['name']?.toString() ?? ''),
-                style: pw.TextStyle(fontSize: 8,
-                  fontWeight: pw.FontWeight.bold, color: _textDark,
-                  lineSpacing: 1.3))),
-            pw.Container(
-              padding: const pw.EdgeInsets.fromLTRB(4, 4, 4, 4),
-              color: sb,
-              alignment: pw.Alignment.center,
-              child: pw.Text(sev, style: pw.TextStyle(
-                fontSize: 7.5, fontWeight: pw.FontWeight.bold,
-                color: sc),
-                textAlign: pw.TextAlign.center)),
+              padding: const pw.EdgeInsets.fromLTRB(2, 5, 2, 4),
+              alignment: pw.Alignment.topCenter,
+              child: pw.Container(
+                width: 12, height: 12,
+                alignment: pw.Alignment.center,
+                color: sc,
+                child: pw.Text('${i + 1}', style: pw.TextStyle(
+                  fontSize: 7, fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.white)))),
             pw.Container(
               padding: const pw.EdgeInsets.fromLTRB(6, 4, 6, 4),
-              color: bg,
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(_safe(h['name']?.toString() ?? ''),
+                    style: pw.TextStyle(fontSize: 7.8,
+                      fontWeight: pw.FontWeight.bold, color: _ink,
+                      lineSpacing: 1.3)),
+                  // Line-of-fire tag, so the table says which rows the arrow
+                  // on the photo belongs to.
+                  if (LineOfFireGeometry.parse(h) != null ||
+                      LineOfFireGeometry.claimsLineOfFire(h))
+                    pw.Container(
+                      margin: const pw.EdgeInsets.only(top: 2.5),
+                      padding: const pw.EdgeInsets.symmetric(
+                          horizontal: 4, vertical: 1.2),
+                      decoration: pw.BoxDecoration(
+                        color: _lofHot, borderRadius: _r3),
+                      child: pw.Text(
+                        LineOfFireGeometry.parse(h) != null
+                            ? 'LINE OF FIRE'
+                            : 'LINE OF FIRE (not located)',
+                        style: pw.TextStyle(fontSize: 5.8,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.white))),
+                  if (h['bbox'] is! Map && h['locationUnpinned'] == true)
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.only(top: 2),
+                      child: pw.Text('not marked on photo',
+                        style: pw.TextStyle(fontSize: 6,
+                          fontStyle: pw.FontStyle.italic,
+                          color: _textMed))),
+                ])),
+            pw.Container(
+              padding: const pw.EdgeInsets.fromLTRB(3, 4, 3, 4),
+              alignment: pw.Alignment.topCenter,
+              child: pw.Container(
+                padding: const pw.EdgeInsets.symmetric(
+                    horizontal: 4, vertical: 1.8),
+                decoration: pw.BoxDecoration(
+                  color: sb, borderRadius: _r3,
+                  border: pw.Border.all(color: sc, width: 0.6)),
+                child: pw.Text(sev, style: pw.TextStyle(
+                  fontSize: 6.2, fontWeight: pw.FontWeight.bold,
+                  color: sc, letterSpacing: 0.3),
+                  textAlign: pw.TextAlign.center))),
+            pw.Container(
+              padding: const pw.EdgeInsets.fromLTRB(6, 4, 6, 4),
               child: pw.Text(_safe(h['description']?.toString() ?? ''),
-                style: pw.TextStyle(fontSize: 7.5, color: _textDark,
+                style: pw.TextStyle(fontSize: 7.3, color: _ink,
                   lineSpacing: 1.4))),
             pw.Container(
               padding: const pw.EdgeInsets.fromLTRB(6, 4, 6, 4),
-              color: bg,
               child: pw.Text(_safe(h['regulation']?.toString() ?? ''),
                 style: pw.TextStyle(fontSize: 7, color: _textMed,
                   lineSpacing: 1.3))),
             pw.Container(
               padding: const pw.EdgeInsets.fromLTRB(6, 4, 6, 4),
-              color: bg,
               child: pw.Text(_safe(h['correctiveAction']?.toString() ?? ''),
-                style: pw.TextStyle(fontSize: 7.5, color: _textDark,
+                style: pw.TextStyle(fontSize: 7.3, color: _ink,
                   lineSpacing: 1.4))),
           ]);
         }),
       ],
-    );
+    ));
   }
 
   // _riskScoreBar() was deleted here. It rendered TOTAL RISK SCORE / OVERALL
@@ -1450,12 +1916,14 @@ class PdfExport {
 
 
   static pw.Widget _summaryBox(String summary) => pw.Container(
-    padding: const pw.EdgeInsets.all(10),
+    width: double.infinity,
+    padding: const pw.EdgeInsets.fromLTRB(11, 9, 11, 9),
     decoration: pw.BoxDecoration(
-      border: pw.Border.all(color: _divider, width: 0.5),
-      color: PdfColor.fromHex('#FAFAFA')),
+      borderRadius: _r3,
+      border: pw.Border.all(color: _hair, width: 0.8),
+      color: _panel),
     child: pw.Text(summary.isEmpty ? 'No summary provided.' : _safe(summary),
-      style: pw.TextStyle(fontSize: 9, color: _textDark, lineSpacing: 1.6)));
+      style: pw.TextStyle(fontSize: 8.8, color: _ink, lineSpacing: 1.6)));
 
   /// Corrective action for reports that have no hazards table (near misses).
   /// The reporter enters these as one field joined with ' | ', so it is split
@@ -1470,10 +1938,12 @@ class PdfExport {
         .where((s) => s.isNotEmpty)
         .toList();
     return pw.Container(
-      padding: const pw.EdgeInsets.fromLTRB(10, 6, 10, 6),
+      width: double.infinity,
+      padding: const pw.EdgeInsets.fromLTRB(11, 7, 11, 7),
       decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: _divider, width: 0.5),
-        color: PdfColor.fromHex('#FAFAFA')),
+        borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.8),
+        color: _panel),
       child: pw.Column(
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: items.length <= 1
@@ -1539,16 +2009,17 @@ class PdfExport {
     // whole block was the second-biggest contributor to the report spilling
     // onto page 2. Now one line, ~26pt, carrying the same information.
     return pw.Container(
-      padding: const pw.EdgeInsets.fromLTRB(8, 5, 8, 5),
+      padding: const pw.EdgeInsets.fromLTRB(9, 6, 9, 6),
       decoration: pw.BoxDecoration(
-        border: pw.Border.all(color: PdfColor.fromHex('#00838F'), width: 0.6),
-        color: PdfColor.fromHex('#E0F7FA')),
+        borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.8),
+        color: _panel),
       child: pw.Row(
         crossAxisAlignment: pw.CrossAxisAlignment.center,
         children: [
-          pw.Text('LOCATION  ', style: pw.TextStyle(
-            fontSize: 7, color: PdfColor.fromHex('#00695C'),
-            fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
+          pw.Text('GPS LOCATION   ', style: pw.TextStyle(
+            fontSize: 6.3, color: _navyDeep,
+            fontWeight: pw.FontWeight.bold, letterSpacing: 1.0)),
           // Expanded (not Spacer) so the row cannot wrap onto a second line and
           // undo the saving. displayLocation is pre-checked to fit, so maxLines
           // here is a backstop, not the mechanism.
@@ -1556,7 +2027,7 @@ class PdfExport {
             child: pw.Text(displayLocation,
               maxLines: 1,
               style: pw.TextStyle(
-                fontSize: 8.5, color: _textDark,
+                fontSize: 8.3, color: _ink,
                 fontWeight: pw.FontWeight.bold))),
           if (acc != null)
             pw.Text('  +/-${_toDouble(acc).toStringAsFixed(0)}m',
@@ -1601,75 +2072,59 @@ class PdfExport {
   // sits 3pt above its caption) while giving back ~38pt toward one page. The
   // horizontal padding stays at 9pt: the three 120pt rules have to fit side by
   // side, so squeezing left/right would start clipping them, not just crowd.
-  static pw.Widget _signOff(String reporter, String pno) => pw.Container(
-    padding: const pw.EdgeInsets.fromLTRB(9, 7, 9, 7),
-    decoration: pw.BoxDecoration(
-      border: pw.Border.all(color: _sailBlue, width: 0.8),
-      color: _sailLight),
-    child: pw.Column(children: [
-      pw.Row(
-        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          pw.Expanded(child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Text('REPORTED BY', style: pw.TextStyle(
-                fontSize: 7, color: _textLight,
-                fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
-              pw.SizedBox(height: 4),
-              pw.Text(reporter, style: pw.TextStyle(
-                fontSize: 10, fontWeight: pw.FontWeight.bold,
-                color: _textDark)),
-              if (pno.isNotEmpty) pw.Text('P.No.: $pno',
-                style: pw.TextStyle(fontSize: 8, color: _textMed)),
-              pw.SizedBox(height: 10),
-              pw.Container(width: 120, height: 0.5, color: _textDark),
-              pw.SizedBox(height: 3),
-              pw.Text('Signature', style: pw.TextStyle(
-                fontSize: 7, color: _textLight)),
-            ])),
-          pw.Expanded(child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.center,
-            children: [
-              pw.Text('REVIEWED BY', style: pw.TextStyle(
-                fontSize: 7, color: _textLight,
-                fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
-              pw.SizedBox(height: 4),
-              pw.Text('Safety Officer / HOD', style: pw.TextStyle(
-                fontSize: 9, color: _textMed)),
-              pw.SizedBox(height: 10),
-              pw.Container(width: 120, height: 0.5, color: _textDark),
-              pw.SizedBox(height: 3),
-              pw.Text('Signature & Date', style: pw.TextStyle(
-                fontSize: 7, color: _textLight)),
-            ])),
-          pw.Expanded(child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.end,
-            children: [
-              pw.Text('APPROVED BY', style: pw.TextStyle(
-                fontSize: 7, color: _textLight,
-                fontWeight: pw.FontWeight.bold, letterSpacing: 0.5)),
-              pw.SizedBox(height: 4),
-              pw.Text('Plant Head / GM (Safety)', style: pw.TextStyle(
-                fontSize: 9, color: _textMed)),
-              pw.SizedBox(height: 10),
-              pw.Container(width: 120, height: 0.5, color: _textDark),
-              pw.SizedBox(height: 3),
-              pw.Text('Signature & Date', style: pw.TextStyle(
-                fontSize: 7, color: _textLight)),
-            ])),
-        ]),
+  // ★ 2026-10-03 redesign: a proper sign-off block. Three equal columns,
+  // each with role caption, name line and a signature rule with room to sign
+  // by hand (18pt clear), on white with hairline dividers rather than a flat
+  // blue rectangle. The reporter's name and P.No. are pre-printed.
+  static pw.Widget _signOff(String reporter, String pno) {
+    pw.Widget col(String role, String who, String sub, String caption) =>
+      pw.Expanded(child: pw.Padding(
+        padding: const pw.EdgeInsets.fromLTRB(10, 8, 10, 8),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(role, style: pw.TextStyle(
+              fontSize: 5.8, color: _steel,
+              fontWeight: pw.FontWeight.bold, letterSpacing: 1.0)),
+            pw.SizedBox(height: 3),
+            pw.Text(_safe(who), maxLines: 1, style: pw.TextStyle(
+              fontSize: 8.8, fontWeight: pw.FontWeight.bold, color: _ink)),
+            pw.Text(_safe(sub), maxLines: 1,
+              style: pw.TextStyle(fontSize: 6.8, color: _steel)),
+            pw.SizedBox(height: 18),
+            pw.Container(height: 0.6, color: _ink),
+            pw.SizedBox(height: 2.5),
+            pw.Text(caption, style: pw.TextStyle(
+              fontSize: 6.2, color: _steel)),
+          ])));
+    return pw.Column(children: [
+      pw.Container(
+        decoration: pw.BoxDecoration(
+          borderRadius: _r3,
+          border: pw.Border.all(color: _hair, width: 0.8)),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            col('REPORTED BY', reporter,
+                pno.isNotEmpty ? 'P.No. $pno' : 'Reporting officer',
+                'Signature & date'),
+            pw.Container(width: 0.7, height: 62, color: _hair),
+            col('REVIEWED BY', 'Safety Officer / HOD', 'Name:',
+                'Signature & date'),
+            pw.Container(width: 0.7, height: 62, color: _hair),
+            col('APPROVED BY', 'Plant Head / GM (Safety)', 'Name:',
+                'Signature & date'),
+          ])),
       pw.SizedBox(height: 5),
-      pw.Container(height: 0.5, color: PdfColor.fromHex('#BBDEFB')),
-      pw.SizedBox(height: 3),
       pw.Text(
-        'This report is generated by SAIL Safety Lens AI system. '
-        'All observations are subject to verification by the Safety Department.',
-        style: pw.TextStyle(fontSize: 7, color: _textLight,
+        'Generated by SAIL Safety Lens. AI observations are advisory and '
+        'subject to verification by the Safety Department before any '
+        'finding is recorded.',
+        style: pw.TextStyle(fontSize: 6.3, color: _steel,
           fontStyle: pw.FontStyle.italic),
         textAlign: pw.TextAlign.center),
-    ]));
+    ]);
+  }
 
   static List<Map<String, dynamic>> _parseHazards(dynamic raw) {
     if (raw == null) return [];
@@ -1732,11 +2187,7 @@ class PdfExport {
     final fn = 'SafetyLens_${incident['type'] ?? 'Report'}'
         '_${incident['id'] ?? DateTime.now().millisecondsSinceEpoch}.pdf';
     if (kIsWeb) {
-      final blob   = html.Blob([bytes], 'application/pdf');
-      final url    = html.Url.createObjectUrlFromBlob(blob);
-      final anchor = html.AnchorElement(href: url)
-        ..setAttribute('download', fn)..click();
-      html.Url.revokeObjectUrl(url);
+      _downloadWeb(bytes, fn);
     } else {
       final dir  = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/$fn');
@@ -1744,6 +2195,101 @@ class PdfExport {
       await Share.shareXFiles([XFile(file.path)],
           text: 'SAIL Safety Lens Report', subject: 'Incident Report');
     }
+  }
+
+  /// Share an incident AS A PDF FILE — the one entry point every WhatsApp /
+  /// Email / More share button uses (★ 2026-10-03; they used to send a text
+  /// summary, or a Drive link that was often not uploaded yet).
+  ///
+  /// Mobile: the PDF is written to the temp dir and handed to the system share
+  /// sheet, where the user picks WhatsApp, Gmail, etc. Android/iOS do not let an
+  /// app attach a file to a specific app silently, so WhatsApp and Email both go
+  /// through the sheet — but what arrives is the PDF, not text.
+  ///
+  /// Web: Web Share Level 2 (`navigator.share({files})`) where the browser
+  /// supports it (Chrome Android, Safari, Edge); otherwise — desktop Firefox,
+  /// or the tap's user activation expired while the PDF was being built — the
+  /// PDF is DOWNLOADED so the user can attach it themselves.
+  ///
+  /// Returns 'shared', 'dismissed' or 'downloaded' so the caller can tell the
+  /// user what happened. Throws only if the PDF itself could not be generated.
+  static Future<String> shareIncidentPdf({
+    required Map<String, dynamic> incident,
+    String reporterName = 'SAIL Safety Officer',
+    String reporterPno = '',
+    Uint8List? imageBytes,
+    String? text,
+    String? subject,
+  }) async {
+    final bytes = await generateIncidentReportBytes(
+      incident: incident, reporterName: reporterName,
+      reporterPno: reporterPno, imageBytes: imageBytes);
+    final fn = pdfFileName(incident);
+    final title = incident['title']?.toString().trim() ?? '';
+    // text == '' means "no caption": WhatsApp on Android drops the file
+    // attachment when the intent also carries EXTRA_TEXT (see
+    // incident_detail_screen), so WhatsApp shares pass ''.
+    final caption =
+        text ?? 'SAIL Safety Lens report${title.isEmpty ? '' : ': $title'}';
+    return sharePdfBytes(bytes,
+        fileName: fn,
+        text: caption.isEmpty ? null : caption,
+        subject: subject ??
+            'Safety Lens ${incident['type'] ?? 'Report'}'
+                '${title.isEmpty ? '' : ' - $title'}');
+  }
+
+  /// A file name that survives every share target: no spaces, slashes or
+  /// colons (WhatsApp and some mail clients mangle them).
+  static String pdfFileName(Map<String, dynamic> incident) {
+    String clean(String v) =>
+        v.replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_').replaceAll(RegExp(r'_+'), '_');
+    final type = clean(incident['type']?.toString() ?? 'Report');
+    final id = clean(incident['id']?.toString() ??
+        DateTime.now().millisecondsSinceEpoch.toString());
+    return 'SafetyLens_${type}_$id.pdf';
+  }
+
+  /// See [shareIncidentPdf].
+  static Future<String> sharePdfBytes(Uint8List bytes, {
+    required String fileName,
+    String? text,
+    String? subject,
+  }) async {
+    if (kIsWeb) {
+      try {
+        final res = await Share.shareXFiles(
+          [XFile.fromData(bytes, mimeType: 'application/pdf', name: fileName)],
+          text: text, subject: subject);
+        // share_plus 9 on web returns `unavailable` AFTER A SUCCESSFUL share
+        // (the Web Share API does not report the chosen target), and THROWS
+        // when the browser cannot share files. So only the throw means
+        // "fall back to a download".
+        return res.status == ShareResultStatus.dismissed ? 'dismissed' : 'shared';
+      } catch (_) {
+        _downloadWeb(bytes, fileName);
+        return 'downloaded';
+      }
+    }
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/$fileName');
+    await file.writeAsBytes(bytes, flush: true);
+    final res = await Share.shareXFiles(
+      [XFile(file.path, mimeType: 'application/pdf', name: fileName)],
+      text: text, subject: subject);
+    return res.status == ShareResultStatus.dismissed ? 'dismissed' : 'shared';
+  }
+
+  static void _downloadWeb(Uint8List bytes, String fileName) {
+    final blob = html.Blob([bytes], 'application/pdf');
+    final url = html.Url.createObjectUrlFromBlob(blob);
+    html.AnchorElement(href: url)
+      ..setAttribute('download', fileName)
+      ..click();
+    // Revoked later, not immediately: Safari/Firefox can cancel a download
+    // whose blob URL is revoked in the same tick as the click.
+    Future.delayed(const Duration(seconds: 30),
+        () => html.Url.revokeObjectUrl(url));
   }
 
   static Future<File> generateIncidentReport({

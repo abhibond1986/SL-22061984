@@ -146,18 +146,40 @@ class SupabaseService {
 
   /// Fetch all incidents (newest first). Returns [] on any error.
   static Future<List<Map<String, dynamic>>> fetchIncidents() async {
-    if (!isReady) return [];
-    try {
+    return await fetchIncidentsOrNull() ?? [];
+  }
+
+  /// Every incident row, paged.
+  ///
+  /// ★ 2026-10-03. An unbounded `select()` is silently capped by PostgREST at
+  /// its configured max-rows (1000 by default) — the same trap fetchUsers()
+  /// documents. For incidents that is worse than a short list: the full sync
+  /// treats this result as THE server set and `reconcileWithServer` deletes
+  /// every local row that is not in it, so row 1001 onward would be erased from
+  /// every device, and other devices would never see them. Paging with a
+  /// stable secondary order (id) makes the set complete at any size.
+  static Future<List<Map<String, dynamic>>> _fetchAllIncidentRows() async {
+    const page = 1000;
+    final out = <Map<String, dynamic>>[];
+    // Stops on an EMPTY page, not a short one, and advances by what actually
+    // came back: if the project's PostgREST max-rows is set below [page], every
+    // page is short, and stopping on the first would hand the reconcile a
+    // truncated server set — which it reads as "the rest were deleted".
+    for (var from = 0; ;) {
       final rows = await _db
           .from('incidents')
           .select()
-          .order('date', ascending: false);
-      return (rows as List)
-          .map((r) => _fromRow(Map<String, dynamic>.from(r as Map)))
-          .toList();
-    } catch (_) {
-      return [];
+          .order('date', ascending: false)
+          .order('id', ascending: true)
+          .range(from, from + page - 1)
+          .timeout(const Duration(seconds: 30));
+      final list = rows as List;
+      if (list.isEmpty) break;
+      out.addAll(
+          list.map((r) => _fromRow(Map<String, dynamic>.from(r as Map))));
+      from += list.length;
     }
+    return out;
   }
 
   /// Like [fetchIncidents] but returns null on ANY failure (network, auth,
@@ -168,13 +190,10 @@ class SupabaseService {
   static Future<List<Map<String, dynamic>>?> fetchIncidentsOrNull() async {
     if (!isReady) return null;
     try {
-      final rows = await _db
-          .from('incidents')
-          .select()
-          .order('date', ascending: false);
-      return (rows as List)
-          .map((r) => _fromRow(Map<String, dynamic>.from(r as Map)))
-          .toList();
+      // Paged — a partial set here would be read as "the server deleted the
+      // rest" by the reconcile. A failure on ANY page returns null for the
+      // same reason.
+      return await _fetchAllIncidentRows();
     } catch (_) {
       return null;
     }

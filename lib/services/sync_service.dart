@@ -1396,7 +1396,13 @@ class SyncService {
         final id = remote['id']?.toString() ?? '';
         if (id.isEmpty || activeTombstones.contains(id)) continue;
         if (!localMap.containsKey(id)) {
-          localMap[id] = remote;
+          // ★ 2026-10-03: marked synced — it came FROM the server. Without the
+          // flag every report pulled from another device looked "unsynced"
+          // here forever: reconcileWithServer spared it, so a report deleted
+          // on the server lived on in this device's log, and the not-uploaded
+          // count was inflated by every remote row. Same rule as
+          // LocalDB.saveIncidentFromServer (the realtime path).
+          localMap[id] = Map<String, dynamic>.from(remote)..['_synced'] = true;
         } else {
           // Use LocalDB's single merge rule rather than a local variant. The
           // old inline merge let ANY non-empty server value overwrite local,
@@ -1498,7 +1504,13 @@ class SyncService {
         if (id.isEmpty) continue;
         if (activeTombstones.contains(id)) continue; // deleted locally — keep hidden
         if (!localMap.containsKey(id)) {
-          localMap[id] = remote;
+          // ★ 2026-10-03: marked synced — it came FROM the server. Without the
+          // flag every report pulled from another device looked "unsynced"
+          // here forever: reconcileWithServer spared it, so a report deleted
+          // on the server lived on in this device's log, and the not-uploaded
+          // count was inflated by every remote row. Same rule as
+          // LocalDB.saveIncidentFromServer (the realtime path).
+          localMap[id] = Map<String, dynamic>.from(remote)..['_synced'] = true;
         } else {
           // Existing — merge via LocalDB's single shared rule, which protects
           // unsynced local workflow edits and device-only fields.

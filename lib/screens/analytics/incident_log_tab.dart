@@ -23,6 +23,11 @@ class IncidentLogTab extends StatefulWidget {
 class _IncidentLogTabState extends State<IncidentLogTab> {
   List<Map<String, dynamic>> _all = [];
   bool _loading = true;
+  // Server-sync state for the strip above the list. See _syncAndLoad.
+  bool _syncing = false;
+  bool? _lastSyncOk;
+  DateTime? _lastSyncAt;
+  int _unsyncedCount = 0;
 
   // Filters
   /// 'All' is only ever a real option for a user who may see all plants. For a
@@ -149,7 +154,9 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   void initState() {
     super.initState();
     _applyPendingFilters();
-    _load();
+    // Cache first (instant), then the server. The unforced sync is throttled
+    // and coalesced inside SyncService, so opening the log is cheap.
+    _load().then((_) => _syncAndLoad());
     // Live refresh when any device adds/edits/deletes an incident.
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
     // Live refresh when the admin edits plants/departments/severities/statuses.
@@ -188,13 +195,60 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     }
   }
 
+  /// Pull the server set, then reload. [force] bypasses the 90 s throttle —
+  /// used by pull-to-refresh, where the user has explicitly asked for the
+  /// latest. Never throws: a failed pull leaves the local log as it was.
+  ///
+  /// ★ 2026-10-03. Pull-to-refresh used to call [_load] alone, which re-read
+  /// THIS device's cache and never touched the server — so a report saved on
+  /// another device could not be fetched from the log at all; the user had to
+  /// leave the screen and hope a background sync ran. The empty state had no
+  /// refresh at all, which is exactly the state a newly signed-in device is in.
+  Future<void> _syncAndLoad({bool force = false}) async {
+    if (mounted) setState(() => _syncing = true);
+    try {
+      final res = await SyncService.fullSync(force: force)
+          .timeout(const Duration(seconds: 45));
+      _lastSyncOk = res['ok'] == true;
+      // A throttled call returns ok without pulling; show the time of the
+      // pull that actually happened, not "now".
+      if (res['ok'] == true) {
+        _lastSyncAt = DateTime.tryParse(res['syncTime']?.toString() ?? '')
+                ?.toLocal() ??
+            (res['skipped'] == null ? DateTime.now() : _lastSyncAt);
+      }
+    } catch (_) {
+      _lastSyncOk = false;
+    }
+    await _load();
+    if (mounted) setState(() => _syncing = false);
+  }
+
   Future<void> _load() async {
     final scope = await PlantScope.forUser();
+    final user = await LocalDB.getCurrentUser();
     // Scope the data at the source: a non-admin never holds another plant's
     // records in memory, so no filter, card, PDF export or delete action below
     // can reach them.
-    final inc = await scope.filterIncidents(await LocalDB.getIncidents());
-    final user = await LocalDB.getCurrentUser();
+    //
+    // ★ 2026-10-03, with one exception: the user's OWN reports are always kept.
+    // A report filed from another device under a different plant (a transfer,
+    // a visit, a profile edit) is not another plant's data leaking in — it is
+    // the reporter's own work, and the log is where they look for it.
+    final everything = await LocalDB.getIncidents();
+    final scoped = await scope.filterIncidents(everything);
+    // _isMine reads these two fields, so set them before it is used here.
+    _currentUserName = user?['name']?.toString() ?? '';
+    _currentUserPno = user?['pno']?.toString() ?? '';
+    final scopedIds = scoped.map((i) => i['id']?.toString() ?? '').toSet();
+    final inc = [
+      ...scoped,
+      ...everything.where((i) =>
+          !scopedIds.contains(i['id']?.toString() ?? '') && _isMine(i)),
+    ];
+    final unsynced =
+        (await LocalDB.getUnsyncedIncidents()).where((i) => inc.any(
+            (x) => x['id']?.toString() == i['id']?.toString())).length;
     final plants = await AdminMasterData.getPlants();
     final depts = await AdminMasterData.getDepartments(); // ★ NEW: Load departments
     final sevs = await AdminMasterData.getSeverities();
@@ -206,6 +260,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     if (mounted) setState(() {
       _scope = scope;
       _all = inc;
+      _unsyncedCount = unsynced;
       _plantDefs = plants;
       // A locked user's plant filter is pinned, not chosen — so a stale 'All'
       // (or a plant carried over from a previous session) can't widen the view.
@@ -237,7 +292,11 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
 
     // Plant filter — by plant CODE via [_matchesPlant], never by spelling.
     if (_plantFilter != 'All') {
-      list = list.where((i) => _matchesPlant(i, _plantFilter)).toList();
+      // A locked user's own reports stay visible under their pinned plant —
+      // they were added past the scope in _load on purpose.
+      list = list.where((i) =>
+          (_scope.isLocked && _plantFilter == _scope.plant && _isMine(i)) ||
+          _matchesPlant(i, _plantFilter)).toList();
     }
 
     // ★ NEW: Department filter
@@ -359,17 +418,38 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
           ]),
         ),
       ),
+      _syncStrip(sl),
       // Incident list
       Expanded(
         child: filtered.isEmpty
-            ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.search_off_rounded, color: sl.text4, size: 40),
-                const SizedBox(height: 8),
-                Text('No incidents match filters',
-                    style: TextStyle(color: sl.text3, fontSize: 13)),
-              ]))
+            // Pullable even when empty — a newly signed-in device starts here,
+            // and pulling is how it fetches what other devices have saved.
+            ? RefreshIndicator(
+                onRefresh: () => _syncAndLoad(force: true),
+                color: AppColors.accent,
+                child: LayoutBuilder(builder: (ctx, c) => ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: [
+                    SizedBox(
+                      height: c.maxHeight,
+                      child: Center(child: Column(
+                          mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.search_off_rounded, color: sl.text4, size: 40),
+                        const SizedBox(height: 8),
+                        Text(_all.isEmpty
+                                ? 'No reports on this device yet'
+                                : 'No incidents match filters',
+                            style: TextStyle(color: sl.text3, fontSize: 13)),
+                        const SizedBox(height: 4),
+                        Text('Pull down to fetch reports saved on other devices',
+                            style: TextStyle(color: sl.text4, fontSize: 11)),
+                      ])),
+                    ),
+                  ],
+                )),
+              )
             : RefreshIndicator(
-                onRefresh: _load,
+                onRefresh: () => _syncAndLoad(force: true),
                 color: AppColors.accent,
                 child: ListView.builder(
                   // Gutter, not a wrap: this list is the app's longest and must
@@ -383,6 +463,61 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
               ),
       ),
     ]);
+  }
+
+  /// One-line server status above the list: syncing / N not uploaded yet /
+  /// last pulled. Makes "is this every device's data?" answerable at a glance,
+  /// and gives a stuck upload a button instead of a wait.
+  Widget _syncStrip(SL sl) {
+    final String label;
+    final Color colour;
+    final IconData icon;
+    if (_syncing) {
+      label = 'Syncing with server…';
+      colour = sl.text3;
+      icon = Icons.sync_rounded;
+    } else if (_unsyncedCount > 0) {
+      label = '$_unsyncedCount report${_unsyncedCount == 1 ? '' : 's'} on this '
+          'device not uploaded yet — other devices can\'t see '
+          '${_unsyncedCount == 1 ? 'it' : 'them'}';
+      colour = const Color(0xFFE65100);
+      icon = Icons.cloud_upload_outlined;
+    } else if (_lastSyncOk == false) {
+      label = 'Offline — showing reports saved on this device';
+      colour = const Color(0xFFE65100);
+      icon = Icons.cloud_off_rounded;
+    } else if (_lastSyncAt != null) {
+      final t = _lastSyncAt!;
+      label = 'Up to date with all devices · '
+          '${t.hour.toString().padLeft(2, '0')}:'
+          '${t.minute.toString().padLeft(2, '0')}';
+      colour = const Color(0xFF2E7D32);
+      icon = Icons.cloud_done_outlined;
+    } else {
+      return const SizedBox.shrink();
+    }
+    final showAction = !_syncing && (_unsyncedCount > 0 || _lastSyncOk == false);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+      child: Row(children: [
+        Icon(icon, size: 14, color: colour),
+        const SizedBox(width: 6),
+        Expanded(child: Text(label,
+            maxLines: 2, overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: colour, fontSize: 11,
+                fontWeight: FontWeight.w600))),
+        if (showAction)
+          TextButton(
+            onPressed: () => _syncAndLoad(force: true),
+            style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8)),
+            child: Text(_unsyncedCount > 0 ? 'Upload now' : 'Retry',
+                style: const TextStyle(fontSize: 11,
+                    fontWeight: FontWeight.w700)),
+          ),
+      ]),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════

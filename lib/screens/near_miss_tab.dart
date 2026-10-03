@@ -9,8 +9,6 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show File, Directory;
-import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
@@ -22,8 +20,6 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:share_plus/share_plus.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
 // GeminiVision is no longer called from this screen: the photo analysis goes
@@ -1282,7 +1278,11 @@ If the text is already fine, return it unchanged.''';
         fileName:   'SafetyLens_${incident['id']}.pdf',
       );
       if (url != null && url.isNotEmpty) {
-        await SyncService.pushIncident({...incident, 'pdfUrl': url}).catchError((_) => false);
+        // Local only: `pdfUrl` has no server column, so re-pushing the whole
+        // incident here only raced the real save. See ai_scan_tab
+        // _uploadPdfBackground for the defect that caused.
+        await LocalDB.updateIncidentFields(
+            incident['id']?.toString() ?? '', {'pdfUrl': url});
       }
     } catch (_) {}
   }
@@ -2284,54 +2284,16 @@ If the text is already fine, return it unchanged.''';
     _submit(exportAfter: false);
   }
 
-  /// ★ v25/v29/v30: Share Report — captures data + image BEFORE submit clears form
+  /// Save + Share. ★ 2026-10-03: shares the PDF REPORT FILE of the record
+  /// just saved (it used to share a text summary with the photo). _submit
+  /// retains the saved record and its photo in _savedIncident /
+  /// _savedImageBytes, so nothing has to be captured before the form clears.
   void _handleShareReport() async {
     _submittingAction = 'share';
-    // ★ v29 FIX: Build share text BEFORE _submit clears the form fields
-    final shareText = '''🚨 NEAR MISS REPORT — ${_plant}
-━━━━━━━━━━━━━━━━━━━━
-📍 Location: ${_location.text.trim()}
-🏭 Department: $_effectiveDept
-⚠️ Category: $_wsaCause
-🔴 Severity: $_severity
-📋 Type: $_obsType
-
-📝 Description:
-${_description.text.trim()}
-
-🔧 Corrective Actions:
-${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim()).where((t) => t.isNotEmpty)].asMap().entries.map((e) => '${e.key + 1}. ${e.value}').join('\n')}
-
-📅 Date: ${DateTime.now().toString().split('.').first}
-👷 Reported via Safety Lens App''';
-
-    // ★ v30: Save image to temp file BEFORE _submit clears _imageBytes
-    XFile? shareImageFile;
-    if (_imageBytes != null && !kIsWeb) {
-      try {
-        final tempDir = await getTemporaryDirectory();
-        final imgFile = File('${tempDir.path}/near_miss_${DateTime.now().millisecondsSinceEpoch}.jpg');
-        await imgFile.writeAsBytes(_imageBytes!);
-        shareImageFile = XFile(imgFile.path, mimeType: 'image/jpeg');
-      } catch (_) {
-        // If temp file creation fails, share without image
-      }
-    }
-
     final success = await _submit(exportAfter: false);
-    if (success && mounted) {
-      try {
-        if (shareImageFile != null) {
-          // Share with image attached (works on WhatsApp, Telegram, etc.)
-          await Share.shareXFiles(
-            [shareImageFile],
-            text: shareText,
-            subject: 'Near Miss Report — $_plant',
-          );
-        } else {
-          await Share.share(shareText, subject: 'Near Miss Report — $_plant');
-        }
-      } catch (_) {}
+    final incident = _savedIncident;
+    if (success && mounted && incident != null) {
+      await _sharePdf(incident, _savedImageBytes);
     }
   }
 
@@ -2726,130 +2688,57 @@ ${[_immediateAction.text.trim(), ..._additionalActions.map((c) => c.text.trim())
     );
   }
 
-  String _buildShareText(Map<String, dynamic> incident) {
-    final title    = incident['title']?.toString() ?? 'Near Miss Report';
-    final severity = incident['severity']?.toString() ?? 'MEDIUM';
-    final plant    = incident['plant']?.toString() ?? '';
-    final dept     = incident['dept']?.toString() ?? '';
-    final location = incident['location']?.toString() ?? '';
-    final desc     = incident['desc']?.toString() ?? '';
-    final date     = incident['date']?.toString().split('T').first ?? '';
-    final action   = incident['immediateAction']?.toString() ?? '';
-    final category = incident['wsaCategory']?.toString() ?? '';
-
-    final buf = StringBuffer();
-    buf.writeln('⚠️ *SAIL Safety Lens — Near Miss Report*');
-    buf.writeln();
-    buf.writeln('📋 *Title:* $title');
-    buf.writeln('🔴 *Severity:* $severity');
-    buf.writeln('🏭 *Plant:* $plant');
-    if (dept.isNotEmpty) buf.writeln('🏢 *Department:* $dept');
-    buf.writeln('📍 *Location:* $location');
-    buf.writeln('📅 *Date:* $date');
-    if (category.isNotEmpty) buf.writeln('⚠️ *Category:* $category');
-    buf.writeln();
-    if (desc.isNotEmpty) {
-      buf.writeln('📝 *Description:*');
-      buf.writeln(desc);
-      buf.writeln();
-    }
-    if (action.isNotEmpty) {
-      buf.writeln('🔧 *Corrective Action:*');
-      buf.writeln(action);
-      buf.writeln();
-    }
-    buf.writeln('—');
-    buf.write('_Generated by SAIL Safety Lens_');
-    return buf.toString();
-  }
-
-  Future<void> _shareViaWhatsApp(Map<String, dynamic> incident, [Uint8List? savedImageBytes]) async {
-    // ★ v32: Always use Share.shareXFiles / Share.share — never use wa.me URLs
-    // wa.me opens a new browser tab every time; native share intent reuses existing WhatsApp
+  // ★ 2026-10-03: every share button sends the PDF REPORT FILE — the same
+  // document the PDF button exports — instead of a text summary or the bare
+  // photo. On a phone WhatsApp and Email both open the system share sheet with
+  // the PDF attached (Android/iOS hand a file to another app only through that
+  // sheet). On a browser that cannot share files the PDF is downloaded and the
+  // snack bar says so.
+  Future<void> _sharePdf(Map<String, dynamic> incident,
+      [Uint8List? savedImageBytes, String channel = 'share']) async {
+    _snack('Preparing PDF report...', AppColors.accent);
     try {
-      final text = _buildShareText(incident);
-
-      if (!kIsWeb && savedImageBytes != null) {
-        // Share image file with text caption — WhatsApp shows image inline
-        final tempDir = await getTemporaryDirectory();
-        final imgFile = File('${tempDir.path}/near_miss_${incident['id']}.jpg');
-        await imgFile.writeAsBytes(savedImageBytes);
-        await Share.shareXFiles(
-          [XFile(imgFile.path, mimeType: 'image/jpeg')],
-          text: text,
-          subject: 'Near Miss Report — ${incident['plant'] ?? ''}',
-        );
-      } else {
-        // No image — use native share (opens share sheet, user picks WhatsApp)
-        await Share.share(text, subject: 'Near Miss Report — ${incident['plant'] ?? ''}');
+      final user = await LocalDB.getCurrentUser();
+      final title = incident['title']?.toString() ?? 'Near Miss Report';
+      final severity = incident['severity']?.toString() ?? '';
+      final plant = incident['plant']?.toString() ?? '';
+      final outcome = await PdfExport.shareIncidentPdf(
+        incident: incident,
+        reporterName: _savedReporterName.isNotEmpty
+            ? _savedReporterName
+            : user?['name']?.toString() ?? 'SAIL Safety Officer',
+        reporterPno: _savedReporterPno.isNotEmpty
+            ? _savedReporterPno
+            : user?['pno']?.toString() ?? '',
+        imageBytes: savedImageBytes,
+        text: channel == 'whatsapp' ? '' : 'SAIL Safety Lens - Near Miss Report\n'
+            '$title${severity.isEmpty ? '' : ' ($severity)'}'
+            '${plant.isEmpty ? '' : ' - $plant'}',
+        subject: 'SAIL Safety Lens: $title',
+      );
+      if (!mounted) return;
+      if (outcome == 'downloaded') {
+        _snack(channel == 'share'
+                ? 'PDF downloaded - this browser cannot share files directly'
+                : 'PDF downloaded - attach it in ${channel == 'whatsapp' ? 'WhatsApp' : 'your email'}',
+            AppColors.accent);
       }
     } catch (e) {
-      final text = _buildShareText(incident);
-      await Share.share(text);
+      if (mounted) _snack('Could not create the PDF: $e', AppColors.red);
     }
   }
 
-  Future<void> _shareViaEmail(Map<String, dynamic> incident, [Uint8List? savedImageBytes]) async {
-    final text    = _buildShareText(incident);
-    final title   = incident['title']?.toString() ?? 'Near Miss Report';
-    final subject = 'SAIL Safety Lens: $title';
+  Future<void> _shareViaWhatsApp(Map<String, dynamic> incident,
+          [Uint8List? savedImageBytes]) =>
+      _sharePdf(incident, savedImageBytes, 'whatsapp');
 
-    // ★ v30: Try to share with PDF + image attachment via shareXFiles
-    if (!kIsWeb && savedImageBytes != null) {
-      try {
-        final tempDir = await getTemporaryDirectory();
-        final user = await LocalDB.getCurrentUser();
-        final pdfBytes = await PdfExport.generateIncidentReportBytes(
-          incident: incident,
-          reporterName: user?['name']?.toString() ?? 'SAIL Safety Officer',
-          reporterPno: user?['pno']?.toString() ?? '',
-          imageBytes: savedImageBytes,
-        );
-        if (pdfBytes.isNotEmpty) {
-          final pdfFile = File('${tempDir.path}/SafetyLens_${incident['id']}.pdf');
-          await pdfFile.writeAsBytes(pdfBytes);
-          await Share.shareXFiles(
-            [XFile(pdfFile.path, mimeType: 'application/pdf')],
-            text: text,
-            subject: subject,
-          );
-          return;
-        }
-      } catch (_) {}
-    }
+  Future<void> _shareViaEmail(Map<String, dynamic> incident,
+          [Uint8List? savedImageBytes]) =>
+      _sharePdf(incident, savedImageBytes, 'email');
 
-    // Fallback: mailto or plain text share
-    final url = Uri(scheme: 'mailto', query: 'subject=${Uri.encodeComponent(subject)}&body=${Uri.encodeComponent(text)}');
-    try {
-      if (await canLaunchUrl(url)) {
-        await launchUrl(url);
-      } else {
-        await Share.share(text, subject: subject);
-      }
-    } catch (_) {
-      await Share.share(text, subject: subject);
-    }
-  }
-
-  Future<void> _shareGeneric(Map<String, dynamic> incident, [Uint8List? savedImageBytes]) async {
-    final text = _buildShareText(incident);
-
-    // ★ v30: Share with image file if available
-    if (!kIsWeb && savedImageBytes != null) {
-      try {
-        final tempDir = await getTemporaryDirectory();
-        final imgFile = File('${tempDir.path}/near_miss_photo_${incident['id']}.jpg');
-        await imgFile.writeAsBytes(savedImageBytes);
-        await Share.shareXFiles(
-          [XFile(imgFile.path, mimeType: 'image/jpeg')],
-          text: text,
-          subject: 'Near Miss Report — ${incident['plant'] ?? ''}',
-        );
-        return;
-      } catch (_) {}
-    }
-    await Share.share(text);
-  }
+  Future<void> _shareGeneric(Map<String, dynamic> incident,
+          [Uint8List? savedImageBytes]) =>
+      _sharePdf(incident, savedImageBytes);
 
   // ═══════════════════════════════════════════════════════════════
   //  LISTENING BANNER — shows at top when voice is active

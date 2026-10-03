@@ -946,13 +946,37 @@ class LocalDB {
   // ═══════════════════════════════════════════════════════════════
   static Future<void> replaceAllIncidents(
       List<Map<String, dynamic>> incidents) async {
-    // Strip imageBase64 to prevent storage quota overflow
-    final cleaned = incidents.map((inc) {
+    // Strip imageBase64 to prevent storage quota overflow — EXCEPT, on web, for
+    // a row that has not reached the server and has no Storage URL yet.
+    //
+    // ★ 2026-10-03. On web the inline base64 is the ONLY copy of the evidence
+    // photo (no file storage), and this method is called by every full sync. It
+    // used to strip unconditionally, so a web scan whose first upload failed
+    // lost its photo at the next sync — and the retry then uploaded a report
+    // with no image, which is what every OTHER device then showed in its log.
+    // Kept for those rows only; everything else still goes, as before.
+    Map<String, dynamic> clean(Map<String, dynamic> inc, {required bool keep}) {
       final copy = Map<String, dynamic>.from(inc);
-      copy.remove('imageBase64');
+      if (!keep) copy.remove('imageBase64');
       return copy;
-    }).toList();
-    await _prefs.setString(_kIncidents, jsonEncode(cleaned));
+    }
+
+    // Keyed on imageUrl alone, not on _synced: pushIncident marks a row synced
+    // even when its image upload failed, and for that row this base64 is the
+    // only copy of the photo on web. (Review finding, 2026-10-03.)
+    bool owesImage(Map<String, dynamic> inc) =>
+        kIsWeb && (inc['imageUrl']?.toString() ?? '').isEmpty;
+
+    final cleaned =
+        incidents.map((inc) => clean(inc, keep: owesImage(inc))).toList();
+    try {
+      await _prefs.setString(_kIncidents, jsonEncode(cleaned));
+    } catch (_) {
+      // Over quota even so: fall back to the old behaviour rather than lose
+      // the whole incident list.
+      await _prefs.setString(_kIncidents,
+          jsonEncode(incidents.map((i) => clean(i, keep: false)).toList()));
+    }
   }
 
   /// ✅ Purge bloated imageBase64 fields to reclaim storage quota.

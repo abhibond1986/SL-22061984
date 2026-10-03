@@ -1,5 +1,13 @@
 # Safety Lens — current status
 
+> **2026-10-03 — PDF report + incident log.** Incident log now pages every
+> Supabase row and shows a sync strip (reports from all devices); PDF hazard
+> boxes are halo-stroked with outside tags and close-ups; every located line of
+> fire is drawn and listed; Share/WhatsApp/Email send the **PDF file** (web
+> falls back to download); report layout redesigned. `dart analyze` 0 errors on
+> Flutter 3.19.6; four sample renders in `audit_2026-10-03/`. Not yet run on a
+> device. Details: `AUDIT_2026-10-03_PDF_REPORT_AND_LOG.md`.
+
 **Last verified: 2026-08-14** against the live repo and the Supabase REST API.
 The SOP/SMP scan feature was added on 2026-08-19 — as a **bottom-nav tab at
 index 3**, between Near Miss and Ask AI, taking the bar from five tabs to six.

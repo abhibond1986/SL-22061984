@@ -4,14 +4,9 @@
 //         image included in PDF/WhatsApp from thumbnailBase64 fallback
 
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
 import '../services/local_db.dart';
@@ -348,108 +343,40 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     } catch (e) { _snack('PDF failed: $e', AppColors.red); }
   }
 
-  // ★ v31: Share via WhatsApp with PDF + image
-  Future<void> _shareWhatsAppWithPdf() async {
+  // ★ 2026-10-03: every share here sends the PDF REPORT FILE through the one
+  // PdfExport.shareIncidentPdf path. Before, a web user, a failed PDF, or the
+  // header WhatsApp button got a text summary (or the bare photo) instead.
+  // WhatsApp gets the file with no caption: WhatsApp on Android drops the
+  // attachment when the intent also carries text (the note that used to live
+  // here). Email keeps the text summary as the message body.
+  Future<void> _sharePdf({required String channel}) async {
     _snack('Generating PDF report...', AppColors.accent);
     try {
       final user = await LocalDB.getCurrentUser() ?? {};
       final imageBytes = await _resolveImageBytes();
-      final pdfBytes = await PdfExport.generateIncidentReportBytes(
+      final outcome = await PdfExport.shareIncidentPdf(
         incident: _inc,
         reporterName: user['name']?.toString() ?? 'SAIL Safety Officer',
         reporterPno:  user['pno']?.toString()  ?? '',
         imageBytes: imageBytes,
+        text: channel == 'whatsapp' ? '' : _buildShareText(),
+        subject: 'SAIL Safety Lens: ${_inc['title'] ?? 'Safety Report'}',
       );
-
-      final text = _buildShareText();
-
-      if (!kIsWeb && pdfBytes.isNotEmpty) {
-        final tempDir = await getTemporaryDirectory();
-        final files = <XFile>[];
-
-        final pdfFile = File('${tempDir.path}/SafetyLens_${_inc['id']}.pdf');
-        await pdfFile.writeAsBytes(pdfBytes);
-        files.add(XFile(pdfFile.path, mimeType: 'application/pdf'));
-
-        if (imageBytes != null) {
-          final imgFile = File('${tempDir.path}/near_miss_photo_${_inc['id']}.jpg');
-          await imgFile.writeAsBytes(imageBytes);
-          files.add(XFile(imgFile.path, mimeType: 'image/jpeg'));
-        }
-
-        // IMPORTANT: Do NOT pass `text:` here. WhatsApp (and some other apps)
-        // silently DROP file attachments when the share intent also carries
-        // EXTRA_TEXT — the user ends up with only the text and no PDF. The PDF
-        // already contains all incident details, so we share files only. The
-        // descriptive caption is still available via "Share via Email" and the
-        // text-only WhatsApp path.
-        await Share.shareXFiles(files,
-          subject: 'Safety Report — ${_inc['plant'] ?? ''}');
-      } else {
-        // Native share — no wa.me URLs (they open new browser tabs)
-        await Share.share(text, subject: 'Safety Report — ${_inc['plant'] ?? ''}');
+      if (outcome == 'downloaded') {
+        _snack('PDF downloaded - attach it in '
+            '${channel == 'whatsapp' ? 'WhatsApp' : 'your email'}',
+            AppColors.accent);
       }
     } catch (e) {
       _snack('Share failed: $e', AppColors.red);
-      await Share.share(_buildShareText());
     }
   }
 
-  // ★ v31: Share via Email with PDF attachment
-  Future<void> _shareEmailWithPdf() async {
-    _snack('Generating PDF…', AppColors.accent);
-    try {
-      final user = await LocalDB.getCurrentUser() ?? {};
-      final imageBytes = await _resolveImageBytes();
-      final pdfBytes = await PdfExport.generateIncidentReportBytes(
-        incident: _inc,
-        reporterName: user['name']?.toString() ?? 'SAIL Safety Officer',
-        reporterPno:  user['pno']?.toString()  ?? '',
-        imageBytes: imageBytes,
-      );
+  Future<void> _shareWhatsAppWithPdf() => _sharePdf(channel: 'whatsapp');
 
-      final text = _buildShareText();
-      final subject = 'SAIL Safety Lens: ${_inc['title'] ?? 'Near Miss Report'}';
+  Future<void> _shareEmailWithPdf() => _sharePdf(channel: 'email');
 
-      if (!kIsWeb && pdfBytes.isNotEmpty) {
-        final tempDir = await getTemporaryDirectory();
-        final pdfFile = File('${tempDir.path}/SafetyLens_${_inc['id']}.pdf');
-        await pdfFile.writeAsBytes(pdfBytes);
-        await Share.shareXFiles(
-          [XFile(pdfFile.path, mimeType: 'application/pdf')],
-          text: text, subject: subject);
-      } else {
-        final url = Uri(scheme: 'mailto', query:
-          'subject=${Uri.encodeComponent(subject)}&body=${Uri.encodeComponent(text)}');
-        try {
-          if (await canLaunchUrl(url)) { await launchUrl(url); }
-          else { await Share.share(text, subject: subject); }
-        } catch (_) { await Share.share(text, subject: subject); }
-      }
-    } catch (e) { _snack('Email share failed: $e', AppColors.red); }
-  }
-
-  // ★ v31: Direct WhatsApp share (text + image, no PDF)
-  Future<void> _shareWhatsAppDirect() async {
-    // ★ v32: Use native share intent — never wa.me URLs (those open new tabs)
-    try {
-      final text = _buildShareText();
-      final imageBytes = await _resolveImageBytes();
-
-      if (!kIsWeb && imageBytes != null) {
-        final tempDir = await getTemporaryDirectory();
-        final imgFile = File('${tempDir.path}/near_miss_photo_${_inc['id']}.jpg');
-        await imgFile.writeAsBytes(imageBytes);
-        await Share.shareXFiles(
-          [XFile(imgFile.path, mimeType: 'image/jpeg')],
-          text: text,
-          subject: 'Near Miss Report — ${_inc['plant'] ?? ''}');
-      } else {
-        // Native share — user picks WhatsApp from share sheet
-        await Share.share(text, subject: 'Near Miss Report — ${_inc['plant'] ?? ''}');
-      }
-    } catch (e) { _snack('Share failed: $e', AppColors.red); }
-  }
+  Future<void> _shareWhatsAppDirect() => _sharePdf(channel: 'whatsapp');
 
   String _buildShareText() {
     final title    = _inc['title']?.toString() ?? 'Near Miss Report';
