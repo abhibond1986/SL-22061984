@@ -1,5 +1,12 @@
 # Safety Lens — current status
 
+> **2026-10-03 (rev. 2) — PDF masthead.** Masthead is now titled with the
+> Plant / Unit (codes like "BSL" expand to the plant name) and painted in the
+> risk colour; bare SAIL emblem (new `assets/images/sail_emblem*.png`) replaces
+> the app-icon tile; PDF severity palette aligned with the app (HIGH red,
+> MEDIUM amber); line-of-fire strip and metric printed only when a line of
+> fire exists. See AUDIT_2026-10-03_PDF_REPORT_AND_LOG.md, "Revision 2".
+
 > **2026-10-03 — PDF report + incident log.** Incident log now pages every
 > Supabase row and shows a sync strip (reports from all devices); PDF hazard
 > boxes are halo-stroked with outside tags and close-ups; every located line of

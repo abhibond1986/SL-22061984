@@ -26,12 +26,16 @@ import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as ht
 
 class PdfExport {
   static final PdfColor _sailBlue    = PdfColor.fromHex('#0D47A1');
-  static final PdfColor _critCol     = PdfColor.fromHex('#C62828');
-  static final PdfColor _critBg      = PdfColor.fromHex('#FFEBEE');
-  static final PdfColor _highCol     = PdfColor.fromHex('#E65100');
-  static final PdfColor _highBg      = PdfColor.fromHex('#FFF3E0');
-  static final PdfColor _medCol      = PdfColor.fromHex('#00838F');
-  static final PdfColor _medBg       = PdfColor.fromHex('#E0F7FA');
+  // ★ 2026-10-03: aligned with the app's risk colours (SeverityBadge in
+  // main.dart: CRITICAL dark red, HIGH red, MEDIUM amber, LOW green), in
+  // print-safe shades that keep white text legible (>= 4.5:1) on the
+  // severity-coloured masthead. HIGH was orange and MEDIUM teal before.
+  static final PdfColor _critCol     = PdfColor.fromHex('#8E1B1B');
+  static final PdfColor _critBg      = PdfColor.fromHex('#F9E7E7');
+  static final PdfColor _highCol     = PdfColor.fromHex('#C62828');
+  static final PdfColor _highBg      = PdfColor.fromHex('#FFEBEE');
+  static final PdfColor _medCol      = PdfColor.fromHex('#B45309');
+  static final PdfColor _medBg       = PdfColor.fromHex('#FFF4E0');
   static final PdfColor _lowCol      = PdfColor.fromHex('#2E7D32');
   static final PdfColor _lowBg       = PdfColor.fromHex('#E8F5E9');
   static final PdfColor _textDark    = PdfColor.fromHex('#212121');
@@ -60,13 +64,22 @@ class PdfExport {
       DateTime.parse(incident['date'] ?? DateTime.now().toIso8601String()));
 
     // ★ v28: Load SAIL Safety Lens logo for PDF header
+    // ★ 2026-10-03: the bare SAIL emblem (transparent background), not the
+    // app-icon tile, which put a white rounded square inside the masthead.
+    // The masthead is now severity-coloured, so it carries the WHITE emblem;
+    // the continuation header on pages 2+ is white, so it gets the blue one.
     pw.MemoryImage? logoImage;
     try {
-      final logoData = await rootBundle.load('assets/images/app_icon.png');
-      logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
-      _cachedLogo = logoImage; // Cache for page headers (pages 2+)
+      final d = await rootBundle.load('assets/images/sail_emblem_white.png');
+      logoImage = pw.MemoryImage(d.buffer.asUint8List());
     } catch (_) {
-      // Logo load failed — will use text fallback
+      // Missing asset: fall back to the "SAIL" text mark in the banner.
+    }
+    try {
+      final d = await rootBundle.load('assets/images/sail_emblem.png');
+      _cachedLogo = pw.MemoryImage(d.buffer.asUint8List());
+    } catch (_) {
+      _cachedLogo = null;
     }
 
     Uint8List? imgBytes = imageBytes;
@@ -240,7 +253,7 @@ class PdfExport {
     pdf.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
       margin: const pw.EdgeInsets.fromLTRB(32, 32, 32, 32),
-      header: (ctx) => _pageHeader(ctx.pageNumber > 1),
+      header: (ctx) => _pageHeader(ctx.pageNumber > 1, _plantName(incident)),
       footer: (ctx) => _pageFooter(
           ctx.pageNumber, ctx.pagesCount, _refNo(incident), dateStr),
       // ─── ONE-PAGE LAYOUT ───────────────────────────────────────────────
@@ -360,7 +373,7 @@ class PdfExport {
   // ─── PAGE CHROME ─────────────────────────────────────────────────────────
   static pw.MemoryImage? _cachedLogo; // ★ v28: cache for page headers
 
-  static pw.Widget _pageHeader(bool show) {
+  static pw.Widget _pageHeader(bool show, String plantName) {
     if (!show) return pw.SizedBox();
     return pw.Container(
       padding: const pw.EdgeInsets.only(bottom: 6),
@@ -372,7 +385,7 @@ class PdfExport {
         children: [
           pw.Row(children: [
             if (_cachedLogo != null)
-              pw.Container(width: 20, height: 20,
+              pw.Container(width: 18, height: 18,
                 child: pw.Image(_cachedLogo!, fit: pw.BoxFit.contain))
             else
               pw.Container(width: 18, height: 18, color: _sailBlue,
@@ -384,7 +397,7 @@ class PdfExport {
             pw.Text('SAFETY LENS', style: pw.TextStyle(
               color: _sailBlue, fontSize: 8, fontWeight: pw.FontWeight.bold)),
           ]),
-          pw.Text('Workplace Hazard Report  (continued)', style: pw.TextStyle(
+          pw.Text('${_safe(plantName)}  (continued)', style: pw.TextStyle(
             fontSize: 7, color: _steel)),
         ],
       ),
@@ -594,8 +607,29 @@ class PdfExport {
   static bool _isRated(String s) =>
       const {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'}.contains(s.toUpperCase());
 
+  /// The Plant / Unit the report came from, used as the report title. A bare
+  /// plant code ("BSL") is expanded to its name ("Bokaro Steel Plant"); any
+  /// other value is shown as stored. Falls back to a generic title only when
+  /// the field is empty.
+  static String _plantName(Map<String, dynamic> inc) {
+    final raw = (inc['plant']?.toString() ?? '').trim();
+    if (raw.isEmpty || raw == '—' || raw == '-') return 'Workplace Hazard Report';
+    final q = raw.toUpperCase();
+    for (final p in AdminMasterData.sailPlants) {
+      if (q == p['code']!.toUpperCase()) return p['name']!;
+    }
+    return raw;
+  }
+
+  /// [c] mixed toward white by [t] (0 = c, 1 = white). Used for secondary
+  /// text on the severity-coloured masthead so it stays in the band's hue.
+  static PdfColor _tint(PdfColor c, double t) => PdfColor(
+      c.red + (1 - c.red) * t,
+      c.green + (1 - c.green) * t,
+      c.blue + (1 - c.blue) * t);
+
   // ─── BANNER (★ 2026-10-03 redesign) ─────────────────────────────────────
-  // One navy masthead + a severity-coloured rule + a white title block, in
+  // One severity-coloured masthead + a white title block, in
   // place of the old two stacked colour bands. The severity is stated once,
   // in a single badge, and the report type and reference sit in the
   // masthead where a filing clerk looks for them.
@@ -606,66 +640,62 @@ class PdfExport {
     final title = _safe(inc['title']?.toString().trim().isNotEmpty == true
         ? inc['title'].toString().trim()
         : (isAi ? 'AI Hazard Scan' : 'Near Miss Report'));
-    final plant = _safe(inc['plant']?.toString() ?? '');
+    // ★ 2026-10-03 (user request): the masthead is titled with the reporting
+    // Plant / Unit, and is painted in the RISK-LEVEL colour (green LOW, teal
+    // MEDIUM, orange HIGH, red CRITICAL, grey when not rated) instead of navy,
+    // so the rating reads from across a room. Plant therefore leaves the
+    // sub-line below, which would otherwise repeat it.
+    final plantTitle = _safe(_plantName(inc));
     final loc = _safe(inc['location']?.toString() ?? '');
-    final where = [plant, loc].where((s) => s.trim().isNotEmpty).join('  ·  ');
+    final where = loc.trim();
+    final soft = _tint(sc, 0.72);   // secondary text on the coloured band
+    final softer = _tint(sc, 0.82);
     return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
       pw.Container(
         padding: const pw.EdgeInsets.fromLTRB(14, 10, 14, 10),
         decoration: pw.BoxDecoration(
-          color: _navyDeep,
+          color: sc,
           borderRadius: const pw.BorderRadius.only(
             topLeft: pw.Radius.circular(4), topRight: pw.Radius.circular(4))),
         child: pw.Row(children: [
+          // The emblem alone, no tile or disc behind it.
           logoImage != null
-            ? pw.Container(
-                width: 34, height: 34,
-                padding: const pw.EdgeInsets.all(2),
-                decoration: const pw.BoxDecoration(
-                  color: PdfColors.white, shape: pw.BoxShape.circle),
+            ? pw.SizedBox(width: 36, height: 36,
                 child: pw.Image(logoImage, fit: pw.BoxFit.contain))
-            : pw.Container(width: 34, height: 34,
-                decoration: const pw.BoxDecoration(
-                  color: PdfColors.white, shape: pw.BoxShape.circle),
-                alignment: pw.Alignment.center,
-                child: pw.Text('SAIL', style: pw.TextStyle(color: _sailBlue,
-                  fontSize: 9, fontWeight: pw.FontWeight.bold))),
-          pw.SizedBox(width: 11),
+            : pw.SizedBox(width: 36, height: 36,
+                child: pw.Center(child: pw.Text('SAIL', style: pw.TextStyle(
+                  color: PdfColors.white, fontSize: 10,
+                  fontWeight: pw.FontWeight.bold)))),
+          pw.SizedBox(width: 12),
           pw.Expanded(child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
               pw.Text('STEEL AUTHORITY OF INDIA LIMITED', style: pw.TextStyle(
-                color: PdfColor.fromHex('#9FC2F5'), fontSize: 6.5,
+                color: soft, fontSize: 6.5,
                 fontWeight: pw.FontWeight.bold, letterSpacing: 1.4)),
               pw.SizedBox(height: 2),
-              pw.Text('Workplace Hazard Report', style: pw.TextStyle(
+              pw.Text(plantTitle, maxLines: 1, style: pw.TextStyle(
                 color: PdfColors.white, fontSize: 15,
                 fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 1.5),
               pw.Text('Safety Lens  ·  IS 14489:2018  ·  Factories Act 1948',
-                style: pw.TextStyle(
-                  color: PdfColor.fromHex('#BBD3F7'), fontSize: 6.5)),
+                style: pw.TextStyle(color: softer, fontSize: 6.5)),
             ])),
           pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
             pw.Container(
               padding: const pw.EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: pw.BoxDecoration(
                 borderRadius: _r3,
-                border: pw.Border.all(
-                  color: PdfColor.fromHex('#9FC2F5'), width: 0.7)),
+                border: pw.Border.all(color: soft, width: 0.7)),
               child: pw.Text(isAi ? 'AI HAZARD SCAN' : 'NEAR MISS REPORT',
                 style: pw.TextStyle(color: PdfColors.white, fontSize: 7,
                   fontWeight: pw.FontWeight.bold, letterSpacing: 0.8))),
             pw.SizedBox(height: 4),
             pw.Text('REF.  ${_refNo(inc)}', style: pw.TextStyle(
-              color: PdfColor.fromHex('#BBD3F7'), fontSize: 7,
-              letterSpacing: 0.6)),
+              color: softer, fontSize: 7, letterSpacing: 0.6)),
           ]),
         ]),
       ),
-      // Severity rule: the band colour runs the full width of the masthead,
-      // so the rating is visible even on a thumbnail of the page.
-      pw.Container(height: 3, color: sc),
       pw.Container(
         padding: const pw.EdgeInsets.fromLTRB(2, 8, 0, 7),
         decoration: pw.BoxDecoration(
@@ -784,7 +814,9 @@ class PdfExport {
       },
       children: [
         pw.TableRow(children: [
-          cell('Plant / Unit', inc['plant']?.toString() ?? '', hi: true),
+          cell('Plant / Unit',
+              (inc['plant']?.toString() ?? '').trim().isEmpty
+                  ? '' : _plantName(inc), hi: true),
           cell('Department', inc['dept']?.toString() ?? ''),
           cell('Location', inc['location']?.toString() ?? ''),
           cell('Date & Time', date, hi: true),
@@ -886,9 +918,8 @@ class PdfExport {
     // small to read. So the same one line goes UNDER the picture, at a font size
     // that survives printing, and the image is left alone. One entry only —
     // _buildAnnotatedPhoto draws a single path, the worst one.
-    // One legend line per drawn path (see _allLofs), and — new — an explicit
-    // "none identified" line when there is no path, so the reader can tell
-    // "no line of fire" apart from "the report doesn't cover line of fire".
+    // One legend line per drawn path (see _allLofs). Nothing at all is
+    // printed when there is no line of fire (user request 2026-10-03).
     final lofLines = [
       for (final e in _allLofs(hazards))
         _safe(LineOfFireGeometry.caption(e.index, e.lof, arrow: '->')),
@@ -1023,14 +1054,11 @@ class PdfExport {
               child: pw.Row(children: [
                 metric('$count', count == 1 ? 'Hazard' : 'Hazards'),
                 metric('$bboxedCount', 'Marked on photo'),
-                metric(
-                  lofLocated > 0
-                      ? '$lofLocated'
-                      : claimedUnlocated.isNotEmpty ? '?' : 'None',
-                  'Line of fire',
-                  color: (lofLocated > 0 || claimedUnlocated.isNotEmpty)
-                      ? _lofHot
-                      : _lowCol),
+                // Only when there IS a line of fire (user request
+                // 2026-10-03): no "None" figure otherwise.
+                if (!lofNone)
+                  metric(lofLocated > 0 ? '$lofLocated' : '?',
+                    'Line of fire', color: _lofHot),
                 metric('$verifyCount', 'To verify'),
               ])),
           // Sacrificial 1pt spacer: under TableCellVerticalAlignment.full the
@@ -1043,7 +1071,9 @@ class PdfExport {
       pw.Container(
         padding: const pw.EdgeInsets.all(5),
         child: annotatedPhoto),
-      if (assessed)
+      // Printed only when a line of fire was found (user request
+      // 2026-10-03). The "none identified" variant was dropped.
+      if (assessed && !lofNone)
         pw.Container(
           width: double.infinity,
           margin: const pw.EdgeInsets.fromLTRB(5, 0, 5, 0),
@@ -1052,15 +1082,10 @@ class PdfExport {
           // #B3261E text (5.7:1). Pale green when no path was found.
           decoration: pw.BoxDecoration(
             borderRadius: _r3,
-            color: PdfColor.fromHex(lofNone ? '#EEF6EE' : '#FDECEA')),
+            color: PdfColor.fromHex('#FDECEA')),
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: lofNone
-              ? [pw.Text('LINE OF FIRE: none identified in this photo',
-                  style: pw.TextStyle(fontSize: 6.8,
-                    fontWeight: pw.FontWeight.bold,
-                    color: PdfColor.fromHex('#2E7D32')))]
-              : [
+            children: [
                   pw.Text('LINE OF FIRE  (red arrow / dashed zone on photo)',
                     style: pw.TextStyle(fontSize: 6.2,
                       fontWeight: pw.FontWeight.bold,
@@ -2322,7 +2347,9 @@ class PdfExport {
     pdf.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
       margin: const pw.EdgeInsets.all(28),
-      header: (ctx) => _pageHeader(ctx.pageNumber > 1),
+      header: (ctx) => _pageHeader(ctx.pageNumber > 1,
+          (plant ?? '').trim().isNotEmpty
+              ? plant!.trim() : 'Consolidated Incident Report'),
       footer: (ctx) => _pageFooter(ctx.pageNumber, ctx.pagesCount,
           reporterName, DateFormat('dd MMM yyyy').format(now)),
       build: (ctx) => [
