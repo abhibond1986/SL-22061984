@@ -60,6 +60,21 @@ class PdfExport {
     String reporterPno = '',
     Uint8List? imageBytes,
   }) async {
+    // ★ 2026-10-04: the report names the person who FILED the incident, not
+    // whoever happens to be generating the PDF. Callers such as the incident
+    // detail screen passed the logged-in viewer, so an admin downloading
+    // Ravi Shankar's (DSP) report got "Reported by: System Admin / ADMIN001".
+    // The incident's own reportedBy/reportedByPno wins whenever it is present;
+    // the parameters stay only as a fallback for records that lack them.
+    final filedBy = (incident['reportedBy'] ?? incident['reporterName'] ??
+            incident['reported_by'] ?? '')
+        .toString().trim();
+    if (filedBy.isNotEmpty) {
+      reporterName = filedBy;
+      reporterPno = (incident['reportedByPno'] ?? incident['reporterPno'] ??
+              incident['reported_by_pno'] ?? '')
+          .toString().trim();
+    }
     final pdf = pw.Document();
     final dateStr = DateFormat('dd MMM yyyy, HH:mm').format(
       DateTime.parse(incident['date'] ?? DateTime.now().toIso8601String()));
@@ -659,7 +674,9 @@ class PdfExport {
   static pw.Widget _banner(Map<String, dynamic> inc, String sev, bool isAi,
       dynamic score, dynamic conf, pw.MemoryImage? logoImage) {
     final rated = _isRated(sev);
-    final sc = rated ? _getSevCol(sev) : _steel;
+    // Lighter band than the body's severity ink (user request 2026-10-04:
+    // "a little less dark"). See [_mastCol].
+    final sc = rated ? _mastCol(sev) : PdfColor.fromHex('#6B7C93');
     final title = _safe(inc['title']?.toString().trim().isNotEmpty == true
         ? inc['title'].toString().trim()
         : (isAi ? 'AI Hazard Scan' : 'Near Miss Report'));
@@ -669,10 +686,11 @@ class PdfExport {
     // so the rating reads from across a room. Plant therefore leaves the
     // sub-line below, which would otherwise repeat it.
     final plantTitle = _safe(_plantName(inc));
-    final loc = _safe(inc['location']?.toString() ?? '');
-    final where = loc.trim();
-    final soft = _tint(sc, 0.72);   // secondary text on the coloured band
-    final softer = _tint(sc, 0.82);
+    final loc = _safe(_locationText(inc)).trim();
+    final where = loc == 'Not recorded' ? '' : loc;
+    // Near-white: on the lighter bands a stronger tint loses contrast.
+    final soft = _tint(sc, 0.86);   // secondary text on the coloured band
+    final softer = _tint(sc, 0.90);
     return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
       pw.Container(
         padding: const pw.EdgeInsets.fromLTRB(14, 10, 14, 10),
@@ -849,7 +867,7 @@ class PdfExport {
               (inc['plant']?.toString() ?? '').trim().isEmpty
                   ? '' : _plantName(inc), hi: true),
           cell('Department', inc['dept']?.toString() ?? ''),
-          cell('Location', inc['location']?.toString() ?? ''),
+          cell('Location', _locationText(inc)),
           cell('Date & Time', date, hi: true),
         ]),
         pw.TableRow(children: [
@@ -2106,6 +2124,26 @@ class PdfExport {
         ]));
   }
 
+  /// The LOCATION shown in the report. AI scans used to save the placeholder
+  /// "AI scan result — <section>" as their location even when the photo
+  /// carried GPS. A placeholder (or a blank) is now replaced by the GPS place
+  /// name or, failing that, the coordinates; a real typed location wins.
+  static String _locationText(Map<String, dynamic> inc) {
+    final raw = (inc['location']?.toString() ?? '').trim();
+    final placeholder = raw.isEmpty || raw.startsWith('AI scan result');
+    if (!placeholder) return raw;
+    final addr = (inc['locationAddress']?.toString() ?? '').trim();
+    if (addr.isNotEmpty) return addr;
+    final lat = inc['latitude'], lon = inc['longitude'];
+    if (lat != null && lon != null) {
+      return '${_toDouble(lat).toStringAsFixed(5)}, '
+          '${_toDouble(lon).toStringAsFixed(5)}';
+    }
+    // No GPS at all: the section is still more useful than the placeholder.
+    final sec = (inc['detectedSection']?.toString() ?? '').trim();
+    return sec.isEmpty || sec == 'GENERAL' ? 'Not recorded' : sec;
+  }
+
   static double _toDouble(dynamic val) {
     if (val is double) return val;
     if (val is int) return val.toDouble();
@@ -2214,6 +2252,21 @@ class PdfExport {
       clean.add(line);
     }
     return clean.join(' ').replaceAll('Summary: ', '').trim();
+  }
+
+  /// Masthead band + RISK LEVEL badge colour. One step lighter than
+  /// [_getSevCol] (2026-10-04, user: "little less dark ... less red, less
+  /// green"), still dark enough for the white 15pt bold plant title:
+  /// CRITICAL #C62828 (5.6:1), HIGH #E04848 (~4.0:1), MEDIUM #D07A12 (~3.1:1),
+  /// LOW #43A047 (~3.1:1). All >= 3:1, the WCAG floor for large/bold text,
+  /// which is all the band carries. Body text keeps the darker _getSevCol.
+  static PdfColor _mastCol(String s) {
+    switch (s.toUpperCase()) {
+      case 'CRITICAL': return PdfColor.fromHex('#C62828');
+      case 'HIGH':     return PdfColor.fromHex('#E04848');
+      case 'MEDIUM':   return PdfColor.fromHex('#D07A12');
+      default:         return PdfColor.fromHex('#43A047');
+    }
   }
 
   static PdfColor _getSevCol(String s) {

@@ -346,8 +346,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       final imageBytes = await _resolveImageBytes();
       await PdfExport.downloadOrShareIncident(
         incident: _inc,
-        reporterName: user['name']?.toString() ?? Branding.defaultReporter,
-        reporterPno:  user['pno']?.toString()  ?? '',
+        // The incident's reporter, NOT the viewer (PdfExport also enforces it).
+        reporterName: _inc['reportedBy']?.toString() ??
+            user['name']?.toString() ?? Branding.defaultReporter,
+        reporterPno: _inc['reportedByPno']?.toString() ??
+            user['pno']?.toString() ?? '',
         imageBytes: imageBytes,
       );
     } catch (e) { _snack('PDF failed: $e', AppColors.red); }
@@ -366,8 +369,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       final imageBytes = await _resolveImageBytes();
       final outcome = await PdfExport.shareIncidentPdf(
         incident: _inc,
-        reporterName: user['name']?.toString() ?? Branding.defaultReporter,
-        reporterPno:  user['pno']?.toString()  ?? '',
+        // The incident's reporter, NOT the viewer (PdfExport also enforces it).
+        reporterName: _inc['reportedBy']?.toString() ??
+            user['name']?.toString() ?? Branding.defaultReporter,
+        reporterPno: _inc['reportedByPno']?.toString() ??
+            user['pno']?.toString() ?? '',
         imageBytes: imageBytes,
         text: channel == 'whatsapp' ? '' : _buildShareText(),
         subject: '${Branding.appTitle}: ${_inc['title'] ?? 'Safety Report'}',

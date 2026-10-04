@@ -626,7 +626,12 @@ class _AIScanTabState extends State<AIScanTab> {
   /// [jobId] is the analysis this photo belongs to; see [_stillShowing].
   Future<void> _captureLocationSmart(Uint8List exifBytes,
       Uint8List displayBytes, ImageSource source, String? jobId) async {
-    if (source == ImageSource.gallery) {
+    // ★ 2026-10-04: EXIF GPS is tried for EVERY photo, not only gallery picks.
+    // On the web build (safetylens.in) a "camera" capture is a file from the
+    // phone's own camera app, and it often carries GPS in EXIF. Where the
+    // picture has a location, that is where the hazard IS — better than where
+    // the device is now. Device GPS remains the fallback.
+    {
       try {
         final exifLocation = await GeoService.getLocationFromExif(exifBytes).timeout(
           const Duration(seconds: 5), onTimeout: () => null);
@@ -2527,7 +2532,11 @@ class _AIScanTabState extends State<AIScanTab> {
                          : detectedSection,
       'detectedSection': detectedSection,
       'sectionCues':     sectionCues,
-      'location':        'AI scan result — $detectedSection',
+      // ★ 2026-10-04: the GPS place name (from the photo's EXIF or the
+      // device) when one was captured; the placeholder only when there is none.
+      'location':        _locationController.text.trim().isNotEmpty
+                         ? _locationController.text.trim()
+                         : 'AI scan result — $detectedSection',
       'severity':        _overallRisk,
       // Was `?? 'Multiple causes'`, which is not a member of the WSA-13 master
       // list, so it landed in the admin panel's "WSA-13 Pareto — Root Causes"
