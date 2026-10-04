@@ -13,6 +13,7 @@ import '../services/sync_service.dart';
 import '../services/local_db.dart';
 import '../utils/sail_logo.dart';
 import 'brand_logo.dart';
+import 'notification_bell.dart';
 
 class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
   /// Global "return to Home" hook. The parent shell (HomeScreen /
@@ -535,6 +536,9 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
               ),
+
+            // Notifications — new case assignments (see notification_bell.dart)
+            const NotificationBell(),
 
             // User avatar
             GestureDetector(

@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 
 import '../widgets/user_picker.dart';
 import 'admin_audit.dart';
+import 'assignment_notifications.dart';
 import 'assign_scope.dart';
 import 'local_db.dart';
 import 'plant_scope.dart';
@@ -111,6 +112,9 @@ class IncidentAssign {
       return AssignResult(AssignOutcome.failed, 'Could not save: $e');
     }
     SyncService.pushIncident(inc).catchError((_) => false);
+    // Local saves do not bump RealtimeSync.incidentsRevision; refresh the bell
+    // so a self-assignment (or a shared terminal) shows straight away.
+    AssignmentNotifications.refresh();
 
     try {
       final actor = (await LocalDB.getCurrentUser())?['username']?.toString() ??
