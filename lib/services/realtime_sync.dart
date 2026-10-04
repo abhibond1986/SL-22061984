@@ -23,6 +23,7 @@ import 'supabase_service.dart';
 import 'local_db.dart';
 import 'app_logger.dart';
 import 'admin_master_data.dart';
+import 'sync_service.dart';
 
 class RealtimeSync {
   RealtimeSync._();
@@ -138,6 +139,8 @@ class RealtimeSync {
         default:
           return;
       }
+      // A change pushed by the server is proof the server is reachable.
+      SyncService.lastServerContact = DateTime.now();
       // Tell every listening screen to refresh from LocalDB.
       incidentsRevision.value++;
     } catch (e, s) {

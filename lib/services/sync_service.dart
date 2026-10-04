@@ -1,7 +1,7 @@
 import 'dart:async' show Completer;
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint, visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db.dart';
@@ -1165,9 +1165,73 @@ class SyncService {
     final predecessor = _syncLock;
     final release = Completer<void>();
     _syncLock = release.future;
+    // ★ 2026-10-04 WATCHDOG. Without it, one run that never completes holds the
+    // lock forever and every later sync — including the user's "Retry" — queues
+    // behind it. That is exactly what happened on phones: iOS Safari freezes a
+    // background tab, a request in flight at that moment may never resolve, and
+    // several steps (users, master data, KB) had no timeout of their own. The
+    // log then said "Offline" for the rest of the session although the network
+    // was fine. A run that overruns now fails with a TimeoutException and frees
+    // the lock; the stuck future is abandoned (its remaining work is local and
+    // idempotent, so finishing late is harmless).
     return predecessor
-        .then((_) => body())
-        .whenComplete(release.complete);
+        .then((_) => body().timeout(runWatchdog))
+        .whenComplete(() {
+      if (!release.isCompleted) release.complete();
+    });
+  }
+
+  /// Longest a single locked sync run may take before the lock is released.
+  /// Not const only so a test can shorten it.
+  @visibleForTesting
+  static Duration runWatchdog = const Duration(seconds: 75);
+
+  @visibleForTesting
+  static Future<T> debugRunExclusive<T>(Future<T> Function() body) =>
+      _runExclusive(body);
+
+  /// Per-request ceiling for the secondary sync steps (users, master data).
+  static const Duration _kStepTimeout = Duration(seconds: 25);
+
+  /// When the incidents table last answered. "Am I online?" is answered from
+  /// this, not from whether the whole fullSync succeeded — a slow user-list or
+  /// master-data step must not make the log claim the device is offline.
+  static DateTime? lastServerContact;
+
+  /// Human-readable reason for the last failed fullSync ('' after a success).
+  static String lastSyncError = '';
+
+  /// True when the server has answered within [within].
+  static bool serverReachedWithin(Duration within) {
+    final t = lastServerContact;
+    return t != null && DateTime.now().difference(t) < within;
+  }
+
+  static DateTime? _lastKbSync;
+  static bool _kbSyncRunning = false;
+
+  /// Knowledge-base pull, OFF the critical path and at most every 10 minutes.
+  /// The KB is ~2.7 MB per pull; it used to run inside every fullSync, which on
+  /// a phone added seconds to each sync and could push it past the log's
+  /// timeout. Nothing in the incident reconcile depends on it.
+  static void _kickKnowledgeSync() {
+    if (_kbSyncRunning) return;
+    final last = _lastKbSync;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 10)) {
+      return;
+    }
+    _kbSyncRunning = true;
+    () async {
+      try {
+        await syncKnowledgeBase().timeout(const Duration(seconds: 90));
+        _lastKbSync = DateTime.now();
+      } catch (_) {
+        // Best-effort; retried on a later sync.
+      } finally {
+        _kbSyncRunning = false;
+      }
+    }();
   }
 
   /// True when a recent successful sync can stand in for a new one.
@@ -1277,6 +1341,8 @@ class SyncService {
       if (!force && _syncIsFresh(userKey)) return _throttledResult();
 
       final result = await _fullSyncUnguarded();
+      lastSyncError =
+          result['ok'] == true ? '' : (result['error']?.toString() ?? 'Sync failed');
       // Only a genuine success refreshes the window. A failed sync that set it
       // would lock the app out of retrying for 90s — exactly when it most needs
       // to retry.
@@ -1334,6 +1400,7 @@ class SyncService {
       final pushed = await _drainPendingQueueUnguarded();
 
       final serverRows = await SupabaseService.fetchIncidentsOrNull();
+      if (serverRows != null) lastServerContact = DateTime.now();
       if (serverRows == null) {
         // Couldn't reach the server — do NOT touch local data.
         return {
@@ -1422,21 +1489,37 @@ class SyncService {
       }
       await LocalDB.replaceAllIncidents(localMap.values.toList());
 
-      // Refresh cached users too.
-      final users = await fetchUsers();
-      if (users.isNotEmpty) await LocalDB.cacheUsers(users);
+      // ── Secondary steps. The incident set above is what this sync is FOR;
+      // everything below is best-effort with its own timeout, so a slow or
+      // failing step can no longer turn a good incident pull into "Offline".
+      var users = const <Map<String, dynamic>>[];
+      try {
+        users = await fetchUsers().timeout(_kStepTimeout);
+      } catch (e) {
+        debugPrint('[SyncService] users refresh skipped: $e');
+      }
 
       // Refresh master data (plants, departments, severities, statuses, WSA
       // causes, observation types, AI keys). Without this, "Sync Now" left the
       // device on stale lists and the frontend deviated from the admin panel
       // until the next cold start.
-      final masterUpdated = await AdminMasterData.syncFromBackend();
+      var masterUpdated = false;
+      try {
+        masterUpdated =
+            await AdminMasterData.syncFromBackend().timeout(_kStepTimeout);
+      } catch (e) {
+        debugPrint('[SyncService] master-data refresh skipped: $e');
+      }
 
-      // ★ Also sync KB docs during full sync — previously only synced at
-      // startup, so mid-session admin uploads were invisible to other devices.
-      try { await syncKnowledgeBase(); } catch (_) {}
+      // ★ KB docs: still refreshed so mid-session admin uploads reach other
+      // devices, but in the background — see [_kickKnowledgeSync].
+      _kickKnowledgeSync();
 
-      await _markSyncTime();
+      try {
+        await _markSyncTime();
+      } catch (_) {
+        // A full browser storage must not fail a sync that has already landed.
+      }
       return {
         'ok': true,
         // `pushed` is the queue drain; `uploadedBacklog` is the local-only

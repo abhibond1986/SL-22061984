@@ -20,7 +20,8 @@ class IncidentLogTab extends StatefulWidget {
   State<IncidentLogTab> createState() => _IncidentLogTabState();
 }
 
-class _IncidentLogTabState extends State<IncidentLogTab> {
+class _IncidentLogTabState extends State<IncidentLogTab>
+    with WidgetsBindingObserver {
   List<Map<String, dynamic>> _all = [];
   bool _loading = true;
   // Server-sync state for the strip above the list. See _syncAndLoad.
@@ -163,18 +164,42 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
     // Live refresh when the admin edits plants/departments/severities/statuses.
     AdminMasterData.revision.addListener(_onRealtime);
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// Phone browsers freeze a background tab; coming back is the moment a
+  /// stale "can't reach server" is most likely wrong, so check again.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted && !_syncing &&
+        _lastSyncOk != true) {
+      _syncAndLoad(force: true);
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
     AdminMasterData.revision.removeListener(_onRealtime);
     super.dispose();
   }
 
   void _onRealtime() {
-    if (mounted) _load();
+    if (!mounted) return;
+    // A sync that finished after our timeout (or a realtime event) proves the
+    // server is reachable — clear a stale "can't reach server" strip.
+    if (_lastSyncOk == false && SyncService.serverReachedWithin(_kOnlineWindow)) {
+      setState(() {
+        _lastSyncOk = true;
+        _lastSyncAt = SyncService.lastServerContact;
+      });
+    }
+    _load();
   }
+
+  /// How recent a successful server answer must be to count as "online".
+  static const _kOnlineWindow = Duration(minutes: 3);
 
   /// ★ v35: Apply pending filters set by Home tab navigation
   void _applyPendingFilters() {
@@ -219,8 +244,17 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                 ?.toLocal() ??
             (res['skipped'] == null ? DateTime.now() : _lastSyncAt);
       }
-    } catch (_) {
+    } catch (e) {
       _lastSyncOk = false;
+      SyncService.lastSyncError = e.toString();
+    }
+    // The verdict is about the SERVER, not about every step of the sync: if
+    // the incidents table answered recently, this device is online and the
+    // list is current, even when a secondary step (users, master data) or the
+    // overall timer gave up.
+    if (_lastSyncOk != true && SyncService.serverReachedWithin(_kOnlineWindow)) {
+      _lastSyncOk = true;
+      _lastSyncAt = SyncService.lastServerContact;
     }
     await _load();
     if (mounted) setState(() => _syncing = false);
@@ -543,7 +577,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       colour = const Color(0xFFE65100);
       icon = Icons.cloud_upload_outlined;
     } else if (_lastSyncOk == false) {
-      label = 'Offline — showing reports saved on this device';
+      label = "Can't reach the server — showing reports saved on this device";
       colour = const Color(0xFFE65100);
       icon = Icons.cloud_off_rounded;
     } else if (_lastSyncAt != null) {
@@ -562,10 +596,15 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
       child: Row(children: [
         Icon(icon, size: 14, color: colour),
         const SizedBox(width: 6),
-        Expanded(child: Text(label,
+        Expanded(child: Tooltip(
+          // The actual reason, so a persistent failure can be reported.
+          message: _lastSyncOk == false && SyncService.lastSyncError.isNotEmpty
+              ? SyncService.lastSyncError
+              : '',
+          child: Text(label,
             maxLines: 2, overflow: TextOverflow.ellipsis,
             style: TextStyle(color: colour, fontSize: 11,
-                fontWeight: FontWeight.w600))),
+                fontWeight: FontWeight.w600)))),
         if (showAction)
           TextButton(
             onPressed: () => _syncAndLoad(force: true),
