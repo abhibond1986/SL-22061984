@@ -1,5 +1,11 @@
 ## 2026-10-04
 
+- **PDF fixes: reporter, masthead, location.**
+  - The PDF now names the incident's own reporter, not the viewer. The detail screen had been passing the logged-in admin, so Ravi Shankar's DSP case printed "System Admin / ADMIN001".
+  - The masthead and risk badge use lighter `_mastCol` shades.
+  - EXIF GPS is now read for every photo, the captured place is saved as Location, and the PDF replaces the "AI scan result" placeholder with the GPS place or coordinates.
+  - See AUDIT_2026-10-04_PDF_REPORTER_LOCATION.md.
+
 - **The top header now uses the brand colours.** `UniversalAppBar` has an indigo→deep-teal gradient (`TopBarStyle` in nav_bar_style.dart) with white text and icons, a white language chip, a white avatar disc and an amber-300 bell when there are unread notifications. Mobile status-bar icons are light. See AUDIT_2026-10-04_TOP_BAR_COLOUR.md.
 
 - **Bottom nav bar is now transparent light blue.** It is frosted glass: a sky-100/200 tint at 50–62% opacity over the existing blur, so content shows through, with dark text and a white pill on the selected tab. The dark theme uses a translucent navy-blue. This replaces the solid indigo from earlier today. Only `lib/widgets/nav_bar_style.dart` changed. See section 3 of AUDIT_2026-10-04_SHEETS_BANNER_NAVBAR.md.
