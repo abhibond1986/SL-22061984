@@ -36,3 +36,16 @@ Evidence (`tools/navbar_render_test.dart`, which uses the same NavBarStyle calls
 - `dart analyze lib` gives 0 errors and 53 issues, the same as the baseline.
 - `navbar_render_test` passed 4/4.
 - A web redeploy is needed before the change appears on safetylens.in.
+
+## 3. Revision: transparent light-blue nav bar (user request, same day)
+
+The solid indigo band was replaced with translucent "frosted glass" in light blue. The only file changed is `lib/widgets/nav_bar_style.dart`. Both shells already use `extendBody: true` and the 16 px BackdropFilter blur, so no other code changed.
+
+| | Light theme | Dark theme |
+|---|---|---|
+| Tint | sky-100 → sky-200 (`#E0F2FE` → `#BAE6FD`) at 50–62% opacity | sky-900 → sky-950 (`#0C4A6E` → `#082F49`) at 45–60% opacity |
+| Top edge | White hairline | Sky hairline |
+| Unselected tabs | Slate `#334155` | Sky-200 |
+| Selected tab | White pill, sky-700 icon, bold sky-800 label | Sky-400 glass pill, white label |
+
+The renders put coloured incident cards **under** the bar, as the real shells do, so the see-through effect is visible. Reds and greens show through as a blur, and the labels stay readable over them. Results: `dart analyze` 0 errors (53, same as the baseline); `navbar_render_test` 4/4; PNGs `audit_2026-10-04/navbar_{light,dark}_{420,1000}.png` regenerated.

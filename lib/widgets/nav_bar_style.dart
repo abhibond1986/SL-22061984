@@ -5,27 +5,43 @@ import '../main.dart';
 /// shell (home_screen.dart) and the contractor shell
 /// (contractor_home_screen.dart) so the two can never drift apart again.
 ///
-/// 2026-10-04: the bar was a near-white indigo wash that read as "no colour".
-/// It is now a solid brand-indigo band. Unselected tabs are white at 78%, and
-/// the selected tab gets a white pill with an indigo icon and a bold white
-/// label. Measured contrast: white on #4F5BD5 is about 5.6:1, and the indigo
-/// icon on the white pill is about 5.2:1. Both clear WCAG AA.
+/// 2026-10-04 (rev 2, user request): a TRANSLUCENT light-blue "frosted glass"
+/// bar. Both shells use `extendBody: true` and wrap the bar in
+/// ClipRRect + BackdropFilter(blur 16), so page content scrolls visibly behind
+/// it, blurred and tinted light blue.
+///
+/// Readability on top of moving content: the tint is 50–62% opacity (dark 45–60%)
+/// and the blur flattens whatever is underneath, so the text sits on a stable
+/// pale-blue field. Unselected tabs use slate #334155 (about 8:1 on the light
+/// tint). The selected tab gets a white pill with a sky-700 (#0369A1) icon and
+/// a sky-800 label (about 6:1). Dark mode uses a translucent navy-blue tint
+/// with sky-200 text.
 class NavBarStyle {
   NavBarStyle._();
 
+  static const Color _sky700 = Color(0xFF0369A1);
+  static const Color _sky800 = Color(0xFF075985);
+
   static BoxDecoration decoration(SL sl) => BoxDecoration(
         gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
           colors: sl.isDark
-              ? const [Color(0xFF2B3275), Color(0xFF1A1E4A)] // deep indigo
-              : const [Color(0xFF5B67E0), Color(0xFF3B45B5)], // brand indigo
+              ? [
+                  const Color(0xFF0C4A6E).withOpacity(0.45), // sky-900 glass
+                  const Color(0xFF082F49).withOpacity(0.60),
+                ]
+              : [
+                  const Color(0xFFE0F2FE).withOpacity(0.50), // sky-100 glass
+                  const Color(0xFFBAE6FD).withOpacity(0.62), // sky-200
+                ],
         ),
-        // A light top hairline separates the band from page content. (No
-        // shadow: the bar sits inside a ClipRRect, which would clip it.)
+        // A bright hairline on top gives the glass an edge against content.
         border: Border(
           top: BorderSide(
-              color: Colors.white.withOpacity(sl.isDark ? 0.10 : 0.25)),
+              color: sl.isDark
+                  ? const Color(0xFF7DD3FC).withOpacity(0.25)
+                  : Colors.white.withOpacity(0.9)),
         ),
       );
 
@@ -33,14 +49,14 @@ class NavBarStyle {
   static Color pill(SL sl, bool sel) => !sel
       ? Colors.transparent
       : sl.isDark
-          ? Colors.white.withOpacity(0.92)
-          : Colors.white;
+          ? const Color(0xFF38BDF8).withOpacity(0.28)
+          : Colors.white.withOpacity(0.92);
 
-  /// Icon colour: indigo when it sits on the white pill, otherwise soft white.
-  static Color icon(SL sl, bool sel) => sel
-      ? (sl.isDark ? const Color(0xFF2B3275) : AppColors.accent)
-      : Colors.white.withOpacity(0.78);
+  static Color icon(SL sl, bool sel) => sl.isDark
+      ? (sel ? const Color(0xFFE0F2FE) : const Color(0xFFBAE6FD))
+      : (sel ? _sky700 : const Color(0xFF334155));
 
-  static Color label(SL sl, bool sel) =>
-      sel ? Colors.white : Colors.white.withOpacity(0.78);
+  static Color label(SL sl, bool sel) => sl.isDark
+      ? (sel ? Colors.white : const Color(0xFFBAE6FD))
+      : (sel ? _sky800 : const Color(0xFF334155));
 }

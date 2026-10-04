@@ -29,7 +29,10 @@ const _items = [
   (Icons.bar_chart_outlined, Icons.bar_chart_rounded, 'Reports'),
 ];
 
-Widget _bar(SL sl, int selected) => Container(
+Widget _bar(SL sl, int selected) => ClipRRect(
+    child: BackdropFilter(
+    filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+    child: Container(
       decoration: NavBarStyle.decoration(sl),
       height: 64,
       child: Row(children: [
@@ -57,7 +60,7 @@ Widget _bar(SL sl, int selected) => Container(
             ]);
           })),
       ]),
-    );
+    )));
 
 void main() {
   final root = '/tmp/fl/flutter/bin/cache/artifacts/material_fonts';
@@ -71,7 +74,7 @@ void main() {
             '$root/Roboto-Bold.ttf']);
           await _font('MaterialIcons', ['$root/MaterialIcons-Regular.otf']);
         });
-        t.view.physicalSize = Size(w, 220);
+        t.view.physicalSize = Size(w, 300);
         t.view.devicePixelRatio = 1;
         final key = GlobalKey();
         await t.pumpWidget(MaterialApp(
@@ -85,8 +88,23 @@ void main() {
               final sl = SL.of(ctx);
               return Scaffold(
                 backgroundColor: dark ? const Color(0xFF0D1117) : const Color(0xFFF4F6FB),
-                body: Center(child: Text('page content',
-                    style: TextStyle(color: sl.text3))),
+                // Same as the real shells: content runs UNDER the bar.
+                extendBody: true,
+                body: ListView(children: [
+                  for (final c in [AppColors.red, AppColors.amber, AppColors.green,
+                    AppColors.accent, AppColors.cyan, AppColors.crit])
+                    Container(
+                      height: 40,
+                      margin: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      alignment: Alignment.centerLeft,
+                      decoration: BoxDecoration(color: c,
+                          borderRadius: BorderRadius.circular(10)),
+                      child: const Text('Incident card behind the bar',
+                          style: TextStyle(color: Colors.white,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                ]),
                 bottomNavigationBar: _bar(sl, 1),
               );
             }),

@@ -1,5 +1,7 @@
 ## 2026-10-04
 
+- **Bottom nav bar is now transparent light blue.** It is frosted glass: a sky-100/200 tint at 50–62% opacity over the existing blur, so content shows through, with dark text and a white pill on the selected tab. The dark theme uses a translucent navy-blue. This replaces the solid indigo from earlier today. Only `lib/widgets/nav_bar_style.dart` changed. See section 3 of AUDIT_2026-10-04_SHEETS_BANNER_NAVBAR.md.
+
 - **AI Scan: Sheets banner removed. Bottom nav bar coloured.** The legacy "Saved & synced to Sheets · View Sheet →" strip is gone. It showed on any local save, even when nothing had uploaded. The "View Sheet" and "View in Sheets" buttons and `_openSheetsLink` are also gone, and leftover wording now says "server". Both shells' bottom nav now use `NavBarStyle` (indigo gradient, white pill on the selected tab, light and dark). See AUDIT_2026-10-04_SHEETS_BANNER_NAVBAR.md.
 - Fixed the false "Offline — showing reports saved on this device" banner on mobile. Cause: a request frozen by iOS Safari while the tab was in the background left a `fullSync` hanging. The sync lock had no escape, and the users, master-data and KB steps had no timeouts, so every later sync, including Retry, queued behind it forever. Fixes:
   - a 75 s lock watchdog;
