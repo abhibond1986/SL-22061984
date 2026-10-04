@@ -1,5 +1,7 @@
 ## 2026-10-04
 
+- **The top header now uses the brand colours.** `UniversalAppBar` has an indigo→deep-teal gradient (`TopBarStyle` in nav_bar_style.dart) with white text and icons, a white language chip, a white avatar disc and an amber-300 bell when there are unread notifications. Mobile status-bar icons are light. See AUDIT_2026-10-04_TOP_BAR_COLOUR.md.
+
 - **Bottom nav bar is now transparent light blue.** It is frosted glass: a sky-100/200 tint at 50–62% opacity over the existing blur, so content shows through, with dark text and a white pill on the selected tab. The dark theme uses a translucent navy-blue. This replaces the solid indigo from earlier today. Only `lib/widgets/nav_bar_style.dart` changed. See section 3 of AUDIT_2026-10-04_SHEETS_BANNER_NAVBAR.md.
 
 - **AI Scan: Sheets banner removed. Bottom nav bar coloured.** The legacy "Saved & synced to Sheets · View Sheet →" strip is gone. It showed on any local save, even when nothing had uploaded. The "View Sheet" and "View in Sheets" buttons and `_openSheetsLink` are also gone, and leftover wording now says "server". Both shells' bottom nav now use `NavBarStyle` (indigo gradient, white pill on the selected tab, light and dark). See AUDIT_2026-10-04_SHEETS_BANNER_NAVBAR.md.

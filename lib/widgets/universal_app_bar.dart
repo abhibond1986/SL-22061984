@@ -7,6 +7,7 @@
 
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import '../main.dart' show AppColors, SL, SLRadius, SLSpace, SLText;
 import '../services/i18n.dart';
 import '../services/sync_service.dart';
@@ -14,6 +15,7 @@ import '../services/local_db.dart';
 import '../utils/sail_logo.dart';
 import 'brand_logo.dart';
 import 'notification_bell.dart';
+import 'nav_bar_style.dart' show TopBarStyle;
 
 class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
   /// Global "return to Home" hook. The parent shell (HomeScreen /
@@ -403,36 +405,16 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
       default:   langLabel = 'EN'; break;
     }
 
-    return ClipRRect(
+    // Dark coloured header → light status-bar icons on Android/iOS.
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: ClipRRect(
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
         child: Container(
-          decoration: BoxDecoration(
-            // Subtle brand-tinted ribbon. Previously a flat sl.glassColor
-            // (plain white at 8%/45%), which made the header read as a washed
-            // -out band and left the title fighting whatever scrolled beneath
-            // it. The tint is low-chroma indigo→teal at high opacity: enough
-            // colour to feel deliberate, opaque enough that text stays legible.
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: sl.isDark
-                  ? [
-                      const Color(0xFF1D2444).withOpacity(0.92), // indigo
-                      const Color(0xFF14203A).withOpacity(0.92), // indigo→teal
-                    ]
-                  : [
-                      const Color(0xFFECEEFD).withOpacity(0.92), // pale indigo
-                      const Color(0xFFF2FAFC).withOpacity(0.92), // pale teal
-                    ],
-            ),
-            border: Border(
-              bottom: BorderSide(
-                color: AppColors.accent.withOpacity(sl.isDark ? 0.26 : 0.18),
-                width: 1)),
-            // NB: no boxShadow here — the enclosing ClipRRect clips to the
-            // container's rect, so any drop shadow would be cut away anyway.
-          ),
+          // Brand-gradient header with white foregrounds — see TopBarStyle.
+          // (Was a pale indigo→teal wash that read as "no colour".)
+          decoration: TopBarStyle.decoration(sl),
           child: SafeArea(
             bottom: false,
             child: Padding(
@@ -451,7 +433,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                     child: Padding(
                       padding: const EdgeInsets.all(6),
                       child: Icon(Icons.arrow_back_rounded,
-                        color: sl.text1, size: 22),
+                        color: TopBarStyle.fg, size: 22),
                     ),
                   ),
                 ),
@@ -482,14 +464,14 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(widget.title,
-                    style: TextStyle(color: sl.text1, fontSize: 15,
+                    style: const TextStyle(color: TopBarStyle.fg, fontSize: 15,
                         fontWeight: FontWeight.w700, height: 1.1),
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 if (widget.subtitle != null)
                   Text(widget.subtitle!,
                       // 9.5px was below the 11px hint-text floor — unreadable
                       // on a plant floor, especially through safety glasses.
-                      style: TextStyle(color: sl.text3, fontSize: 11),
+                      style: TextStyle(color: TopBarStyle.fgMuted, fontSize: 11),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
               ])),
 
@@ -500,6 +482,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 icon: Icons.language_rounded,
                 label: langLabel,
                 color: AppColors.amber,
+                onHeader: true,
                 onTap: () async {
                   await I18n.toggle();
                   if (mounted) setState(() {});
@@ -516,7 +499,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                     : I18n.t('settings.darkMode'),
                 icon: Icon(widget.isDark
                     ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                    color: sl.text2, size: 20),
+                    color: TopBarStyle.fg, size: 20),
                 onPressed: widget.toggleTheme,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
@@ -529,16 +512,16 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 icon: _exporting
                     ? const SizedBox(width: 16, height: 16,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: AppColors.green))
+                            strokeWidth: 2, color: TopBarStyle.fg))
                     : const Icon(Icons.cloud_upload_outlined,
-                        color: AppColors.green, size: 20),
+                        color: TopBarStyle.fg, size: 20),
                 onPressed: _exporting ? null : _doExport,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
               ),
 
             // Notifications — new case assignments (see notification_bell.dart)
-            const NotificationBell(),
+            const NotificationBell(onHeader: true),
 
             // User avatar
             GestureDetector(
@@ -549,14 +532,16 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 // a 30/36/36/34 stagger.
                 margin: const EdgeInsets.only(left: SLSpace.xs),
                 width: 36, height: 36,
-                decoration: const BoxDecoration(
+                // White disc with an indigo initial: the old indigo→teal
+                // gradient disc would vanish into the header's own gradient.
+                decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft, end: Alignment.bottomRight,
-                    colors: [Color(0xFF4F5BD5), Color(0xFF0EA5B5)])),
+                  color: Colors.white,
+                  border: Border.all(
+                      color: Colors.white.withOpacity(0.5), width: 2)),
                 child: Center(child: Text(initial,
                     style: const TextStyle(
-                        color: Colors.white,
+                        color: AppColors.accent,
                         fontSize: 13, fontWeight: FontWeight.w800))),
               ),
             ),
@@ -565,6 +550,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
       ),
         ),
       ),
+    ),
     );
   }
 }
@@ -574,8 +560,10 @@ class _IconBtn extends StatelessWidget {
   final String label;
   final Color color;
   final VoidCallback onTap;
+  /// Painted on the coloured header → white chip instead of a tinted one.
+  final bool onHeader;
   const _IconBtn({required this.icon, required this.label,
-    required this.color, required this.onTap});
+    required this.color, required this.onTap, this.onHeader = false});
 
   @override
   Widget build(BuildContext context) {
@@ -593,15 +581,16 @@ class _IconBtn extends StatelessWidget {
     //    must never be a foreground — on the light theme amber-on-pale-indigo
     //    is well under 3:1. `sl.textOn(color)` is the paired ink for a tinted
     //    chip and is what every other pill in the app already uses.
-    final ink = sl.textOn(color);
+    final ink = onHeader ? TopBarStyle.fg : sl.textOn(color);
     return GestureDetector(
       onTap: onTap,
       child: Container(
         height: 36, padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.12),
+          color: onHeader ? TopBarStyle.chipFill : color.withOpacity(0.12),
           borderRadius: BorderRadius.circular(SLRadius.pill),
-          border: Border.all(color: color.withOpacity(0.35))),
+          border: Border.all(color: onHeader
+              ? TopBarStyle.chipBorder : color.withOpacity(0.35))),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Icon(icon, color: ink, size: 14),
           const SizedBox(width: SLSpace.xs),

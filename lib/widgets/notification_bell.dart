@@ -10,13 +10,17 @@
 // once, not once per bell.
 
 import 'package:flutter/material.dart';
+import 'nav_bar_style.dart' show TopBarStyle;
 import '../main.dart' show AppColors, SL, SLRadius;
 import '../screens/incident_detail_screen.dart';
 import '../services/assignment_inbox.dart';
 import '../services/assignment_notifications.dart';
 
 class NotificationBell extends StatefulWidget {
-  const NotificationBell({super.key});
+  const NotificationBell({super.key, this.onHeader = false});
+
+  /// True when drawn on the coloured UniversalAppBar → white / amber-300 icon.
+  final bool onHeader;
 
   /// Last arrival generation that has been toasted, shared by all bells.
   static int _toastedGen = 0;
@@ -109,7 +113,9 @@ class _NotificationBellState extends State<NotificationBell> {
               n > 0
                   ? Icons.notifications_active_rounded
                   : Icons.notifications_none_rounded,
-              color: n > 0 ? AppColors.amber : sl.text2,
+              color: widget.onHeader
+                  ? (n > 0 ? TopBarStyle.alert : TopBarStyle.fg)
+                  : (n > 0 ? AppColors.amber : sl.text2),
               size: 22,
             ),
           ),

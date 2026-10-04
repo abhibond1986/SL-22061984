@@ -60,3 +60,36 @@ class NavBarStyle {
       ? (sel ? Colors.white : const Color(0xFFBAE6FD))
       : (sel ? _sky800 : const Color(0xFF334155));
 }
+
+/// Colours for the top header (UniversalAppBar). 2026-10-04, user request:
+/// "put some colour based on the app aesthetics". The header now carries the
+/// brand gradient, indigo #4F5BD5 → deep teal #0E7C8A. It is the same pair the
+/// avatar and logo tile already use, with the teal end darkened from #0EA5B5 so
+/// white stays above 4.5:1 across the whole band. Every foreground on it is
+/// white, or amber-300 for "you have unread notifications". The solid brand
+/// header pairs with the light-blue glass bottom bar ([NavBarStyle]).
+class TopBarStyle {
+  TopBarStyle._();
+
+  static BoxDecoration decoration(SL sl) => BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: sl.isDark
+              ? const [Color(0xFF2A3178), Color(0xFF0B4F5A)]
+              : const [Color(0xFF4F5BD5), Color(0xFF0E7C8A)],
+        ),
+        border: Border(
+            bottom: BorderSide(color: Colors.white.withOpacity(0.12))),
+      );
+
+  static const Color fg = Colors.white;
+  static Color get fgMuted => Colors.white.withOpacity(0.82);
+
+  /// Pill/chip on the header (language toggle).
+  static Color get chipFill => Colors.white.withOpacity(0.16);
+  static Color get chipBorder => Colors.white.withOpacity(0.35);
+
+  /// Bell icon when there is something unread.
+  static const Color alert = Color(0xFFFCD34D); // amber-300
+}
