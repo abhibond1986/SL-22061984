@@ -8,6 +8,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/nav_bar_style.dart';
 import '../utils/app_tabs.dart';
 import '../services/local_db.dart';
 import '../services/sync_service.dart';
@@ -342,32 +343,7 @@ class _HomeScreenState extends State<HomeScreen>
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
-          decoration: BoxDecoration(
-            // Subtle indigo wash instead of a flat neutral slab, so the nav bar
-            // reads as part of the brand surface rather than a grey strip. Kept
-            // very low-chroma on purpose — it must never compete with the
-            // accent-coloured selected tab.
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: sl.isDark
-                  ? [
-                      const Color(0xFF191F38).withOpacity(0.98), // indigo-tinted
-                      const Color(0xFF0D1117).withOpacity(0.98), // near-black base
-                    ]
-                  : [
-                      const Color(0xFFE9ECFB).withOpacity(0.94), // pale indigo
-                      const Color(0xFFF8F9FE).withOpacity(0.94),
-                    ],
-            ),
-            border: Border(
-              // Accent-tinted hairline: separates the bar from content and
-              // echoes the selected-tab colour.
-              top: BorderSide(
-                color: AppColors.accent.withOpacity(sl.isDark ? 0.28 : 0.20),
-                width: 1),
-            ),
-          ),
+          decoration: NavBarStyle.decoration(sl),
           child: SafeArea(
             child: SizedBox(
               height: BottomNavGap.barHeight,
@@ -413,9 +389,7 @@ class _HomeScreenState extends State<HomeScreen>
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
-                              color: sel
-                                  ? AppColors.accent.withOpacity(0.15)
-                                  : Colors.transparent,
+                              color: NavBarStyle.pill(sl, sel),
                               borderRadius: BorderRadius.circular(20),
                             ),
                             child: Icon(
@@ -425,11 +399,7 @@ class _HomeScreenState extends State<HomeScreen>
                               // sits on the dark indigo nav gradient, where
                               // accent measures ~2.8:1 — the most-looked-at
                               // control in the app was its least readable one.
-                              color: sel
-                                  ? sl.accentText
-                                  : sl.isDark
-                                      ? const Color(0xFFCBD5E1) // brighter for dark mode nav
-                                      : sl.text4,
+                              color: NavBarStyle.icon(sl, sel),
                             ),
                           ),
                           const SizedBox(height: 2),
@@ -452,11 +422,7 @@ class _HomeScreenState extends State<HomeScreen>
                               fontWeight: sel
                                   ? FontWeight.w700
                                   : FontWeight.w500,
-                              color: sel
-                                  ? sl.accentText
-                                  : sl.isDark
-                                      ? const Color(0xFFCBD5E1) // brighter for dark mode nav
-                                      : sl.text4,
+                              color: NavBarStyle.label(sl, sel),
                             ),
                           ),
                         ],

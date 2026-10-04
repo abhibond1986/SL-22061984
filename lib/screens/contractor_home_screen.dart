@@ -8,6 +8,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/nav_bar_style.dart';
 import '../services/sync_service.dart';
 import '../services/background_sync.dart';
 import 'login_screen.dart';
@@ -127,7 +128,7 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
           // ★ Sync to Google Sheets button
           IconButton(
             icon: Icon(Icons.cloud_upload_outlined, color: sl.text3, size: 20),
-            tooltip: 'Sync to Sheets',
+            tooltip: 'Sync to server',
             onPressed: () async {
               final count = await SyncService.getPendingCount();
               if (count == 0) {
@@ -179,29 +180,8 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
-      decoration: BoxDecoration(
-        // Matches the employee shell's nav bar (home_screen.dart) so the two
-        // shells don't look like two different apps.
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: sl.isDark
-              ? [
-                  const Color(0xFF191F38).withOpacity(0.98),
-                  const Color(0xFF0D1117).withOpacity(0.98),
-                ]
-              : [
-                  const Color(0xFFE9ECFB).withOpacity(0.94),
-                  const Color(0xFFF8F9FE).withOpacity(0.94),
-                ],
-        ),
-        border: Border(
-          top: BorderSide(
-            color: AppColors.accent.withOpacity(sl.isDark ? 0.28 : 0.20),
-            width: 1),
-        ),
-      ),
-      child: SafeArea(
+      decoration: NavBarStyle.decoration(sl),
+          child: SafeArea(
         child: SizedBox(
           height: BottomNavGap.barHeight,
           child: Row(
@@ -232,20 +212,14 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
-                          color: sel
-                              ? AppColors.accent.withOpacity(0.15)
-                              : Colors.transparent,
+                          color: NavBarStyle.pill(sl, sel),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Icon(
                           sel ? item.activeIcon : item.icon,
                           size: 22,
                           // sl.accentText: bare accent is ~2.8:1 on this bar.
-                          color: sel
-                                ? sl.accentText
-                                : sl.isDark
-                                    ? const Color(0xFFCBD5E1)
-                                    : sl.text4,
+                          color: NavBarStyle.icon(sl, sel),
                         ),
                       ),
                       const SizedBox(height: 2),
@@ -258,11 +232,7 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                           fontSize: SLText.minBadge,
                           fontWeight:
                               sel ? FontWeight.w700 : FontWeight.w500,
-                          color: sel
-                              ? sl.accentText
-                              : sl.isDark
-                                  ? const Color(0xFFCBD5E1)
-                                  : sl.text4,
+                          color: NavBarStyle.label(sl, sel),
                         ),
                       ),
                     ],

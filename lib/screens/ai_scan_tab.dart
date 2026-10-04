@@ -1,7 +1,7 @@
 // lib/screens/ai_scan_tab.dart
 // ✅ Step chips 1-5 are fully interactive
 // ✅ Duplicate image detection
-// ✅ Google Sheets link shown after save
+// ✅ Save dialog reports the real server-upload outcome
 // ✅ Save success dialog
 // ✅ NEW: "Review & Edit AI Findings" hint banner at top of review sheet
 // ✅ Inline edit per hazard preserved
@@ -113,8 +113,6 @@ class _AIScanTabState extends State<AIScanTab> {
   LocationData? _capturedLocation;
   bool _capturingLocation = false;
 
-  static const String _sheetUrl =
-      'https://docs.google.com/spreadsheets/d/16BeCJ3KpXiYzl-cbcfRUFL1vZkPtzyXzUHZP5usNZhY/edit';
 
   // ── ADMIN MASTER DATA ────────────────────────────────────────────
   // This screen previously had NO master-data awareness at all — its
@@ -1976,20 +1974,6 @@ class _AIScanTabState extends State<AIScanTab> {
             ]),
             const SizedBox(height: 12),
             Row(children: [
-              Expanded(child: OutlinedButton.icon(
-                onPressed: () { Navigator.pop(ctx); _openSheetsLink(); },
-                icon: const Icon(Icons.open_in_new_rounded,
-                    size: 14, color: AppColors.accent),
-                label: Text('View Sheet',
-                    style: TextStyle(color: sl.accentText,
-                        fontSize: 12, fontWeight: FontWeight.w700)),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: AppColors.accent, width: 1.5),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10))),
-              )),
-              const SizedBox(width: 10),
               Expanded(child: ElevatedButton.icon(
                 onPressed: () => Navigator.pop(ctx),
                 icon: const Icon(Icons.check_rounded,
@@ -2391,22 +2375,6 @@ class _AIScanTabState extends State<AIScanTab> {
                                 fontWeight: FontWeight.w700)),
                         ]))),
                   Row(children: [
-                    Expanded(child: OutlinedButton.icon(
-                      onPressed: _openSheetsLink,
-                      icon: const Icon(Icons.table_chart_rounded,
-                          size: 14, color: AppColors.accent),
-                      label: const Text('View in Sheets',
-                        style: TextStyle(
-                            color: AppColors.accent,
-                            fontSize: 12, fontWeight: FontWeight.w700)),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(
-                            color: AppColors.accent, width: 1.5),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10))),
-                    )),
-                    const SizedBox(width: 10),
                     Expanded(child: ElevatedButton.icon(
                       onPressed: () => Navigator.pop(ctx),
                       icon: const Icon(Icons.done_all_rounded,
@@ -2459,19 +2427,6 @@ class _AIScanTabState extends State<AIScanTab> {
 
     await LocalDB.saveIncident(all[incIdx]);
     SyncService.pushIncident(all[incIdx]).catchError((_) => false);
-  }
-
-  Future<void> _openSheetsLink() async {
-    final uri = Uri.parse(_sheetUrl);
-    try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
-      } else {
-        _snack('Could not open browser', AppColors.red);
-      }
-    } catch (e) {
-      _snack('Error: $e', AppColors.red);
-    }
   }
 
   static String _str(Object? v) => v?.toString().trim() ?? '';
@@ -3005,7 +2960,7 @@ class _AIScanTabState extends State<AIScanTab> {
               _featureTag('⚖️ IS 14489', sl),
               _featureTag('🏭 WSA 13', sl),
               _featureTag('📋 PDF export', sl),
-              _featureTag('📊 Sheets sync', sl),
+              _featureTag('☁️ Cloud sync', sl),
             ]),
           ])),
       ),
@@ -3319,31 +3274,11 @@ class _AIScanTabState extends State<AIScanTab> {
       // came from the live AI or the offline knowledge-base fallback.
       _analysisSourceBadge(sl),
 
-      if (_isSaved) Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: AppColors.green.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.green.withOpacity(0.4))),
-        child: Row(children: [
-          Icon(Icons.check_circle_outline,
-              color: sl.greenText, size: 16),
-          const SizedBox(width: 8),
-          Expanded(child: Text('Saved & synced to Sheets',
-            style: TextStyle(color: sl.greenText,
-                fontSize: 11, fontWeight: FontWeight.w600))),
-          GestureDetector(
-            onTap: _openSheetsLink,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.green,
-                borderRadius: BorderRadius.circular(6)),
-              child: const Text('View Sheet →',
-                style: TextStyle(color: Colors.white,
-                    fontSize: SLText.minLabel, fontWeight: FontWeight.w700)))),
-        ])),
+      // 2026-10-04: the green "Saved & synced to Sheets · View Sheet →" strip
+      // was removed. It was a leftover from the Google Sheets backend: it showed
+      // whenever the report was saved locally (`_isSaved`), whether or not the
+      // upload had worked, and the link opened a legacy spreadsheet. The real
+      // upload outcome is already reported in the save dialog.
 
       if (_imageBytes != null) ...[
         Container(
@@ -4612,7 +4547,7 @@ class _AIScanTabState extends State<AIScanTab> {
         _infoRow('1.', 'Capture: take a workplace photo', sl),
         _infoRow('2.', 'AI Scan: Gemini detects all hazards', sl),
         _infoRow('3.', 'Review: see all hazards & regulations', sl),
-        _infoRow('4.', 'Save: stores to device + Google Sheets', sl),
+        _infoRow('4.', 'Save: stores to device + server', sl),
         _infoRow('5.', 'Mitigate: add action per hazard & close', sl),
       ]));
   }

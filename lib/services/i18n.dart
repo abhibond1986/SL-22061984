@@ -228,7 +228,7 @@ class I18n extends ChangeNotifier {
     'severity.low'         : 'LOW',
 
     'msg.savedLocal'       : 'Saved locally',
-    'msg.savedSheets'      : '✓ Synced to Google Sheets',
+    'msg.savedSheets'      : 'synced to server',
     'msg.willSync'         : 'Will sync when online',
     'msg.exportSuccess'    : 'Exported successfully',
     'msg.networkError'     : 'Network error — try again',
@@ -407,7 +407,7 @@ class I18n extends ChangeNotifier {
     'severity.low'         : 'निम्न',
 
     'msg.savedLocal'       : 'स्थानीय रूप से सहेजा गया',
-    'msg.savedSheets'      : '✓ गूगल शीट में सिंक',
+    'msg.savedSheets'      : 'सर्वर पर सिंक',
     'msg.willSync'         : 'ऑनलाइन होने पर सिंक होगा',
     'msg.exportSuccess'    : 'निर्यात सफल',
     'msg.networkError'     : 'नेटवर्क त्रुटि — पुनः प्रयास',
