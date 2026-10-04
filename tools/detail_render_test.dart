@@ -39,7 +39,7 @@ final inc = <String, dynamic>{
 void main() {
   final root = '/tmp/fl/flutter/bin/cache/artifacts/material_fonts';
   final out = Platform.environment['OUT'] ?? '/tmp/out';
-  Future<void> shoot(WidgetTester tester, Size size, String name) async {
+  Future<void> shoot(WidgetTester tester, Size size, String name, {bool dark = false, Map<String,dynamic>? data}) async {
     await tester.runAsync(() async {
       await _font('Roboto', ['$root/Roboto-Regular.ttf', '$root/Roboto-Medium.ttf',
         '$root/Roboto-Bold.ttf', '$root/Roboto-Black.ttf']);
@@ -51,8 +51,8 @@ void main() {
     await tester.runAsync(() async {
       await tester.pumpWidget(RepaintBoundary(key: key, child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(fontFamily: 'Roboto', useMaterial3: true),
-        home: IncidentDetailScreen(incident: inc),
+        theme: ThemeData(fontFamily: 'Roboto', useMaterial3: true, brightness: dark ? Brightness.dark : Brightness.light),
+        home: IncidentDetailScreen(incident: data ?? inc),
       )));
       for (var i = 0; i < 12; i++) {
         await Future.delayed(const Duration(milliseconds: 250));
@@ -75,5 +75,7 @@ void main() {
     await LocalDB.init();
   });
   testWidgets('laptop', (t) => shoot(t, const Size(1440, 800), 'detail_laptop'));
+  testWidgets('dark', (t) => shoot(t, const Size(1440, 800), 'detail_dark', dark: true));
+  testWidgets('closed', (t) => shoot(t, const Size(1440, 900), 'detail_closed', data: {...inc, 'status': 'CLOSED', 'assignedTo': 'Ravi Shankar', 'mitigationAction': 'Hoses rerouted overhead; debris cleared.', 'closedAt': '2026-09-29T16:00:00', 'closedBy': 'Abhinav Kumar'}));
   testWidgets('phone', (t) => shoot(t, const Size(400, 1400), 'detail_phone'));
 }

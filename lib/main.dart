@@ -14,6 +14,8 @@ import 'services/realtime_sync.dart';
 import 'services/gemini_vision.dart';
 import 'services/ai_run_log.dart';
 import 'services/visitor_service.dart';
+import 'services/branding.dart';
+import 'widgets/brand_logo.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'widgets/scan_status_overlay.dart';
 import 'screens/splash_screen.dart';
@@ -24,6 +26,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await LocaleService().load();
   await LocalDB.init();
+  // Company name + logo from the local cache, so the first frame is branded.
+  await Branding.load();
   // Supabase backend (no-op until configured + enabled in SupabaseConfig).
   await SupabaseService.init();
   await SyncService.init();
@@ -488,10 +492,10 @@ class _SafetyLensAppState extends State<SafetyLensApp> with WidgetsBindingObserv
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: LocaleService(),
+      listenable: Listenable.merge([LocaleService(), Branding.revision]),
       builder: (context, _) {
         return MaterialApp(
-          title: 'SAIL Safety Lens',
+          title: Branding.appTitle,
           debugShowCheckedModeBanner: false,
           locale: LocaleService().locale,
           supportedLocales: LocaleService.supportedLocales,
@@ -577,12 +581,13 @@ class BrandTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sl = SL.of(context);
-    return Column(
+    return BrandBuilder(builder: (context) => Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Row(mainAxisSize: MainAxisSize.min, children: [
-          Text('SAIL ',
+          if (Branding.shortName.trim().isNotEmpty)
+          Text('${Branding.shortName.trim()} ',
               style: GoogleFonts.poppins(
                   fontSize: size,
                   fontWeight: FontWeight.w900,
@@ -608,7 +613,7 @@ class BrandTitle extends StatelessWidget {
                       fontStyle: FontStyle.italic))),
         ]),
       ],
-    );
+    ));
   }
 }
 
@@ -642,16 +647,8 @@ class SailLogoTile extends StatelessWidget {
   final double size;
   const SailLogoTile({super.key, this.size = 40});
   @override
-  Widget build(BuildContext context) => SizedBox(
-      width: size,
-      height: size,
-      child: Image.asset('assets/images/app_icon.png', fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => Container(
-          width: size, height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: AppColors.accent),
-          child: Icon(Icons.shield, color: Colors.white, size: size * 0.5))));
+  Widget build(BuildContext context) =>
+      BrandLogo(size: size, fallbackColor: AppColors.accent);
 }
 
 
@@ -820,7 +817,8 @@ class AppLocalizations {
       _AppLocalizationsDelegate();
 
   // ── All strings ────────────────────────────────────────────────────────
-  String get appName          => _t('appName');
+  String get appName          =>
+      Branding.isDefault ? _t('appName') : Branding.appTitle;
   String get selectLanguage   => _t('selectLanguage');
   String get languageSaved    => _t('languageSaved');
   // Auth

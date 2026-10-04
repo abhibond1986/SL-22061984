@@ -40,6 +40,7 @@ import '../models/error_log_entry.dart';
 import 'package:uuid/uuid.dart';
 import '../widgets/bottom_nav_gap.dart';
 import '../widgets/content_width.dart';
+import '../services/branding.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -2081,17 +2082,17 @@ class _AIScanTabState extends State<AIScanTab> {
       final severity = incident['severity']?.toString() ?? '';
       final plant = incident['plant']?.toString() ?? '';
       final pdfUrl = incident['pdfUrl']?.toString() ?? '';
-      final caption = 'SAIL Safety Lens - Hazard Report\n'
+      final caption = '${Branding.appTitle} - Hazard Report\n'
           '$title${severity.isEmpty ? '' : ' ($severity)'}'
           '${plant.isEmpty ? '' : ' - $plant'}'
           '${pdfUrl.isEmpty ? '' : '\nOnline copy: $pdfUrl'}';
       final outcome = await PdfExport.shareIncidentPdf(
         incident:     incident,
-        reporterName: user['name']?.toString() ?? 'SAIL Safety Officer',
+        reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
         imageBytes:   _imageBytes,
         text:    channel == 'whatsapp' ? '' : caption,
-        subject: 'SAIL Safety Lens: $title',
+        subject: '${Branding.appTitle}: $title',
       );
       if (!mounted) return;
       if (outcome == 'downloaded') {
@@ -2593,7 +2594,7 @@ class _AIScanTabState extends State<AIScanTab> {
       'type':            'AI_SCAN',
       'status':          'OPEN',
       'date':            DateTime.now().toIso8601String(),
-      'reportedBy':      user['name']?.toString() ?? 'SAIL Safety Officer',
+      'reportedBy':      user['name']?.toString() ?? Branding.defaultReporter,
       'reportedByPno':   user['pno']?.toString()  ?? '',
       'people':          '0',
       'hazards':         hazards,
@@ -2678,7 +2679,7 @@ class _AIScanTabState extends State<AIScanTab> {
       print('PDF Upload: generating PDF for incident ${incident['id']}...');
       final pdfBytes = await PdfExport.generateIncidentReportBytes(
         incident:     incident,
-        reporterName: user['name']?.toString() ?? 'SAIL Safety Officer',
+        reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
         imageBytes:   _imageBytes,
       );
@@ -2728,7 +2729,7 @@ class _AIScanTabState extends State<AIScanTab> {
       _snack('Generating PDF…', AppColors.accent);
       await PdfExport.downloadOrShareIncident(
         incident:     incident,
-        reporterName: user['name']?.toString() ?? 'SAIL Safety Officer',
+        reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
         imageBytes:   _imageBytes,
       );

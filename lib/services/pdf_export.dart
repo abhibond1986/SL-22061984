@@ -19,6 +19,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 import 'admin_master_data.dart';
+import 'branding.dart';
 import 'hazard_quality.dart';
 import 'image_storage.dart';
 import 'line_of_fire.dart';
@@ -68,18 +69,28 @@ class PdfExport {
     // app-icon tile, which put a white rounded square inside the masthead.
     // The masthead is now severity-coloured, so it carries the WHITE emblem;
     // the continuation header on pages 2+ is white, so it gets the blue one.
+    // ★ 2026-10-04: a custom company logo (Admin → Company Branding) replaces
+    // both. It is an arbitrary image, so on the coloured masthead it sits on a
+    // small white tile (see _masthead); on the white continuation header it is
+    // shown bare.
     pw.MemoryImage? logoImage;
-    try {
-      final d = await rootBundle.load('assets/images/sail_emblem_white.png');
-      logoImage = pw.MemoryImage(d.buffer.asUint8List());
-    } catch (_) {
-      // Missing asset: fall back to the "SAIL" text mark in the banner.
-    }
-    try {
-      final d = await rootBundle.load('assets/images/sail_emblem.png');
-      _cachedLogo = pw.MemoryImage(d.buffer.asUint8List());
-    } catch (_) {
-      _cachedLogo = null;
+    _logoIsCustom = Branding.logoBytes != null;
+    if (_logoIsCustom) {
+      logoImage = pw.MemoryImage(Branding.logoBytes!);
+      _cachedLogo = logoImage;
+    } else {
+      try {
+        final d = await rootBundle.load('assets/images/sail_emblem_white.png');
+        logoImage = pw.MemoryImage(d.buffer.asUint8List());
+      } catch (_) {
+        // Missing asset: fall back to the text mark in the banner.
+      }
+      try {
+        final d = await rootBundle.load('assets/images/sail_emblem.png');
+        _cachedLogo = pw.MemoryImage(d.buffer.asUint8List());
+      } catch (_) {
+        _cachedLogo = null;
+      }
     }
 
     Uint8List? imgBytes = imageBytes;
@@ -377,6 +388,13 @@ class PdfExport {
 
   // ─── PAGE CHROME ─────────────────────────────────────────────────────────
   static pw.MemoryImage? _cachedLogo; // ★ v28: cache for page headers
+  static bool _logoIsCustom = false;  // ★ 2026-10-04: company logo set by admin
+
+  /// Text mark used when no logo image is available.
+  static String get _brandMark {
+    final s = Branding.shortName.trim();
+    return _safe(s.isEmpty ? 'SL' : (s.length > 5 ? s.substring(0, 5) : s));
+  }
 
   static pw.Widget _pageHeader(bool show, String plantName) {
     if (!show) return pw.SizedBox();
@@ -395,7 +413,7 @@ class PdfExport {
             else
               pw.Container(width: 18, height: 18, color: _sailBlue,
                 alignment: pw.Alignment.center,
-                child: pw.Text('SAIL', style: pw.TextStyle(
+                child: pw.Text(_brandMark, style: pw.TextStyle(
                   color: PdfColors.white, fontSize: 5,
                   fontWeight: pw.FontWeight.bold))),
             pw.SizedBox(width: 5),
@@ -419,7 +437,7 @@ class PdfExport {
       child: pw.Row(
         children: [
           pw.Expanded(child: pw.Text(
-            _safe('SAIL Safety Lens  ·  Ref. $ref  ·  $date'), style: st)),
+            _safe('${Branding.appTitle}  ·  Ref. $ref  ·  $date'), style: st)),
           pw.Text('CONFIDENTIAL - INTERNAL USE', style: pw.TextStyle(
             fontSize: 6.5, color: _steel, letterSpacing: 0.6)),
           pw.Expanded(child: pw.Text('Page $pg of $tot',
@@ -663,19 +681,27 @@ class PdfExport {
           borderRadius: const pw.BorderRadius.only(
             topLeft: pw.Radius.circular(4), topRight: pw.Radius.circular(4))),
         child: pw.Row(children: [
-          // The emblem alone, no tile or disc behind it.
-          logoImage != null
+          // The SAIL emblem alone, no tile or disc behind it. A custom
+          // company logo gets a white tile: it is not drawn for a coloured
+          // background and would otherwise disappear into the risk colour.
+          logoImage != null && _logoIsCustom
+            ? pw.Container(width: 36, height: 36,
+                padding: const pw.EdgeInsets.all(3),
+                decoration: const pw.BoxDecoration(color: PdfColors.white,
+                    borderRadius: pw.BorderRadius.all(pw.Radius.circular(4))),
+                child: pw.Image(logoImage, fit: pw.BoxFit.contain))
+          : logoImage != null
             ? pw.SizedBox(width: 36, height: 36,
                 child: pw.Image(logoImage, fit: pw.BoxFit.contain))
             : pw.SizedBox(width: 36, height: 36,
-                child: pw.Center(child: pw.Text('SAIL', style: pw.TextStyle(
+                child: pw.Center(child: pw.Text(_brandMark, style: pw.TextStyle(
                   color: PdfColors.white, fontSize: 10,
                   fontWeight: pw.FontWeight.bold)))),
           pw.SizedBox(width: 12),
           pw.Expanded(child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Text('STEEL AUTHORITY OF INDIA LIMITED', style: pw.TextStyle(
+              pw.Text(_safe(Branding.companyName.toUpperCase()), maxLines: 1, style: pw.TextStyle(
                 color: soft, fontSize: 6.5,
                 fontWeight: pw.FontWeight.bold, letterSpacing: 1.4)),
               pw.SizedBox(height: 2),
@@ -2151,7 +2177,7 @@ class PdfExport {
           ])),
       pw.SizedBox(height: 5),
       pw.Text(
-        'Generated by SAIL Safety Lens. AI observations are advisory and '
+        'Generated by ${_safe(Branding.appTitle)}. AI observations are advisory and '
         'subject to verification by the Safety Department before any '
         'finding is recorded.',
         style: pw.TextStyle(fontSize: 6.3, color: _steel,
@@ -2227,7 +2253,7 @@ class PdfExport {
       final file = File('${dir.path}/$fn');
       await file.writeAsBytes(bytes);
       await Share.shareXFiles([XFile(file.path)],
-          text: 'SAIL Safety Lens Report', subject: 'Incident Report');
+          text: '${Branding.appTitle} Report', subject: 'Incident Report');
     }
   }
 
@@ -2264,7 +2290,7 @@ class PdfExport {
     // attachment when the intent also carries EXTRA_TEXT (see
     // incident_detail_screen), so WhatsApp shares pass ''.
     final caption =
-        text ?? 'SAIL Safety Lens report${title.isEmpty ? '' : ': $title'}';
+        text ?? '${Branding.appTitle} report${title.isEmpty ? '' : ': $title'}';
     return sharePdfBytes(bytes,
         fileName: fn,
         text: caption.isEmpty ? null : caption,
@@ -2351,7 +2377,7 @@ class PdfExport {
     final pdf   = pw.Document();
     final now   = DateTime.now();
     final title = reportTitle
-        ?? 'SAIL Safety Lens — Consolidated Incident Report';
+        ?? '${Branding.appTitle} — Consolidated Incident Report';
 
     pdf.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
@@ -2367,7 +2393,7 @@ class PdfExport {
           color: _sailBlue,
           child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Text('SAIL SAFETY LENS', style: pw.TextStyle(
+              pw.Text(_safe(Branding.appTitle.toUpperCase()), style: pw.TextStyle(
                 color: PdfColors.white, fontSize: 18,
                 fontWeight: pw.FontWeight.bold)),
               pw.Text(title, style: pw.TextStyle(
@@ -2439,6 +2465,6 @@ class PdfExport {
   static Future<void> sharePdf(File file, {String? subject}) async {
     await Share.shareXFiles([XFile(file.path)],
         subject: subject ?? 'Safety Lens Report',
-        text: 'Safety report generated by SAIL Safety Lens');
+        text: 'Safety report generated by ${Branding.appTitle}');
   }
 }

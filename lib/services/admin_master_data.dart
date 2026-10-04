@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'sync_service.dart';
+import 'branding.dart';
 // For the canonical list of Gemini vision model IDs, so backend-synced values
 // are validated against ONE source of truth rather than a duplicated list that
 // would drift as Google retires models. (Dart permits the resulting import
@@ -700,6 +701,12 @@ class AdminMasterData {
       if (remote == null || remote.isEmpty) return false;
 
       bool updated = false;
+
+      // Company name + logo. Branding notifies its own listeners, so it does
+      // not need to bump `revision` (which re-primes every master-data list).
+      if (remote['branding'] != null) {
+        await Branding.applyRemote(remote['branding']);
+      }
 
       // The admin panel is AUTHORITATIVE. A key that is PRESENT but holds an
       // empty list means the admin deleted every entry — that must propagate,

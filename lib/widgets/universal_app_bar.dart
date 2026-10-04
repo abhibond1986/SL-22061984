@@ -12,6 +12,7 @@ import '../services/i18n.dart';
 import '../services/sync_service.dart';
 import '../services/local_db.dart';
 import '../utils/sail_logo.dart';
+import 'brand_logo.dart';
 
 class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
   /// Global "return to Home" hook. The parent shell (HomeScreen /
@@ -468,17 +469,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                   borderRadius: BorderRadius.circular(10),
                   child: Padding(
                     padding: const EdgeInsets.all(2),
-                    child: SizedBox(
-                      width: 36, height: 36,
-                      child: Image.asset('assets/images/app_icon.png',
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => Container(
-                          width: 36, height: 36,
-                          decoration: BoxDecoration(
-                            color: AppColors.accent,
-                            borderRadius: BorderRadius.circular(8)),
-                          child: const Icon(Icons.shield, color: Colors.white, size: 20))),
-                    ),
+                    child: BrandLogo(size: 36, fallbackColor: AppColors.accent),
                   ),
                 ),
               ),

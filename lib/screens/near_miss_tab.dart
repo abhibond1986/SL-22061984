@@ -43,6 +43,7 @@ import '../services/near_miss_guard.dart';
 import '../services/ai_correction_service.dart';
 import '../services/ai_run_log.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../services/branding.dart';
 
 class NearMissTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -878,7 +879,7 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
           ? 'Respond in English.'
           : 'IMPORTANT: Respond in $_detectedLangName language using native script. Do NOT translate to English.';
 
-      final prompt = '''You are a safety report text corrector for SAIL (Steel Authority of India Limited).
+      final prompt = '''You are a safety report text corrector for ${Branding.shortName} (${Branding.companyName}).
 
 FIELD: $fieldLabel
 WORKER'S INPUT: "$rawText"
@@ -1267,7 +1268,7 @@ If the text is already fine, return it unchanged.''';
     try {
       final pdfBytes = await PdfExport.generateIncidentReportBytes(
         incident:     incident,
-        reporterName: user?['name']?.toString() ?? 'SAIL Safety Officer',
+        reporterName: user?['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user?['pno']?.toString()  ?? '',
         imageBytes:   imgBytes,
       );
@@ -2314,7 +2315,7 @@ If the text is already fine, return it unchanged.''';
       await PdfExport.downloadOrShareIncident(
         incident: incident,
         reporterName: _savedReporterName.isEmpty
-            ? 'SAIL Safety Officer'
+            ? Branding.defaultReporter
             : _savedReporterName,
         reporterPno: _savedReporterPno,
         imageBytes: _savedImageBytes,
@@ -2527,7 +2528,7 @@ If the text is already fine, return it unchanged.''';
         try {
           await PdfExport.downloadOrShareIncident(
             incident:    incident,
-            reporterName: user?['name']?.toString() ?? 'SAIL Safety Officer',
+            reporterName: user?['name']?.toString() ?? Branding.defaultReporter,
             reporterPno:  user?['pno']?.toString()  ?? '',
             imageBytes:  _imageBytes,
           );
@@ -2554,7 +2555,7 @@ If the text is already fine, return it unchanged.''';
           // Retained so the post-save PDF/Share actions can export THIS record
           // without re-running _submit, which would file a duplicate.
           _savedIncident = Map<String, dynamic>.from(incident);
-          _savedReporterName = user?['name']?.toString() ?? 'SAIL Safety Officer';
+          _savedReporterName = user?['name']?.toString() ?? Branding.defaultReporter;
           _savedReporterPno = user?['pno']?.toString() ?? '';
           _savedImageBytes = preservedImageBytes;
         });
@@ -2706,15 +2707,15 @@ If the text is already fine, return it unchanged.''';
         incident: incident,
         reporterName: _savedReporterName.isNotEmpty
             ? _savedReporterName
-            : user?['name']?.toString() ?? 'SAIL Safety Officer',
+            : user?['name']?.toString() ?? Branding.defaultReporter,
         reporterPno: _savedReporterPno.isNotEmpty
             ? _savedReporterPno
             : user?['pno']?.toString() ?? '',
         imageBytes: savedImageBytes,
-        text: channel == 'whatsapp' ? '' : 'SAIL Safety Lens - Near Miss Report\n'
+        text: channel == 'whatsapp' ? '' : '${Branding.appTitle} - Near Miss Report\n'
             '$title${severity.isEmpty ? '' : ' ($severity)'}'
             '${plant.isEmpty ? '' : ' - $plant'}',
-        subject: 'SAIL Safety Lens: $title',
+        subject: '${Branding.appTitle}: $title',
       );
       if (!mounted) return;
       if (outcome == 'downloaded') {

@@ -13,6 +13,8 @@ import '../services/background_sync.dart';
 import 'login_screen.dart';
 import 'ai_scan_tab.dart';
 import 'near_miss_tab.dart';
+import '../services/branding.dart';
+import '../widgets/brand_logo.dart';
 
 class ContractorHomeScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -93,23 +95,13 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
         ),
         title: Row(
           children: [
-            Image.asset(
-              'assets/images/app_icon.png',
-              width: 28,
-              height: 28,
-              errorBuilder: (_, __, ___) => Container(
-                width: 28, height: 28,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.accent),
-                child: const Icon(Icons.shield, color: Colors.white, size: 14)),
-            ),
+            const BrandLogo(size: 28, fallbackColor: AppColors.accent),
             const SizedBox(width: 10),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'SAIL Safety Lens',
+                  Branding.appTitle,
                   style: TextStyle(
                     color: sl.text1,
                     fontSize: 14,

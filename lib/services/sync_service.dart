@@ -504,6 +504,7 @@ class SyncService {
     bool? spiCardVisible,
     bool? sopScanTabVisible,
     Map<String, int>? severityScores,
+    Map<String, dynamic>? branding,
     String? updatedBy,
   }) async {
     if (SupabaseConfig.enabled) {
@@ -522,6 +523,8 @@ class SyncService {
       // needing its own special case.
       if (sopScanTabVisible != null) any |= await SupabaseService.setMasterData('sop_scan_tab_visible', {'visible': sopScanTabVisible});
       if (severityScores != null) any |= await SupabaseService.setMasterData('severity_scores', severityScores);
+      // Company name + logo (Admin → Company Branding). See services/branding.dart.
+      if (branding != null) any |= await SupabaseService.setMasterData('branding', branding);
       return any;
     }
     if (!await isConfigured) return false;
@@ -544,6 +547,9 @@ class SyncService {
       // to persist as FALSE, which is the safe direction.
       if (sopScanTabVisible != null) body['sopScanTabVisible'] = sopScanTabVisible;
       if (severityScores != null) body['severityScores'] = severityScores;
+      // Legacy backend: persists only once 'branding' is in the Apps Script
+      // MASTERDATA_KEYS whitelist (not yet added). Supabase is the live path.
+      if (branding != null) body['branding'] = branding;
       if (updatedBy != null)   body['updatedBy'] = updatedBy;
 
       final resp = await _postWithRedirect(url, body);
@@ -579,6 +585,8 @@ class SyncService {
         // recoverable, but only if the unwrap does not throw first.
         if (raw['sop_scan_tab_visible'] != null) 'sopScanTabVisible': (raw['sop_scan_tab_visible'] is Map) ? (raw['sop_scan_tab_visible'] as Map)['visible'] : raw['sop_scan_tab_visible'],
         if (raw['severity_scores'] != null) 'severityScores': raw['severity_scores'],
+        // WHITELIST entry — without it the brand never reaches other devices.
+        if (raw['branding'] != null) 'branding': raw['branding'],
       };
 
       // ★ CRITICAL: AI API keys (OpenRouter/Gemini/Groq) do NOT live in the

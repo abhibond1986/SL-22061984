@@ -7,6 +7,7 @@ import '../services/api_keys.dart';
 import '../widgets/glass_card.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import '../widgets/brand_logo.dart';
 
 class SplashScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -86,17 +87,7 @@ class _SplashScreenState extends State<SplashScreen>
                   GlassCard(
                     padding: const EdgeInsets.all(24),
                     borderRadius: 24,
-                    child: Image.asset(
-                      'assets/images/app_icon.png',
-                      width: 90, height: 90,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => Container(
-                        width: 90, height: 90,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: AppColors.accent),
-                        child: const Icon(Icons.shield, color: Colors.white, size: 45)),
-                    ),
+                    child: const BrandLogo(size: 90, fallbackColor: AppColors.accent),
                   ),
                   const SizedBox(height: 28),
                   const BrandTitle(size: 28),

@@ -16,6 +16,8 @@ import '../services/plant_scope.dart';
 import '../services/realtime_sync.dart';
 import 'admin_screen.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../services/branding.dart';
+import '../widgets/brand_logo.dart';
 
 class DashboardTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -402,14 +404,11 @@ class _DashboardTabState extends State<DashboardTab> {
           border: Border.all(color: AppColors.accent.withOpacity(0.3))),
         child: Padding(
           padding: const EdgeInsets.all(5),
-          child: Image.asset('assets/images/app_icon.png',
-            fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => const Icon(
-                Icons.shield_outlined, size: 18, color: AppColors.accent)))),
+          child: const BrandLogo(size: 26, fallbackColor: AppColors.accent))),
       const SizedBox(width: 10),
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('SAIL Safety Lens',
-          style: TextStyle(color: sl.text1, fontSize: 14, fontWeight: FontWeight.w700)),
+        BrandBuilder(builder: (_) => Text(Branding.appTitle,
+          style: TextStyle(color: sl.text1, fontSize: 14, fontWeight: FontWeight.w700))),
         Text('AI Safety Platform',
           style: TextStyle(color: sl.text3, fontSize: 12)),  // Improved: was text4/9px
       ])),

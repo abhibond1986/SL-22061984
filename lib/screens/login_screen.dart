@@ -15,6 +15,7 @@ import '../widgets/glass_card.dart';
 import 'home_screen.dart';
 import 'contractor_home_screen.dart';
 import 'force_password_change_screen.dart';
+import '../widgets/brand_logo.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -299,17 +300,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Image.asset(
-                    'assets/images/app_icon.png',
-                    width: 72, height: 72,
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, __, ___) => Container(
-                      width: 72, height: 72,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: AppColors.accent),
-                      child: const Icon(Icons.shield, color: Colors.white, size: 36)),
-                  ),
+                  const BrandLogo(size: 72, fallbackColor: AppColors.accent),
                   const SizedBox(height: 14),
                   const BrandTitle(size: 22),
                   const SizedBox(height: 6),

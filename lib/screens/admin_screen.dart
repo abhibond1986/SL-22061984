@@ -69,6 +69,8 @@ import 'bulk_user_import_screen.dart';
 import '../widgets/user_picker.dart';
 import 'employee_profile_screen.dart';
 // Reuse the same web/mobile download shim that pdf_export.dart uses
+import '../services/branding.dart';
+import 'admin/branding_panel.dart';
 import '../services/pdf_export_stub.dart'
     if (dart.library.html) '../services/pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
 
@@ -132,6 +134,9 @@ class _AdminScreenState extends State<AdminScreen>
     // real success rate, and response times. Not exposed anywhere else.
     _AdminModule(16,'ai_telemetry','AI Performance',    'Runs, success, speed',
         Icons.speed_rounded,           Color(0xFF455A64), true),
+    // White-label: company name + logo across the app and PDF reports.
+    _AdminModule(17,'branding',  'Company Branding',   'Name & logo',
+        Icons.storefront_rounded,      Color(0xFF0E7490), true),
   ];
 
   // ── Login state ─────────────────────────────────────────────────
@@ -614,7 +619,7 @@ class _AdminScreenState extends State<AdminScreen>
                   style: TextStyle(color: sl.text1, fontSize: 22,
                       fontWeight: FontWeight.w800, letterSpacing: 0.5)),
                 const SizedBox(height: 4),
-                Text('SAIL Safety Lens — Admin v5',
+                Text('${Branding.appTitle} — Admin v5',
                   style: TextStyle(color: sl.text3, fontSize: 12)),
                 const SizedBox(height: 26),
                 _loginField('Username', _unameCtrl, sl,
@@ -924,6 +929,7 @@ class _AdminScreenState extends State<AdminScreen>
       case 14: return _moduleAiAudit(sl);
       case 15: return _moduleAiCorrections(sl);
       case 16: return _moduleAiTelemetry(sl);
+      case 17: return BrandingPanel(actor: _currentActor);
       default: return _modulePlaceholder(m, sl);
     }
   }
@@ -1005,7 +1011,7 @@ class _AdminScreenState extends State<AdminScreen>
                   style: const TextStyle(color: Colors.white,
                       fontSize: 16, fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
-              const Text('SAIL Safety Lens — Enterprise Admin',
+              Text('${Branding.appTitle} — Enterprise Admin',
                   style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 11)),
             ])),
         ])),
