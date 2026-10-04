@@ -107,19 +107,22 @@ class _ReportsTabState extends State<ReportsTab>
                       dividerColor: Colors.transparent,
                       isScrollable: false,
                       padding: const EdgeInsets.all(3),
-                      labelPadding: const EdgeInsets.symmetric(vertical: 4),
+                      labelPadding: EdgeInsets.zero,
+                      // ★ 2026-10-04. 36 px instead of the default 46 px + 8 px
+                      // padding: every pixel of this fixed header was taken
+                      // from the incident list below it on a laptop screen.
                       tabs: [
-                        Tab(text: I18n.t('reports.tab.overview')),
-                        Tab(text: I18n.t('reports.tab.log')),
-                        Tab(text: I18n.t('reports.tab.analysis')),
-                        Tab(text: I18n.t('reports.tab.plantWise')),
+                        Tab(height: 36, text: I18n.t('reports.tab.overview')),
+                        Tab(height: 36, text: I18n.t('reports.tab.log')),
+                        Tab(height: 36, text: I18n.t('reports.tab.analysis')),
+                        Tab(height: 36, text: I18n.t('reports.tab.plantWise')),
                       ],
                     ),
                   ),
                 ),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             Expanded(
               child: TabBarView(
                 controller: _tabController,

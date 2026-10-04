@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:typed_data';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
 import '../../widgets/content_width.dart';
@@ -11,6 +10,7 @@ import '../../services/plant_scope.dart';
 import '../../services/pdf_export.dart';
 import '../../services/sync_service.dart';
 import '../../services/realtime_sync.dart';
+import '../../services/incident_assign.dart';
 import '../incident_detail_screen.dart';
 import '../reports_tab.dart';
 
@@ -40,6 +40,8 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   String _typeFilter = 'All';
   String _dateRange = '90 days';
   bool _myReportsOnly = false; // ★ v35: filter by current user
+  /// null = decide from the viewport height (collapsed on short screens).
+  bool? _filtersOpen;
   String _currentUserName = '';
   String _currentUserPno = '';
   bool _currentUserIsAdmin = false;
@@ -379,90 +381,148 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
 
     final filtered = _filtered;
 
-    return Column(children: [
-      // The filter bar and the summary row live OUTSIDE the ListView below, so
-      // the list's gutter padding can't reach them — they get ContentWidth
-      // instead, at the same `wide` cap, so the three stay in one column.
-      ContentWidth(maxWidth: SLLayout.wide, child: _filterSection(sl)),
-      // Summary
-      ContentWidth(
-        maxWidth: SLLayout.wide,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          child: Row(children: [
-            Text('Showing ${filtered.length} of ${_all.length} incidents',
-                style: TextStyle(color: sl.text3, fontSize: 11,
-                    fontWeight: FontWeight.w600)),
-            const Spacer(),
-            // The pinned plant doesn't count as an active filter for a locked
-            // user, and "Clear filters" must not reset it to 'All' — that was the
-            // one control that could have widened the view back out.
-            if (_sevFilter.isNotEmpty || _statusFilter.isNotEmpty ||
-                (!_scope.isLocked && _plantFilter != 'All') ||
-                _departmentFilter != 'All' ||
-                _typeFilter != 'All' || _myReportsOnly)
-              GestureDetector(
-                onTap: () => setState(() {
-                  _sevFilter.clear();
-                  _statusFilter.clear();
-                  if (!_scope.isLocked) _plantFilter = 'All';
-                  _departmentFilter = 'All'; // ★ NEW: Clear department filter
-                  _typeFilter = 'All';
-                  _dateRange = '90 days';
-                  _myReportsOnly = false;
-                }),
-                child: Text('Clear filters', style: TextStyle(
-                    color: sl.accentText, fontSize: 11,
-                    fontWeight: FontWeight.w600)),
+    // ★ 2026-10-04. ONE scroll view for filters + list. The filter bar, the
+    // summary and the sync strip used to sit in a fixed Column above an
+    // Expanded list, so on a laptop (app bar + tab bar + filters + bottom nav)
+    // the list got barely one card of height and scrolling never revealed a
+    // whole case. Now the filters scroll away with the list, and on a short
+    // viewport they start collapsed behind a "Filters" toggle.
+    return LayoutBuilder(builder: (ctx, box) {
+      final filtersOpen = _filtersOpen ?? box.maxHeight >= 620;
+      final contentW =
+          (box.maxWidth < SLLayout.wide ? box.maxWidth : SLLayout.wide) - 28;
+      final table = contentW >= _kTableMinWidth;
+      final gutter = slGutter(context,
+          maxWidth: SLLayout.wide,
+          base: const EdgeInsets.fromLTRB(14, 0, 14, 80));
+      return RefreshIndicator(
+        onRefresh: () => _syncAndLoad(force: true),
+        color: AppColors.accent,
+        child: CustomScrollView(
+          // Pullable even when empty — a newly signed-in device starts here.
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            SliverToBoxAdapter(
+              child: ContentWidth(
+                maxWidth: SLLayout.wide,
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                  _summaryBar(sl, filtered.length, filtersOpen),
+                  if (filtersOpen) _filterSection(sl),
+                  _syncStrip(sl),
+                ]),
               ),
-          ]),
-        ),
-      ),
-      _syncStrip(sl),
-      // Incident list
-      Expanded(
-        child: filtered.isEmpty
-            // Pullable even when empty — a newly signed-in device starts here,
-            // and pulling is how it fetches what other devices have saved.
-            ? RefreshIndicator(
-                onRefresh: () => _syncAndLoad(force: true),
-                color: AppColors.accent,
-                child: LayoutBuilder(builder: (ctx, c) => ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  children: [
-                    SizedBox(
-                      height: c.maxHeight,
-                      child: Center(child: Column(
-                          mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.search_off_rounded, color: sl.text4, size: 40),
-                        const SizedBox(height: 8),
-                        Text(_all.isEmpty
-                                ? 'No reports on this device yet'
-                                : 'No incidents match filters',
-                            style: TextStyle(color: sl.text3, fontSize: 13)),
-                        const SizedBox(height: 4),
-                        Text('Pull down to fetch reports saved on other devices',
-                            style: TextStyle(color: sl.text4, fontSize: 11)),
-                      ])),
-                    ),
-                  ],
+            ),
+            if (filtered.isEmpty)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 32),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.search_off_rounded, color: sl.text4, size: 40),
+                    const SizedBox(height: 8),
+                    Text(_all.isEmpty
+                            ? 'No reports on this device yet'
+                            : 'No incidents match filters',
+                        style: TextStyle(color: sl.text3, fontSize: 13)),
+                    const SizedBox(height: 4),
+                    Text('Pull down to fetch reports saved on other devices',
+                        style: TextStyle(color: sl.text4, fontSize: 11)),
+                  ]),
                 )),
               )
-            : RefreshIndicator(
-                onRefresh: () => _syncAndLoad(force: true),
-                color: AppColors.accent,
-                child: ListView.builder(
-                  // Gutter, not a wrap: this list is the app's longest and must
-                  // stay lazily built.
-                  padding: slGutter(context,
-                      maxWidth: SLLayout.wide,
-                      base: const EdgeInsets.fromLTRB(14, 0, 14, 80)),
+            else ...[
+              if (table)
+                SliverPadding(
+                  padding: EdgeInsets.only(
+                      left: gutter.left, right: gutter.right),
+                  sliver: SliverToBoxAdapter(child: _tableHeader(sl)),
+                ),
+              SliverPadding(
+                // Gutter, not a wrap: this list is the app's longest and must
+                // stay lazily built.
+                padding: gutter,
+                sliver: SliverList.builder(
                   itemCount: filtered.length,
-                  itemBuilder: (_, i) => _incidentCard(sl, filtered[i]),
+                  itemBuilder: (_, i) => table
+                      ? _incidentRow(sl, filtered[i])
+                      : _incidentCard(sl, filtered[i]),
                 ),
               ),
-      ),
-    ]);
+            ],
+          ],
+        ),
+      );
+    });
+  }
+
+  /// Number of filters that differ from the defaults (pinned plant excluded).
+  int get _activeFilterCount =>
+      _sevFilter.length +
+      _statusFilter.length +
+      ((!_scope.isLocked && _plantFilter != 'All') ? 1 : 0) +
+      (_departmentFilter != 'All' ? 1 : 0) +
+      (_typeFilter != 'All' ? 1 : 0) +
+      (_myReportsOnly ? 1 : 0) +
+      (_dateRange != '90 days' ? 1 : 0);
+
+  /// "Showing N of M" + Clear filters + the show/hide-filters toggle.
+  Widget _summaryBar(SL sl, int shown, bool filtersOpen) {
+    final active = _activeFilterCount;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 2),
+      child: Row(children: [
+        Expanded(
+          child: Text('Showing $shown of ${_all.length} incidents',
+              style: TextStyle(color: sl.text3, fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ),
+        // The pinned plant doesn't count as an active filter for a locked
+        // user, and "Clear filters" must not reset it to 'All' — that was the
+        // one control that could have widened the view back out.
+        if (active > 0)
+          TextButton(
+            onPressed: () => setState(() {
+              _sevFilter.clear();
+              _statusFilter.clear();
+              if (!_scope.isLocked) _plantFilter = 'All';
+              _departmentFilter = 'All';
+              _typeFilter = 'All';
+              _dateRange = '90 days';
+              _myReportsOnly = false;
+            }),
+            style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8)),
+            child: Text('Clear filters', style: TextStyle(
+                color: sl.accentText, fontSize: 12,
+                fontWeight: FontWeight.w700)),
+          ),
+        const SizedBox(width: 4),
+        OutlinedButton.icon(
+          onPressed: () => setState(() => _filtersOpen = !filtersOpen),
+          icon: Icon(
+              filtersOpen
+                  ? Icons.expand_less_rounded
+                  : Icons.tune_rounded,
+              size: 16, color: sl.accentText),
+          label: Text(
+              filtersOpen
+                  ? 'Hide filters'
+                  : (active > 0 ? 'Filters ($active)' : 'Filters'),
+              style: TextStyle(color: sl.accentText, fontSize: 12,
+                  fontWeight: FontWeight.w700)),
+          style: OutlinedButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            side: BorderSide(color: sl.glassBorder),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+      ]),
+    );
   }
 
   /// One-line server status above the list: syncing / N not uploaded yet /
@@ -535,43 +595,41 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
           Expanded(child: _scope.isLocked
               ? _lockedPlantLabel(sl)
               : _dropdownChip(sl, _plantFilter, _plants, (v) =>
-                  setState(() => _plantFilter = v))),
+                  setState(() => _plantFilter = v), expand: true)),
           const SizedBox(width: 8),
           Expanded(child: _dropdownChip(sl, _departmentFilter, _departments, (v) =>
-              setState(() => _departmentFilter = v))),
+              setState(() => _departmentFilter = v), expand: true)),
           const SizedBox(width: 8),
           _dropdownChip(sl, _dateRange,
               ['7 days', '30 days', '90 days', 'All'], (v) =>
               setState(() => _dateRange = v)),
         ]),
         const SizedBox(height: 8),
-        // Row 2: Severity chips
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(children: [
+        // Rows 2+: severity · type · mine · status chips in ONE wrap, so a
+        // wide window spends one line on them instead of two fixed rows.
+        Wrap(
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
             for (final s in _severities)
               _filterChip(sl, s.toUpperCase(), _sevFilter, _sevColorFor(s)),
-            const SizedBox(width: 12),
+            _chipGap(),
             _typeChip(sl, 'All'),
             _typeChip(sl, 'AI_SCAN'),
             _typeChip(sl, 'NEAR_MISS'),
-            const SizedBox(width: 12),
+            _chipGap(),
             // ★ v35: My Reports toggle
             _myReportsChip(sl),
-          ]),
-        ),
-        const SizedBox(height: 6),
-        // Row 3: Status chips
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(children: [
+            _chipGap(),
             for (final s in _statuses)
               _statusChip(sl, s.toUpperCase(), _statusColorFor(s)),
-          ]),
+          ],
         ),
       ]),
     );
   }
+
+  Widget _chipGap() => const SizedBox(width: 10, height: 1);
 
   /// The plant shown as plain text, in the same pill as the dropdowns beside
   /// it so the filter row keeps its shape. No affordance to change it.
@@ -594,8 +652,11 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
     );
   }
 
+  /// [expand] = the chip sits in an Expanded slot: the dropdown then fills it
+  /// and ellipsizes a long plant/department name instead of overflowing on a
+  /// phone (it used to overflow by ~230 px at 400 px wide).
   Widget _dropdownChip(SL sl, String value, List<String> items,
-      ValueChanged<String> onChanged) {
+      ValueChanged<String> onChanged, {bool expand = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
       decoration: BoxDecoration(
@@ -607,6 +668,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
         child: DropdownButton<String>(
           value: value,
           isDense: true,
+          isExpanded: expand,
           dropdownColor: sl.card,
           style: TextStyle(color: sl.text1, fontSize: 12),
           icon: Icon(Icons.keyboard_arrow_down, color: sl.text3, size: 16),
@@ -688,7 +750,7 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
           ),
           child: Text(displayLabel, style: TextStyle(
               color: active ? AppColors.accent : sl.text3,
-              fontSize: 10, fontWeight: FontWeight.w700)),
+              fontSize: 12, fontWeight: FontWeight.w700)),
         ),
       ),
     );
@@ -711,12 +773,12 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
                 width: active ? 1.5 : 1),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.person_outline_rounded, size: 11,
+            Icon(Icons.person_outline_rounded, size: 13,
                 color: active ? const Color(0xFF2196F3) : sl.text3),
             const SizedBox(width: 3),
             Text('Mine', style: TextStyle(
                 color: active ? const Color(0xFF2196F3) : sl.text3,
-                fontSize: 10, fontWeight: FontWeight.w700)),
+                fontSize: 12, fontWeight: FontWeight.w700)),
           ]),
         ),
       ),
@@ -724,256 +786,523 @@ class _IncidentLogTabState extends State<IncidentLogTab> {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  INCIDENT CARD — with type column + thumbnail
+  //  INCIDENT ROWS — ★ 2026-10-04 redesign
+  //
+  //  Two layouts from one set of parts:
+  //   • TABLE (content ≥ _kTableMinWidth, i.e. laptop/desktop): one line per
+  //     case in FIXED-WIDTH columns under a header, so plant, risk, status,
+  //     owner and the action buttons line up vertically down the whole list.
+  //     The action column always reserves the Delete slot, so PDF never jumps
+  //     left on rows the user cannot delete.
+  //   • CARD (phones / narrow windows): details on top, a divider, then a
+  //     full-width footer — owner on the left, buttons right-aligned. The old
+  //     card put the buttons inside the text column, indented under the
+  //     thumbnail, which is the misalignment visible in the screenshot.
+  //  Every row is lightly tinted by its RISK SCORE band (same bands as
+  //  AdminMasterData.severityBands), with a solid bar of that colour on the
+  //  left edge.
   // ═══════════════════════════════════════════════════════════════
+
+  static const double _kTableMinWidth = 1000;
+  static const double _kColThumb = 44;
+  static const double _kColPlant = 160;
+  static const double _kColRisk = 88;
+  static const double _kColStatus = 170;
+  static const double _kBtnAssign = 96;
+  static const double _kBtnPdf = 64;
+  static const double _kBtnDelete = 80;
+  static const double _kBtnGap = 6;
+  static const double _kColActions =
+      _kBtnAssign + _kBtnPdf + _kBtnDelete + 2 * _kBtnGap;
+  static const double _kColGap = 12;
+
+  /// Stored 0–100 risk score, or null when the record carries none.
+  int? _riskScoreOf(Map<String, dynamic> inc) {
+    final raw = inc['riskScore'];
+    if (raw == null) return null;
+    final v = raw is num ? raw.round() : int.tryParse(raw.toString().trim());
+    return v?.clamp(0, 100);
+  }
+
+  /// Band colour for a risk score; falls back to the severity colour when the
+  /// record has no score. Bands = AdminMasterData.severityBands.
+  Color _riskColorFor(int? score, String sev) {
+    if (score == null) return _sevColorFor(sev);
+    final b = AdminMasterData.severityBands;
+    if (score >= (b['CRITICAL']?.min ?? 80)) return AppColors.crit;
+    if (score >= (b['HIGH']?.min ?? 60)) return AppColors.red;
+    if (score >= (b['MEDIUM']?.min ?? 35)) return AppColors.amber;
+    return AppColors.green;
+  }
+
+  /// Light, opaque row background tinted with [c].
+  Color _rowTint(SL sl, Color c) => Color.alphaBlend(
+      c.withOpacity(sl.isDark ? 0.12 : 0.07),
+      sl.isDark ? AppColors.darkCard : Colors.white);
+
+  /// Row shell: rounded, risk-tinted, hairline border in the risk colour and
+  /// a solid 4 px risk bar on the left. Built from a clipped Material + an
+  /// unrounded left border because Flutter cannot paint a borderRadius on a
+  /// Border whose sides differ in colour (it asserts).
+  Widget _rowShell(SL sl, Color riskColor, Map<String, dynamic> inc,
+      EdgeInsets padding, Widget child) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: _rowTint(sl, riskColor),
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: riskColor.withOpacity(0.25)),
+        ),
+        child: InkWell(
+          onTap: () => _openDetail(inc),
+          child: Container(
+            decoration: BoxDecoration(
+                border: Border(left: BorderSide(color: riskColor, width: 4))),
+            padding: padding,
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openDetail(Map<String, dynamic> inc) => Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) =>
+              IncidentDetailScreen(incident: inc, onStatusChanged: _load)));
+
+  /// Column headings for the table layout — same widths as [_incidentRow].
+  Widget _tableHeader(SL sl) {
+    TextStyle st() => TextStyle(
+        color: sl.text4, fontSize: 10.5,
+        fontWeight: FontWeight.w800, letterSpacing: 0.6);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
+      child: Row(children: [
+        const SizedBox(width: _kColThumb + _kColGap),
+        Expanded(child: Text('INCIDENT', style: st())),
+        const SizedBox(width: _kColGap),
+        SizedBox(width: _kColPlant, child: Text('PLANT · DATE', style: st())),
+        const SizedBox(width: _kColGap),
+        SizedBox(width: _kColRisk,
+            child: Text('RISK', style: st(), textAlign: TextAlign.center)),
+        const SizedBox(width: _kColGap),
+        SizedBox(width: _kColStatus,
+            child: Text('STATUS · ACTION OWNER', style: st())),
+        const SizedBox(width: _kColGap),
+        SizedBox(width: _kColActions,
+            child: Text('ACTIONS', style: st(), textAlign: TextAlign.right)),
+      ]),
+    );
+  }
+
+  /// Desktop/laptop row: fixed columns, everything vertically centred.
+  Widget _incidentRow(SL sl, Map<String, dynamic> inc) {
+    final sev = inc['severity']?.toString().toUpperCase() ?? 'MEDIUM';
+    final score = _riskScoreOf(inc);
+    final riskColor = _riskColorFor(score, sev);
+    final date = inc['date']?.toString() ?? '';
+    final dateStr = date.length >= 10 ? date.substring(0, 10) : date;
+    final reporter = inc['reportedBy']?.toString() ?? '';
+
+    return _rowShell(sl, riskColor, inc,
+        const EdgeInsets.fromLTRB(10, 10, 12, 10),
+            Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+              _thumbnail(inc, _kColThumb),
+              const SizedBox(width: _kColGap),
+              // INCIDENT
+              Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                _titleText(sl, inc),
+                const SizedBox(height: 5),
+                _tagRow(sl, inc),
+              ])),
+              const SizedBox(width: _kColGap),
+              // PLANT · DATE
+              SizedBox(width: _kColPlant, child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                _iconLine(sl, Icons.factory_outlined,
+                    inc['plant']?.toString() ?? '—', sl.text2),
+                const SizedBox(height: 3),
+                _iconLine(sl, Icons.calendar_today_outlined, dateStr, sl.text3),
+                if (reporter.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  _iconLine(sl, Icons.edit_note_rounded, reporter, sl.text4),
+                ],
+              ])),
+              const SizedBox(width: _kColGap),
+              // RISK
+              SizedBox(width: _kColRisk,
+                  child: Center(child: _riskBadge(sl, score, sev, riskColor))),
+              const SizedBox(width: _kColGap),
+              // STATUS · OWNER
+              SizedBox(width: _kColStatus, child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                _statusPill(sl, inc),
+                const SizedBox(height: 6),
+                _assigneeLine(sl, inc),
+              ])),
+              const SizedBox(width: _kColGap),
+              // ACTIONS — Delete slot always reserved so buttons line up.
+              SizedBox(width: _kColActions,
+                  child: _actionButtons(inc, reserveDeleteSlot: true)),
+            ]),
+    );
+  }
+
+  /// Phone / narrow-window card.
   Widget _incidentCard(SL sl, Map<String, dynamic> inc) {
     final sev = inc['severity']?.toString().toUpperCase() ?? 'MEDIUM';
-    final status = inc['status']?.toString().toUpperCase() ?? 'OPEN';
-    final type = inc['type']?.toString().toUpperCase() ?? '';
-
-    // Shared with the filter chips so a card and its chip always agree.
-    final sevColor = _sevColorFor(sev);
-    final statusColor = _statusColorFor(status);
-
+    final score = _riskScoreOf(inc);
+    final riskColor = _riskColorFor(score, sev);
     final date = inc['date']?.toString() ?? '';
     final dateStr = date.length >= 10 ? date.substring(0, 10) : date;
 
-    // ★ Type styling
-    final isAiScan = type == 'AI_SCAN';
-    final typeColor = isAiScan ? AppColors.accent : AppColors.amber;
-    final typeLabel = isAiScan ? 'AI Scan' : 'Near Miss';
-    final typeIcon = isAiScan ? Icons.image_search_rounded : Icons.warning_amber_rounded;
-
-    // ★ Thumbnail — multi-source fallback chain
-    final thumbnail = inc['thumbnailBase64']?.toString() ?? '';
-    final imageBase64 = inc['imageBase64']?.toString() ?? '';
-    final hasInlineThumbnail = thumbnail.isNotEmpty && thumbnail != 'null';
-    final hasInlineImage = imageBase64.isNotEmpty && imageBase64 != 'null' && imageBase64 != '[image]' && imageBase64.length > 100;
-    final hasImageRef = (inc['imageRef']?.toString() ?? '').isNotEmpty &&
-        inc['imageRef'].toString() != 'null';
-    // Cloud-synced records may carry only a Supabase Storage URL (no file ref,
-    // no inline base64) — those must also load asynchronously via ImageStorage.
-    final hasImageUrl = (inc['imageUrl']?.toString() ?? '').startsWith('http');
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: GestureDetector(
-        onTap: () => Navigator.push(context, MaterialPageRoute(
-          builder: (_) => IncidentDetailScreen(
-              incident: inc, onStatusChanged: _load))),
-        child: Container(
-          decoration: BoxDecoration(
-            color: sl.glassColor,
-            borderRadius: BorderRadius.circular(12),
-            border: Border(
-              left: BorderSide(color: sevColor, width: 3),
-              top: BorderSide(color: sl.glassBorder),
-              right: BorderSide(color: sl.glassBorder),
-              bottom: BorderSide(color: sl.glassBorder),
-            ),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // ★ LEFT COLUMN: Thumbnail with multi-source fallback
-            Container(
-              width: 52,
-              height: 52,
-              margin: const EdgeInsets.only(right: 10),
-              decoration: BoxDecoration(
-                color: typeColor.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: typeColor.withOpacity(0.2)),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: hasInlineThumbnail
-                  ? Image.memory(
-                      base64Decode(thumbnail),
-                      fit: BoxFit.cover,
-                      width: 52, height: 52,
-                      errorBuilder: (_, __, ___) => _typeIconWidget(typeIcon, typeColor),
-                    )
-                  : hasInlineImage
-                      ? Image.memory(
-                          base64Decode(imageBase64),
-                          fit: BoxFit.cover,
-                          width: 52, height: 52,
-                          errorBuilder: (_, __, ___) => _typeIconWidget(typeIcon, typeColor),
-                        )
-                      : (hasImageRef || hasImageUrl)
-                          ? _asyncThumbnail(inc, typeIcon, typeColor)
-                          : _typeIconWidget(typeIcon, typeColor),
-            ),
-            // ★ RIGHT COLUMN: Details
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              // Title + Status
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+    return _rowShell(sl, riskColor, inc,
+        const EdgeInsets.fromLTRB(10, 12, 12, 10),
+            Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Expanded(child: Text(
-                    inc['title']?.toString() ?? 'Untitled',
-                    style: TextStyle(color: sl.text1, fontSize: 14.5,
-                        fontWeight: FontWeight.w700, height: 1.3),
-                    maxLines: 2, overflow: TextOverflow.ellipsis,
-                  )),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: statusColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: statusColor.withOpacity(0.3)),
-                    ),
-                    child: Text(status, style: TextStyle(
-                        color: sl.textOn(statusColor), fontSize: 9.5, fontWeight: FontWeight.w800)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              // Info row: plant, date, severity
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Icon(Icons.factory_outlined, color: sl.text4, size: 12),
-                  const SizedBox(width: 4),
-                  Flexible(child: Text(
-                    inc['plant']?.toString() ?? '—',
-                    style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.2),
-                    overflow: TextOverflow.ellipsis,
-                  )),
-                  const SizedBox(width: 10),
-                  Icon(Icons.calendar_today_outlined, color: sl.text4, size: 12),
-                  const SizedBox(width: 4),
-                  Text(dateStr, style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.2)),
-                  const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: sevColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(4)),
-                    child: Text(sev, style: TextStyle(
-                        color: sl.textOn(sevColor), fontSize: 9.5, fontWeight: FontWeight.w800)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              // Bottom row: category + type badge + reported by
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  if ((inc['wsaCategory']?.toString() ?? '').isNotEmpty) ...[
-                    Icon(Icons.label_outline, color: sl.text4, size: 11),
-                    const SizedBox(width: 4),
-                    Flexible(child: Text(inc['wsaCategory'].toString(),
-                        style: TextStyle(color: sl.text4, fontSize: 9.5, height: 1.2),
-                        overflow: TextOverflow.ellipsis)),
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                _thumbnail(inc, 52),
+                const SizedBox(width: 10),
+                Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  _titleText(sl, inc),
+                  const SizedBox(height: 5),
+                  Row(children: [
+                    Flexible(child: _iconLine(sl, Icons.factory_outlined,
+                        inc['plant']?.toString() ?? '—', sl.text3)),
                     const SizedBox(width: 10),
-                  ],
-                  // ★ Type badge (more prominent)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: typeColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: typeColor.withOpacity(0.3)),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(typeIcon, color: typeColor, size: 10),
-                      const SizedBox(width: 4),
-                      Text(typeLabel, style: TextStyle(
-                          color: typeColor, fontSize: 9.5, fontWeight: FontWeight.w700)),
-                    ]),
-                  ),
-                // ★ v35: Audit status badge
-                if (inc['auditStatus']?.toString() == 'NEEDS_REVIEW') ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFDC2626).withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFDC2626).withOpacity(0.3)),
-                    ),
-                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.rate_review_outlined, color: Color(0xFFDC2626), size: 9),
-                      SizedBox(width: 2),
-                      Text('Review', style: TextStyle(
-                          color: Color(0xFFDC2626), fontSize: 10, fontWeight: FontWeight.w800)),
-                    ]),
-                  ),
-                ] else if (inc['auditStatus']?.toString() == 'VERIFIED') ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF10B981).withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.verified_outlined, color: Color(0xFF10B981), size: 9),
-                      SizedBox(width: 2),
-                      Text('Verified', style: TextStyle(
-                          color: Color(0xFF10B981), fontSize: 10, fontWeight: FontWeight.w800)),
-                    ]),
-                  ),
-                ],
-                const Spacer(),
-                if ((inc['reportedBy']?.toString() ?? '').isNotEmpty)
-                  Flexible(child: Text(inc['reportedBy'].toString(),
-                      style: TextStyle(color: sl.text4, fontSize: 9),
-                      overflow: TextOverflow.ellipsis)),
+                    _iconLine(sl, Icons.calendar_today_outlined, dateStr,
+                        sl.text3, shrink: false),
+                  ]),
+                ])),
+                const SizedBox(width: 8),
+                _riskBadge(sl, score, sev, riskColor),
               ]),
               const SizedBox(height: 8),
-              // ── Actions: PDF report (all) + Delete (owner or admin only) ──
-              Row(children: [
-                _cardAction(
-                  icon: Icons.picture_as_pdf_rounded,
-                  label: 'PDF',
-                  color: AppColors.cyan,
-                  onTap: () => _exportPdf(inc),
-                ),
-                if (_canDelete(inc)) ...[
-                  const SizedBox(width: 8),
-                  _cardAction(
-                    icon: Icons.delete_outline_rounded,
-                    label: 'Delete',
-                    color: AppColors.red,
-                    onTap: () => _confirmDelete(inc),
-                  ),
+              Wrap(
+                spacing: 6, runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _statusPill(sl, inc),
+                  ..._tags(sl, inc),
                 ],
-              ]),
-            ])),
-          ]),
-        ),
-      ),
+              ),
+              const SizedBox(height: 8),
+              Divider(height: 1, color: riskColor.withOpacity(0.18)),
+              const SizedBox(height: 8),
+              LayoutBuilder(builder: (_, c) {
+                final buttons = _actionButtons(inc, reserveDeleteSlot: false);
+                // Side by side when there is room; otherwise owner on its own
+                // line and the buttons right-aligned beneath it.
+                if (c.maxWidth >= _kColActions + 140) {
+                  return Row(children: [
+                    Expanded(child: _assigneeLine(sl, inc)),
+                    const SizedBox(width: 8),
+                    buttons,
+                  ]);
+                }
+                return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                  _assigneeLine(sl, inc),
+                  const SizedBox(height: 8),
+                  Align(alignment: Alignment.centerRight, child: buttons),
+                ]);
+              }),
+            ]),
     );
   }
 
-  /// Small pill button used in the incident card action row.
+  // ── shared parts ────────────────────────────────────────────────
+
+  Widget _titleText(SL sl, Map<String, dynamic> inc) => Text(
+        inc['title']?.toString() ?? 'Untitled',
+        style: TextStyle(color: sl.text1, fontSize: 14,
+            fontWeight: FontWeight.w700, height: 1.3),
+        maxLines: 2, overflow: TextOverflow.ellipsis,
+      );
+
+  Widget _iconLine(SL sl, IconData icon, String text, Color color,
+      {bool shrink = true}) {
+    final label = Text(text,
+        maxLines: 1, overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: color, fontSize: 11.5, height: 1.2));
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, color: sl.text4, size: 12),
+      const SizedBox(width: 4),
+      shrink ? Flexible(child: label) : label,
+    ]);
+  }
+
+  Widget _pillBox(String text, Color color, {IconData? icon, Color? fg}) {
+    final sl = SL.of(context);
+    final ink = fg ?? _inkOn(sl, color);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.13),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: color.withOpacity(0.35)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (icon != null) ...[
+          Icon(icon, color: ink, size: 11),
+          const SizedBox(width: 4),
+        ],
+        Text(text, style: TextStyle(color: ink, fontSize: 10,
+            fontWeight: FontWeight.w800, letterSpacing: 0.2)),
+      ]),
+    );
+  }
+
+  /// Readable text colour on a tinted pill. Purple (ACTION TAKEN) and the
+  /// neutral fallback are not in SL.textOn's map, so handle them here.
+  Color _inkOn(SL sl, Color c) {
+    if (c == AppColors.purple) {
+      return sl.isDark ? const Color(0xFFB4A9FF) : const Color(0xFF5B3FD6);
+    }
+    if (c == Colors.blueGrey) return sl.text2;
+    return sl.textOn(c);
+  }
+
+  Widget _statusPill(SL sl, Map<String, dynamic> inc) {
+    final status = inc['status']?.toString().toUpperCase() ?? 'OPEN';
+    return _pillBox(status, _statusColorFor(status));
+  }
+
+  /// Type badge, WSA category and audit badge.
+  List<Widget> _tags(SL sl, Map<String, dynamic> inc) {
+    final type = inc['type']?.toString().toUpperCase() ?? '';
+    final isAiScan = type == 'AI_SCAN';
+    final cat = inc['wsaCategory']?.toString() ?? '';
+    final audit = inc['auditStatus']?.toString() ?? '';
+    return [
+      _pillBox(isAiScan ? 'AI Scan' : 'Near Miss',
+          isAiScan ? AppColors.accent : AppColors.amber,
+          icon: isAiScan
+              ? Icons.image_search_rounded
+              : Icons.warning_amber_rounded),
+      if (audit == 'NEEDS_REVIEW')
+        _pillBox('Review', AppColors.crit, icon: Icons.rate_review_outlined)
+      else if (audit == 'VERIFIED')
+        _pillBox('Verified', AppColors.green, icon: Icons.verified_outlined),
+      if (cat.isNotEmpty && cat != '—')
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 220),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.label_outline, color: sl.text4, size: 12),
+            const SizedBox(width: 3),
+            Flexible(child: Text(cat,
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: sl.text3, fontSize: 11))),
+          ]),
+        ),
+    ];
+  }
+
+  Widget _tagRow(SL sl, Map<String, dynamic> inc) {
+    final tags = _tags(sl, inc);
+    return Row(children: [
+      for (var i = 0; i < tags.length; i++) ...[
+        if (i > 0) const SizedBox(width: 6),
+        // The category (last, free text) is the one allowed to shrink.
+        i == tags.length - 1 && tags.length > 1
+            ? Flexible(child: tags[i])
+            : tags[i],
+      ],
+    ]);
+  }
+
+  /// Score over severity label, both in the risk-band colour.
+  Widget _riskBadge(SL sl, int? score, String sev, Color riskColor) {
+    final ink = sl.textOn(riskColor);
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Text.rich(TextSpan(children: [
+        TextSpan(text: score == null ? '—' : '$score',
+            style: TextStyle(color: ink, fontSize: 18,
+                fontWeight: FontWeight.w900, height: 1.0)),
+        if (score != null)
+          TextSpan(text: '/100',
+              style: TextStyle(color: sl.text4, fontSize: 9.5,
+                  fontWeight: FontWeight.w600)),
+      ])),
+      const SizedBox(height: 4),
+      _pillBox(sev, _sevColorFor(sev)),
+    ]);
+  }
+
+  /// Who implements the corrective action — or a visible "Unassigned".
+  Widget _assigneeLine(SL sl, Map<String, dynamic> inc) {
+    final name = IncidentAssign.assigneeName(inc);
+    final has = name.isNotEmpty;
+    final color = has ? sl.text2 : sl.amberText;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(has ? Icons.engineering_rounded : Icons.person_off_outlined,
+          size: 13, color: has ? sl.accentText : sl.amberText),
+      const SizedBox(width: 5),
+      Flexible(child: Text(has ? name : 'Unassigned',
+          maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: color, fontSize: 11.5,
+              fontWeight: has ? FontWeight.w600 : FontWeight.w700))),
+    ]);
+  }
+
+  /// Assign · PDF · Delete, fixed widths. [reserveDeleteSlot] keeps the
+  /// column the same width on rows the user may not delete (table layout).
+  Widget _actionButtons(Map<String, dynamic> inc,
+      {required bool reserveDeleteSlot}) {
+    final assigned = IncidentAssign.hasAssignee(inc);
+    final canDelete = _canDelete(inc);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        _cardAction(
+          icon: assigned
+              ? Icons.swap_horiz_rounded
+              : Icons.person_add_alt_1_rounded,
+          label: assigned ? 'Transfer' : 'Assign',
+          tooltip: assigned
+              ? 'Hand the corrective action to someone else'
+              : 'Assign who will implement the corrective action',
+          color: AppColors.accent,
+          width: _kBtnAssign,
+          onTap: () => _assign(inc),
+        ),
+        const SizedBox(width: _kBtnGap),
+        _cardAction(
+          icon: Icons.picture_as_pdf_rounded,
+          label: 'PDF',
+          tooltip: 'Download / share PDF report',
+          color: AppColors.cyan,
+          width: _kBtnPdf,
+          onTap: () => _exportPdf(inc),
+        ),
+        if (canDelete || reserveDeleteSlot)
+          const SizedBox(width: _kBtnGap),
+        if (canDelete)
+          _cardAction(
+            icon: Icons.delete_outline_rounded,
+            label: 'Delete',
+            tooltip: 'Delete this report',
+            color: AppColors.red,
+            width: _kBtnDelete,
+            onTap: () => _confirmDelete(inc),
+          )
+        else if (reserveDeleteSlot)
+          const SizedBox(width: _kBtnDelete),
+      ],
+    );
+  }
+
+  /// Fixed-size pill button used in the row/card action area.
   Widget _cardAction({
     required IconData icon, required String label,
     required Color color, required VoidCallback onTap,
+    required double width, String? tooltip,
   }) {
     final sl = SL.of(context);
-    return Material(
+    final btn = Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Ink(
+          width: width,
+          height: 32,
           decoration: BoxDecoration(
             color: color.withOpacity(0.10),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: color.withOpacity(0.35)),
+            border: Border.all(color: color.withOpacity(0.40)),
           ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
+          child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
             Icon(icon, color: sl.textOn(color), size: 14),
             const SizedBox(width: 5),
-            Text(label, style: TextStyle(
-                color: sl.textOn(color), fontSize: 11, fontWeight: FontWeight.w700)),
+            Flexible(child: Text(label,
+                maxLines: 1, overflow: TextOverflow.clip,
+                style: TextStyle(color: sl.textOn(color), fontSize: 11.5,
+                    fontWeight: FontWeight.w700))),
           ]),
         ),
       ),
+    );
+    return tooltip == null ? btn : Tooltip(message: tooltip, child: btn);
+  }
+
+  /// Assign / transfer the corrective action straight from the log.
+  Future<void> _assign(Map<String, dynamic> inc) async {
+    final res = await IncidentAssign.pickAndSave(context, inc);
+    if (!mounted) return;
+    if (res.changed) await _load();
+    if (!mounted || res.message.isEmpty) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(res.message),
+      backgroundColor: res.changed ? AppColors.accent : AppColors.red,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  /// Thumbnail with the multi-source fallback chain (inline thumb → inline
+  /// image → stored file / Storage URL → type icon).
+  Widget _thumbnail(Map<String, dynamic> inc, double size) {
+    final type = inc['type']?.toString().toUpperCase() ?? '';
+    final isAiScan = type == 'AI_SCAN';
+    final typeColor = isAiScan ? AppColors.accent : AppColors.amber;
+    final typeIcon =
+        isAiScan ? Icons.image_search_rounded : Icons.warning_amber_rounded;
+    final thumbnail = inc['thumbnailBase64']?.toString() ?? '';
+    final imageBase64 = inc['imageBase64']?.toString() ?? '';
+    final hasInlineThumbnail = thumbnail.isNotEmpty && thumbnail != 'null';
+    final hasInlineImage = imageBase64.isNotEmpty && imageBase64 != 'null' &&
+        imageBase64 != '[image]' && imageBase64.length > 100;
+    final hasImageRef = (inc['imageRef']?.toString() ?? '').isNotEmpty &&
+        inc['imageRef'].toString() != 'null';
+    final hasImageUrl = (inc['imageUrl']?.toString() ?? '').startsWith('http');
+
+    Widget child;
+    if (hasInlineThumbnail || hasInlineImage) {
+      Uint8List? bytes;
+      try {
+        bytes = base64Decode(hasInlineThumbnail ? thumbnail : imageBase64);
+      } catch (_) {}
+      child = bytes == null
+          ? _typeIconWidget(typeIcon, typeColor)
+          : Image.memory(bytes, fit: BoxFit.cover,
+              width: size, height: size, gaplessPlayback: true,
+              errorBuilder: (_, __, ___) =>
+                  _typeIconWidget(typeIcon, typeColor));
+    } else if (hasImageRef || hasImageUrl) {
+      child = _asyncThumbnail(inc, typeIcon, typeColor);
+    } else {
+      child = _typeIconWidget(typeIcon, typeColor);
+    }
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: typeColor.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: typeColor.withOpacity(0.2)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
     );
   }
 

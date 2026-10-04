@@ -15,9 +15,7 @@ import '../services/plant_scope.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
-import '../services/admin_audit.dart';
-import '../services/assign_scope.dart';
-import '../widgets/user_picker.dart';
+import '../services/incident_assign.dart';
 import 'employee_profile_screen.dart';
 
 class IncidentDetailScreen extends StatefulWidget {
@@ -200,6 +198,17 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final isFinal = _statusOrder.isNotEmpty && newStatus == _statusOrder.last;
     if (isFinal && _actionCtrl.text.trim().isEmpty) {
       _snack('Enter corrective action first', AppColors.red); return;
+    }
+    // ★ 2026-10-04. A case cannot move into investigation / corrective action
+    // with nobody responsible for it. Any stage after the first needs an
+    // assignee; if there is none, the picker opens here and cancelling it
+    // cancels the status change.
+    final isFirst = _statusOrder.isNotEmpty && newStatus == _statusOrder.first;
+    if (!isFirst && !IncidentAssign.hasAssignee(_inc)) {
+      _snack('Assign a person for the corrective action first',
+          AppColors.amber);
+      await _assignInvestigator(required: true);
+      if (!mounted || !IncidentAssign.hasAssignee(_inc)) return;
     }
     setState(() => _saving = true);
     final now = DateTime.now().toIso8601String();
@@ -869,7 +878,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               fontWeight: FontWeight.w700)),
       ]),
       const SizedBox(height: 12),
-      _formLabel('Investigation assigned to', sl),
+      _formLabel('Corrective action assigned to *', sl),
       _investigatorField(sl, bg),
       const SizedBox(height: 10),
       _formLabel('Corrective Action Taken *', sl),
@@ -928,7 +937,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               children: [
                 Text(
                   assignee.isEmpty
-                      ? 'Nobody assigned — tap to choose'
+                      ? 'Nobody assigned — tap to choose who implements the action'
                       : (assignedName.isEmpty ? assignee : assignedName),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -979,76 +988,27 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   /// Not folded into "Save progress": a handover is a fact about who is
   /// responsible right now, and leaving it staged behind another button meant a
   /// reassignment could be silently lost when the screen was closed.
-  Future<void> _assignInvestigator() async {
+  Future<void> _assignInvestigator({bool required = false}) async {
     if (_saving) return;
     if (!await _assertCanAct()) return;
     if (!mounted) return;
-
-    final current = _inc['assignedTo']?.toString().trim() ?? '';
-    // Who is eligible is a property of the CASE, not of whoever opened it — see
-    // AssignScope. Resolved before the sheet opens so the restriction is on
-    // screen from the first frame rather than appearing a moment later.
-    final scope = await AssignScope.forIncident(_inc);
-    if (!mounted) return;
-    final picked = await showUserPicker(
-      context,
-      title: current.isEmpty ? 'Assign investigator' : 'Transfer investigation',
-      currentUsername: current.isEmpty ? null : current,
-      scope: scope,
-    );
-    if (picked == null || !mounted) return;
-
-    final previous = current;
     setState(() => _saving = true);
-
-    if (picked.cleared) {
-      _inc.remove('assignedTo');
-      _inc.remove('assignedToName');
-      _inc.remove('assignedAt');
-    } else {
-      if (picked.username.isEmpty) {
-        setState(() => _saving = false);
-        _snack('That employee has no username on file.', AppColors.red);
-        return;
-      }
-      _inc['assignedTo'] = picked.username;
-      // Stored alongside the username so the card can show a person's name
-      // without a lookup — the detail screen must render offline, and a bare
-      // P.no tells a supervisor nothing.
-      _inc['assignedToName'] = picked.displayName;
-      _inc['assignedAt'] = DateTime.now().toIso8601String();
-    }
-
-    // Keep whatever is typed in the form: saving the assignment must not discard
-    // a corrective action the user has half written.
-    _applyFormFields();
-    await LocalDB.saveIncident(_inc);
-    SyncService.pushIncident(_inc).catchError((_) => false);
-
-    final actor = (await LocalDB.getCurrentUser())?['username']?.toString() ??
-        'unknown';
-    await AdminAudit.log(
-      action: AdminAudit.actIncAssign,
-      actor: actor,
-      target: _inc['id']?.toString(),
-      targetName: _inc['title']?.toString(),
-      // `from` makes this a handover record rather than just a current state —
-      // "who was it taken off" is the first question asked when a case stalls.
-      meta: {
-        'from': previous.isEmpty ? '(unassigned)' : previous,
-        'to': picked.cleared ? '(unassigned)' : picked.username,
-      },
+    // Shared with the Log row's "Assign" button — see IncidentAssign.
+    final res = await IncidentAssign.pickAndSave(
+      context, _inc,
+      title: required ? 'Assign who will implement the corrective action' : null,
+      allowClear: !required,
+      // Keep whatever is typed in the form: saving the assignment must not
+      // discard a corrective action the user has half written.
+      beforeSave: _applyFormFields,
     );
-
     if (!mounted) return;
     setState(() => _saving = false);
-    widget.onStatusChanged?.call();
-    _snack(
-      picked.cleared
-          ? 'Investigation unassigned'
-          : 'Assigned to ${picked.displayName}',
-      AppColors.accent,
-    );
+    if (res.changed) widget.onStatusChanged?.call();
+    if (res.message.isNotEmpty) {
+      _snack(res.message,
+          res.changed ? AppColors.accent : AppColors.red);
+    }
   }
 
   /// Target completion date. A tappable field rather than a text box so the

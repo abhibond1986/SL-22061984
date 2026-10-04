@@ -248,6 +248,20 @@
     </div>
   </div>
 
+  <script>
+    // ★ 2026-10-04 — Ctrl + mouse-wheel browser zoom.
+    // Flutter web listens for 'wheel' and calls preventDefault() on every
+    // event (it turns Ctrl+wheel into its own pinch-zoom gesture), which
+    // cancels the browser's page zoom — so Ctrl+scroll did nothing on
+    // safetylens.in. This capture-phase listener on window runs before
+    // Flutter's (it is registered first, before the engine loads) and, for
+    // Ctrl/Cmd+wheel only, stops the event reaching Flutter WITHOUT calling
+    // preventDefault, so the browser performs its normal zoom and Flutter
+    // simply re-lays out at the new size. Plain scrolling is untouched.
+    window.addEventListener('wheel', function (e) {
+      if (e.ctrlKey || e.metaKey) e.stopImmediatePropagation();
+    }, { capture: true, passive: true });
+  </script>
   <script src="flutter.js" defer></script>
   <script>
     // Previously this waited on window 'load', which does not fire until EVERY

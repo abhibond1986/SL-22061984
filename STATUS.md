@@ -1,3 +1,8 @@
+## 2026-10-04
+- Incident Log: an Assign/Transfer button on every row. On the detail screen, a case can't move past the first stage without an assignee; the picker opens automatically. Both go through the new `lib/services/incident_assign.dart`.
+- Log layout: filters now scroll away with the list, and start collapsed on short screens. The rows are a fixed-column table on desktop, with aligned buttons and a tint by risk score. The Reports tab bar is more compact. Ctrl+wheel browser zoom fixed in `web/index.html`.
+- `dart analyze` finds 0 errors. Renders are in `audit_2026-10-04/`. Not yet checked on a device or the live site. Details: AUDIT_2026-10-04_LOG_ASSIGN_AND_LAYOUT.md.
+
 ## 2026-10-03 (rev. 3)
 - PPE box on the wrong person (chin-strap scan): the prompt now runs a per-person PPE check (`persons`, `personIds`). `HazardQuality.auditPersonAttribution` moves a contradicted box onto the person without the item, or withdraws it and caps the row at LOW. Prompt cache rev bumped to 2, so old photos must be re-scanned. Test: tools/hazard_person_attribution_test.dart.
 - PDF: masthead and title repeat on every page; the hazards table splits with a repeated header row. See AUDIT_2026-10-03_PDF_REPORT_AND_LOG.md Revision 3.
