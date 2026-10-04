@@ -1,4 +1,5 @@
 ## 2026-10-04
+- Incident detail page fix: it was blank on desktop because the bottom bar's `ContentWidth` (a Center) filled the whole screen. Fixed with the new `fillHeight: false` option. The page now uses two columns on desktop, with a Quick actions card (assign/transfer, next stage, WhatsApp, email, PDF, copy summary, reporter/owner profile). Details: AUDIT_2026-10-04_INCIDENT_DETAIL.md.
 - Incident Log: an Assign/Transfer button on every row. On the detail screen, a case can't move past the first stage without an assignee; the picker opens automatically. Both go through the new `lib/services/incident_assign.dart`.
 - Log layout: filters now scroll away with the list, and start collapsed on short screens. The rows are a fixed-column table on desktop, with aligned buttons and a tint by risk score. The Reports tab bar is more compact. Ctrl+wheel browser zoom fixed in `web/index.html`.
 - `dart analyze` finds 0 errors. Renders are in `audit_2026-10-04/`. Not yet checked on a device or the live site. Details: AUDIT_2026-10-04_LOG_ASSIGN_AND_LAYOUT.md.

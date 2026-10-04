@@ -4,8 +4,8 @@
 //         image included in PDF/WhatsApp from thumbnailBase64 fallback
 
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
@@ -460,7 +460,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(_inc['title']?.toString() ?? 'Incident',
+          Text('Incident report',
             style: TextStyle(color: sl.text1, fontSize: 14,
                 fontWeight: FontWeight.w700),
             maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -491,16 +491,55 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       // this plant's records.
       bottomNavigationBar: (_isClosed || !_permChecked || !_canAct)
           ? null : _buildBottomBar(sl, bgColor),
-      body: SingleChildScrollView(
-        padding: slGutter(context,
-            base: const EdgeInsets.fromLTRB(14, 14, 14, 20)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      // ★ 2026-10-04. Desktop/laptop: the report on the left, the work on it
+      // (owner, share, mitigation, timeline) on the right, so both are on
+      // screen at once instead of one 720px column with a page of scrolling.
+      // Phones keep the single column, with Quick actions right after the
+      // details.
+      body: LayoutBuilder(builder: (context, box) {
+        final twoCol = box.maxWidth >= _kTwoColMin;
+        final details = _detailsColumn(sl, sev, sc, bgColor,
+            quickActionsInline: !twoCol);
+        final work = _workColumn(sl, bgColor, withQuickActions: twoCol);
+        return SingleChildScrollView(
+          padding: slGutter(context,
+              maxWidth: twoCol ? SLLayout.wide : SLLayout.content,
+              base: const EdgeInsets.fromLTRB(14, 14, 14, 20)),
+          child: twoCol
+              ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _buildStatusPipeline(sl, bgColor),
+                  const SizedBox(height: 12),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Expanded(flex: 6, child: details),
+                    const SizedBox(width: 16),
+                    Expanded(flex: 5, child: work),
+                  ]),
+                  const SizedBox(height: 24),
+                ])
+              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _buildStatusPipeline(sl, bgColor),
+                  const SizedBox(height: 12),
+                  details,
+                  work,
+                  const SizedBox(height: 24),
+                ]),
+        );
+      }),
+    );
+  }
 
-          // ── STATUS PIPELINE (compact) ─────────────────────────
-          _buildStatusPipeline(sl, bgColor),
-          const SizedBox(height: 12),
+  /// Content width at which the page splits into two columns.
+  static const double _kTwoColMin = 980;
 
+  /// The report itself: what was found, where, by whom.
+  Widget _detailsColumn(SL sl, String sev, Color sc, Color bgColor,
+          {bool quickActionsInline = false}) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // ── HEADER ROW ───────────────────────────────────────
+          Text(_inc['title']?.toString() ?? 'Incident',
+              style: TextStyle(color: sl.text1, fontSize: 17,
+                  fontWeight: FontWeight.w800, height: 1.3)),
+          const SizedBox(height: 8),
           Row(children: [
             _pill(sev, sc),
             const SizedBox(width: 6),
@@ -520,6 +559,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           // ── COMPACT INFO ROWS (not giant grid) ───────────────
           _buildCompactInfo(sl, bgColor),
           const SizedBox(height: 12),
+          // Phones: actions straight after the facts, not below the hazards.
+          if (quickActionsInline) ...[
+            _buildQuickActions(sl, bgColor),
+            const SizedBox(height: 12),
+          ],
 
           // ── DESCRIPTION ──────────────────────────────────────
           if ((_inc['desc']?.toString() ?? '').isNotEmpty) ...[
@@ -537,6 +581,15 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
 
           // ── HAZARDS LIST ─────────────────────────────────────
           _buildHazardsList(sl, bgColor),
+      ]);
+
+  /// The work on the report: quick actions, mitigation form, timeline.
+  Widget _workColumn(SL sl, Color bgColor, {bool withQuickActions = true}) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (withQuickActions) ...[
+            _buildQuickActions(sl, bgColor),
+            const SizedBox(height: 12),
+          ],
 
           // ── MITIGATION / CLOSED ──────────────────────────────
           // A user who may not act on this record gets the read-only summary,
@@ -551,10 +604,168 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
 
           // ── TIMELINE ─────────────────────────────────────────
           _buildTimeline(sl, bgColor),
-          const SizedBox(height: 80),
+      ]);
+
+  // ─── QUICK ACTIONS ───────────────────────────────────────────
+  /// Everything a reviewer does with a case, in one place: who owns it, move
+  /// it on, share the PDF report, copy a text summary, open the reporter's or
+  /// owner's profile. Each button calls the same code path as the app bar /
+  /// bottom bar / Log row, so there is one behaviour per action.
+  Widget _buildQuickActions(SL sl, Color bg) {
+    final owner = IncidentAssign.assigneeName(_inc);
+    final ownerId = _inc['assignedTo']?.toString().trim() ?? '';
+    final reporterPno = (_inc['reportedByPno']?.toString() ??
+            _inc['reporterPno']?.toString() ?? '').trim();
+    final canEdit = _permChecked && _canAct && !_isClosed;
+
+    final curIdx = _statusOrder.indexOf(_status);
+    final nextSt = (curIdx >= 0 && curIdx + 1 < _statusOrder.length)
+        ? _statusOrder[curIdx + 1] : null;
+
+    final target = _targetDate == null
+        ? '' : DateFormat('dd MMM yyyy').format(_targetDate!);
+    final overdue = _targetDate != null &&
+        _targetDate!.isBefore(DateTime.now()) && !_isClosed;
+    final stColor = _statusColor(_status);
+
+    Widget fact(IconData icon, String label, String value,
+        {Color? valueColor}) => Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(children: [
+        Icon(icon, size: 15, color: sl.text4),
+        const SizedBox(width: 8),
+        SizedBox(width: 92, child: Text(label,
+            style: TextStyle(color: sl.text4, fontSize: 11.5))),
+        Expanded(child: Text(value,
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: valueColor ?? sl.text1, fontSize: 12.5,
+                fontWeight: FontWeight.w700))),
+      ]),
+    );
+
+    return Container(
+      decoration: _card(sl, bg),
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            width: 28, height: 28,
+            decoration: BoxDecoration(
+              color: AppColors.accent.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(7)),
+            child: const Icon(Icons.bolt_rounded,
+                color: AppColors.accent, size: 17)),
+          const SizedBox(width: 8),
+          Text('Quick actions', style: TextStyle(color: sl.text1,
+              fontSize: 13, fontWeight: FontWeight.w700)),
         ]),
+        const SizedBox(height: 12),
+        fact(Icons.flag_outlined, 'Status',
+            _status.isEmpty ? '—' : _status,
+            valueColor: _inkOn(sl, stColor)),
+        fact(owner.isEmpty ? Icons.person_off_outlined : Icons.person_rounded,
+            'Action owner', owner.isEmpty ? 'Unassigned' : owner,
+            valueColor: owner.isEmpty ? sl.amberText : null),
+        fact(Icons.event_rounded, 'Target date',
+            target.isEmpty ? 'Not set' : (overdue ? '$target · OVERDUE' : target),
+            valueColor: overdue ? sl.redText
+                : (target.isEmpty ? sl.text4 : null)),
+        const SizedBox(height: 6),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          if (canEdit)
+            _qaButton(
+              icon: owner.isEmpty
+                  ? Icons.person_add_alt_1_rounded
+                  : Icons.swap_horiz_rounded,
+              label: owner.isEmpty ? 'Assign owner' : 'Transfer',
+              color: AppColors.accent,
+              onTap: _saving ? null : () => _assignInvestigator()),
+          if (canEdit && nextSt != null)
+            _qaButton(
+              icon: nextSt == _statusOrder.last
+                  ? Icons.lock_rounded : Icons.manage_search_rounded,
+              label: nextSt == _statusOrder.last
+                  ? 'Close case' : _titleCase(nextSt),
+              color: nextSt == _statusOrder.last
+                  ? const Color(0xFF16A34A) : _statusColor(nextSt),
+              onTap: _saving ? null : () => _advanceStatus(nextSt)),
+          _qaButton(
+            icon: Icons.chat_rounded, label: 'WhatsApp',
+            color: const Color(0xFF25D366),
+            onTap: _shareWhatsAppWithPdf),
+          _qaButton(
+            icon: Icons.email_outlined, label: 'Email',
+            color: const Color(0xFF1976D2),
+            onTap: _shareEmailWithPdf),
+          _qaButton(
+            icon: Icons.picture_as_pdf_rounded, label: 'Download PDF',
+            color: AppColors.red,
+            onTap: _exportPdfLocal),
+          _qaButton(
+            icon: Icons.copy_rounded, label: 'Copy summary',
+            color: Colors.blueGrey,
+            onTap: _copySummary),
+          if (reporterPno.isNotEmpty)
+            _qaButton(
+              icon: Icons.badge_outlined, label: 'Reporter',
+              color: Colors.blueGrey,
+              onTap: () => _openProfile(reporterPno.toLowerCase())),
+          if (ownerId.isNotEmpty)
+            _qaButton(
+              icon: Icons.contact_page_outlined, label: 'Owner profile',
+              color: Colors.blueGrey,
+              onTap: () => _openProfile(ownerId)),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _qaButton({
+    required IconData icon, required String label,
+    required Color color, required VoidCallback? onTap,
+  }) {
+    final sl = SL.of(context);
+    final ink = _inkOn(sl, color);
+    return Material(
+      color: color.withOpacity(sl.isDark ? 0.16 : 0.08),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(9),
+        side: BorderSide(color: color.withOpacity(0.35))),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 15, color: ink),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: ink, fontSize: 12,
+                fontWeight: FontWeight.w700)),
+          ]),
+        ),
       ),
     );
+  }
+
+  /// Readable text colour on a light tint of [c]. SL.textOn() only knows the
+  /// palette colours and throws on the rest (WhatsApp green, blueGrey, the
+  /// status colours), so map those here.
+  Color _inkOn(SL sl, Color c) {
+    if (sl.isDark) return Color.lerp(c, Colors.white, 0.35)!;
+    final hsl = HSLColor.fromColor(c);
+    return hsl.withLightness((hsl.lightness * 0.62).clamp(0.0, 1.0)).toColor();
+  }
+
+  String _titleCase(String s) => s.split(' ').map((w) => w.isEmpty
+      ? w : '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}').join(' ');
+
+  void _openProfile(String username) => Navigator.of(context).push(
+      MaterialPageRoute(
+          builder: (_) => EmployeeProfileScreen(username: username)));
+
+  Future<void> _copySummary() async {
+    await Clipboard.setData(ClipboardData(text: _buildShareText()));
+    _snack('Summary copied to clipboard', AppColors.accent);
   }
 
   // ─── STATUS PIPELINE ─────────────────────────────────────────
@@ -1257,7 +1468,10 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       // The bar keeps its full-width top border; the action buttons are capped
       // to the same column as the body above, so "Close Case" doesn't end up
       // half a browser away from the case it closes.
-      child: ContentWidth(child: Row(children: [
+      // fillHeight: false — without it the Center inside ContentWidth took the
+      // whole screen and this bar hid the app bar and every detail above it.
+      child: ContentWidth(maxWidth: SLLayout.wide, fillHeight: false,
+          child: Row(children: [
         // Save without advancing. Replaces the old hardcoded "Investigate"
         // shortcut, which named a stage the admin may have renamed or removed
         // and duplicated the advance button's job — while the far more useful

@@ -35,16 +35,25 @@ class ContentWidth extends StatelessWidget {
     super.key,
     required this.child,
     this.maxWidth = SLLayout.content,
+    this.fillHeight = true,
   });
 
   /// Reading column for task screens. Use [SLLayout.wide] for tables and
   /// analytics, [SLLayout.form] for single-column entry.
   final double maxWidth;
 
+  /// [Center] grows to the full height its parent allows. Inside a
+  /// `Scaffold.bottomNavigationBar` that is the WHOLE SCREEN, so a bar wrapped
+  /// in this widget covered the app bar and body (★ 2026-10-04: the incident
+  /// detail page showed only Save / Mark as… on a blank page). Pass `false`
+  /// for bars and any slot that should hug its content's height.
+  final bool fillHeight;
+
   final Widget child;
 
   @override
   Widget build(BuildContext context) => Center(
+        heightFactor: fillHeight ? null : 1.0,
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: maxWidth),
           child: child,
@@ -73,7 +82,8 @@ class ContentWidth extends StatelessWidget {
 ///
 /// Use [ContentWidth] instead for anything that is NOT a scroll view — a
 /// composer bar, a filter row, a `bottomNavigationBar`, a `TabBar` — since those
-/// have no `padding` to widen.
+/// have no `padding` to widen. In a `bottomNavigationBar` pass
+/// `fillHeight: false`, or the bar fills the screen.
 ///
 /// TRAP: this reads the WINDOW width, so it is wrong inside a region that is
 /// already laterally inset (e.g. the admin body, which sits beside a 240px
