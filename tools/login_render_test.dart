@@ -48,7 +48,7 @@ void main() {
 
   Future<void> shoot(WidgetTester t, Size size, String name,
       {bool dark = false, bool register = false, bool error = false,
-      double frame = 0.3}) async {
+      double frame = 0.3, double scroll = 0}) async {
     // Pin the backdrop loop at a fixed point so renders are repeatable.
     PlantBackdrop.debugFrame = frame;
     await t.runAsync(() async {
@@ -82,6 +82,11 @@ void main() {
         await t.tap(find.text('Register'));
         await settle();
       }
+      if (scroll > 0) {
+        // Drag the form column: on wide layouts only it should move.
+        await t.drag(find.text('Full name'), Offset(0, -scroll));
+        await settle();
+      }
       if (error) {
         // Empty username + Sign in → the inline error box.
         await t.tap(find.text('Sign in').last);
@@ -106,6 +111,7 @@ void main() {
   testWidgets('small 320', (t) => shoot(t, const Size(320, 700), 'login_320_light'));
   testWidgets('desktop light', (t) => shoot(t, const Size(1440, 900), 'login_desktop_light'));
   testWidgets('desktop dark register', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_register', dark: true, register: true));
+  testWidgets('desktop dark register scrolled', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_register_scrolled', dark: true, register: true, scroll: 400));
   testWidgets('desktop dark', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark', dark: true));
   // Close-up of the hot-metal pour in the background (desktop, dark).
   testWidgets('desktop dark motion', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_motion', dark: true, frame: 0.537));

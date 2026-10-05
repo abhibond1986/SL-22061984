@@ -222,3 +222,31 @@ The user asked to remove the loading page that appears when safetylens.in is ope
 **Caveat.** The browser still has to download the Flutter engine and app code (main.dart.js) before any Flutter UI can appear, so first-time visitors see the plain backdrop colour for that moment instead of a logo card. Repeat visits are served from cache and are near-instant.
 
 **Verification.** `dart analyze lib` reports 52 issues and 0 errors, the same as the baseline. index.html parses. A full `flutter build web` was not run in the sandbox (it exceeds the time limit); the GitHub Actions build on push compiles it.
+
+## Revision 7: user's steel-plant illustration, animated; static brand; amber card edge
+
+**Requests.** (1) "create the animation for the smoke and the flow of molten metal" on the supplied ChatGPT illustration of a night steel plant. (2) "Make the register page … scroll down instead of the entire page, so that left hand side text remains static." (3) "make the boundary of sign in section to be little orange in color with very less thickness."
+
+**Backdrop (`lib/widgets/plant_backdrop.dart`, rewritten).**
+
+- The illustration is now the login background: `assets/images/login_backdrop.jpg` (1672 × 941, progressive JPEG q84, 168 KB). The original PNG is kept as `icon_src/login_backdrop_master.png`. The code-drawn skyline from revisions 1–5 is gone.
+- Fit is `BoxFit.cover` anchored to the bottom at `Alignment(-0.04, 1)`. This keeps the pour in view on both a 1440-wide desktop and a 320-wide phone.
+- An animated overlay is registered to the painted landmarks in image pixels. `_Map` reproduces the cover/alignment maths, so the overlay lands on the painting at any screen size.
+  - Smoke: puffs rise along each painted plume from the two front chimneys, and fainter wisps come from the three far chimneys on the right (6 s cycle).
+  - Molten stream: a bright core runs from the ladle lip to the mould, with highlights travelling down it (0.6 s each). It sways slightly (2 s period).
+  - Glow and sparks: additive glows at the lip and at the splash flicker (1.2 s and 0.4 s periods). 26 ballistic sparks are thrown from the splash, and a rim of light flickers at the mould.
+  - Warm fume drifts up beside the moulds (4 s cycle).
+  - Every period divides the 12 s loop, so the animation loops seamlessly. With the OS reduced-motion setting, the frame freezes and no sparks are drawn.
+- Readability: in dark mode, a top-to-bottom scrim (55% → 0% by 80% height) keeps white text readable over the busy HUD and plume area. In light mode, a pale veil is used instead. The plant at the bottom is left untouched.
+- The image and the overlay have separate RepaintBoundaries, so only the overlay repaints each frame.
+- The fallback gradient (shown before the image decodes), the `web/index.html` body, theme-color, the manifest background and the `_WebEntry` placeholder now all use the illustration's sky colours (`#0A2CC8 → #00226E → #0486B0`). The page, the placeholder and the login read as one surface.
+
+**Static brand, scrolling form (`login_screen.dart`, ≥ 960 px).** Each column now has its own scroll view. The brand statement is vertically centred and stays fixed. Only the form column scrolls, using a `LayoutBuilder` + `ConstrainedBox(minHeight)` so the short Sign-in card is still centred. This replaces the revision 5 top-alignment workaround. Narrow layouts still scroll as one column, because the brand header there is compact. Evidence: `login_v6_desktop_dark_register.png` and `login_v6_desktop_dark_register_scrolled.png` (form dragged 400 px; brand unchanged).
+
+**Card edge.** The glass card border is now amber `#F59E0B` (62% opacity in dark, 70% in light) at 0.8 px, down from 1.2 px. The secondary tiles (Contractor access, Android app) got their own neutral `tileEdge`, so only the main card is orange.
+
+**Tiles over the pour.** On phones, the bright pour sits behind the two bottom tiles. Their 7% white fill let the glow wash out the text. They now use a deep-indigo glass (`#0B1240` at 78%) in dark and 80% white in light. Evidence: `login_v6_phone_dark.png` and `login_v6_phone_light.png`.
+
+**Evidence (`audit_2026-10-05/login_v6_*`).** desktop_dark, desktop_dark_motion, desktop_light, desktop_dark_register, desktop_dark_register_scrolled, phone_dark, phone_light, phone_register, phone_error, 320_light, pour_closeup, animation.gif (36 frames, 1440×900 scaled to 960×600) and animation_closeup.gif (520×300 crop around the ladle).
+
+**Verification.** `dart analyze lib`: 52 issues, 0 errors (same as the baseline). All login render tests passed.

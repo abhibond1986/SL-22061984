@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -299,52 +300,74 @@ class _LoginScreenState extends State<LoginScreen> {
         SafeArea(
           child: LayoutBuilder(builder: (context, box) {
             final wide = box.maxWidth >= 960;
-            final content = wide
-                ? ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 1080),
-                    // Top-aligned, not centred: the Register form is much
-                    // taller than Sign in, and centring pushed the emblem and
-                    // wordmark halfway down the page (user, 2026-10-05). The
-                    // brand block now starts level with the top of the card.
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                            child: Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: _brandStatement(sl))),
-                        const SizedBox(width: 56),
-                        SizedBox(width: SLLayout.form, child: _formColumn(sl)),
-                      ],
-                    ),
-                  )
-                : ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: SLLayout.form),
-                    child: Column(children: [
-                      _compactHeader(sl),
-                      const SizedBox(height: 24),
-                      _formColumn(sl),
-                    ]),
-                  );
-            return Center(
-              child: SingleChildScrollView(
-                padding: EdgeInsets.symmetric(
-                    horizontal: wide ? 48 : 20, vertical: 28),
-                // The single page-load moment: the content rises 12px and
-                // fades in. Skipped when the OS asks for reduced motion.
-                child: TweenAnimationBuilder<double>(
+            // The single page-load moment: the content rises 12px and fades
+            // in. Skipped when the OS asks for reduced motion.
+            Widget entrance(Widget child) => TweenAnimationBuilder<double>(
                   tween: Tween(begin: reduceMotion ? 1 : 0, end: 1),
                   duration: reduceMotion
                       ? Duration.zero
                       : const Duration(milliseconds: 520),
                   curve: Curves.easeOutCubic,
-                  builder: (_, t, child) => Opacity(
+                  builder: (_, t, c) => Opacity(
                     opacity: t,
                     child: Transform.translate(
-                        offset: Offset(0, 12 * (1 - t)), child: child),
+                        offset: Offset(0, 12 * (1 - t)), child: c),
                   ),
-                  child: content,
+                  child: child,
+                );
+            if (wide) {
+              // Two columns. Only the form column scrolls (user, 2026-10-05:
+              // the tall Register form scrolled the whole page and took the
+              // brand text with it). The brand statement is fixed, centred
+              // in the viewport; the form is centred while it fits and
+              // scrolls on its own once it is taller than the window.
+              return entrance(Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1080 + 96),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 48),
+                    child: Row(children: [
+                      Expanded(
+                        child: Center(
+                          child: SingleChildScrollView(
+                            // Only scrolls on a very short window.
+                            padding: const EdgeInsets.symmetric(vertical: 28),
+                            child: _brandStatement(sl),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 56),
+                      SizedBox(
+                        width: SLLayout.form,
+                        child: LayoutBuilder(
+                          builder: (context, col) => SingleChildScrollView(
+                            padding: const EdgeInsets.symmetric(vertical: 28),
+                            child: ConstrainedBox(
+                              constraints: BoxConstraints(
+                                  minHeight:
+                                      math.max(0, col.maxHeight - 56)),
+                              child: Center(child: _formColumn(sl)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
                 ),
+              ));
+            }
+            return Center(
+              child: SingleChildScrollView(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+                child: entrance(ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: SLLayout.form),
+                  child: Column(children: [
+                    _compactHeader(sl),
+                    const SizedBox(height: 24),
+                    _formColumn(sl),
+                  ]),
+                )),
               ),
             );
           }),
@@ -526,7 +549,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   end: Alignment.bottomRight,
                   colors: _LoginGlass.cardFill(sl),
                 ),
-                border: Border.all(color: _LoginGlass.edge(sl), width: 1.2),
+                // Hairline molten-amber edge (user, 2026-10-05: "boundary of
+                // sign in section a little orange, very less thickness").
+                border: Border.all(color: _LoginGlass.edge(sl), width: 0.8),
               ),
               // AutofillGroup, not just autofillHints on the fields: only a group
               // tells the platform these fields are one form, which is what makes
@@ -676,7 +701,7 @@ class _LoginScreenState extends State<LoginScreen> {
         color: _LoginGlass.tile(sl),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: _LoginGlass.edge(sl)),
+          side: BorderSide(color: _LoginGlass.tileEdge(sl)),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -1197,13 +1222,20 @@ class _LoginGlass {
       ? [Colors.white.withOpacity(0.11), Colors.white.withOpacity(0.05)]
       : [Colors.white.withOpacity(0.66), Colors.white.withOpacity(0.44)];
 
-  static Color edge(SL sl) => sl.isDark
+  /// Sign-in card edge: a hairline of molten amber.
+  static Color edge(SL sl) =>
+      const Color(0xFFF59E0B).withOpacity(sl.isDark ? 0.62 : 0.70);
+
+  /// Secondary tiles keep the neutral glass edge.
+  static Color tileEdge(SL sl) => sl.isDark
       ? Colors.white.withOpacity(0.16)
       : Colors.white.withOpacity(0.85);
 
+  // Tiles sit over the bright pour in the illustration on phones, so they are
+  // a solid-ish glass rather than a 7% tint (text was lost in the glow).
   static Color tile(SL sl) => sl.isDark
-      ? Colors.white.withOpacity(0.07)
-      : Colors.white.withOpacity(0.52);
+      ? const Color(0xFF0B1240).withOpacity(0.78)
+      : Colors.white.withOpacity(0.80);
 
   /// Recessed background of the segmented control and of the inputs' outline.
   static Color well(SL sl) => sl.isDark

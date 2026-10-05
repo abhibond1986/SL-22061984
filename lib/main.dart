@@ -570,9 +570,9 @@ class _WebEntryState extends State<_WebEntry> {
       return const DecoratedBox(
         decoration: BoxDecoration(
           gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF151A4A), Color(0xFF10163D), Color(0xFF0B2A38)],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: [Color(0xFF0A2CC8), Color(0xFF00226E), Color(0xFF0486B0)],
           ),
         ),
       );
