@@ -11,7 +11,6 @@ import '../services/auth_service.dart';
 import '../services/validators.dart';
 import '../services/visitor_service.dart';
 import '../services/i18n.dart';
-import '../widgets/glass_card.dart';
 import 'home_screen.dart';
 import 'contractor_home_screen.dart';
 import 'force_password_change_screen.dart';
@@ -271,310 +270,445 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // ─── LAYOUT (2026-10-05 glassmorphism redesign) ─────────────────────────────
+  //
+  // One frosted card floats over a "lens" backdrop: the brand indigo → teal
+  // field, three soft colour glows (indigo, teal, and a molten-amber glow from
+  // the furnace end of the plant) and a set of faint concentric rings, like an
+  // aperture, centred behind the card. The rings are the one decorative idea.
+  // Everything else is plain and quiet.
+  //
+  // Performance: there is exactly ONE BackdropFilter (the card). The glows are
+  // painted with MaskFilter.blur inside a CustomPainter, which is cheap on
+  // Flutter web, unlike stacked BackdropFilters (UI_UX_AUDIT.md §A).
+  //
+  // ≥ 960px wide: two columns, with the brand statement on the left and the
+  // card on the right. Narrower than that: one centred column.
   @override
   Widget build(BuildContext context) {
     final sl = SL.of(context);
+    final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: sl.bgGradient,
+      backgroundColor: _LoginGlass.base(sl),
+      body: Stack(children: [
+        Positioned.fill(
+          child: RepaintBoundary(
+            child: CustomPaint(painter: _LensBackdropPainter(isDark: sl.isDark)),
           ),
         ),
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 24, vertical: 24),
-              // Caps the form at a readable column width on desktop browsers.
-              // Without it there is no width constraint anywhere on this screen,
-              // so on a 1920px window the login card, the contractor button and
-              // the download banner each stretched to ~1870px — a single letterbox
-              // strip that made the web build look like a phone screenshot
-              // dragged wider. force_password_change_screen.dart already did this
-              // correctly; this is the same pattern (UI_UX_AUDIT.md §D).
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: SLLayout.form),
-                child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const BrandLogo(size: 72, fallbackColor: AppColors.accent),
-                  const SizedBox(height: 14),
-                  const BrandTitle(size: 22),
-                  const SizedBox(height: 6),
-                  Text(I18n.t('app.tagline'),
-                    style: TextStyle(
-                      color: sl.text4, fontSize: 12,
-                      letterSpacing: 1.2)),
-                  const SizedBox(height: 28),
-
-                  GlassCard(
-                    padding: const EdgeInsets.all(20),
-                    borderRadius: 20,
-                    // AutofillGroup, not just autofillHints on the fields: the
-                    // hints let a manager OFFER a credential, but only a group
-                    // tells the platform that these fields belong to one form,
-                    // which is what makes "save this password?" appear after a
-                    // successful sign-in.
-                    child: AutofillGroup(
-                      child: Column(
+        SafeArea(
+          child: LayoutBuilder(builder: (context, box) {
+            final wide = box.maxWidth >= 960;
+            final content = wide
+                ? ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1080),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        // Tab toggle
-                        Container(
-                          decoration: BoxDecoration(
-                            color: sl.isDark
-                                ? Colors.white.withOpacity(0.05)
-                                : Colors.white.withOpacity(0.4),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          padding: const EdgeInsets.all(4),
-                          child: Row(children: [
-                            _tab('Login', _isLogin, () =>
-                                setState(() { _isLogin = true; _err = ''; })),
-                            _tab('Register', !_isLogin, () =>
-                                setState(() { _isLogin = false; _err = ''; })),
-                          ]),
-                        ),
-                        const SizedBox(height: 20),
-
-                        if (_isLogin) ..._loginFields(sl)
-                        else ..._registerFields(sl),
-
-                        if (_err.isNotEmpty) ...[
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: AppColors.crit.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: AppColors.crit.withOpacity(0.4))),
-                            child: Row(children: [
-                              Icon(Icons.error_outline,
-                                color: sl.critText, size: 16),
-                              const SizedBox(width: 8),
-                              Expanded(child: Text(_err,
-                                style: TextStyle(
-                                  color: sl.critText, fontSize: 12))),
-                            ])),
-                        ],
-
-                        const SizedBox(height: 20),
-
-                        // Login/Register button
-                        SizedBox(
-                          width: double.infinity,
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(colors: _loading
-                                ? [sl.card2, sl.card2]
-                                : [AppColors.accent, AppColors.cyan]),
-                              borderRadius: BorderRadius.circular(12),
-                              boxShadow: _loading ? [] : [BoxShadow(
-                                color: AppColors.accent.withOpacity(0.3),
-                                blurRadius: 12, offset: const Offset(0, 4))]),
-                            child: ElevatedButton(
-                              onPressed: _loading
-                                ? null
-                                : (_isLogin ? _login : _register),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.transparent,
-                                shadowColor: Colors.transparent,
-                                padding: const EdgeInsets.symmetric(vertical: 15),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12))),
-                              child: _loading
-                                ? const SizedBox(
-                                    width: 20, height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white))
-                                : Text(
-                                    _isLogin ? 'Login' : 'Create Account',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w700))))),
+                        Expanded(child: _brandStatement(sl)),
+                        const SizedBox(width: 56),
+                        SizedBox(width: SLLayout.form, child: _formColumn(sl)),
                       ],
                     ),
-                    ),
+                  )
+                : ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: SLLayout.form),
+                    child: Column(children: [
+                      _compactHeader(sl),
+                      const SizedBox(height: 24),
+                      _formColumn(sl),
+                    ]),
+                  );
+            return Center(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.symmetric(
+                    horizontal: wide ? 48 : 20, vertical: 28),
+                // The single page-load moment: the content rises 12px and
+                // fades in. Skipped when the OS asks for reduced motion.
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: reduceMotion ? 1 : 0, end: 1),
+                  duration: reduceMotion
+                      ? Duration.zero
+                      : const Duration(milliseconds: 520),
+                  curve: Curves.easeOutCubic,
+                  builder: (_, t, child) => Opacity(
+                    opacity: t,
+                    child: Transform.translate(
+                        offset: Offset(0, 12 * (1 - t)), child: child),
                   ),
-
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    // The BackdropFilter that used to wrap this is gone. It blurred
-                    // behind an OutlinedButton sitting on the page gradient, so it
-                    // had no visible effect at all — and BackdropFilter is the
-                    // expensive path on Flutter web (UI_UX_AUDIT.md §A).
-                    child: OutlinedButton.icon(
-                      onPressed: _contractorAccess,
-                      icon: const Icon(Icons.engineering_outlined, size: 18),
-                      label: const Text('Contractor Access'),
-                      style: OutlinedButton.styleFrom(
-                        // sl.cyanText: bare cyan is 2.97:1 on white, documented in
-                        // AppColors as "unusable as text there".
-                        foregroundColor: sl.cyanText,
-                        side: BorderSide(
-                          color: AppColors.cyan.withOpacity(0.5),
-                          width: 1.5,
-                        ),
-                        minimumSize: const Size(0, SLSpace.tapTarget),
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: SLRadius.rMd,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'No login required — AI Scan & Near Miss only',
-                    style: TextStyle(
-                      color: sl.text3,        // Improved contrast
-                      fontSize: 11,           // Increased from 10
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // Android App Download Button
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            // Darkened from #22C55E→#16A34A, where white text
-                            // measured 2.28:1. #15803D→#166534 puts the label at
-                            // 5.02:1 and keeps the same green identity.
-                            colors: [Color(0xFF15803D), Color(0xFF166534)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: [
-                            BoxShadow(
-                              // Follows the button's own gradient (now #15803D)
-                              // so the glow is not a lighter green than the
-                              // surface casting it.
-                              color: const Color(0xFF15803D).withOpacity(0.3),
-                              blurRadius: 12,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            onTap: _launchAppDownload,
-                            borderRadius: BorderRadius.circular(16),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 24, vertical: 16),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  const Icon(
-                                    Icons.download_rounded,
-                                    color: Colors.white,
-                                    size: 22,
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Text(
-                                        'Download Android App',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: 0.3,
-                                        ),
-                                      ),
-                                      Text(
-                                        _downloadSubtitle,
-                                        style: TextStyle(
-                                          color: Colors.white.withOpacity(0.90),  // Better contrast
-                                          fontSize: 11,                            // Increased from 10
-                                          letterSpacing: 0.5,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  // Version pill. Only shown once the real
-                                  // version is known — a placeholder like
-                                  // "v—" would look like a failure.
-                                  if (_latestVersion.isNotEmpty) ...[
-                                    const SizedBox(width: 10),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 8, vertical: 3),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white.withOpacity(0.22),
-                                        borderRadius:
-                                            BorderRadius.circular(999),
-                                      ),
-                                      child: Text(
-                                        'v$_latestVersion',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: 0.2,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // TextButton, not a GestureDetector around 11px text. The old
-                  // shape gave a ~15px-tall target with no ripple — and this is
-                  // currently the ONLY theme switch anywhere in the app, so it
-                  // has to be hittable. 12px minimum, 48px tall.
-                  TextButton.icon(
-                    onPressed: widget.toggleTheme,
-                    icon: Icon(sl.isDark
-                      ? Icons.light_mode_outlined
-                      : Icons.dark_mode_outlined,
-                      color: sl.text4, size: 18),
-                    label: Text(
-                      sl.isDark ? 'Switch to Light Mode'
-                                : 'Switch to Dark Mode',
-                      style: TextStyle(
-                        color: sl.text4, fontSize: SLText.minLabel)),
-                    style: TextButton.styleFrom(
-                      minimumSize: const Size(0, SLSpace.tapTarget),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: SLSpace.lg),
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: SLRadius.rSm)),
-                  ),
-                ],
+                  child: content,
+                ),
               ),
+            );
+          }),
+        ),
+      ]),
+    );
+  }
+
+  /// Phone / narrow header: logo, wordmark and tagline, centred.
+  Widget _compactHeader(SL sl) => Column(children: [
+        _logoTile(sl, 64),
+        const SizedBox(height: 14),
+        const BrandTitle(size: 24),
+        const SizedBox(height: 6),
+        Text(I18n.t('app.tagline'),
+            style: TextStyle(
+                color: sl.text3, fontSize: 13, fontWeight: FontWeight.w500)),
+      ]);
+
+  /// Desktop left column: what the product does, in plain words.
+  Widget _brandStatement(SL sl) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _logoTile(sl, 72),
+          const SizedBox(height: 22),
+          const BrandTitle(size: 38),
+          const SizedBox(height: 8),
+          Text(I18n.t('app.tagline'),
+              style: TextStyle(
+                  color: sl.text3, fontSize: 15, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 28),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: Text(
+              'Photograph a work area, see its hazards marked within seconds, '
+              'and follow every corrective action through to closure.',
+              style: TextStyle(
+                  color: sl.text1,
+                  fontSize: 19,
+                  height: 1.45,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: -0.2),
+            ),
+          ),
+          const SizedBox(height: 28),
+          _feature(sl, Icons.center_focus_strong_rounded,
+              'AI hazard scan from a single photo'),
+          _feature(sl, Icons.assignment_turned_in_outlined,
+              'Incidents assigned and tracked to closure'),
+          _feature(sl, Icons.picture_as_pdf_outlined,
+              'Shareable PDF reports with location'),
+        ],
+      );
+
+  Widget _feature(SL sl, IconData icon, String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: _LoginGlass.chip(sl),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _LoginGlass.edge(sl)),
+            ),
+            child: Icon(icon, size: 18, color: sl.accentText),
+          ),
+          const SizedBox(width: 12),
+          Text(text,
+              style: TextStyle(
+                  color: sl.text2, fontSize: 14, fontWeight: FontWeight.w500)),
+        ]),
+      );
+
+  /// The logo on a small glass tile so a white-label logo with a transparent
+  /// background still reads against the gradient.
+  Widget _logoTile(SL sl, double size) => Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: _LoginGlass.chip(sl),
+          borderRadius: BorderRadius.circular(size * 0.32),
+          border: Border.all(color: _LoginGlass.edge(sl)),
+          boxShadow: [
+            BoxShadow(
+                color: AppColors.accent.withOpacity(sl.isDark ? 0.35 : 0.18),
+                blurRadius: 28,
+                offset: const Offset(0, 10)),
+          ],
+        ),
+        child: BrandLogo(size: size - 16, fallbackColor: AppColors.accent),
+      );
+
+  /// The card, then the two secondary ways in, then the theme switch.
+  Widget _formColumn(SL sl) => Column(children: [
+        _glassCard(sl),
+        const SizedBox(height: 16),
+        LayoutBuilder(builder: (context, box) {
+          final contractor = _secondaryTile(
+            sl,
+            icon: Icons.engineering_outlined,
+            iconColor: sl.cyanText,
+            title: 'Contractor access',
+            subtitle: 'No login. AI scan and near miss only',
+            onTap: _contractorAccess,
+          );
+          final android = _secondaryTile(
+            sl,
+            icon: Icons.android_rounded,
+            iconColor: sl.greenText,
+            title: 'Get the Android app',
+            subtitle: _downloadSubtitle,
+            onTap: _launchAppDownload,
+          );
+          if (box.maxWidth < 360) {
+            return Column(children: [
+              contractor,
+              const SizedBox(height: 10),
+              android,
+            ]);
+          }
+          return IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(child: contractor),
+              const SizedBox(width: 10),
+              Expanded(child: android),
+            ]),
+          );
+        }),
+        const SizedBox(height: 14),
+        // TextButton, not a GestureDetector around 11px text: this is the only
+        // theme switch before sign-in, so it has to be a real 48px target.
+        TextButton.icon(
+          onPressed: widget.toggleTheme,
+          icon: Icon(
+              sl.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+              color: sl.text3,
+              size: 18),
+          label: Text(sl.isDark ? 'Switch to light mode' : 'Switch to dark mode',
+              style: TextStyle(color: sl.text3, fontSize: SLText.minLabel)),
+          style: TextButton.styleFrom(
+              minimumSize: const Size(0, SLSpace.tapTarget),
+              padding: const EdgeInsets.symmetric(horizontal: SLSpace.lg),
+              shape: const RoundedRectangleBorder(borderRadius: SLRadius.rSm)),
+        ),
+      ]);
+
+  /// The frosted card holding the toggle, fields, error and primary button.
+  Widget _glassCard(SL sl) => DecoratedBox(
+        // Shadow sits OUTSIDE the clip, otherwise ClipRRect would cut it off.
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(26),
+          boxShadow: [
+            BoxShadow(
+              color: (sl.isDark ? Colors.black : const Color(0xFF3B47B8))
+                  .withOpacity(sl.isDark ? 0.40 : 0.16),
+              blurRadius: 48,
+              offset: const Offset(0, 22),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(26),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(22, 22, 22, 24),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(26),
+                // Brighter at the top-left like light catching a glass edge.
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: _LoginGlass.cardFill(sl),
+                ),
+                border: Border.all(color: _LoginGlass.edge(sl), width: 1.2),
+              ),
+              // AutofillGroup, not just autofillHints on the fields: only a group
+              // tells the platform these fields are one form, which is what makes
+              // "save this password?" appear after a successful sign-in.
+              child: AutofillGroup(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(_isLogin ? 'Sign in' : 'Create your account',
+                        style: TextStyle(
+                            color: sl.text1,
+                            fontSize: 21,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.3)),
+                    const SizedBox(height: 4),
+                    Text(
+                        _isLogin
+                            ? 'Use your Safety Lens username and password.'
+                            : 'Your P.No. or mobile lets you reset a forgotten password.',
+                        style: TextStyle(
+                            color: sl.text3, fontSize: 12.5, height: 1.4)),
+                    const SizedBox(height: 18),
+                    _segmented(sl),
+                    const SizedBox(height: 20),
+                    if (_isLogin) ..._loginFields(sl) else ..._registerFields(sl),
+                    if (_err.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                            color: AppColors.crit.withOpacity(0.10),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                                color: AppColors.crit.withOpacity(0.4))),
+                        child: Row(children: [
+                          Icon(Icons.error_outline, color: sl.critText, size: 16),
+                          const SizedBox(width: 8),
+                          Expanded(
+                              child: Text(_err,
+                                  style: TextStyle(
+                                      color: sl.critText, fontSize: 12))),
+                        ]),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    _primaryButton(sl),
+                  ],
+                ),
               ),
             ),
           ),
         ),
-      ),
-    );
-  }
+      );
+
+  /// Login / Register as a segmented control with a sliding white pill.
+  Widget _segmented(SL sl) => Container(
+        height: 46,
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: _LoginGlass.well(sl),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _LoginGlass.wellEdge(sl)),
+        ),
+        child: Stack(children: [
+          AnimatedAlign(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+            alignment: _isLogin ? Alignment.centerLeft : Alignment.centerRight,
+            child: FractionallySizedBox(
+              widthFactor: 0.5,
+              heightFactor: 1,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: _LoginGlass.pill(sl),
+                  borderRadius: BorderRadius.circular(10),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withOpacity(sl.isDark ? 0.30 : 0.08),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Row(children: [
+            _tab('Login', _isLogin,
+                () => setState(() { _isLogin = true; _err = ''; })),
+            _tab('Register', !_isLogin,
+                () => setState(() { _isLogin = false; _err = ''; })),
+          ]),
+        ]),
+      );
+
+  Widget _primaryButton(SL sl) => AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        height: 52,
+        decoration: BoxDecoration(
+          // Indigo → deep teal: the header's gradient, so the action reads as
+          // the brand. White label stays above 4.5:1 across the whole band.
+          gradient: LinearGradient(
+            colors: _loading
+                ? [sl.card2, sl.card2]
+                : const [Color(0xFF4F5BD5), Color(0xFF0E7C8A)],
+          ),
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: _loading
+              ? []
+              : [
+                  BoxShadow(
+                      color: const Color(0xFF4F5BD5).withOpacity(0.35),
+                      blurRadius: 18,
+                      offset: const Offset(0, 8)),
+                ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: _loading ? null : (_isLogin ? _login : _register),
+            child: Center(
+              child: _loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : Text(_isLogin ? 'Sign in' : 'Create account',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2)),
+            ),
+          ),
+        ),
+      );
+
+  /// Small glass tile for the two secondary entry points.
+  Widget _secondaryTile(SL sl,
+          {required IconData icon,
+          required Color iconColor,
+          required String title,
+          required String subtitle,
+          required VoidCallback onTap}) =>
+      Material(
+        color: _LoginGlass.tile(sl),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: _LoginGlass.edge(sl)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 64),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+              child: Row(children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: iconColor.withOpacity(sl.isDark ? 0.18 : 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, size: 20, color: iconColor),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: sl.text1,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 2),
+                      Text(subtitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: sl.text3, fontSize: 11, height: 1.3)),
+                    ],
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      );
 
   Future<void> _launchAppDownload() async {
     const url = 'https://github.com/abhibond1986/SL-22061984/releases/latest/download/app-release.apk';
@@ -613,11 +747,12 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   List<Widget> _loginFields(SL sl) => [
-    _field('Username', _userCtrl, sl,
+    _field('Username', _userCtrl, sl, icon: Icons.person_outline_rounded,
       autofillHints: const [AutofillHints.username],
       textInputAction: TextInputAction.next),
     const SizedBox(height: 12),
     _field('Password', _passCtrl, sl, obscure: !_showLoginPass,
+      icon: Icons.lock_outline_rounded,
       autofillHints: const [AutofillHints.password],
       textInputAction: TextInputAction.done,
       onToggleObscure: () => setState(() => _showLoginPass = !_showLoginPass),
@@ -635,7 +770,7 @@ class _LoginScreenState extends State<LoginScreen> {
           minimumSize: const Size(0, SLSpace.tapTarget),
           padding: const EdgeInsets.symmetric(horizontal: SLSpace.md),
           shape: const RoundedRectangleBorder(borderRadius: SLRadius.rSm)),
-        child: Text('Forgot Password?',
+        child: Text('Forgot password?',
             style: TextStyle(
               color: sl.accentText,
               fontSize: SLText.minLabel,
@@ -864,13 +999,13 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   List<Widget> _registerFields(SL sl) => [
-    _field('Full Name', _regNameCtrl, sl, hint: 'e.g. Rajesh Kumar',
+    _field('Full name', _regNameCtrl, sl, icon: Icons.person_outline_rounded, hint: 'e.g. Rajesh Kumar',
       autofillHints: const [AutofillHints.name]),
     const SizedBox(height: 12),
-    _field('Username', _regUserCtrl, sl, hint: 'Choose a username',
+    _field('Username', _regUserCtrl, sl, icon: Icons.alternate_email_rounded, hint: 'Choose a username',
       autofillHints: const [AutofillHints.newUsername]),
     const SizedBox(height: 12),
-    _field('Password', _regPassCtrl, sl,
+    _field('Password', _regPassCtrl, sl, icon: Icons.lock_outline_rounded,
       obscure: !_showRegPass,
       hint: 'At least 6 characters',
       // newPassword, not password: this tells a password manager to OFFER to
@@ -881,20 +1016,20 @@ class _LoginScreenState extends State<LoginScreen> {
     const SizedBox(height: 12),
     // Confirm field: registration is the one moment a typo is unrecoverable
     // without a reset, because the user never sees what they typed.
-    _field('Confirm Password', _regConfirmCtrl, sl,
+    _field('Confirm password', _regConfirmCtrl, sl, icon: Icons.lock_outline_rounded,
       obscure: !_showRegPass, hint: 'Re-enter your password',
       autofillHints: const [AutofillHints.newPassword]),
     const SizedBox(height: 12),
-    _field('Designation', _regDesigCtrl, sl,
+    _field('Designation', _regDesigCtrl, sl, icon: Icons.work_outline_rounded,
       hint: 'e.g. AGM Safety, Safety Officer',
       autofillHints: const [AutofillHints.jobTitle]),
     const SizedBox(height: 12),
     // P.No. / mobile are no longer cosmetic: they are what the self-service
     // password reset checks against, so the copy says so.
-    _field('Employee No. (P.No.)', _regPnoCtrl, sl,
+    _field('Employee No. (P.No.)', _regPnoCtrl, sl, icon: Icons.badge_outlined,
       hint: 'Used to verify you if you forget your password'),
     const SizedBox(height: 12),
-    _field('Mobile', _regMobileCtrl, sl,
+    _field('Mobile', _regMobileCtrl, sl, icon: Icons.phone_iphone_rounded,
       hint: 'Optional — also usable for password recovery',
       autofillHints: const [AutofillHints.telephoneNumber],
       keyboardType: TextInputType.phone),
@@ -903,25 +1038,28 @@ class _LoginScreenState extends State<LoginScreen> {
     Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('PLANT / UNIT',
+        Text('Plant / unit',
           style: TextStyle(
-            color: sl.text3, fontSize: 11,    // Improved: was text4/9px
-            fontWeight: FontWeight.w700, letterSpacing: 0.8)),
+            color: sl.text2, fontSize: 12.5, fontWeight: FontWeight.w600)),
         const SizedBox(height: 6),
         Container(
           decoration: BoxDecoration(
-            color: sl.isDark
-                ? Colors.white.withOpacity(0.06)
-                : Colors.white.withOpacity(0.5),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: sl.glassBorder)),
+            color: _LoginGlass.input(sl),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: _LoginGlass.wellEdge(sl))),
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<String>(
               value: _selectedPlant,
               isExpanded: true,
               dropdownColor: sl.card,
-              style: TextStyle(color: sl.text1, fontSize: 13),
+              borderRadius: BorderRadius.circular(12),
+              // From the theme, not a bare TextStyle: DropdownButton.style
+              // REPLACES the inherited style, so a bare one dropped the app
+              // font (Inter) from the hint and the selected value.
+              style: (Theme.of(context).textTheme.bodyMedium ??
+                      const TextStyle())
+                  .copyWith(color: sl.text1, fontSize: 13),
               hint: Text('Select your plant / unit',
                 style: TextStyle(color: sl.text4, fontSize: 12)),
               icon: Icon(Icons.keyboard_arrow_down_rounded,
@@ -951,39 +1089,42 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _tab(String label, bool active, VoidCallback onTap) {
     final sl = SL.of(context);
     return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 9),
-          decoration: BoxDecoration(
-            color: active ? AppColors.accent : Colors.transparent,
-            borderRadius: BorderRadius.circular(9)),
-          child: Text(label,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: active ? Colors.white : sl.text3,
-              fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-              fontSize: 13)))));
+      child: Semantics(
+        button: true,
+        selected: active,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Center(
+            // Plain Text, so it inherits the theme font (Inter).
+            // AnimatedDefaultTextStyle would REPLACE the inherited style.
+            child: Text(label,
+                style: TextStyle(
+                    color: active ? _LoginGlass.pillText(sl) : sl.text3,
+                    fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                    fontSize: 13.5)),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _field(String label, TextEditingController ctrl, SL sl,
       {bool obscure = false, String? hint,
        VoidCallback? onSubmitted, TextInputAction? textInputAction,
        TextInputType? keyboardType,
-       // Lets the browser's / Android's password manager fill this field. Every
-       // field on this screen was previously unhinted, so a saved credential
-       // could not be offered at all and users retyped their password on every
-       // phone they picked up.
+       // Lets the browser's / Android's password manager fill this field.
        List<String>? autofillHints,
-       VoidCallback? onToggleObscure, bool obscured = true}) {
+       VoidCallback? onToggleObscure, bool obscured = true,
+       IconData? icon}) {
+    final radius = BorderRadius.circular(12);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label.toUpperCase(),
+        // Sentence case, not tracked-out caps: easier to read at a glance.
+        Text(label,
           style: TextStyle(
-            color: sl.text3, fontSize: 11,    // Improved: was text4/9px
-            fontWeight: FontWeight.w700, letterSpacing: 0.8)),
+            color: sl.text2, fontSize: 12.5, fontWeight: FontWeight.w600)),
         const SizedBox(height: 6),
         TextField(
           controller: ctrl,
@@ -992,35 +1133,148 @@ class _LoginScreenState extends State<LoginScreen> {
           keyboardType: keyboardType,
           autofillHints: autofillHints,
           onSubmitted: onSubmitted == null ? null : (_) => onSubmitted(),
-          style: TextStyle(color: sl.text1, fontSize: 13),
+          style: TextStyle(color: sl.text1, fontSize: 14),
+          cursorColor: sl.accentText,
           decoration: InputDecoration(
             hintText: hint,
-            hintStyle: TextStyle(color: sl.text4, fontSize: 11),
+            hintStyle: TextStyle(color: sl.text4, fontSize: 12.5),
+            prefixIcon: icon == null
+                ? null
+                : Icon(icon, size: 19, color: sl.text3),
             suffixIcon: onToggleObscure == null ? null : IconButton(
               tooltip: obscured ? 'Show password' : 'Hide password',
               icon: Icon(
                 obscured
                     ? Icons.visibility_outlined
                     : Icons.visibility_off_outlined,
-                color: sl.text3, size: 18),
+                color: sl.text3, size: 19),
               onPressed: onToggleObscure,
             ),
             filled: true,
-            fillColor: sl.isDark
-                ? Colors.white.withOpacity(0.06)
-                : Colors.white.withOpacity(0.5),
+            fillColor: _LoginGlass.input(sl),
             contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14, vertical: 12),
+              horizontal: 14, vertical: 14),
             border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: BorderSide(color: sl.glassBorder)),
+              borderRadius: radius,
+              borderSide: BorderSide(color: _LoginGlass.wellEdge(sl))),
             enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: BorderSide(color: sl.glassBorder)),
+              borderRadius: radius,
+              borderSide: BorderSide(color: _LoginGlass.wellEdge(sl))),
             focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(
-                color: AppColors.accent, width: 1.5)))),
+              borderRadius: radius,
+              borderSide: BorderSide(color: sl.accentText, width: 1.6)))),
       ]);
   }
+}
+
+/// Colour tokens for the login glass. Kept here because nothing else in the
+/// app sits on the lens backdrop.
+///
+/// Light: a pale indigo-to-mint field, white glass at ~62→42%, and the app's
+/// normal dark text. Dark: deep indigo-to-petrol, white glass at ~10→5%, and
+/// light text. Text contrast is measured against the glass over the PALEST and
+/// DARKEST parts of the backdrop, which is why the fills are not more transparent.
+class _LoginGlass {
+  _LoginGlass._();
+
+  static Color base(SL sl) =>
+      sl.isDark ? const Color(0xFF0F1438) : const Color(0xFFEEF0FF);
+
+  static List<Color> cardFill(SL sl) => sl.isDark
+      ? [Colors.white.withOpacity(0.11), Colors.white.withOpacity(0.05)]
+      : [Colors.white.withOpacity(0.66), Colors.white.withOpacity(0.44)];
+
+  static Color edge(SL sl) => sl.isDark
+      ? Colors.white.withOpacity(0.16)
+      : Colors.white.withOpacity(0.85);
+
+  static Color chip(SL sl) => sl.isDark
+      ? Colors.white.withOpacity(0.08)
+      : Colors.white.withOpacity(0.60);
+
+  static Color tile(SL sl) => sl.isDark
+      ? Colors.white.withOpacity(0.07)
+      : Colors.white.withOpacity(0.52);
+
+  /// Recessed background of the segmented control and of the inputs' outline.
+  static Color well(SL sl) => sl.isDark
+      ? Colors.black.withOpacity(0.22)
+      : const Color(0xFF4F5BD5).withOpacity(0.07);
+  static Color wellEdge(SL sl) => sl.isDark
+      ? Colors.white.withOpacity(0.12)
+      : const Color(0xFF4F5BD5).withOpacity(0.16);
+
+  static Color input(SL sl) => sl.isDark
+      ? Colors.white.withOpacity(0.06)
+      : Colors.white.withOpacity(0.78);
+
+  static Color pill(SL sl) =>
+      sl.isDark ? Colors.white.withOpacity(0.16) : Colors.white;
+  static Color pillText(SL sl) =>
+      sl.isDark ? Colors.white : const Color(0xFF3B47B8);
+}
+
+/// Background for the login screen: the brand field, three soft glows and the
+/// lens rings. Static; it repaints only when the theme changes.
+class _LensBackdropPainter extends CustomPainter {
+  _LensBackdropPainter({required this.isDark});
+  final bool isDark;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? const [Color(0xFF151A4A), Color(0xFF0F1438), Color(0xFF07313A)]
+              : const [Color(0xFFE9ECFF), Color(0xFFF2F4FF), Color(0xFFDDF3F3)],
+        ).createShader(rect),
+    );
+
+    final s = size.shortestSide;
+    void glow(Offset c, double r, Color color) => canvas.drawCircle(
+        c,
+        r,
+        Paint()
+          ..color = color
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.55));
+
+    // Indigo upper-left, teal right, molten amber low (the furnace glow).
+    glow(Offset(size.width * 0.12, size.height * 0.10), s * 0.42,
+        const Color(0xFF4F5BD5).withOpacity(isDark ? 0.55 : 0.30));
+    glow(Offset(size.width * 0.92, size.height * 0.38), s * 0.40,
+        const Color(0xFF0EA5B5).withOpacity(isDark ? 0.42 : 0.26));
+    glow(Offset(size.width * 0.55, size.height * 1.02), s * 0.38,
+        const Color(0xFFF59E0B).withOpacity(isDark ? 0.26 : 0.20));
+
+    // Lens rings: concentric hairlines centred slightly above the middle of
+    // the screen, with thin and thicker rings alternating like a lens barrel.
+    final c = Offset(size.width * (size.width >= 960 ? 0.70 : 0.5),
+        size.height * 0.46);
+    final ring = Paint()..style = PaintingStyle.stroke;
+    final ink = isDark ? Colors.white : const Color(0xFF3B47B8);
+    for (var i = 1; i <= 7; i++) {
+      final r = s * (0.16 + i * 0.11);
+      ring
+        ..strokeWidth = i.isEven ? 1.0 : 2.2
+        ..color = ink.withOpacity((isDark ? 0.075 : 0.07) * (1 - i / 9));
+      canvas.drawCircle(c, r, ring);
+    }
+    // One short amber arc on the second ring, just right of the card: the
+    // focus mark.
+    ring
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round
+      ..color = const Color(0xFFF59E0B).withOpacity(isDark ? 0.55 : 0.50);
+    final r2 = s * (0.16 + 2 * 0.11);
+    canvas.drawArc(Rect.fromCircle(center: c, radius: r2), 0.18, 0.55, false,
+        ring);
+  }
+
+  @override
+  bool shouldRepaint(_LensBackdropPainter old) => old.isDark != isDark;
 }

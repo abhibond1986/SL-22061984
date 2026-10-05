@@ -1,3 +1,16 @@
+## 2026-10-05
+
+- **The login screen has a glassmorphism redesign.**
+  - It shows a frosted card over a "lens" backdrop: brand gradient, indigo, teal and amber glows, and faint concentric rings.
+  - Login and Register are now a segmented control with a sliding pill.
+  - Inputs have icons and sentence-case labels. The primary button uses the indigo→teal gradient.
+  - Contractor access and the Android app are glass tiles.
+  - Desktop (at least 960 px) uses a two-column layout with a brand statement on the left.
+  - There is one BackdropFilter, and reduced motion is respected.
+  - The auth logic is unchanged.
+  - The plant dropdown font bug is fixed.
+  - See AUDIT_2026-10-05_LOGIN_GLASS.md and the renders in audit_2026-10-05/.
+
 ## 2026-10-04
 
 - **PDF fixes: reporter, masthead, location.**
