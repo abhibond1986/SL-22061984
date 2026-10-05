@@ -1,10 +1,8 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../services/local_db.dart';
 import '../services/auth_service.dart';
 import '../services/api_keys.dart';
-import '../widgets/glass_card.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
 import '../widgets/brand_logo.dart';
@@ -84,11 +82,8 @@ class _SplashScreenState extends State<SplashScreen>
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  GlassCard(
-                    padding: const EdgeInsets.all(24),
-                    borderRadius: 24,
-                    child: const BrandLogo(size: 90, fallbackColor: AppColors.accent),
-                  ),
+                  // Bare emblem, no frames, matching the login screen (2026-10-05).
+                  BrandMark(size: 110, onDark: sl.isDark),
                   const SizedBox(height: 28),
                   const BrandTitle(size: 28),
                   const SizedBox(height: 8),

@@ -67,3 +67,50 @@ class BrandBuilder extends StatelessWidget {
       valueListenable: Branding.revision,
       builder: (context, _, __) => builder(context));
 }
+
+/// Frameless brand mark for hero spots (login, splash). 2026-10-05, user
+/// request: the login logo looked cluttered because THREE rounded frames were
+/// nested (a glass tile, BrandLogo's white backing, and the rounded border
+/// baked into app_icon.png).
+///
+/// So this draws no frame at all:
+///  * default SAIL brand with no uploaded logo → the bare SAIL emblem
+///    (`sail_emblem.png`, or `sail_emblem_white.png` on dark backgrounds);
+///  * an uploaded logo (Admin → Company Branding) → that image as-is;
+///  * a renamed brand with no logo → the generic app icon.
+class BrandMark extends StatelessWidget {
+  const BrandMark({super.key, this.size = 104, this.onDark = false});
+
+  /// Height of the mark; the width follows the image's aspect ratio.
+  final double size;
+
+  /// True when the mark sits on a dark background, which selects the white emblem.
+  final bool onDark;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<int>(
+        valueListenable: Branding.revision,
+        builder: (context, _, __) {
+          final bytes = Branding.logoBytes;
+          final Widget img;
+          if (bytes != null) {
+            img = Image.memory(bytes,
+                height: size, fit: BoxFit.contain, gaplessPlayback: true);
+          } else if (Branding.shortName.trim().toUpperCase() ==
+              Branding.defaultShortName.toUpperCase()) {
+            img = Image.asset(
+                onDark
+                    ? 'assets/images/sail_emblem_white.png'
+                    : 'assets/images/sail_emblem.png',
+                height: size,
+                fit: BoxFit.contain,
+                filterQuality: FilterQuality.medium);
+          } else {
+            img = Image.asset('assets/images/app_icon.png',
+                height: size, fit: BoxFit.contain);
+          }
+          return Semantics(
+              label: '${Branding.companyName} logo', image: true, child: img);
+        },
+      );
+}

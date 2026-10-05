@@ -1,5 +1,12 @@
 ## 2026-10-05
 
+- **Login revision 2: logo and wordmark.**
+  - The logo is now the bare SAIL emblem, with no tiles or frames (new `BrandMark`; the emblem is white in dark mode).
+  - It is centred and larger: 132 px on desktop and 92 px on phones.
+  - The "SAIL Safety Lens" wordmark is now Plus Jakarta Sans in one ink colour, with ExtraBold SAIL and Medium Safety Lens. It replaces the multicolour Poppins.
+  - The splash screen matches.
+  - See revision 2 in AUDIT_2026-10-05_LOGIN_GLASS.md.
+
 - **The login screen has a glassmorphism redesign.**
   - It shows a frosted card over a "lens" backdrop: brand gradient, indigo, teal and amber glows, and faint concentric rings.
   - Login and Register are now a segmented control with a sliding pill.

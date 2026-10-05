@@ -76,3 +76,37 @@ Renders are in `audit_2026-10-05/`:
 | `login_desktop_light.png` / `login_desktop_dark.png` | 1440×900 two-column layout |
 
 **Deploy:** safetylens.in only shows this after a new web build is deployed. The Android app picks it up with the next APK release.
+
+## Revision 2: logo and wordmark (same day)
+
+**User feedback:**
+
+- Centre the SAIL logo and make it a little larger.
+- Reduce the clutter: there were three rounded shapes around the logo.
+- The font and colours of "SAIL Safety Lens" were not good; make them more modern and professional.
+
+**Changes:**
+
+- **New `BrandMark` widget** (`lib/widgets/brand_logo.dart`). It draws the logo with no frame at all.
+  - The cause of the clutter was three nested rounded frames: the glass tile, `BrandLogo`'s white backing, and the rounded border baked into `app_icon.png`.
+  - For the default SAIL brand it now shows the bare SAIL emblem: `sail_emblem.png`, or `sail_emblem_white.png` in dark mode.
+  - An admin-uploaded logo is shown exactly as uploaded.
+  - A renamed brand that has no logo falls back to the app icon.
+- **Logo size and position:**
+  - Desktop: 132 px tall (was a 72 px tile).
+  - Phone: 92 px (was 64).
+  - A soft halo sits behind it.
+  - The whole desktop brand column is now centre-aligned. The feature list is left-aligned inside it so the icons still line up.
+- **New `BrandTitle` wordmark** (`lib/main.dart`). It is used on login and splash.
+  - The old version used three colours in Poppins, with a gradient "Safety" and an italic pink-to-amber "Lens".
+  - The new one is Plus Jakarta Sans in a single ink colour: #162050 in light mode, white in dark mode.
+  - "SAIL" is ExtraBold and "Safety Lens" is Medium, with slightly tightened tracking.
+  - The tagline uses the same family with slight letter-spacing, so the two read as one lock-up.
+- **Splash screen:** now uses the same frameless `BrandMark`. Its glass tile and two unused imports were removed.
+- **Feature lines:** the small icon chips are gone; each line now has a plain icon. This also reduces clutter.
+
+**Verification:**
+
+- `dart analyze lib` reports 52 issues, one fewer than the baseline, and none are errors.
+- `login_render_test` passes 7 of 7.
+- The new renders are `audit_2026-10-05/login_v2_*.png`. The first-pass renders are kept for comparison.

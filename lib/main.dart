@@ -575,45 +575,39 @@ class _WebEntryState extends State<_WebEntry> {
 }
 
 // ─── SHARED WIDGETS ───────────────────────────────────────────────────────────
+/// The product wordmark (login, splash).
+///
+/// 2026-10-05, user request ("fonts and colour of SAIL Safety Lens not good,
+/// make it more modern and professional"): this replaces a three-colour
+/// Poppins treatment (gradient "Safety", pink→amber italic "Lens"). The new
+/// mark is one ink colour in Plus Jakarta Sans. Hierarchy comes from weight
+/// alone: the company short name is ExtraBold and the product name is Medium,
+/// with slightly tightened tracking as display type wants.
 class BrandTitle extends StatelessWidget {
   final double size;
   const BrandTitle({super.key, this.size = 19});
   @override
   Widget build(BuildContext context) {
     final sl = SL.of(context);
-    return BrandBuilder(builder: (context) => Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          if (Branding.shortName.trim().isNotEmpty)
-          Text('${Branding.shortName.trim()} ',
-              style: GoogleFonts.poppins(
-                  fontSize: size,
-                  fontWeight: FontWeight.w900,
-                  color: sl.isDark ? Colors.white : const Color(0xFF1A1A3E))),
-          ShaderMask(
-              shaderCallback: (b) => const LinearGradient(
-                      colors: [AppColors.accent, AppColors.cyan])
-                  .createShader(b),
-              child: Text('Safety',
-                  style: GoogleFonts.poppins(
-                      fontSize: size,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white))),
-          ShaderMask(
-              shaderCallback: (b) => const LinearGradient(
-                      colors: [AppColors.pink, AppColors.amber])
-                  .createShader(b),
-              child: Text(' Lens',
-                  style: GoogleFonts.poppins(
-                      fontSize: size,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      fontStyle: FontStyle.italic))),
+    final ink = sl.isDark ? Colors.white : const Color(0xFF162050);
+    TextStyle st(FontWeight w) => GoogleFonts.plusJakartaSans(
+        fontSize: size,
+        fontWeight: w,
+        color: ink,
+        height: 1.1,
+        letterSpacing: -0.015 * size);
+    return BrandBuilder(builder: (context) {
+      final short = Branding.shortName.trim();
+      return Text.rich(
+        TextSpan(children: [
+          if (short.isNotEmpty) TextSpan(text: '$short ', style: st(FontWeight.w800)),
+          TextSpan(text: 'Safety Lens', style: st(FontWeight.w500)),
         ]),
-      ],
-    ));
+        textAlign: TextAlign.center,
+        maxLines: 1,
+        overflow: TextOverflow.visible,
+      );
+    });
   }
 }
 

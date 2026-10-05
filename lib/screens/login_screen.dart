@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../services/admin_master_data.dart';
@@ -346,89 +347,95 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  /// Phone / narrow header: logo, wordmark and tagline, centred.
+  /// Phone / narrow header: emblem, wordmark and tagline, centred.
   Widget _compactHeader(SL sl) => Column(children: [
-        _logoTile(sl, 64),
-        const SizedBox(height: 14),
-        const BrandTitle(size: 24),
+        _logoMark(sl, 92),
+        const SizedBox(height: 18),
+        const BrandTitle(size: 27),
         const SizedBox(height: 6),
-        Text(I18n.t('app.tagline'),
-            style: TextStyle(
-                color: sl.text3, fontSize: 13, fontWeight: FontWeight.w500)),
+        _tagline(sl, 13.5),
       ]);
 
-  /// Desktop left column: what the product does, in plain words.
+  /// Desktop left column, centred: emblem, wordmark, tagline, one plain
+  /// sentence about the product and three features.
   Widget _brandStatement(SL sl) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _logoTile(sl, 72),
-          const SizedBox(height: 22),
-          const BrandTitle(size: 38),
-          const SizedBox(height: 8),
-          Text(I18n.t('app.tagline'),
-              style: TextStyle(
-                  color: sl.text3, fontSize: 15, fontWeight: FontWeight.w500)),
-          const SizedBox(height: 28),
+          _logoMark(sl, 132),
+          const SizedBox(height: 26),
+          const BrandTitle(size: 42),
+          const SizedBox(height: 10),
+          _tagline(sl, 16),
+          const SizedBox(height: 30),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 440),
+            constraints: const BoxConstraints(maxWidth: 500),
             child: Text(
               'Photograph a work area, see its hazards marked within seconds, '
               'and follow every corrective action through to closure.',
+              textAlign: TextAlign.center,
               style: TextStyle(
-                  color: sl.text1,
-                  fontSize: 19,
-                  height: 1.45,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: -0.2),
+                  color: sl.text2,
+                  fontSize: 18,
+                  height: 1.5,
+                  fontWeight: FontWeight.w400,
+                  letterSpacing: -0.1),
             ),
           ),
           const SizedBox(height: 28),
-          _feature(sl, Icons.center_focus_strong_rounded,
-              'AI hazard scan from a single photo'),
-          _feature(sl, Icons.assignment_turned_in_outlined,
-              'Incidents assigned and tracked to closure'),
-          _feature(sl, Icons.picture_as_pdf_outlined,
-              'Shareable PDF reports with location'),
+          // Left-aligned list, centred as a block, so the icons line up.
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _feature(sl, Icons.center_focus_strong_rounded,
+                  'AI hazard scan from a single photo'),
+              _feature(sl, Icons.assignment_turned_in_outlined,
+                  'Incidents assigned and tracked to closure'),
+              _feature(sl, Icons.picture_as_pdf_outlined,
+                  'Shareable PDF reports with location'),
+            ],
+          ),
         ],
       );
+
+  /// Tagline set in the wordmark's family, slightly tracked, so the pair
+  /// reads as one lock-up.
+  Widget _tagline(SL sl, double size) => Text(I18n.t('app.tagline'),
+      textAlign: TextAlign.center,
+      style: GoogleFonts.plusJakartaSans(
+          color: sl.text3,
+          fontSize: size,
+          fontWeight: FontWeight.w500,
+          letterSpacing: 0.04 * size));
 
   Widget _feature(SL sl, IconData icon, String text) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: _LoginGlass.chip(sl),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: _LoginGlass.edge(sl)),
-            ),
-            child: Icon(icon, size: 18, color: sl.accentText),
-          ),
+          Icon(icon, size: 19, color: sl.accentText),
           const SizedBox(width: 12),
           Text(text,
               style: TextStyle(
-                  color: sl.text2, fontSize: 14, fontWeight: FontWeight.w500)),
+                  color: sl.text2, fontSize: 14.5, fontWeight: FontWeight.w500)),
         ]),
       );
 
-  /// The logo on a small glass tile so a white-label logo with a transparent
-  /// background still reads against the gradient.
-  Widget _logoTile(SL sl, double size) => Container(
-        padding: const EdgeInsets.all(8),
+  /// The bare brand emblem, with no tile or backing. 2026-10-05: the user found
+  /// three nested rounded frames around the logo cluttered (see [BrandMark]).
+  /// A soft glow behind it keeps it anchored on the gradient.
+  Widget _logoMark(SL sl, double size) => Container(
         decoration: BoxDecoration(
-          color: _LoginGlass.chip(sl),
-          borderRadius: BorderRadius.circular(size * 0.32),
-          border: Border.all(color: _LoginGlass.edge(sl)),
+          shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
-                color: AppColors.accent.withOpacity(sl.isDark ? 0.35 : 0.18),
-                blurRadius: 28,
-                offset: const Offset(0, 10)),
+              color: (sl.isDark ? const Color(0xFF6D7BFF) : Colors.white)
+                  .withOpacity(sl.isDark ? 0.22 : 0.85),
+              blurRadius: size * 0.6,
+              spreadRadius: size * 0.05,
+            ),
           ],
         ),
-        child: BrandLogo(size: size - 16, fallbackColor: AppColors.accent),
+        child: BrandMark(size: size, onDark: sl.isDark),
       );
 
   /// The card, then the two secondary ways in, then the theme switch.
@@ -1187,10 +1194,6 @@ class _LoginGlass {
   static Color edge(SL sl) => sl.isDark
       ? Colors.white.withOpacity(0.16)
       : Colors.white.withOpacity(0.85);
-
-  static Color chip(SL sl) => sl.isDark
-      ? Colors.white.withOpacity(0.08)
-      : Colors.white.withOpacity(0.60);
 
   static Color tile(SL sl) => sl.isDark
       ? Colors.white.withOpacity(0.07)
