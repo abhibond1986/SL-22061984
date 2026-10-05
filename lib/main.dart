@@ -563,11 +563,18 @@ class _WebEntryState extends State<_WebEntry> {
 
   @override
   Widget build(BuildContext context) {
-    // Show a minimal container (same bg as HTML splash) until DB check finishes
+    // The local session check takes a few milliseconds. Until it answers,
+    // paint the same dark sky as index.html and the login backdrop, so there
+    // is no visible "loading" step between the page and the login screen.
     if (_destination == null) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0A0E1A),
-        body: SizedBox.shrink(),
+      return const DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF151A4A), Color(0xFF10163D), Color(0xFF0B2A38)],
+          ),
+        ),
       );
     }
     return _destination!;

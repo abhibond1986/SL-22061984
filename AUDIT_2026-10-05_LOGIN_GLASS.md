@@ -204,3 +204,21 @@ User feedback: the hot-metal pour at the bottom was hard to see; every chimney s
 **Register alignment (`lib/screens/login_screen.dart`).** The wide two-column Row is now `CrossAxisAlignment.start`, and the brand column has 8 px of top padding. The tall Register form used to centre the emblem halfway down the page; now it starts level with the card. Sign in looks the same as before because the two columns are about the same height.
 
 **Verification.** `dart analyze lib`: 52 issues, 0 errors (same as the baseline). Renders are in `audit_2026-10-05/`: `login_v5_desktop_dark`, `_pour`, `_light`, `_dark_register`, `phone_dark`, `phone_register`, `pour_closeup` (PNG), plus `login_v5_animation.gif` and `login_v5_animation_closeup.gif`. A new test, `desktop dark register`, was added to `tools/login_render_test.dart`. Committed locally only; not pushed or deployed, waiting for user approval.
+
+## Revision 6: no loading page on the web
+
+The user asked to remove the loading page that appears when safetylens.in is opened on the web, and to keep it in the app if it is needed there.
+
+**Before.** `web/index.html` showed a branded card with the old multicolour "Safety Lens" wordmark, the old app_icon ring, an "IS 14489 · AI Safety" tagline, a green progress bar and a blinking "Initializing..." label. It faded out 600 ms after Flutter started. `_WebEntry` then painted a near-black `#0A0E1A` frame while it checked for a saved session. The visitor saw a splash page, then a flash, then the login.
+
+**After.**
+
+- `web/index.html`: the loading card, its CSS (orbs, glass card, progress bar, status) and the fade-out JS have all been removed. The page is now just the login backdrop's dark sky (`#151A4A → #10163D → #0B2A38`, 135°), so Flutter's first frame, the login screen, draws over identical colours.
+- The theme-color meta and the manifest `background_color` were changed to `#10163D`.
+- The Ctrl+wheel zoom listener and the DOMContentLoaded boot are kept unchanged.
+- `lib/main.dart` `_WebEntry`: the placeholder shown during the millisecond session check now uses the same sky gradient.
+- The app is unchanged. Android/iOS still start at `SplashScreen` (`home: kIsWeb ? _WebEntry : SplashScreen`).
+
+**Caveat.** The browser still has to download the Flutter engine and app code (main.dart.js) before any Flutter UI can appear, so first-time visitors see the plain backdrop colour for that moment instead of a logo card. Repeat visits are served from cache and are near-instant.
+
+**Verification.** `dart analyze lib` reports 52 issues and 0 errors, the same as the baseline. index.html parses. A full `flutter build web` was not run in the sandbox (it exceeds the time limit); the GitHub Actions build on push compiles it.

@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-title" content="Safety Lens">
   <link rel="apple-touch-icon" href="icons/Icon-192.png?v=2">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="theme-color" content="#0D1117">
+  <meta name="theme-color" content="#10163D">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <link rel="manifest" href="manifest.json?v=2">
   <!-- These three used to point at app_icon.png, which was a 1 MB 1024px PNG.
@@ -40,8 +40,13 @@
       height: -webkit-fill-available;
     }
 
+    /* 2026-10-05 (user): no loading page on the web. The page is just the
+       login backdrop's dark sky until Flutter paints its first frame, and the
+       login screen then draws over the same colours, so the visitor sees one
+       page, not a splash followed by a login. (The Android/iOS app keeps its
+       own SplashScreen; this file only affects the web build.) */
     body {
-      background: #0D1117;
+      background: #10163D linear-gradient(135deg, #151A4A 0%, #10163D 50%, #0B2A38 100%) fixed;
       font-family: -apple-system, 'Inter', sans-serif;
       overflow: hidden;
       min-height: 100vh;
@@ -55,199 +60,9 @@
       width: 100%;
       height: 100%;
     }
-
-    /* Animated background orbs */
-    body::before {
-      content: '';
-      position: fixed;
-      top: -20%;
-      left: -20%;
-      width: 60%;
-      height: 60%;
-      background: radial-gradient(circle, rgba(33,150,243,0.12) 0%, transparent 70%);
-      animation: orb1 8s ease-in-out infinite alternate;
-      pointer-events: none;
-    }
-    body::after {
-      content: '';
-      position: fixed;
-      bottom: -20%;
-      right: -20%;
-      width: 60%;
-      height: 60%;
-      background: radial-gradient(circle, rgba(0,188,212,0.08) 0%, transparent 70%);
-      animation: orb2 10s ease-in-out infinite alternate;
-      pointer-events: none;
-    }
-    @keyframes orb1 { from { transform: translate(0,0) scale(1); } to { transform: translate(5%,5%) scale(1.1); } }
-    @keyframes orb2 { from { transform: translate(0,0) scale(1); } to { transform: translate(-5%,-5%) scale(1.1); } }
-
-    #loading {
-      position: fixed;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      z-index: 9999;
-      transition: opacity 0.6s ease;
-    }
-
-    /* Glassmorphism card */
-    .glass-card {
-      background: rgba(255, 255, 255, 0.04);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 32px;
-      padding: 40px 48px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      box-shadow:
-        0 8px 32px rgba(0,0,0,0.4),
-        0 0 0 1px rgba(33,150,243,0.08),
-        inset 0 1px 0 rgba(255,255,255,0.06);
-      animation: fadeIn 0.8s ease;
-      max-width: 90vw;
-      box-sizing: border-box;
-    }
-
-    /* Responsive adjustments for mobile */
-    @media (max-width: 480px) {
-      .glass-card {
-        padding: 24px 32px;
-        border-radius: 24px;
-      }
-      .logo-ring {
-        width: 100px;
-        height: 100px;
-      }
-      .logo-ring img {
-        width: 65px;
-        height: 65px;
-      }
-      .brand {
-        font-size: 26px;
-      }
-      .tagline {
-        font-size: 9px;
-        letter-spacing: 2px;
-      }
-    }
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(20px) scale(0.96); }
-      to   { opacity: 1; transform: translateY(0)    scale(1); }
-    }
-
-    /* SAIL Logo circle */
-    .logo-ring {
-      width: 120px;
-      height: 120px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.06);
-      border: 1.5px solid rgba(33,150,243,0.3);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin-bottom: 24px;
-      box-shadow:
-        0 0 40px rgba(33,150,243,0.15),
-        0 0 80px rgba(33,150,243,0.08),
-        inset 0 1px 0 rgba(255,255,255,0.1);
-      animation: pulse 3s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { box-shadow: 0 0 40px rgba(33,150,243,0.15), 0 0 80px rgba(33,150,243,0.08), inset 0 1px 0 rgba(255,255,255,0.1); }
-      50%       { box-shadow: 0 0 60px rgba(33,150,243,0.25), 0 0 120px rgba(33,150,243,0.12), inset 0 1px 0 rgba(255,255,255,0.1); }
-    }
-
-    .logo-ring img {
-      width: 80px;
-      height: 80px;
-      object-fit: contain;
-      filter: drop-shadow(0 2px 8px rgba(33,150,243,0.3));
-    }
-
-    /* Brand name */
-    .brand {
-      font-size: 32px;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-      margin-bottom: 4px;
-    }
-    .brand .safety { 
-      background: linear-gradient(135deg, #2196F3, #00BCD4);
-      -webkit-background-clip: text; background-clip: text; color: transparent;
-    }
-    .brand .lens {
-      font-style: italic;
-      background: linear-gradient(135deg, #F59E0B, #EF4444);
-      -webkit-background-clip: text; background-clip: text; color: transparent;
-    }
-
-    .tagline {
-      color: rgba(100, 116, 139, 1);
-      font-size: 11px;
-      letter-spacing: 3px;
-      font-weight: 600;
-      text-transform: uppercase;
-      margin-bottom: 28px;
-    }
-
-    /* Progress bar */
-    .progress-track {
-      width: 160px;
-      height: 2px;
-      background: rgba(255,255,255,0.06);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, #22C55E, #39FF14);
-      border-radius: 2px;
-      animation: loading 2.5s ease-in-out forwards;
-    }
-    @keyframes loading {
-      0%   { width: 0%; }
-      60%  { width: 80%; }
-      100% { width: 100%; }
-    }
-
-    .status {
-      margin-top: 10px;
-      font-size: 10px;
-      color: rgba(100, 116, 139, 0.7);
-      letter-spacing: 1px;
-      animation: blink 1.5s ease-in-out infinite;
-    }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
   </style>
 </head>
 <body>
-  <div id="loading">
-    <div class="glass-card">
-      <div class="logo-ring">
-        <!-- width/height match the CSS so the card doesn't reflow once the
-             image lands. fetchpriority=high: this is the only thing the user
-             can actually see while the engine boots. -->
-        <img src="app_icon.png?v=4" alt="Safety Lens Badge"
-          width="80" height="80" fetchpriority="high" decoding="async"
-          onerror="this.src='icons/Icon-192.png'">
-      </div>
-      <div class="brand">
-        <span class="safety">Safety</span><span class="lens"> Lens</span>
-      </div>
-      <div class="tagline">SAIL &nbsp;·&nbsp; IS 14489 &nbsp;·&nbsp; AI Safety</div>
-      <div class="progress-track">
-        <div class="progress-fill"></div>
-      </div>
-      <div class="status">Initializing...</div>
-    </div>
-  </div>
-
   <script>
     // ★ 2026-10-04 — Ctrl + mouse-wheel browser zoom.
     // Flutter web listens for 'wheel' and calls preventDefault() on every
@@ -282,12 +97,7 @@
         _flutter.loader.loadEntrypoint({
           onEntrypointLoaded: function (engineInitializer) {
             engineInitializer.initializeEngine().then(function (appRunner) {
-              appRunner.runApp().then(function () {
-                var loading = document.getElementById('loading');
-                if (!loading) return;
-                loading.style.opacity = '0';
-                setTimeout(function () { loading.remove(); }, 600);
-              });
+              appRunner.runApp();
             });
           }
         });

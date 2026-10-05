@@ -3,7 +3,7 @@
     "short_name": "Safety Lens",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0A0E1A",
+    "background_color": "#10163D",
     "theme_color": "#0D47A1",
     "description": "AI-powered industrial safety for SAIL by IS 14489 standards",
     "orientation": "any",
