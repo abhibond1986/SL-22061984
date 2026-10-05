@@ -1,5 +1,7 @@
 ## 2026-10-05
 
+- **Login revision 4.** The app now opens in dark mode by default. The SAIL emblem PNGs were rebuilt from `icon_src/app_icon_master.png`, because the old files cut off the bottom of the "सेल SAIL" text. The backdrop is now a generic industrial skyline with subtle smoke, a hot-metal pour with sparks, and slow chimney lights; the AI scan was removed. Analyze shows 0 errors. Renders and GIFs are in `audit_2026-10-05/login_v4_*`.
+
 - **Login background: animated steel-plant skyline.** New `lib/widgets/plant_backdrop.dart` draws a night (dark) or dawn (light) SAIL-style plant: blast furnace, stoves, stacks, conveyor, gasholder and ladle crane. An AI scan line sweeps it and marks hazards with amber brackets, smoke drifts and beacons blink. It respects reduced motion, and analyze shows 0 errors (52 issues). Renders and a GIF are in `audit_2026-10-05/login_v3_*`; details are in AUDIT_2026-10-05_LOGIN_GLASS.md, Revision 3.
 
 - **Login revision 2: logo and wordmark.**

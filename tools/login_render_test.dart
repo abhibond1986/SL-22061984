@@ -48,8 +48,8 @@ void main() {
 
   Future<void> shoot(WidgetTester t, Size size, String name,
       {bool dark = false, bool register = false, bool error = false,
-      double frame = 0.62}) async {
-    // Pin the backdrop loop (0.62 = calm frame; ~0.24-0.30 = mid AI scan).
+      double frame = 0.3}) async {
+    // Pin the backdrop loop at a fixed point so renders are repeatable.
     PlantBackdrop.debugFrame = frame;
     await t.runAsync(() async {
       await _font('Roboto', ['$root/Roboto-Regular.ttf', '$root/Roboto-Medium.ttf',
@@ -106,14 +106,12 @@ void main() {
   testWidgets('small 320', (t) => shoot(t, const Size(320, 700), 'login_320_light'));
   testWidgets('desktop light', (t) => shoot(t, const Size(1440, 900), 'login_desktop_light'));
   testWidgets('desktop dark', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark', dark: true));
-  // Mid-scan frames: scan line sweeping, hazard bracket locked on.
-  testWidgets('phone dark scan', (t) => shoot(t, const Size(390, 844), 'login_phone_dark_scan', dark: true, frame: 0.29));
-  testWidgets('desktop dark scan', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_scan', dark: true, frame: 0.236));
-  testWidgets('desktop light scan', (t) => shoot(t, const Size(1440, 900), 'login_desktop_light_scan', frame: 0.236));
-  // FRAMES=1: frame sequence for an animated preview (scan part of the loop).
+  // Close-up of the hot-metal pour in the background (desktop, dark).
+  testWidgets('desktop dark motion', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_motion', dark: true, frame: 0.537));
+  // FRAMES=1: frame sequence for an animated preview (first 3.6 s of the loop).
   if (Platform.environment['FRAMES'] == '1') {
-    for (var i = 0; i < 30; i++) {
-      final u = 0.06 + i * (0.42 / 30);
+    for (var i = 0; i < 36; i++) {
+      final u = i / 120; // 0.1 s steps over the first 3.6 s of the loop
       final n = i.toString().padLeft(2, '0');
       testWidgets('frame $n', (t) => shoot(t, const Size(1440, 900),
           'frame_$n', dark: Platform.environment['LIGHT'] != '1', frame: u));

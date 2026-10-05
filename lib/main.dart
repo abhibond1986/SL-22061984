@@ -385,8 +385,8 @@ class SafetyLensApp extends StatefulWidget {
 }
 
 class _SafetyLensAppState extends State<SafetyLensApp> with WidgetsBindingObserver {
-  // ✅ FIX: Default to LIGHT mode instead of dark
-  ThemeMode _mode = ThemeMode.light;
+  // Opens in dark mode (user request 2026-10-05); the toggle still switches.
+  ThemeMode _mode = ThemeMode.dark;
 
   @override
   void initState() {

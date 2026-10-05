@@ -158,3 +158,37 @@ Renders are in `audit_2026-10-05/`:
 - `login_render_test` passes 10 of 10. That is the original 7 plus 3 new mid-scan frames.
 - Renders are `audit_2026-10-05/login_v3_*.png`.
 - `login_v3_animation.gif` is a 30-frame preview of the scan. Running with `FRAMES=1` regenerates the frames.
+
+## Revision 4: dark by default, complete SAIL logo, generic industrial backdrop (same day)
+
+**User feedback:**
+
+- Open the page in dark mode by default.
+- The SAIL logo is not complete; the "SAIL" text at the bottom is slightly cut off.
+- Make the backdrop a generic industrial background, with smoke or hot metal and a small amount of animation, keeping it subtle and professional.
+
+**Dark by default (`lib/main.dart`).** `_SafetyLensApp._mode` now starts as `ThemeMode.dark`. The theme toggle works as before. The web loading screen (`web/index.html`) was already dark, so the page no longer flashes from dark to light on load.
+
+**Complete logo (`assets/images/sail_emblem.png` and `sail_emblem_white.png`).** The old 311×320 files had the bottom of the "सेल SAIL" text cut off inside the PNG itself, so no layout change could have fixed it.
+
+- Both files were rebuilt at 574×598 from the complete logo in `icon_src/app_icon_master.png` (1024²).
+- The cut-out uses a colour-to-alpha key on the SAIL blue. This drops the white background and the grey drop shadow, so neither shows as a halo on the dark screen.
+- The white version uses the same mask, filled white.
+- Every use of the emblem (`BrandMark`, the branding panel, the PDF masthead) uses `BoxFit.contain`, so the new aspect ratio needs no code change. The PDF report also gets the complete logo.
+
+**Generic industrial backdrop (`lib/widgets/plant_backdrop.dart`, rewritten).**
+
+- The scene is no longer a specific steel plant. It now shows factory halls with sawtooth roofs, a process tower, storage tanks, silos with a conveyor, banded chimneys, a cooling tower and a pipe rack. At the centre is a melt shop with an open, lit bay where hot metal is being poured.
+- The motion is deliberately quiet. It runs on one seamless 12 s loop, and every period divides 12 s, so there is no jump when it repeats:
+  - soft smoke plumes rise and drift from four chimneys;
+  - a molten stream pours from a tilted ladle with a gently flickering glow, and a few tiny sparks fly at the splash;
+  - slow red lights blink on the two tallest chimneys (every 3 s).
+- The Revision 3 AI scan line and hazard brackets were removed, as part of the request for subtlety.
+- Reduced-motion handling, the two-layer repaint split and the `debugFrame` test hook are unchanged.
+
+**Verification:**
+
+- `dart analyze lib` reports 52 issues, the same as the baseline, and none are errors.
+- `login_render_test` passes 8 of 8.
+- Renders are `audit_2026-10-05/login_v4_*.png`.
+- There are two animated previews: `login_v4_animation.gif` (the full screen) and `login_v4_animation_closeup.gif` (the pour). Each is 36 frames covering 3.6 s.

@@ -1,39 +1,41 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
-/// Login background: a stylised integrated steel plant on the horizon
-/// (2026-10-05, user request: "make a background image depending upon what
-/// it is" + "add a little animation related to this app").
+/// Login background: a generic heavy-industry skyline at dusk, with slow
+/// smoke from the chimneys and hot metal being poured inside an open bay.
 ///
-/// Drawn in code rather than shipped as a bitmap, so it is sharp at any size,
-/// follows the light/dark theme, and adds nothing to the download size.
+/// History (2026-10-05): first a detailed steel-plant scene with an "AI scan"
+/// sweep and hazard brackets; the user then asked for a *generic* industrial
+/// background with smoke / hot metal and only a subtle, professional amount
+/// of motion, so the scan and brackets were removed.
+///
+/// Drawn in code (sharp at any size, follows light/dark, no download weight).
 ///
 /// Scene, back to front:
-///   sky gradient · indigo / teal glows · molten-amber horizon glow
-///   far layer:  mill sheds with sawtooth roofs, two cooling towers
-///   mid layer:  blast furnace + skip bridge, three hot-blast stoves, stacks,
-///               conveyor gallery + junction tower, gasholder, ladle crane
-///   near layer: pipe rack on trestles, rail line, ground
+///   sky gradient, indigo and teal glows, a warm horizon glow
+///   far:   low sawtooth sheds, a cooling tower, two slender chimneys
+///   mid:   factory halls, process tower, storage tanks, silos and conveyor,
+///          a melt shop with an open, lit bay, banded chimneys
+///   near:  pipe rack on trestles, ground line
 ///
-/// Motion (one loop, 12 s; all of it stops when the OS asks for reduced
-/// motion):
-///   * AI scan: a teal scan line sweeps the skyline, and as it passes the
-///     ladle crane a hazard bracket locks on and fades. This is what the app
-///     does: scan a scene, mark the hazard.
-///   * smoke drifting from the stacks, aviation beacons blinking on their tops,
-///     and a slow breathing of the furnace glow.
+/// Motion (one seamless 12 s loop; every period divides 12 s):
+///   * smoke rising and drifting from the chimneys, very low opacity;
+///   * a molten stream from a tilted ladle in the open bay, with a gently
+///     flickering glow and a few short-lived sparks at the splash;
+///   * slow red aviation lights on the two tallest chimneys.
+/// Reduced motion (OS setting) freezes a calm frame with no sparks.
 ///
-/// Only the animated overlay repaints each frame. The skyline is a separate
-/// static layer behind its own RepaintBoundary.
+/// The static skyline and the animated overlay are separate layers behind
+/// their own RepaintBoundary; only the small overlay repaints per frame.
 class PlantBackdrop extends StatefulWidget {
   const PlantBackdrop({super.key, required this.isDark, this.animate = true});
   final bool isDark;
 
-  /// False freezes the scene (reduced motion, tests that want a still).
+  /// False freezes the scene.
   final bool animate;
 
   /// Tests only: pin the loop at this point (0..1) and draw it as a live
-  /// frame, so render tests can capture the scan without a ticking animation.
+  /// frame, so render tests can capture motion without a ticking animation.
   static double? debugFrame;
 
   @override
@@ -74,8 +76,7 @@ class _PlantBackdropState extends State<PlantBackdrop>
       if (!_c.isAnimating) _c.repeat();
     } else {
       _c.stop();
-      // A still frame with no scan line visible.
-      _c.value = 0.62;
+      _c.value = 0.3;
     }
   }
 
@@ -103,17 +104,14 @@ class _PlantBackdropState extends State<PlantBackdrop>
 
 // ─── Shared geometry ──────────────────────────────────────────────────────
 //
-// The skyline is authored on a virtual 1600 × 420 strip whose bottom edge is
-// the bottom of the screen. It is scaled so it is at least 34% of the screen
-// height (so it still reads on a tall phone) and at least the screen width,
-// and is centred horizontally. On a phone that crops to the middle: the
-// furnace, stoves and crane.
+// Authored on a virtual 1600 × 420 strip whose bottom edge is the bottom of
+// the screen: at least 34% of the screen height (so it reads on a tall
+// phone), at least the screen width, centred. On wide screens it is
+// flattened by up to 15% so it stays below the text.
 class _Frame {
   _Frame(Size size) {
     final fit = size.height * 0.34 / vh;
     sx = math.max(size.width / vw, fit);
-    // On wide screens the width wins and the strip would grow tall enough to
-    // reach the text; flatten it a little (at most 15%) to keep it low.
     sy = math.max(sx * 0.85, math.min(sx, fit));
     dx = (size.width - vw * sx) / 2;
     dy = size.height - vh * sy;
@@ -121,39 +119,40 @@ class _Frame {
   static const double vw = 1600, vh = 420;
   late final double sx, sy, dx, dy;
 
-  Rect map(Rect r) => Rect.fromLTRB(
-      dx + r.left * sx, dy + r.top * sy, dx + r.right * sx, dy + r.bottom * sy);
-
   void apply(Canvas c) {
     c.translate(dx, dy);
     c.scale(sx, sy);
   }
 }
 
-// Landmarks that the animated layer needs too.
-const _stacks = <Offset>[Offset(430, 92), Offset(1062, 52), Offset(1212, 104)];
-// Things the AI scan "marks" as it passes: the ladle crane (load overhead),
-// the furnace top (gas / work at height) and the conveyor transfer tower
-// (nip points). Whichever are on screen get a hazard bracket.
-const _hazards = <Rect>[
-  Rect.fromLTRB(166, 192, 362, 356),
-  Rect.fromLTRB(704, 96, 842, 262),
-  Rect.fromLTRB(1262, 214, 1360, 330),
+// Landmarks shared by both layers.
+const _chimneys = <Offset>[
+  Offset(262, 88),
+  Offset(1036, 46),
+  Offset(1100, 100),
+  Offset(1376, 132),
 ];
-const _furnaceTop = Offset(770, 118);
+const _beaconOn = <int>[1, 0]; // indexes into _chimneys that carry a light
+const _bay = Rect.fromLTRB(752, 292, 912, 404); // open bay of the melt shop
+const _lip = Offset(806, 322); // ladle pouring lip
+const _splash = Offset(822, 398); // where the stream lands
 
 class _Palette {
   _Palette(this.dark);
   final bool dark;
   List<Color> get sky => dark
-      ? const [Color(0xFF151A4A), Color(0xFF10163D), Color(0xFF0A2A38)]
+      ? const [Color(0xFF151A4A), Color(0xFF10163D), Color(0xFF0B2A38)]
       : const [Color(0xFFE9ECFF), Color(0xFFF2F4FF), Color(0xFFE3F3F3)];
-  Color get far => dark ? const Color(0xFF262E6A) : const Color(0xFFD3D7F7);
-  Color get mid => dark ? const Color(0xFF161C4C) : const Color(0xFFAEB5EA);
-  Color get near => dark ? const Color(0xFF0C1135) : const Color(0xFF8D96DA);
-  Color get line => dark ? const Color(0xFF3A4590) : const Color(0xFFC3C8F2);
-  Color get window => dark ? const Color(0xFFFFB547) : const Color(0xFFFFFFFF);
-  Color get molten => const Color(0xFFF59E0B);
+  Color get far => dark ? const Color(0xFF232B64) : const Color(0xFFD6DAF7);
+  Color get mid => dark ? const Color(0xFF151B4A) : const Color(0xFFB0B7EA);
+  Color get near => dark ? const Color(0xFF0C1135) : const Color(0xFF9199DB);
+  Color get line => dark ? const Color(0xFF2E3878) : const Color(0xFFC6CBF2);
+  Color get window => dark ? const Color(0xFFFFB547) : Colors.white;
+  Color get bayInside =>
+      dark ? const Color(0xFF2A1A1E) : const Color(0xFF8C7FA8);
+  static const molten = Color(0xFFF59E0B);
+  static const hot = Color(0xFFFFD27A);
+  static const white = Color(0xFFFFF4D6);
 }
 
 // ─── Static skyline ───────────────────────────────────────────────────────
@@ -166,7 +165,6 @@ class _SkylinePainter extends CustomPainter {
     final p = _Palette(isDark);
     final rect = Offset.zero & size;
 
-    // Sky.
     canvas.drawRect(
         rect,
         Paint()
@@ -176,7 +174,6 @@ class _SkylinePainter extends CustomPainter {
             colors: p.sky,
           ).createShader(rect));
 
-    // Brand glows, the same family as the rest of the login.
     final s = size.shortestSide;
     void glow(Offset c, double r, Color color) => canvas.drawCircle(
         c,
@@ -185,9 +182,9 @@ class _SkylinePainter extends CustomPainter {
           ..color = color
           ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.55));
     glow(Offset(size.width * 0.12, size.height * 0.10), s * 0.42,
-        const Color(0xFF4F5BD5).withOpacity(isDark ? 0.50 : 0.26));
+        const Color(0xFF4F5BD5).withOpacity(isDark ? 0.48 : 0.26));
     glow(Offset(size.width * 0.92, size.height * 0.30), s * 0.38,
-        const Color(0xFF0EA5B5).withOpacity(isDark ? 0.36 : 0.22));
+        const Color(0xFF0EA5B5).withOpacity(isDark ? 0.32 : 0.20));
 
     final f = _Frame(size);
     canvas.save();
@@ -195,23 +192,23 @@ class _SkylinePainter extends CustomPainter {
 
     // ── far layer ──
     final far = Paint()..color = p.far;
-    _coolingTower(canvas, far, 150, 420, 64, 160);
-    _coolingTower(canvas, far, 1400, 420, 70, 175);
-    // Sawtooth-roofed mill sheds along the whole horizon.
+    _coolingTower(canvas, far, 1480, 420, 66, 168);
+    canvas.drawRect(const Rect.fromLTWH(96, 150, 10, 270), far);
+    canvas.drawRect(const Rect.fromLTWH(1250, 120, 9, 300), far);
     final shed = Path()..moveTo(0, 420);
     double x = 0;
-    final heights = <double>[70, 92, 60, 84, 104, 66, 88, 74, 96, 62, 80];
+    const heights = <double>[64, 84, 58, 78, 96, 62, 82, 70, 90, 60, 76];
     var i = 0;
     while (x < 1600) {
       final h = heights[i % heights.length];
       final w = 120.0 + (i * 37 % 60);
       shed.lineTo(x, 420 - h);
-      // three roof teeth per shed
       for (var k = 0; k < 3; k++) {
         final tx = x + w * k / 3;
-        shed.lineTo(tx + w / 3 * 0.7, 420 - h - 14);
-        shed.lineTo(tx + w / 3 * 0.7, 420 - h);
-        shed.lineTo(tx + w / 3, 420 - h);
+        shed
+          ..lineTo(tx + w / 3 * 0.7, 420 - h - 12)
+          ..lineTo(tx + w / 3 * 0.7, 420 - h)
+          ..lineTo(tx + w / 3, 420 - h);
       }
       x += w;
       i++;
@@ -221,152 +218,180 @@ class _SkylinePainter extends CustomPainter {
       ..close();
     canvas.drawPath(shed, far);
 
-    // ── molten horizon glow (between far and mid, so the plant is lit from behind) ──
+    // Warm horizon glow behind the mid layer (the works lit from within).
     canvas.drawOval(
-        Rect.fromCenter(center: const Offset(820, 400), width: 1100, height: 260),
+        Rect.fromCenter(
+            center: const Offset(830, 410), width: 1150, height: 240),
         Paint()
-          ..color = p.molten.withOpacity(isDark ? 0.22 : 0.16)
+          ..color = _Palette.molten.withOpacity(isDark ? 0.18 : 0.12)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 70));
 
     // ── mid layer ──
     final mid = Paint()..color = p.mid;
-    final stroke = Paint()
+    final pen = Paint()
       ..color = p.mid
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 6
-      ..strokeCap = StrokeCap.round;
+      ..strokeCap = StrokeCap.butt;
 
-    // Blast furnace: tapered shell, top platform, downcomers, skip bridge.
-    final bf = Path()
-      ..moveTo(720, 420)
-      ..lineTo(728, 300)
-      ..lineTo(712, 250)
-      ..lineTo(742, 150)
-      ..lineTo(798, 150)
-      ..lineTo(828, 250)
-      ..lineTo(812, 300)
-      ..lineTo(820, 420)
-      ..close();
-    canvas.drawPath(bf, mid);
-    canvas.drawRect(const Rect.fromLTWH(736, 128, 68, 22), mid); // top house
-    canvas.drawRect(const Rect.fromLTWH(764, 104, 12, 26), mid); // bleeder
-    // Downcomers: two big pipes curving down to the dust catcher.
-    canvas.drawPath(
-        Path()
-          ..moveTo(790, 132)
-          ..quadraticBezierTo(860, 120, 872, 230),
-        stroke..strokeWidth = 9);
-    canvas.drawPath(
-        Path()
-          ..moveTo(750, 132)
-          ..quadraticBezierTo(690, 128, 676, 210),
-        stroke..strokeWidth = 7);
-    canvas.drawRect(const Rect.fromLTWH(656, 206, 40, 70), mid); // dust catcher
-    canvas.drawPath(
-        Path()
-          ..moveTo(656, 276)
-          ..lineTo(676, 300)
-          ..lineTo(696, 276)
-          ..close(),
-        mid);
-    // Skip bridge: inclined truss from the stockhouse to the furnace top.
-    canvas.drawPath(
-        Path()
-          ..moveTo(540, 412)
-          ..lineTo(744, 150),
-        stroke..strokeWidth = 8);
-    canvas.drawRect(const Rect.fromLTWH(500, 370, 90, 50), mid); // stockhouse
-    _truss(canvas, p.mid, const Offset(540, 412), const Offset(744, 150), 14);
-
-    // Three hot-blast stoves: tall domed cylinders.
-    for (final sx in const <double>[880, 934, 988]) {
-      final r = RRect.fromRectAndCorners(Rect.fromLTWH(sx, 196, 44, 224),
-          topLeft: const Radius.circular(22), topRight: const Radius.circular(22));
-      canvas.drawRRect(r, mid);
-    }
-    // Hot-blast main linking stoves to the furnace.
-    canvas.drawRect(const Rect.fromLTWH(812, 330, 230, 9), mid);
-
-    // Stacks (chimneys), tapered.
-    for (final top in _stacks) {
-      canvas.drawPath(
-          Path()
-            ..moveTo(top.dx - 9, top.dy)
-            ..lineTo(top.dx + 9, top.dy)
-            ..lineTo(top.dx + 15, 420)
-            ..lineTo(top.dx - 15, 420)
-            ..close(),
-          mid);
-      // Two painted bands near the top, as on real stacks.
-      final band = Paint()..color = p.line;
-      canvas.drawRect(Rect.fromLTWH(top.dx - 10, top.dy + 14, 20, 5), band);
-      canvas.drawRect(Rect.fromLTWH(top.dx - 11, top.dy + 30, 22, 5), band);
-    }
-
-    // Conveyor gallery rising to a junction tower.
-    canvas.drawPath(
-        Path()
-          ..moveTo(1100, 412)
-          ..lineTo(1290, 262),
-        stroke..strokeWidth = 12);
-    _truss(canvas, p.mid, const Offset(1100, 420), const Offset(1290, 272), 10);
-    canvas.drawRect(const Rect.fromLTWH(1280, 230, 64, 190), mid);
-    canvas.drawRect(const Rect.fromLTWH(1272, 222, 80, 12), mid);
-
-    // Gasholder.
-    canvas.drawRRect(
-        RRect.fromRectAndCorners(const Rect.fromLTWH(1440, 250, 120, 170),
-            topLeft: const Radius.circular(10), topRight: const Radius.circular(10)),
-        mid);
-    final ribs = Paint()
+    // Factory hall, left, with a sawtooth roof.
+    _sawHall(canvas, mid, 40, 330, 296, 4);
+    // Process tower with platforms.
+    canvas.drawRect(const Rect.fromLTWH(372, 168, 40, 252), mid);
+    canvas.drawRect(const Rect.fromLTWH(386, 140, 12, 30), mid);
+    final rail = Paint()
       ..color = p.line
       ..strokeWidth = 2;
-    for (var rx = 1452.0; rx < 1560; rx += 18) {
-      canvas.drawLine(Offset(rx, 256), Offset(rx, 420), ribs);
+    for (var y = 200.0; y < 400; y += 44) {
+      canvas.drawRect(Rect.fromLTWH(362, y, 60, 5), mid);
+      canvas.drawLine(Offset(362, y - 8), Offset(422, y - 8), rail);
+    }
+    // Storage tanks with domed tops.
+    _tank(canvas, mid, 440, 92, 300);
+    _tank(canvas, mid, 540, 76, 322);
+    canvas.drawRect(const Rect.fromLTWH(430, 352, 200, 6), mid); // pipe
+
+    // Melt shop: tall hall with a raised roof lantern and an open bay.
+    final shop = Path()
+      ..moveTo(650, 420)
+      ..lineTo(650, 250)
+      ..lineTo(830, 206)
+      ..lineTo(1010, 250)
+      ..lineTo(1010, 420)
+      ..close();
+    canvas.drawPath(shop, mid);
+    canvas.drawRect(const Rect.fromLTWH(770, 190, 120, 26), mid); // lantern
+    canvas.drawRect(Rect.fromLTWH(780, 198, 100, 6),
+        Paint()..color = p.window.withOpacity(isDark ? 0.35 : 0.6));
+    // The open bay: warm interior, lit from the pour.
+    canvas.drawRect(_bay, Paint()..color = p.bayInside);
+    canvas.drawRect(
+        _bay,
+        Paint()
+          ..shader = RadialGradient(
+            center: const Alignment(0.0, 0.9),
+            radius: 1.0,
+            colors: [
+              _Palette.molten.withOpacity(isDark ? 0.55 : 0.45),
+              _Palette.molten.withOpacity(0),
+            ],
+          ).createShader(_bay));
+    // Gantry beam and the tilted ladle hanging in the bay.
+    canvas.drawRect(Rect.fromLTWH(_bay.left, _bay.top + 4, _bay.width, 6), mid);
+    canvas.save();
+    canvas.translate(_lip.dx - 26, _lip.dy + 4);
+    canvas.rotate(-0.55);
+    canvas.drawPath(
+        Path()
+          ..moveTo(-20, -14)
+          ..lineTo(26, -14)
+          ..lineTo(20, 24)
+          ..lineTo(-14, 24)
+          ..close(),
+        mid);
+    canvas.restore();
+    canvas.drawLine(
+        Offset(_lip.dx - 30, _bay.top + 10),
+        Offset(_lip.dx - 30, _lip.dy - 12),
+        Paint()
+          ..color = p.mid
+          ..strokeWidth = 2);
+    // Runner / mould on the floor.
+    canvas.drawRect(
+        Rect.fromLTWH(_splash.dx - 34, _bay.bottom - 8, 68, 8), mid);
+    // Hall windows.
+    final win = Paint()..color = p.window.withOpacity(isDark ? 0.6 : 0.8);
+    for (var wx = 668.0; wx < 740; wx += 22) {
+      canvas.drawRect(Rect.fromLTWH(wx, 300, 10, 7), win);
+      canvas.drawRect(Rect.fromLTWH(wx, 336, 10, 7), win);
+    }
+    for (var wx = 928.0; wx < 1000; wx += 22) {
+      canvas.drawRect(Rect.fromLTWH(wx, 300, 10, 7), win);
     }
 
-    // Ladle crane (gantry): two A-frame legs, girder, trolley, hook, ladle.
-    _crane0(canvas, p);
+    // Chimneys, tapered, with painted bands.
+    for (final top in _chimneys) {
+      canvas.drawPath(
+          Path()
+            ..moveTo(top.dx - 8, top.dy)
+            ..lineTo(top.dx + 8, top.dy)
+            ..lineTo(top.dx + 14, 420)
+            ..lineTo(top.dx - 14, 420)
+            ..close(),
+          mid);
+      final band = Paint()..color = p.line;
+      canvas.drawRect(Rect.fromLTWH(top.dx - 9, top.dy + 12, 18, 5), band);
+      canvas.drawRect(Rect.fromLTWH(top.dx - 10, top.dy + 28, 20, 5), band);
+    }
 
-    // Lit windows on the stockhouse, junction tower and furnace cast house.
-    final win = Paint()..color = p.window.withOpacity(isDark ? 0.75 : 0.85);
-    for (var wy = 244.0; wy < 400; wy += 26) {
-      canvas.drawRect(Rect.fromLTWH(1292, wy, 8, 6), win);
-      canvas.drawRect(Rect.fromLTWH(1322, wy + 8, 8, 6), win);
+    // Silos with a conveyor gallery rising to their top.
+    for (final sx in const <double>[1150, 1186, 1222]) {
+      canvas.drawRRect(
+          RRect.fromRectAndCorners(Rect.fromLTWH(sx, 236, 32, 184),
+              topLeft: const Radius.circular(6),
+              topRight: const Radius.circular(6)),
+          mid);
     }
-    for (var wx = 508.0; wx < 584; wx += 18) {
-      canvas.drawRect(Rect.fromLTWH(wx, 384, 8, 6), win);
-    }
-    canvas.drawRect(const Rect.fromLTWH(752, 380, 36, 10),
-        Paint()..color = p.molten.withOpacity(isDark ? 0.85 : 0.65)); // taphole
+    canvas.drawRect(const Rect.fromLTWH(1144, 224, 116, 14), mid);
+    canvas.drawLine(const Offset(1250, 232), const Offset(1420, 360),
+        pen..strokeWidth = 10);
+    _truss(canvas, p.mid, const Offset(1252, 242), const Offset(1420, 370), 9);
+
+    // Factory hall, right.
+    _sawHall(canvas, mid, 1290, 1600, 318, 4);
+
+    // Pipe bridge across the middle.
+    canvas.drawRect(const Rect.fromLTWH(600, 344, 50, 5), mid);
+    canvas.drawRect(const Rect.fromLTWH(1010, 344, 140, 5), mid);
 
     // ── near layer ──
     final near = Paint()..color = p.near;
-    // Pipe rack on trestles across the whole width.
     for (var tx = 20.0; tx < 1600; tx += 110) {
-      canvas.drawRect(Rect.fromLTWH(tx, 378, 6, 42), near);
+      canvas.drawRect(Rect.fromLTWH(tx, 380, 6, 40), near);
     }
-    canvas.drawRect(const Rect.fromLTWH(0, 374, 1600, 6), near);
-    canvas.drawRect(const Rect.fromLTWH(0, 386, 1600, 4), near);
-    // Ground with a rail line.
+    canvas.drawRect(const Rect.fromLTWH(0, 376, 1600, 5), near);
+    canvas.drawRect(const Rect.fromLTWH(0, 388, 1600, 3), near);
     canvas.drawRect(const Rect.fromLTWH(0, 404, 1600, 40), near);
-    canvas.drawRect(Rect.fromLTWH(0, 410, 1600, 2),
+    canvas.drawRect(const Rect.fromLTWH(0, 410, 1600, 2),
         Paint()..color = p.line.withOpacity(0.7));
 
     canvas.restore();
   }
 
-  void _coolingTower(Canvas c, Paint paint, double cx, double base,
-      double halfW, double h) {
-    // Hyperboloid silhouette: wide base, waist at ~70%, flared lip.
+  void _sawHall(Canvas c, Paint paint, double x0, double x1, double y, int n) {
+    final w = (x1 - x0) / n;
     final path = Path()
-      ..moveTo(cx - halfW, base)
-      ..quadraticBezierTo(cx - halfW * 0.55, base - h * 0.7,
-          cx - halfW * 0.62, base - h)
-      ..lineTo(cx + halfW * 0.62, base - h)
-      ..quadraticBezierTo(cx + halfW * 0.55, base - h * 0.7, cx + halfW, base)
+      ..moveTo(x0, 420)
+      ..lineTo(x0, y);
+    for (var k = 0; k < n; k++) {
+      final a = x0 + w * k;
+      path
+        ..lineTo(a + w * 0.72, y - 22)
+        ..lineTo(a + w * 0.72, y)
+        ..lineTo(a + w, y);
+    }
+    path
+      ..lineTo(x1, 420)
       ..close();
     c.drawPath(path, paint);
+  }
+
+  void _tank(Canvas c, Paint paint, double x, double w, double top) {
+    c.drawRect(Rect.fromLTWH(x, top, w, 420 - top), paint);
+    c.drawOval(Rect.fromLTWH(x, top - w * 0.16, w, w * 0.32), paint);
+  }
+
+  void _coolingTower(
+      Canvas c, Paint paint, double cx, double base, double halfW, double h) {
+    c.drawPath(
+        Path()
+          ..moveTo(cx - halfW, base)
+          ..quadraticBezierTo(
+              cx - halfW * 0.55, base - h * 0.7, cx - halfW * 0.62, base - h)
+          ..lineTo(cx + halfW * 0.62, base - h)
+          ..quadraticBezierTo(
+              cx + halfW * 0.55, base - h * 0.7, cx + halfW, base)
+          ..close(),
+        paint);
   }
 
   void _truss(Canvas c, Color color, Offset a, Offset b, int bays) {
@@ -379,42 +404,9 @@ class _SkylinePainter extends CustomPainter {
       final p0 = Offset.lerp(a, b, k / bays)!;
       c.drawLine(p0, p0 + unit, pen);
       if (k < bays) {
-        final p1 = Offset.lerp(a, b, (k + 1) / bays)!;
-        c.drawLine(p0 + unit, p1, pen);
+        c.drawLine(p0 + unit, Offset.lerp(a, b, (k + 1) / bays)!, pen);
       }
     }
-  }
-
-  void _crane0(Canvas c, _Palette p) {
-    final paint = Paint()..color = p.mid;
-    final pen = Paint()
-      ..color = p.mid
-      ..strokeWidth = 7
-      ..strokeCap = StrokeCap.round;
-    // Legs (A-frames).
-    c.drawLine(const Offset(184, 420), const Offset(204, 214), pen);
-    c.drawLine(const Offset(224, 420), const Offset(204, 214), pen);
-    c.drawLine(const Offset(318, 420), const Offset(338, 214), pen);
-    c.drawLine(const Offset(358, 420), const Offset(338, 214), pen);
-    // Girder.
-    c.drawRect(const Rect.fromLTWH(170, 200, 182, 16), paint);
-    // Trolley + hook rope + ladle.
-    c.drawRect(const Rect.fromLTWH(250, 216, 28, 14), paint);
-    c.drawLine(const Offset(264, 230), const Offset(264, 300),
-        Paint()
-          ..color = p.mid
-          ..strokeWidth = 2);
-    c.drawPath(
-        Path()
-          ..moveTo(240, 300)
-          ..lineTo(288, 300)
-          ..lineTo(282, 344)
-          ..lineTo(246, 344)
-          ..close(),
-        paint);
-    // Molten rim of the ladle.
-    c.drawRect(const Rect.fromLTWH(242, 298, 44, 4),
-        Paint()..color = p.molten.withOpacity(p.dark ? 0.9 : 0.7));
   }
 
   @override
@@ -429,146 +421,128 @@ class _LifePainter extends CustomPainter {
   final Animation<double> t;
   final bool still;
 
-  static const _scanStart = 0.08, _scanEnd = 0.40; // of the 12 s loop
+  static const _tau = 2 * math.pi;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final p = _Palette(isDark);
     final sec = t.value * 12.0;
     final f = _Frame(size);
     canvas.save();
     f.apply(canvas);
+    _smoke(canvas, sec);
+    _pour(canvas, sec);
+    _beacons(canvas, sec);
+    canvas.restore();
+  }
 
-    // Furnace glow breathing (6 s period).
-    final breathe = 0.5 + 0.5 * math.sin(sec / 6 * 2 * math.pi);
-    canvas.drawCircle(
-        _furnaceTop,
-        46,
-        Paint()
-          ..color = p.molten.withOpacity((isDark ? 0.10 : 0.07) + 0.08 * breathe)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 30));
-
-    // Smoke from each stack: five puffs per stack, rising and widening.
-    final smoke = isDark ? Colors.white : const Color(0xFF6E78C8);
-    for (var k = 0; k < _stacks.length; k++) {
-      final top = _stacks[k];
-      for (var i = 0; i < 5; i++) {
-        final ph = ((sec / 7.5) + i / 5 + k * 0.17) % 1.0;
-        final y = top.dy - 6 - ph * 110;
-        final x = top.dx + ph * 46 + math.sin(ph * math.pi * 2 + k) * 6;
-        final r = 7 + ph * 26;
-        final a = (1 - ph) * math.min(1, ph * 5) * (isDark ? 0.10 : 0.12);
+  // Soft plumes: seven puffs per chimney on a 6 s cycle, rising, widening and
+  // leaning right with the wind. Very low opacity so it reads as atmosphere.
+  void _smoke(Canvas canvas, double sec) {
+    final tint = isDark ? const Color(0xFFC9CFF5) : const Color(0xFF7C85C9);
+    for (var k = 0; k < _chimneys.length; k++) {
+      final top = _chimneys[k];
+      for (var i = 0; i < 7; i++) {
+        final ph = ((sec / 6) + i / 7 + k * 0.13) % 1.0;
+        final y = top.dy - 4 - ph * 120;
+        final x = top.dx + ph * ph * 70 + math.sin(ph * _tau + k) * 4;
+        final r = 6 + ph * 30;
+        final a = math.min(1.0, ph * 6) * (1 - ph) * (isDark ? 0.17 : 0.16);
         canvas.drawCircle(
             Offset(x, y),
             r,
             Paint()
-              ..color = smoke.withOpacity(a)
-              ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.6));
+              ..color = tint.withOpacity(a)
+              ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.7));
       }
     }
+  }
 
-    // Aviation beacons: short red blink, staggered between stacks.
-    for (var k = 0; k < _stacks.length; k++) {
-      final ph = (sec / 1.6 + k * 0.33) % 1.0;
-      final on = still ? 0.6 : (ph < 0.18 ? 1.0 : 0.15);
-      final c = _stacks[k] + const Offset(0, -4);
+  // Hot metal: a slightly wavering stream from the ladle lip to the runner,
+  // a breathing glow, and a few sparks thrown up at the splash.
+  void _pour(Canvas canvas, double sec) {
+    // Periods 1.2 s and 0.4 s both divide the 12 s loop, so it never jumps.
+    final flick = still
+        ? 0.9
+        : 0.86 +
+            0.09 * math.sin(sec / 1.2 * _tau) +
+            0.05 * math.sin(sec / 0.4 * _tau);
+
+    canvas.drawCircle(
+        _splash,
+        44,
+        Paint()
+          ..color = _Palette.molten.withOpacity((isDark ? 0.30 : 0.22) * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 26));
+    canvas.drawOval(
+        Rect.fromCenter(center: _splash, width: 40, height: 8),
+        Paint()
+          ..color = _Palette.hot.withOpacity(0.85 * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2));
+
+    final wob = still ? 0.0 : math.sin(sec / 0.4 * _tau) * 0.8;
+    final stream = Path()
+      ..moveTo(_lip.dx, _lip.dy)
+      ..quadraticBezierTo(_lip.dx + 14 + wob, _lip.dy + 20,
+          _splash.dx + wob * 0.5, _splash.dy);
+    canvas.drawPath(
+        stream,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 10
+          ..color = _Palette.molten.withOpacity(0.35 * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+    canvas.drawPath(
+        stream,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3.4
+          ..strokeCap = StrokeCap.round
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [_Palette.white, _Palette.hot, _Palette.molten],
+          ).createShader(Rect.fromPoints(_lip, _splash)));
+
+    if (still) return;
+    // Sparks: twelve, each on a period that divides 12 s, short ballistic
+    // arcs that fade out. Small and few, so the effect stays quiet.
+    const periods = <double>[1.0, 1.2, 1.5, 2.0];
+    for (var i = 0; i < 12; i++) {
+      final period = periods[i % periods.length];
+      final life = ((sec / period) + i * 0.37) % 1.0;
+      if (life > 0.55) continue; // each spark is alive about half its cycle
+      final l = life / 0.55;
+      final ang = -math.pi / 2 + (((i * 0.61) % 1.0) - 0.5) * 2.2;
+      final speed = 70.0 + (i * 23 % 40);
+      final tt = l * 0.55;
+      final pos = _splash +
+          Offset(math.cos(ang) * speed * tt,
+              math.sin(ang) * speed * tt + 0.5 * 260 * tt * tt);
+      canvas.drawCircle(
+          pos,
+          1.3,
+          Paint()
+            ..color = _Palette.hot.withOpacity(0.9 * (1 - l))
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.8));
+    }
+  }
+
+  // Red obstruction lights on the two tallest chimneys: slow 3 s blink.
+  void _beacons(Canvas canvas, double sec) {
+    for (final k in _beaconOn) {
+      final ph = (sec / 3 + k * 0.5) % 1.0;
+      final on = still ? 0.5 : (ph < 0.22 ? 1.0 : 0.18);
+      final c = _chimneys[k] + const Offset(0, -3);
       canvas.drawCircle(
           c,
-          9,
+          8,
           Paint()
-            ..color = const Color(0xFFFF4D4D).withOpacity(0.35 * on)
+            ..color = const Color(0xFFFF4D4D).withOpacity(0.30 * on)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
-      canvas.drawCircle(
-          c, 2.6, Paint()..color = const Color(0xFFFF6B6B).withOpacity(0.95 * on));
-    }
-
-    canvas.restore();
-
-    // AI scan sweep + hazard lock-on (screen space, so the line spans the
-    // full visible width even when the skyline is cropped).
-    if (!still) _scan(canvas, size, f, sec / 12.0);
-  }
-
-  void _scan(Canvas canvas, Size size, _Frame f, double u) {
-    const teal = Color(0xFF22D3EE);
-    const amber = Color(0xFFF59E0B);
-    final skyTop = f.dy + 30 * f.sy; // just above the tallest stack
-
-    if (u >= _scanStart && u <= _scanEnd) {
-      final k = (u - _scanStart) / (_scanEnd - _scanStart);
-      final e = Curves.easeInOutSine.transform(k);
-      final x = -40 + (size.width + 80) * e;
-      final fade = math.sin(k * math.pi); // in and out softly
-      // Trail.
-      final trail = Rect.fromLTRB(x - 160, skyTop, x, size.height);
-      canvas.drawRect(
-          trail,
-          Paint()
-            ..shader = LinearGradient(colors: [
-              teal.withOpacity(0),
-              teal.withOpacity((isDark ? 0.10 : 0.08) * fade),
-            ]).createShader(trail));
-      // Line.
-      canvas.drawLine(
-          Offset(x, skyTop),
-          Offset(x, size.height),
-          Paint()
-            ..color = teal.withOpacity((isDark ? 0.75 : 0.6) * fade)
-            ..strokeWidth = 1.6);
-      canvas.drawLine(
-          Offset(x, skyTop),
-          Offset(x, size.height),
-          Paint()
-            ..color = teal.withOpacity(0.35 * fade)
-            ..strokeWidth = 8
-            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
-    }
-
-    // Hazard brackets: each one locks on as the line passes it. Phones skip
-    // them: there the skyline sits behind the card and the tiles.
-    if (size.width < 600) return;
-    for (final h in _hazards) {
-      final box = f.map(h);
-      if (box.center.dx < 8 || box.center.dx > size.width - 8) continue;
-      final kHit = _inverseEase(
-          ((box.center.dx + 40) / (size.width + 80)).clamp(0.0, 1.0));
-      final uHit = _scanStart + kHit * (_scanEnd - _scanStart);
-      final since = (u - uHit) * 12.0; // seconds since the line crossed
-      if (since < 0 || since > 3.2) continue;
-      _bracket(canvas, box, since, amber);
+      canvas.drawCircle(c, 2.4,
+          Paint()..color = const Color(0xFFFF6B6B).withOpacity(0.9 * on));
     }
   }
-
-  void _bracket(Canvas canvas, Rect box, double since, Color amber) {
-    final lock = Curves.easeOutBack.transform((since / 0.45).clamp(0.0, 1.0));
-    final alpha = since < 2.4 ? 1.0 : (1 - (since - 2.4) / 0.8);
-    final grow = 1.25 - 0.25 * lock; // brackets snap in from slightly wider
-    final r = Rect.fromCenter(
-        center: box.center, width: box.width * grow, height: box.height * grow);
-    final pen = Paint()
-      ..color = amber.withOpacity(0.9 * alpha)
-      ..strokeWidth = 2.2
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    final l = math.min(r.width, r.height) * 0.22;
-    for (final c in [r.topLeft, r.topRight, r.bottomLeft, r.bottomRight]) {
-      final sx = c.dx == r.left ? 1.0 : -1.0;
-      final sy = c.dy == r.top ? 1.0 : -1.0;
-      canvas.drawPath(
-          Path()
-            ..moveTo(c.dx, c.dy + sy * l)
-            ..lineTo(c.dx, c.dy)
-            ..lineTo(c.dx + sx * l, c.dy),
-          pen);
-    }
-    // Soft fill while locked.
-    canvas.drawRRect(
-        RRect.fromRectAndRadius(r, const Radius.circular(4)),
-        Paint()..color = amber.withOpacity(0.07 * alpha * lock.clamp(0.0, 1.0)));
-  }
-
-  /// Inverse of Curves.easeInOutSine: x(k) = (1 - cos(pi k)) / 2.
-  static double _inverseEase(double x) => math.acos(1 - 2 * x) / math.pi;
 
   @override
   bool shouldRepaint(_LifePainter old) =>
