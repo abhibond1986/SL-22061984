@@ -250,3 +250,18 @@ The user asked to remove the loading page that appears when safetylens.in is ope
 **Evidence (`audit_2026-10-05/login_v6_*`).** desktop_dark, desktop_dark_motion, desktop_light, desktop_dark_register, desktop_dark_register_scrolled, phone_dark, phone_light, phone_register, phone_error, 320_light, pour_closeup, animation.gif (36 frames, 1440×900 scaled to 960×600) and animation_closeup.gif (520×300 crop around the ladle).
 
 **Verification.** `dart analyze lib`: 52 issues, 0 errors (same as the baseline). All login render tests passed.
+
+## Revision 8: brand text readability over the illustration
+
+**Feedback.** After the rev 7 deploy, the user sent a screenshot of safetylens.in. The brand text on the left was "not at all visible properly…it lacks professionalism". The description and the three feature lines sat directly on the lit plant structures, the HUD brackets and a plume. The top-down scrim had faded out by that height, especially on shorter laptop windows.
+
+**Fix (`login_screen.dart`, desktop ≥ 960 px).**
+
+- **Reading plate:** `_brandStatement` now sits on a borderless plate made of one large, very soft BoxShadow. In dark mode it is navy `#020A2E` at 84%, blur 110, spread 24. In light mode it is the pale veil colour `#F2F4FF` at 92%. It darkens only the area directly behind the text, has no visible edge, and leaves the pour (lower centre) and the smoke bright.
+- **Text colour (dark mode):** the text is brighter than the generic tokens. The description is `#EDF1F8`, the feature lines are `#E2E8F2` and the tagline is `#C9D3E6`.
+- **Text shadow:** a soft 10 px shadow (`_ink`) separates the text from any remaining highlights.
+- Light mode keeps its ink colours.
+
+**Evidence.** `login_v7_laptop_dark.png` (1024×640, the short window closest to the screenshot), `login_v7_laptop_light.png`, `login_v7_desktop_dark.png`, `login_v7_desktop_light.png`, `login_v7_phone_dark.png` (unchanged layout). The render test gained `laptop dark` and `laptop light` at 1024×640.
+
+**Verification.** `dart analyze lib`: 52 issues, 0 errors. All 12 login render tests passed.

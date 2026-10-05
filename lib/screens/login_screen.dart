@@ -387,7 +387,37 @@ class _LoginScreenState extends State<LoginScreen> {
 
   /// Desktop left column, centred: emblem, wordmark, tagline, one plain
   /// sentence about the product and three features.
-  Widget _brandStatement(SL sl) => Column(
+  ///
+  /// It sits on a borderless "reading plate": one large, very soft shadow in
+  /// the sky's navy (pale veil in light mode). The plate quietly darkens the
+  /// busy part of the illustration (HUD lines, lit structures) directly behind
+  /// the text and has no visible edge. The pour, lower right, stays bright.
+  /// 2026-10-05: the user found the text over the raw illustration unreadable.
+  Widget _brandStatement(SL sl) => DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(220),
+          boxShadow: [
+            BoxShadow(
+              color: sl.isDark
+                  ? const Color(0xFF020A2E).withOpacity(0.84)
+                  : const Color(0xFFF2F4FF).withOpacity(0.92),
+              blurRadius: 110,
+              spreadRadius: 24,
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: _brandContent(sl),
+        ),
+      );
+
+  /// Soft legibility shadow for text drawn over the photo (dark mode only).
+  static List<Shadow>? _ink(SL sl) => sl.isDark
+      ? const [Shadow(color: Color(0xB3000418), blurRadius: 10)]
+      : null;
+
+  Widget _brandContent(SL sl) => Column(
         crossAxisAlignment: CrossAxisAlignment.center,
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -404,11 +434,12 @@ class _LoginScreenState extends State<LoginScreen> {
               'and follow every corrective action through to closure.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  color: sl.text2,
+                  color: sl.isDark ? const Color(0xFFEDF1F8) : sl.text2,
                   fontSize: 18,
                   height: 1.5,
                   fontWeight: FontWeight.w400,
-                  letterSpacing: -0.1),
+                  letterSpacing: -0.1,
+                  shadows: _ink(sl)),
             ),
           ),
           const SizedBox(height: 28),
@@ -433,10 +464,11 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _tagline(SL sl, double size) => Text(I18n.t('app.tagline'),
       textAlign: TextAlign.center,
       style: GoogleFonts.plusJakartaSans(
-          color: sl.text3,
+          color: sl.isDark ? const Color(0xFFC9D3E6) : sl.text3,
           fontSize: size,
           fontWeight: FontWeight.w500,
-          letterSpacing: 0.04 * size));
+          letterSpacing: 0.04 * size,
+          shadows: _ink(sl)));
 
   Widget _feature(SL sl, IconData icon, String text) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
@@ -445,7 +477,10 @@ class _LoginScreenState extends State<LoginScreen> {
           const SizedBox(width: 12),
           Text(text,
               style: TextStyle(
-                  color: sl.text2, fontSize: 14.5, fontWeight: FontWeight.w500)),
+                  color: sl.isDark ? const Color(0xFFE2E8F2) : sl.text2,
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w500,
+                  shadows: _ink(sl))),
         ]),
       );
 

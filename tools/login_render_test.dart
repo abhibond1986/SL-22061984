@@ -113,6 +113,8 @@ void main() {
   testWidgets('desktop dark register', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_register', dark: true, register: true));
   testWidgets('desktop dark register scrolled', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_register_scrolled', dark: true, register: true, scroll: 400));
   testWidgets('desktop dark', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark', dark: true));
+  testWidgets('laptop dark', (t) => shoot(t, const Size(1024, 640), 'login_laptop_dark', dark: true));
+  testWidgets('laptop light', (t) => shoot(t, const Size(1024, 640), 'login_laptop_light'));
   // Close-up of the hot-metal pour in the background (desktop, dark).
   testWidgets('desktop dark motion', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_motion', dark: true, frame: 0.537));
   // FRAMES=1: frame sequence for an animated preview (first 3.6 s of the loop).
