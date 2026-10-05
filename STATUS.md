@@ -1,5 +1,7 @@
 ## 2026-10-05
 
+- **Login background: animated steel-plant skyline.** New `lib/widgets/plant_backdrop.dart` draws a night (dark) or dawn (light) SAIL-style plant: blast furnace, stoves, stacks, conveyor, gasholder and ladle crane. An AI scan line sweeps it and marks hazards with amber brackets, smoke drifts and beacons blink. It respects reduced motion, and analyze shows 0 errors (52 issues). Renders and a GIF are in `audit_2026-10-05/login_v3_*`; details are in AUDIT_2026-10-05_LOGIN_GLASS.md, Revision 3.
+
 - **Login revision 2: logo and wordmark.**
   - The logo is now the bare SAIL emblem, with no tiles or frames (new `BrandMark`; the emblem is white in dark mode).
   - It is centred and larger: 132 px on desktop and 92 px on phones.

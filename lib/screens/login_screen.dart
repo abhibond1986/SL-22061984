@@ -16,6 +16,7 @@ import 'home_screen.dart';
 import 'contractor_home_screen.dart';
 import 'force_password_change_screen.dart';
 import '../widgets/brand_logo.dart';
+import '../widgets/plant_backdrop.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -293,9 +294,7 @@ class _LoginScreenState extends State<LoginScreen> {
       backgroundColor: _LoginGlass.base(sl),
       body: Stack(children: [
         Positioned.fill(
-          child: RepaintBoundary(
-            child: CustomPaint(painter: _LensBackdropPainter(isDark: sl.isDark)),
-          ),
+          child: PlantBackdrop(isDark: sl.isDark),
         ),
         SafeArea(
           child: LayoutBuilder(builder: (context, box) {
@@ -1215,69 +1214,4 @@ class _LoginGlass {
       sl.isDark ? Colors.white.withOpacity(0.16) : Colors.white;
   static Color pillText(SL sl) =>
       sl.isDark ? Colors.white : const Color(0xFF3B47B8);
-}
-
-/// Background for the login screen: the brand field, three soft glows and the
-/// lens rings. Static; it repaints only when the theme changes.
-class _LensBackdropPainter extends CustomPainter {
-  _LensBackdropPainter({required this.isDark});
-  final bool isDark;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    canvas.drawRect(
-      rect,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: isDark
-              ? const [Color(0xFF151A4A), Color(0xFF0F1438), Color(0xFF07313A)]
-              : const [Color(0xFFE9ECFF), Color(0xFFF2F4FF), Color(0xFFDDF3F3)],
-        ).createShader(rect),
-    );
-
-    final s = size.shortestSide;
-    void glow(Offset c, double r, Color color) => canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..color = color
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.55));
-
-    // Indigo upper-left, teal right, molten amber low (the furnace glow).
-    glow(Offset(size.width * 0.12, size.height * 0.10), s * 0.42,
-        const Color(0xFF4F5BD5).withOpacity(isDark ? 0.55 : 0.30));
-    glow(Offset(size.width * 0.92, size.height * 0.38), s * 0.40,
-        const Color(0xFF0EA5B5).withOpacity(isDark ? 0.42 : 0.26));
-    glow(Offset(size.width * 0.55, size.height * 1.02), s * 0.38,
-        const Color(0xFFF59E0B).withOpacity(isDark ? 0.26 : 0.20));
-
-    // Lens rings: concentric hairlines centred slightly above the middle of
-    // the screen, with thin and thicker rings alternating like a lens barrel.
-    final c = Offset(size.width * (size.width >= 960 ? 0.70 : 0.5),
-        size.height * 0.46);
-    final ring = Paint()..style = PaintingStyle.stroke;
-    final ink = isDark ? Colors.white : const Color(0xFF3B47B8);
-    for (var i = 1; i <= 7; i++) {
-      final r = s * (0.16 + i * 0.11);
-      ring
-        ..strokeWidth = i.isEven ? 1.0 : 2.2
-        ..color = ink.withOpacity((isDark ? 0.075 : 0.07) * (1 - i / 9));
-      canvas.drawCircle(c, r, ring);
-    }
-    // One short amber arc on the second ring, just right of the card: the
-    // focus mark.
-    ring
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round
-      ..color = const Color(0xFFF59E0B).withOpacity(isDark ? 0.55 : 0.50);
-    final r2 = s * (0.16 + 2 * 0.11);
-    canvas.drawArc(Rect.fromCircle(center: c, radius: r2), 0.18, 0.55, false,
-        ring);
-  }
-
-  @override
-  bool shouldRepaint(_LensBackdropPainter old) => old.isDark != isDark;
 }

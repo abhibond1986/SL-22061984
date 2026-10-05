@@ -110,3 +110,51 @@ Renders are in `audit_2026-10-05/`:
 - `dart analyze lib` reports 52 issues, one fewer than the baseline, and none are errors.
 - `login_render_test` passes 7 of 7.
 - The new renders are `audit_2026-10-05/login_v2_*.png`. The first-pass renders are kept for comparison.
+
+## Revision 3: steel-plant skyline background with animation (same day)
+
+**Request:** "make a background image for my webpage/app depending upon what it is". The user chose the login screen only, in a steel plant skyline style. They then added: "add little bit of animation also related to this app/web".
+
+**New file: `lib/widgets/plant_backdrop.dart` (`PlantBackdrop`).** It replaces the old lens-ring backdrop, and `_LensBackdropPainter` is removed. The whole scene is drawn in code, not shipped as an image file. That means it stays sharp at any size, follows the light and dark themes, and adds no bytes to the download.
+
+**What it shows:** an integrated steel plant on the horizon, drawn in three depth layers.
+
+- **Far layer:** sawtooth-roofed mill sheds and two cooling towers.
+- **Mid layer:**
+  - the blast furnace, with its top house, bleeder, downcomers, dust catcher and skip-bridge truss;
+  - three domed hot-blast stoves;
+  - three banded stacks;
+  - a conveyor gallery and its junction tower;
+  - a gasholder;
+  - a ladle gantry crane carrying a ladle with a molten rim.
+- **Near layer:** a pipe rack on trestles and the rail line.
+- **Lighting:** a molten-amber glow sits behind the plant, and windows and the taphole are lit amber.
+- **Dark theme:** a night scene in deep indigo, with a teal tint low in the sky.
+- **Light theme:** a dawn scene of soft indigo silhouettes on lavender and mint.
+
+**Animation:** everything runs on one 12 s loop.
+
+- **AI scan (the app's own idea).** A teal scan line sweeps the skyline in about 3.8 s. As it passes each hazard (the ladle crane, the furnace top and the conveyor transfer tower), an amber hazard bracket snaps in, holds and then fades.
+  - Brackets appear only on screens at least 600 px wide. On phones the skyline sits behind the card.
+- **Smoke** drifts from the stacks.
+- **Red aviation beacons** blink on the stack tops.
+- **The furnace glow** slowly breathes.
+
+**Performance and accessibility:**
+
+- The static skyline and the animated overlay are separate layers, each behind its own `RepaintBoundary`, so only the light overlay repaints every frame.
+- When the OS asks for reduced motion, the loop stops on a calm frame with no scan line.
+- `PlantBackdrop.debugFrame` lets tests pin a single frame.
+
+**Layout:**
+
+- The skyline fills at least 34% of the screen height, so it still reads on tall phones.
+- On wide screens it is flattened by up to 15%, which keeps it below the brand text.
+- It is centred horizontally. On phones that crops the scene to the furnace and stoves.
+
+**Verification:**
+
+- `dart analyze lib` reports 52 issues, the same as the baseline, and none are errors. Both new and changed files have no issues.
+- `login_render_test` passes 10 of 10. That is the original 7 plus 3 new mid-scan frames.
+- Renders are `audit_2026-10-05/login_v3_*.png`.
+- `login_v3_animation.gif` is a 30-frame preview of the scan. Running with `FRAMES=1` regenerates the frames.
