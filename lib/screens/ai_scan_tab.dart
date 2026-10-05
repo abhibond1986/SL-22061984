@@ -2952,24 +2952,24 @@ class _AIScanTabState extends State<AIScanTab> {
             Container(
               width: 64, height: 64,
               decoration: BoxDecoration(
-                color: AppColors.accent.withOpacity(0.1),
+                color: AppColors.accent.withOpacity(sl.isDark ? 0.18 : 0.10),
                 shape: BoxShape.circle),
-              child: const Icon(Icons.add_a_photo_outlined,
-                  size: 32, color: AppColors.accent)),
+              child: Icon(Icons.add_a_photo_outlined,
+                  size: 32, color: sl.accentText)),
             const SizedBox(height: 12),
             Text('Capture workplace photo',
               style: TextStyle(color: sl.text1, fontSize: 14,
                   fontWeight: FontWeight.w700)),
             const SizedBox(height: 4),
             Text('AI detects hazards & marks them on photo',
-              style: TextStyle(color: sl.text4, fontSize: 11)),
+              style: TextStyle(color: sl.text3, fontSize: 11)),
             const SizedBox(height: 12),
             Wrap(spacing: 6, runSpacing: 4, children: [
-              _featureTag('🎯 Bbox mapping', sl),
-              _featureTag('⚖️ IS 14489', sl),
-              _featureTag('🏭 WSA 13', sl),
-              _featureTag('📋 PDF export', sl),
-              _featureTag('☁️ Cloud sync', sl),
+              _featureTag(Icons.center_focus_strong_outlined, 'Bbox mapping', sl),
+              _featureTag(Icons.gavel_rounded, 'IS 14489', sl),
+              _featureTag(Icons.factory_outlined, 'WSA 13', sl),
+              _featureTag(Icons.picture_as_pdf_outlined, 'PDF export', sl),
+              _featureTag(Icons.cloud_done_outlined, 'Cloud sync', sl),
             ]),
           ])),
       ),
@@ -3013,10 +3013,12 @@ class _AIScanTabState extends State<AIScanTab> {
         const SizedBox(width: 8),
         Expanded(child: OutlinedButton.icon(
           onPressed: () => _pickImage(ImageSource.gallery),
-          icon: const Icon(Icons.photo_library,
-              size: 14, color: AppColors.accent),
-          label: const Text('Gallery', style: TextStyle(
-              color: AppColors.accent, fontSize: 12,
+          // accentText (lifted indigo on dark), not raw accent: #4F5BD5 text
+          // on the dark surface was ~3:1 and hard to read.
+          icon: Icon(Icons.photo_library,
+              size: 14, color: sl.accentText),
+          label: Text('Gallery', style: TextStyle(
+              color: sl.accentText, fontSize: 12,
               fontWeight: FontWeight.w600)),
           style: OutlinedButton.styleFrom(
             side: const BorderSide(color: AppColors.accent, width: 2),
@@ -3056,15 +3058,31 @@ class _AIScanTabState extends State<AIScanTab> {
     ],
   );
 
-  Widget _featureTag(String label, SL sl) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+  /// Capability chip on the empty capture card.
+  ///
+  /// 2026-10-05 (user: "the colour combination for the text is not good"):
+  /// label, emoji and outline were all the primary indigo #4F5BD5 on the dark
+  /// card, about 3:1 contrast, and the emoji came out as flat indigo blobs on
+  /// web. Now the label is neutral text2 (about 12:1 on dark), the icon is a
+  /// Material icon in the lifted accent (accentText), and the chip is a quiet
+  /// neutral pill, so the chips read as information rather than as links.
+  Widget _featureTag(IconData icon, String label, SL sl) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
     decoration: BoxDecoration(
-      color: AppColors.accent.withOpacity(0.07),
+      color: sl.isDark
+          ? Colors.white.withOpacity(0.05)
+          : AppColors.accent.withOpacity(0.06),
       borderRadius: BorderRadius.circular(99),
-      border: Border.all(color: AppColors.accent.withOpacity(0.2))),
-    child: Text(label, style: const TextStyle(
-        color: AppColors.accent, fontSize: SLText.minBadge,
-        fontWeight: FontWeight.w600)));
+      border: Border.all(color: sl.isDark
+          ? Colors.white.withOpacity(0.10)
+          : AppColors.accent.withOpacity(0.18))),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, size: 13, color: sl.accentText),
+      const SizedBox(width: 5),
+      Text(label, style: TextStyle(
+          color: sl.text2, fontSize: SLText.minBadge,
+          fontWeight: FontWeight.w600)),
+    ]));
 
   Widget _analyzingView() => Container(
     // Taller than the old 160: the bar, the phase caption and the elapsed

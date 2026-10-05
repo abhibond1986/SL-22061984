@@ -1,4 +1,5 @@
 ## 2026-10-05
+- AI Scan capture card: the feature chips were indigo text on dark (about 3:1). They now use neutral text with accent Material icons instead of emoji. The Gallery button and camera icon now use accentText. See AUDIT_2026-10-05_SCAN_CHIPS.md.
 - Web: removed the HTML loading page (old logo card, progress bar, "Initializing..."). The page now opens directly into the login backdrop's colours, and Flutter paints the login screen over them. The app keeps its SplashScreen. AUDIT_2026-10-05_LOGIN_GLASS.md §Revision 6.
 - Login rev 5: the hot-metal pour is now the focal point (bigger open bay, ladle on a crane, ingot moulds, light spill, no pipe rack in front). Smoke now comes from every chimney plus the cooling tower. On desktop Register, the brand column is top-aligned with the card. Awaiting user approval before push/deploy. See AUDIT_2026-10-05_LOGIN_GLASS.md §Revision 5.
 
