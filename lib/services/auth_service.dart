@@ -235,6 +235,18 @@ class AuthService {
       Map<String, dynamic> u, String password) {
     final direct = _matchFormat(u, password);
     if (direct != null) return direct;
+    // Mobile keyboards (iOS QuickType, Android suggestions) append a space
+    // when a suggestion is tapped. The exact value is always tried first, so
+    // a password that really ends in a space still works; this only stops a
+    // stray keyboard space from reading as "Incorrect password".
+    final trimmed = password.trim();
+    if (trimmed.isNotEmpty && trimmed != password) {
+      final m = _matchFormat(u, trimmed);
+      if (m != null) {
+        debugPrint('[Auth] password matched after trimming whitespace');
+        return m;
+      }
+    }
     if (!mustChangePassword(u)) return null;
 
     for (final variant in <String>[

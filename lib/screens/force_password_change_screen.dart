@@ -169,6 +169,12 @@ class _ForcePasswordChangeScreenState extends State<ForcePasswordChangeScreen> {
                       TextField(
                         controller: _newCtrl,
                         obscureText: _obscure,
+                        // Exactly as typed (iOS Safari autocorrect/QuickType
+                        // otherwise touches a revealed password).
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.visiblePassword,
+                        autofillHints: const [AutofillHints.newPassword],
                         autofocus: true,
                         style: TextStyle(color: sl.text1),
                         decoration: InputDecoration(
@@ -198,6 +204,12 @@ class _ForcePasswordChangeScreenState extends State<ForcePasswordChangeScreen> {
                       TextField(
                         controller: _confirmCtrl,
                         obscureText: _obscure,
+                        // Exactly as typed (iOS Safari autocorrect/QuickType
+                        // otherwise touches a revealed password).
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.visiblePassword,
+                        autofillHints: const [AutofillHints.newPassword],
                         style: TextStyle(color: sl.text1),
                         onSubmitted: (_) => _busy ? null : _submit(),
                         decoration: InputDecoration(

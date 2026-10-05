@@ -1,3 +1,6 @@
+## 2026-10-06
+- Safari login fix: Flutter web leaves `autocorrect="on"` on inputs, and only Safari acts on it, so usernames (and revealed passwords) could be changed before sending. Credential fields now turn off autocorrect, suggestions and smart punctuation, and a stray trailing keyboard space no longer fails the login. AUDIT_2026-10-06_SAFARI_LOGIN.md.
+
 ## 2026-10-05
 - Login rev 8: the brand text over the illustration was hard to read (user screenshot). It now sits on a soft, edgeless navy reading plate, with brighter text and a subtle text shadow. The pour stays bright. Awaiting push. AUDIT_2026-10-05_LOGIN_GLASS.md §Revision 8.
 - Login rev 7: the backdrop is now the user's steel-plant illustration, with animated smoke from every chimney and a flowing molten pour (highlights, glow flicker, sparks, fume). On desktop, only the form column scrolls and the brand stays static. The sign-in card has a 0.8 px amber edge. The bottom tiles are more opaque so they stay readable over the pour on phones. The web page background matches the illustration's colours. Awaiting user approval before push. AUDIT_2026-10-05_LOGIN_GLASS.md §Revision 7.

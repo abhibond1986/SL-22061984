@@ -1191,6 +1191,22 @@ class _LoginScreenState extends State<LoginScreen> {
        VoidCallback? onToggleObscure, bool obscured = true,
        IconData? icon}) {
     final radius = BorderRadius.circular(12);
+    // Credential fields must reach the server exactly as typed. With the
+    // defaults, iPhone/iPad Safari autocorrects and offers QuickType
+    // suggestions in these inputs (accepted by the keyboard's Next/Go key, and
+    // a tapped suggestion appends a space). A revealed password is an ordinary
+    // text input to iOS, so it was also open to smart quotes/dashes. The
+    // login then failed on Safari with credentials that worked on a laptop.
+    const credHints = {
+      AutofillHints.username,
+      AutofillHints.newUsername,
+      AutofillHints.password,
+      AutofillHints.newPassword,
+    };
+    final hints = autofillHints ?? const <String>[];
+    final isPassword = hints.contains(AutofillHints.password) ||
+        hints.contains(AutofillHints.newPassword);
+    final isCredential = hints.any(credHints.contains);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1203,8 +1219,16 @@ class _LoginScreenState extends State<LoginScreen> {
           controller: ctrl,
           obscureText: obscure,
           textInputAction: textInputAction,
-          keyboardType: keyboardType,
+          keyboardType: keyboardType ??
+              (isPassword ? TextInputType.visiblePassword : null),
           autofillHints: autofillHints,
+          autocorrect: !isCredential,
+          enableSuggestions: !isCredential,
+          smartDashesType:
+              isCredential ? SmartDashesType.disabled : null,
+          smartQuotesType:
+              isCredential ? SmartQuotesType.disabled : null,
+          textCapitalization: TextCapitalization.none,
           onSubmitted: onSubmitted == null ? null : (_) => onSubmitted(),
           style: TextStyle(color: sl.text1, fontSize: 14),
           cursorColor: sl.accentText,
