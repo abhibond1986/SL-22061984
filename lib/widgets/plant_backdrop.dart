@@ -19,7 +19,8 @@ import 'package:flutter/material.dart';
 ///   near:  pipe rack on trestles, ground line
 ///
 /// Motion (one seamless 12 s loop; every period divides 12 s):
-///   * smoke rising and drifting from the chimneys, very low opacity;
+///   * smoke rising and drifting from every chimney (and steam from the
+///     cooling tower), very low opacity;
 ///   * a molten stream from a tilted ladle in the open bay, with a gently
 ///     flickering glow and a few short-lived sparks at the splash;
 ///   * slow red aviation lights on the two tallest chimneys.
@@ -132,10 +133,33 @@ const _chimneys = <Offset>[
   Offset(1100, 100),
   Offset(1376, 132),
 ];
+// Everything that emits a plume: the four banded chimneys, the two slender
+// far chimneys (smaller, fainter: they are further away) and the cooling
+// tower (wide, soft steam).
+class _Emitter {
+  const _Emitter(this.top, {this.scale = 1, this.alpha = 1, this.spread = 0});
+  final Offset top;
+  final double scale, alpha, spread;
+}
+
+const _emitters = <_Emitter>[
+  _Emitter(Offset(262, 88)),
+  _Emitter(Offset(1036, 46)),
+  _Emitter(Offset(1100, 100)),
+  _Emitter(Offset(1376, 132)),
+  _Emitter(Offset(101, 150), scale: 0.7, alpha: 0.75),
+  _Emitter(Offset(1254.5, 120), scale: 0.7, alpha: 0.75),
+  _Emitter(Offset(1480, 256), scale: 0.9, alpha: 0.8, spread: 0.9),
+];
 const _beaconOn = <int>[1, 0]; // indexes into _chimneys that carry a light
-const _bay = Rect.fromLTRB(752, 292, 912, 404); // open bay of the melt shop
-const _lip = Offset(806, 322); // ladle pouring lip
-const _splash = Offset(822, 398); // where the stream lands
+// The hot-metal pour is the centrepiece: a wide open bay in the middle of the
+// melt shop, in the clear band below the login content on every layout.
+const _bay = Rect.fromLTRB(676, 248, 960, 404); // open bay of the melt shop
+const _ladle = Offset(760, 312); // ladle centre
+const _tilt = 0.55; // ladle tilt (radians, clockwise)
+const _lip = Offset(805, 306); // ladle pouring lip (top-right corner, tilted)
+const _splash = Offset(842, 391); // where the stream lands (mould 2)
+const _moulds = <double>[800, 830, 860, 890]; // ingot moulds on the floor
 
 class _Palette {
   _Palette(this.dark);
@@ -250,62 +274,77 @@ class _SkylinePainter extends CustomPainter {
     _tank(canvas, mid, 540, 76, 322);
     canvas.drawRect(const Rect.fromLTWH(430, 352, 200, 6), mid); // pipe
 
-    // Melt shop: tall hall with a raised roof lantern and an open bay.
+    // Melt shop: tall hall with a raised roof lantern and a wide open bay.
     final shop = Path()
-      ..moveTo(650, 420)
-      ..lineTo(650, 250)
-      ..lineTo(830, 206)
-      ..lineTo(1010, 250)
-      ..lineTo(1010, 420)
+      ..moveTo(620, 420)
+      ..lineTo(620, 236)
+      ..lineTo(830, 196)
+      ..lineTo(1040, 236)
+      ..lineTo(1040, 420)
       ..close();
     canvas.drawPath(shop, mid);
-    canvas.drawRect(const Rect.fromLTWH(770, 190, 120, 26), mid); // lantern
-    canvas.drawRect(Rect.fromLTWH(780, 198, 100, 6),
-        Paint()..color = p.window.withOpacity(isDark ? 0.35 : 0.6));
+    canvas.drawRect(const Rect.fromLTWH(766, 178, 128, 26), mid); // lantern
+    canvas.drawRect(Rect.fromLTWH(776, 186, 108, 6),
+        Paint()..color = p.window.withOpacity(isDark ? 0.4 : 0.6));
     // The open bay: warm interior, lit from the pour.
     canvas.drawRect(_bay, Paint()..color = p.bayInside);
     canvas.drawRect(
         _bay,
         Paint()
           ..shader = RadialGradient(
-            center: const Alignment(0.0, 0.9),
-            radius: 1.0,
+            center: const Alignment(0.15, 0.85),
+            radius: 0.95,
             colors: [
-              _Palette.molten.withOpacity(isDark ? 0.55 : 0.45),
+              _Palette.molten.withOpacity(isDark ? 0.70 : 0.55),
+              _Palette.molten.withOpacity(isDark ? 0.18 : 0.12),
               _Palette.molten.withOpacity(0),
             ],
+            stops: const [0, 0.5, 1],
           ).createShader(_bay));
-    // Gantry beam and the tilted ladle hanging in the bay.
-    canvas.drawRect(Rect.fromLTWH(_bay.left, _bay.top + 4, _bay.width, 6), mid);
+    // Bay frame: columns either side and the crane runway beam.
+    canvas.drawRect(Rect.fromLTWH(_bay.left, _bay.top, 8, _bay.height), mid);
+    canvas.drawRect(Rect.fromLTWH(_bay.right - 8, _bay.top, 8, _bay.height), mid);
+    canvas.drawRect(Rect.fromLTWH(_bay.left, _bay.top + 6, _bay.width, 8), mid);
+    // Crane trolley, hook and bail.
+    const hook = Offset(752, 266);
+    canvas.drawRect(Rect.fromCenter(center: hook - const Offset(0, 8), width: 30, height: 10), mid);
+    final bail = Paint()
+      ..color = p.mid
+      ..strokeWidth = 3;
+    final cs = math.cos(_tilt), sn = math.sin(_tilt);
+    Offset rot(Offset l) =>
+        _ladle + Offset(l.dx * cs - l.dy * sn, l.dx * sn + l.dy * cs);
+    canvas.drawLine(hook, rot(const Offset(-33, -2)), bail);
+    canvas.drawLine(hook, rot(const Offset(33, -2)), bail);
+    // The ladle itself, tilted to pour, with its molten surface at the rim.
     canvas.save();
-    canvas.translate(_lip.dx - 26, _lip.dy + 4);
-    canvas.rotate(-0.55);
+    canvas.translate(_ladle.dx, _ladle.dy);
+    canvas.rotate(_tilt);
     canvas.drawPath(
         Path()
-          ..moveTo(-20, -14)
-          ..lineTo(26, -14)
-          ..lineTo(20, 24)
-          ..lineTo(-14, 24)
+          ..moveTo(-34, -28)
+          ..lineTo(34, -28)
+          ..lineTo(27, 28)
+          ..lineTo(-27, 28)
           ..close(),
         mid);
+    canvas.drawRect(const Rect.fromLTWH(-31, -30, 62, 3),
+        Paint()..color = _Palette.molten.withOpacity(isDark ? 0.9 : 0.75));
     canvas.restore();
-    canvas.drawLine(
-        Offset(_lip.dx - 30, _bay.top + 10),
-        Offset(_lip.dx - 30, _lip.dy - 12),
-        Paint()
-          ..color = p.mid
-          ..strokeWidth = 2);
-    // Runner / mould on the floor.
-    canvas.drawRect(
-        Rect.fromLTWH(_splash.dx - 34, _bay.bottom - 8, 68, 8), mid);
-    // Hall windows.
-    final win = Paint()..color = p.window.withOpacity(isDark ? 0.6 : 0.8);
-    for (var wx = 668.0; wx < 740; wx += 22) {
-      canvas.drawRect(Rect.fromLTWH(wx, 300, 10, 7), win);
-      canvas.drawRect(Rect.fromLTWH(wx, 336, 10, 7), win);
+    // Ingot moulds on the floor; the first one is already filled.
+    for (var k = 0; k < _moulds.length; k++) {
+      final r = Rect.fromLTWH(_moulds[k], 388, 24, 16);
+      canvas.drawRect(r, mid);
+      if (k == 0) {
+        canvas.drawRect(Rect.fromLTWH(r.left + 3, r.top, r.width - 6, 3),
+            Paint()..color = _Palette.molten.withOpacity(isDark ? 0.75 : 0.6));
+      }
     }
-    for (var wx = 928.0; wx < 1000; wx += 22) {
-      canvas.drawRect(Rect.fromLTWH(wx, 300, 10, 7), win);
+    // Hall windows either side of the bay.
+    final win = Paint()..color = p.window.withOpacity(isDark ? 0.6 : 0.8);
+    for (final wx in const <double>[636, 656, 976, 998]) {
+      canvas.drawRect(Rect.fromLTWH(wx, 276, 10, 7), win);
+      canvas.drawRect(Rect.fromLTWH(wx, 312, 10, 7), win);
     }
 
     // Chimneys, tapered, with painted bands.
@@ -340,19 +379,44 @@ class _SkylinePainter extends CustomPainter {
     _sawHall(canvas, mid, 1290, 1600, 318, 4);
 
     // Pipe bridge across the middle.
-    canvas.drawRect(const Rect.fromLTWH(600, 344, 50, 5), mid);
-    canvas.drawRect(const Rect.fromLTWH(1010, 344, 140, 5), mid);
+    canvas.drawRect(const Rect.fromLTWH(600, 344, 20, 5), mid);
+    canvas.drawRect(const Rect.fromLTWH(1040, 344, 110, 5), mid);
 
     // ── near layer ──
     final near = Paint()..color = p.near;
+    // Pipe rack on trestles, with a gap in front of the open bay so nothing
+    // crosses the pour.
+    const gapL = 650.0, gapR = 986.0;
     for (var tx = 20.0; tx < 1600; tx += 110) {
+      if (tx + 6 > gapL && tx < gapR) continue;
       canvas.drawRect(Rect.fromLTWH(tx, 380, 6, 40), near);
     }
-    canvas.drawRect(const Rect.fromLTWH(0, 376, 1600, 5), near);
-    canvas.drawRect(const Rect.fromLTWH(0, 388, 1600, 3), near);
+    for (final y in const <double>[376, 388]) {
+      final h = y == 376 ? 5.0 : 3.0;
+      canvas.drawRect(Rect.fromLTWH(0, y, gapL, h), near);
+      canvas.drawRect(Rect.fromLTWH(gapR, y, 1600 - gapR, h), near);
+    }
     canvas.drawRect(const Rect.fromLTWH(0, 404, 1600, 40), near);
     canvas.drawRect(const Rect.fromLTWH(0, 410, 1600, 2),
         Paint()..color = p.line.withOpacity(0.7));
+    // Warm light spilling out of the bay onto the yard.
+    final spill = Path()
+      ..moveTo(_bay.left + 8, 404)
+      ..lineTo(_bay.right - 8, 404)
+      ..lineTo(_bay.right + 40, 420)
+      ..lineTo(_bay.left - 40, 420)
+      ..close();
+    canvas.drawPath(
+        spill,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              _Palette.molten.withOpacity(isDark ? 0.32 : 0.24),
+              _Palette.molten.withOpacity(0),
+            ],
+          ).createShader(spill.getBounds()));
 
     canvas.restore();
   }
@@ -439,14 +503,18 @@ class _LifePainter extends CustomPainter {
   // leaning right with the wind. Very low opacity so it reads as atmosphere.
   void _smoke(Canvas canvas, double sec) {
     final tint = isDark ? const Color(0xFFC9CFF5) : const Color(0xFF7C85C9);
-    for (var k = 0; k < _chimneys.length; k++) {
-      final top = _chimneys[k];
+    for (var k = 0; k < _emitters.length; k++) {
+      final e = _emitters[k];
+      final top = e.top, sc = e.scale;
       for (var i = 0; i < 7; i++) {
         final ph = ((sec / 6) + i / 7 + k * 0.13) % 1.0;
-        final y = top.dy - 4 - ph * 120;
-        final x = top.dx + ph * ph * 70 + math.sin(ph * _tau + k) * 4;
-        final r = 6 + ph * 30;
-        final a = math.min(1.0, ph * 6) * (1 - ph) * (isDark ? 0.17 : 0.16);
+        final y = top.dy - 4 - ph * 120 * sc;
+        final x = top.dx + ph * ph * 70 * sc + math.sin(ph * _tau + k) * 4;
+        final r = (6 + ph * 30) * sc * (1 + e.spread * ph);
+        final a = math.min(1.0, ph * 6) *
+            (1 - ph) *
+            (isDark ? 0.17 : 0.16) *
+            e.alpha;
         canvas.drawCircle(
             Offset(x, y),
             r,
@@ -469,12 +537,19 @@ class _LifePainter extends CustomPainter {
 
     canvas.drawCircle(
         _splash,
-        44,
+        62,
         Paint()
-          ..color = _Palette.molten.withOpacity((isDark ? 0.30 : 0.22) * flick)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 26));
+          ..color = _Palette.molten.withOpacity((isDark ? 0.40 : 0.28) * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 34));
+    // Glow at the ladle lip as well.
+    canvas.drawCircle(
+        _lip,
+        22,
+        Paint()
+          ..color = _Palette.hot.withOpacity(0.30 * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12));
     canvas.drawOval(
-        Rect.fromCenter(center: _splash, width: 40, height: 8),
+        Rect.fromCenter(center: _splash, width: 26, height: 6),
         Paint()
           ..color = _Palette.hot.withOpacity(0.85 * flick)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2));
@@ -482,20 +557,20 @@ class _LifePainter extends CustomPainter {
     final wob = still ? 0.0 : math.sin(sec / 0.4 * _tau) * 0.8;
     final stream = Path()
       ..moveTo(_lip.dx, _lip.dy)
-      ..quadraticBezierTo(_lip.dx + 14 + wob, _lip.dy + 20,
+      ..quadraticBezierTo(_lip.dx + 26 + wob, _lip.dy + 14,
           _splash.dx + wob * 0.5, _splash.dy);
     canvas.drawPath(
         stream,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 10
-          ..color = _Palette.molten.withOpacity(0.35 * flick)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+          ..strokeWidth = 18
+          ..color = _Palette.molten.withOpacity(0.42 * flick)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 9));
     canvas.drawPath(
         stream,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 3.4
+          ..strokeWidth = 5.5
           ..strokeCap = StrokeCap.round
           ..shader = const LinearGradient(
             begin: Alignment.topCenter,
@@ -504,23 +579,23 @@ class _LifePainter extends CustomPainter {
           ).createShader(Rect.fromPoints(_lip, _splash)));
 
     if (still) return;
-    // Sparks: twelve, each on a period that divides 12 s, short ballistic
+    // Sparks: sixteen, each on a period that divides 12 s, short ballistic
     // arcs that fade out. Small and few, so the effect stays quiet.
     const periods = <double>[1.0, 1.2, 1.5, 2.0];
-    for (var i = 0; i < 12; i++) {
+    for (var i = 0; i < 16; i++) {
       final period = periods[i % periods.length];
       final life = ((sec / period) + i * 0.37) % 1.0;
       if (life > 0.55) continue; // each spark is alive about half its cycle
       final l = life / 0.55;
       final ang = -math.pi / 2 + (((i * 0.61) % 1.0) - 0.5) * 2.2;
-      final speed = 70.0 + (i * 23 % 40);
+      final speed = 95.0 + (i * 23 % 50);
       final tt = l * 0.55;
       final pos = _splash +
           Offset(math.cos(ang) * speed * tt,
               math.sin(ang) * speed * tt + 0.5 * 260 * tt * tt);
       canvas.drawCircle(
           pos,
-          1.3,
+          1.7,
           Paint()
             ..color = _Palette.hot.withOpacity(0.9 * (1 - l))
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.8));

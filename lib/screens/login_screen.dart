@@ -302,10 +302,17 @@ class _LoginScreenState extends State<LoginScreen> {
             final content = wide
                 ? ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 1080),
+                    // Top-aligned, not centred: the Register form is much
+                    // taller than Sign in, and centring pushed the emblem and
+                    // wordmark halfway down the page (user, 2026-10-05). The
+                    // brand block now starts level with the top of the card.
                     child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(child: _brandStatement(sl)),
+                        Expanded(
+                            child: Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: _brandStatement(sl))),
                         const SizedBox(width: 56),
                         SizedBox(width: SLLayout.form, child: _formColumn(sl)),
                       ],

@@ -192,3 +192,15 @@ Renders are in `audit_2026-10-05/`:
 - `login_render_test` passes 8 of 8.
 - Renders are `audit_2026-10-05/login_v4_*.png`.
 - There are two animated previews: `login_v4_animation.gif` (the full screen) and `login_v4_animation_closeup.gif` (the pour). Each is 36 frames covering 3.6 s.
+
+## Revision 5 — pour made the focal point, smoke from every chimney, Register alignment
+
+User feedback: the hot-metal pour at the bottom was hard to see; every chimney should smoke; on the Register tab the SAIL emblem and wordmark sat low and did not line up with the form.
+
+**Pour (`lib/widgets/plant_backdrop.dart`).** Melt shop widened to 620–1040 (peak 196, lantern 766–894). Open bay enlarged from 160×112 to 284×156 virtual units (`_bay` 676,248 → 960,404), about 255×120 px on a 1440×900 screen. The ladle is about 2× bigger, hangs from a crane trolley and bail on a runway beam, and is tilted 0.55 rad with a molten rim. The stream lands in a row of four ingot moulds; the first is already filled. The bay glow is stronger, and warm light now spills from the bay onto the yard. Stream core width went from 3.4 to 5.5 and glow from 10 to 18. There is now a lip glow, a splash glow of radius 62, and 16 sparks of radius 1.7 (was 12 at 1.3). The pipe rack and trestles now leave a gap from x 650 to 986, so nothing crosses in front of the pour. All periods still divide 12 s, and reduced motion still freezes the frame.
+
+**Smoke.** Plumes now come from a `_emitters` list: the four banded chimneys, the two slender far chimneys (scale 0.7, fainter because they are further away), and the cooling tower (wider, softer steam).
+
+**Register alignment (`lib/screens/login_screen.dart`).** The wide two-column Row is now `CrossAxisAlignment.start`, and the brand column has 8 px of top padding. The tall Register form used to centre the emblem halfway down the page; now it starts level with the card. Sign in looks the same as before because the two columns are about the same height.
+
+**Verification.** `dart analyze lib`: 52 issues, 0 errors (same as the baseline). Renders are in `audit_2026-10-05/`: `login_v5_desktop_dark`, `_pour`, `_light`, `_dark_register`, `phone_dark`, `phone_register`, `pour_closeup` (PNG), plus `login_v5_animation.gif` and `login_v5_animation_closeup.gif`. A new test, `desktop dark register`, was added to `tools/login_render_test.dart`. Committed locally only; not pushed or deployed, waiting for user approval.

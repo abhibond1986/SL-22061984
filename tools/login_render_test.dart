@@ -105,6 +105,7 @@ void main() {
   testWidgets('phone register', (t) => shoot(t, const Size(390, 1300), 'login_phone_register', register: true));
   testWidgets('small 320', (t) => shoot(t, const Size(320, 700), 'login_320_light'));
   testWidgets('desktop light', (t) => shoot(t, const Size(1440, 900), 'login_desktop_light'));
+  testWidgets('desktop dark register', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_register', dark: true, register: true));
   testWidgets('desktop dark', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark', dark: true));
   // Close-up of the hot-metal pour in the background (desktop, dark).
   testWidgets('desktop dark motion', (t) => shoot(t, const Size(1440, 900), 'login_desktop_dark_motion', dark: true, frame: 0.537));
