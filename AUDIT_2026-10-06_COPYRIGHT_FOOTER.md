@@ -20,6 +20,12 @@ The strip takes the bottom safe-area inset (the iPhone home indicator), and that
 - `tools/login_render_test.dart` and `tools/navbar_render_test.dart` both wrap the app in the same builder as main.dart. All 16 renders pass.
 - Evidence is in `audit_2026-10-06/copyright_*.png`. The zoomed crops show the phone login, the desktop login and the bottom navigation bar. In each one the footer sits below the content and the nav bar is fully visible.
 
+## Follow-up: contact number
+
+The owner asked for his contact number "just beside" the credit. The line now reads "© <year> Designed & developed by Abhishek Kumar, AGM(SSO)  |  Contact: 8986880340". The number is a tap-to-call link (`tel:+918986880340`), and desktop browsers show a pointer cursor over it.
+
+On screens 400 px wide and up, the line is 9.5 px. On typical phones (335–399 px) it steps down to 8.4 px so the number still fits beside the name. Only very narrow screens (under 335 px, such as the 320 px render) put the number on a second centred line, so the name is never cut off. The renders and zoomed crops were refreshed, all 16 render tests pass, and analyze shows 52 issues with 0 errors.
+
 ## Not changed
 
 PDF reports do not carry the line yet. That can be added to the report footer on request.
