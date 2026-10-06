@@ -8,7 +8,7 @@
 //                   replaceAllUsers, replaceAllKnowledgeDocs
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb, ValueNotifier;
+import 'package:flutter/foundation.dart' show kIsWeb, ValueNotifier, debugPrint;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'kb_seed_data.dart';
 import 'crypto_utils.dart';
@@ -75,7 +75,7 @@ class LocalDB {
   //  TOMBSTONES — keep deletes from being resurrected by sheet merges
   // ═══════════════════════════════════════════════════════════════
   static Set<String> _readSet(String key) {
-    final raw = _prefs.getString(key);
+    final raw = _get(key);
     if (raw == null || raw.isEmpty) return <String>{};
     try {
       return (jsonDecode(raw) as List).map((e) => e.toString()).toSet();
@@ -85,7 +85,7 @@ class LocalDB {
   }
 
   static Future<void> _writeSet(String key, Set<String> v) async {
-    await _prefs.setString(key, jsonEncode(v.toList()));
+    await _put(key, jsonEncode(v.toList()));
   }
 
   static Set<String> deletedIncidentIds() => _readSet(_kDeletedIncidentIds);
@@ -128,11 +128,143 @@ class LocalDB {
 
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
+    await _migrateWebStorage();
     await _seedIfEmpty();
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  STORAGE (quota-safe)
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // 2026-10-06: login failed on iPhone (Safari AND Chrome, both WebKit) with
+  // "QuotaExceededError: The quota has been exceeded". On the web,
+  // SharedPreferences is localStorage. WebKit allows about 5 MB per site,
+  // counted in UTF-16 and after a second JSON encoding. The knowledge-base
+  // cache alone is about 2.7 MB of JSON (1,000 server docs), so it filled the
+  // store, and every later write threw. That included the login's own
+  // upsertUser, so sign-in itself failed. Desktop Chrome allows about twice as
+  // much, which is why the same account worked on a laptop.
+  //
+  // Rules now:
+  //  * On the web, the re-downloadable caches (server KB docs, the user
+  //    directory) live in memory for the session and are NOT persisted.
+  //    KB docs that exist only on this device (cloudSynced != true) are still
+  //    persisted, so nothing un-uploaded is lost.
+  //  * Every write goes through [_put]. A quota error frees expendable keys
+  //    and retries once. If it still fails, the write is dropped with a log
+  //    line and the call returns false; it never throws. SharedPreferences
+  //    updates its in-memory copy BEFORE the platform write, so this session
+  //    keeps working either way.
+
+  static const _webSessionKeys = {_kKbDocs, _kCachedUsers};
+  static final Map<String, String> _webMem = {};
+
+  /// Keys that can always be rebuilt (server re-pull, or diagnostics), in
+  /// the order they are given up when storage is full.
+  static const _expendableKeys = [
+    'ai_result_cache_v1',
+    'ai_runs_log',
+    'app_error_logs',
+    'error_logs',
+  ];
+
+  static bool _sessionOnly(String key) =>
+      kIsWeb && _webSessionKeys.contains(key);
+
+  static bool _isQuota(Object e) {
+    final m = e.toString().toLowerCase();
+    return m.contains('quota') || m.contains('exceeded the quota');
+  }
+
+  static String? _get(String key) =>
+      _sessionOnly(key) ? _webMem[key] : _prefs.getString(key);
+
+  static Future<bool> _put(String key, String value) async {
+    if (_sessionOnly(key)) {
+      _webMem[key] = value;
+      final keep = key == _kKbDocs ? _localOnlyKbJson(value) : null;
+      if (keep == null) {
+        await _prefs.remove(key);
+        return true;
+      }
+      return _write(key, keep);
+    }
+    return _write(key, value);
+  }
+
+  static Future<bool> _del(String key) {
+    _webMem.remove(key);
+    return _prefs.remove(key);
+  }
+
+  static Future<bool> _write(String key, String value) async {
+    try {
+      return await _prefs.setString(key, value);
+    } catch (e) {
+      if (!_isQuota(e)) rethrow;
+      await _freeSpace();
+      try {
+        return await _prefs.setString(key, value);
+      } catch (e2) {
+        if (!_isQuota(e2)) rethrow;
+        debugPrint('[LocalDB] storage full; "$key" (${value.length} chars) '
+            'kept in memory only for this session');
+        return false;
+      }
+    }
+  }
+
+  static Future<void> _freeSpace() async {
+    for (final k in _expendableKeys) {
+      try {
+        await _prefs.remove(k);
+      } catch (_) {}
+    }
+    if (kIsWeb) {
+      // Persisted copies of the session-only caches written by older builds.
+      for (final k in _webSessionKeys) {
+        if (k == _kKbDocs) continue; // local-only docs are handled by _put
+        try {
+          await _prefs.remove(k);
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// The KB docs that exist only on this device, as JSON, or null if none.
+  static String? _localOnlyKbJson(String all) {
+    try {
+      final list = jsonDecode(all);
+      if (list is! List) return null;
+      final mine = list
+          .where((d) => d is Map && d['cloudSynced'] != true)
+          .toList();
+      return mine.isEmpty ? null : jsonEncode(mine);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// One-time on each web load: move the big caches out of localStorage and
+  /// into memory. This is what un-sticks a browser whose storage an older
+  /// build already filled; without it, the very first write after an upgrade
+  /// would still hit the quota.
+  static Future<void> _migrateWebStorage() async {
+    if (!kIsWeb) return;
+    for (final k in _webSessionKeys) {
+      try {
+        final raw = _prefs.getString(k);
+        if (raw == null) continue;
+        _webMem[k] = raw;
+        await _put(k, raw); // persists only what must survive (see _put)
+      } catch (e) {
+        debugPrint('[LocalDB] web storage migration for "$k" skipped: $e');
+      }
+    }
+  }
+
   static Future<void> _seedIfEmpty() async {
-    if (_prefs.getString(_kUsers) == null) {
+    if (_get(_kUsers) == null) {
       // Seed users with hashed passwords (default password: 'demo')
       final seed = <Map<String, dynamic>>[];
       final seedData = [
@@ -156,7 +288,7 @@ class LocalDB {
         u['status'] = 'active';
         seed.add(u);
       }
-      await _prefs.setString(_kUsers, jsonEncode(seed));
+      await _put(_kUsers, jsonEncode(seed));
     }
 
     // NOTE: We intentionally DO NOT seed demo incidents. Previously, fixed-id
@@ -164,8 +296,8 @@ class LocalDB {
     // to the Google Sheet by fullSync — which refilled a sheet the admin had
     // cleared. Incidents are now sourced solely from the backend + real user
     // reports, so all devices show the same shared data.
-    if (_prefs.getString(_kIncidents) == null) {
-      await _prefs.setString(_kIncidents, jsonEncode(<Map<String, dynamic>>[]));
+    if (_get(_kIncidents) == null) {
+      await _put(_kIncidents, jsonEncode(<Map<String, dynamic>>[]));
     }
   }
 
@@ -193,7 +325,7 @@ class LocalDB {
         if (CryptoUtils.verifyPassword(password, salt, storedHash)) {
           final safeUser = Map<String, dynamic>.from(u)
             ..remove('password')..remove('passwordHash')..remove('salt');
-          await _prefs.setString(_kCurrentUser, jsonEncode(safeUser));
+          await _put(_kCurrentUser, jsonEncode(safeUser));
           return safeUser;
         }
       }
@@ -205,7 +337,7 @@ class LocalDB {
         await _migratePassword(u, password);
         final safeUser = Map<String, dynamic>.from(u)
           ..remove('password')..remove('passwordHash')..remove('salt');
-        await _prefs.setString(_kCurrentUser, jsonEncode(safeUser));
+        await _put(_kCurrentUser, jsonEncode(safeUser));
         return safeUser;
       }
 
@@ -237,7 +369,7 @@ class LocalDB {
         if (CryptoUtils.verifyPassword(password, salt, storedHash)) {
           final safeUser = Map<String, dynamic>.from(u)
             ..remove('password')..remove('passwordHash')..remove('salt');
-          await _prefs.setString(_kCurrentUser, jsonEncode(safeUser));
+          await _put(_kCurrentUser, jsonEncode(safeUser));
           return safeUser;
         }
       }
@@ -262,7 +394,7 @@ class LocalDB {
         break;
       }
     }
-    await _prefs.setString(_kUsers, jsonEncode(users));
+    await _put(_kUsers, jsonEncode(users));
   }
 
   static Future<Map<String, dynamic>?> register(
@@ -282,7 +414,7 @@ class LocalDB {
     }
 
     users.add(userData);
-    await _prefs.setString(_kUsers, jsonEncode(users));
+    await _put(_kUsers, jsonEncode(users));
 
     // If this username was previously deleted, clear its tombstone so the
     // re-registered account is visible again.
@@ -293,7 +425,7 @@ class LocalDB {
     // Store safe user (no credentials) in current session
     final safeUser = Map<String, dynamic>.from(userData)
       ..remove('password')..remove('passwordHash')..remove('salt');
-    await _prefs.setString(_kCurrentUser, jsonEncode(safeUser));
+    await _put(_kCurrentUser, jsonEncode(safeUser));
     return safeUser;
   }
 
@@ -309,7 +441,7 @@ class LocalDB {
     // Read RAW so a tombstone-filtered write can't drop deleted records; the
     // old version wrote back the FILTERED list, permanently deleting every
     // tombstoned user as a side effect of a password reset.
-    final raw = _prefs.getString(_kUsers);
+    final raw = _get(_kUsers);
     final users = raw == null
         ? <Map<String, dynamic>>[]
         : (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e)).toList();
@@ -327,7 +459,7 @@ class LocalDB {
       }
     }
     if (found) {
-      await _prefs.setString(_kUsers, jsonEncode(users));
+      await _put(_kUsers, jsonEncode(users));
     }
     return found;
   }
@@ -343,7 +475,7 @@ class LocalDB {
     if (target.isEmpty) return;
 
     Future<void> scrub(String key) async {
-      final raw = _prefs.getString(key);
+      final raw = _get(key);
       if (raw == null || raw.isEmpty) return;
       try {
         final list = (jsonDecode(raw) as List)
@@ -355,7 +487,7 @@ class LocalDB {
           if (uname != target) continue;
           if (u.remove('password') != null) changed = true;
         }
-        if (changed) await _prefs.setString(key, jsonEncode(list));
+        if (changed) await _put(key, jsonEncode(list));
       } catch (_) {
         // Corrupt bucket — leave it alone rather than destroying it.
       }
@@ -366,18 +498,18 @@ class LocalDB {
   }
 
   static Future<void> signOut() async {
-    await _prefs.remove(_kCurrentUser);
+    await _del(_kCurrentUser);
   }
 
   static Future<Map<String, dynamic>?> getCurrentUser() async {
-    final raw = _prefs.getString(_kCurrentUser);
+    final raw = _get(_kCurrentUser);
     if (raw == null) return null;
     return jsonDecode(raw) as Map<String, dynamic>;
   }
 
   /// Set the current logged-in user (used after remote login)
   static Future<void> setCurrentUser(Map<String, dynamic> user) async {
-    await _prefs.setString(_kCurrentUser, jsonEncode(user));
+    await _put(_kCurrentUser, jsonEncode(user));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -385,7 +517,7 @@ class LocalDB {
   // ═══════════════════════════════════════════════════════════════
 
   static Future<List<Map<String, dynamic>>> getUsers() async {
-    final raw = _prefs.getString(_kUsers);
+    final raw = _get(_kUsers);
     if (raw == null) return [];
     final tombstoned = deletedUsernames();
     return (jsonDecode(raw) as List)
@@ -402,11 +534,11 @@ class LocalDB {
 
   static Future<void> cacheUsers(
       List<Map<String, dynamic>> users) async {
-    await _prefs.setString(_kCachedUsers, jsonEncode(users));
+    await _put(_kCachedUsers, jsonEncode(users));
   }
 
   static Future<List<Map<String, dynamic>>> getCachedUsers() async {
-    final raw = _prefs.getString(_kCachedUsers);
+    final raw = _get(_kCachedUsers);
     if (raw == null || raw.isEmpty) return [];
     try {
       return (jsonDecode(raw) as List)
@@ -418,7 +550,7 @@ class LocalDB {
   }
 
   static Future<void> clearCachedUsers() async {
-    await _prefs.remove(_kCachedUsers);
+    await _del(_kCachedUsers);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -432,7 +564,7 @@ class LocalDB {
 
     // Read RAW (not tombstone-filtered) so we update the real record rather
     // than duplicating a previously-deleted one.
-    final rawU = _prefs.getString(_kUsers);
+    final rawU = _get(_kUsers);
     final users = rawU == null
         ? <Map<String, dynamic>>[]
         : (jsonDecode(rawU) as List).map((e) => Map<String, dynamic>.from(e)).toList();
@@ -449,7 +581,7 @@ class LocalDB {
     } else {
       users.add(Map<String, dynamic>.from(user));
     }
-    await _prefs.setString(_kUsers, jsonEncode(users));
+    await _put(_kUsers, jsonEncode(users));
 
     // Re-adding a user clears any prior deletion tombstone.
     final ts = _readSet(_kDeletedUsernames);
@@ -470,7 +602,7 @@ class LocalDB {
         } else {
           cached.add(Map<String, dynamic>.from(user));
         }
-        await _prefs.setString(_kCachedUsers, jsonEncode(cached));
+        await _put(_kCachedUsers, jsonEncode(cached));
       }
     } catch (_) {}
   }
@@ -484,20 +616,20 @@ class LocalDB {
     if (uname.isEmpty) return;
 
     // Read RAW (getUsers hides tombstoned) so we mutate the real bucket.
-    final rawU = _prefs.getString(_kUsers);
+    final rawU = _get(_kUsers);
     final users = rawU == null
         ? <Map<String, dynamic>>[]
         : (jsonDecode(rawU) as List).map((e) => Map<String, dynamic>.from(e)).toList();
     users.removeWhere(
         (u) => (u['username']?.toString() ?? '').trim() == uname);
-    await _prefs.setString(_kUsers, jsonEncode(users));
+    await _put(_kUsers, jsonEncode(users));
 
     try {
       final cached = await getCachedUsers();
       if (cached.isNotEmpty) {
         cached.removeWhere(
             (u) => (u['username']?.toString() ?? '').trim() == uname);
-        await _prefs.setString(_kCachedUsers, jsonEncode(cached));
+        await _put(_kCachedUsers, jsonEncode(cached));
       }
     } catch (_) {}
 
@@ -510,7 +642,7 @@ class LocalDB {
   // ═══════════════════════════════════════════════════════════════
 
   static Future<List<Map<String, dynamic>>> getIncidents() async {
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return [];
     final tombstoned = deletedIncidentIds();
     final list = (jsonDecode(raw) as List)
@@ -626,20 +758,14 @@ class LocalDB {
     // _kMaxInlineImages incidents; strip it from older ones to avoid quota.
     _boundInlineImages(all);
 
-    try {
-      await _prefs.setString(_kIncidents, jsonEncode(all));
-    } catch (e) {
-      // If still over quota (unlikely after stripping images), try removing
-      // oldest incidents to make room
-      if (e.toString().contains('QuotaExceeded')) {
-        // Keep only last 50 incidents
-        all.sort((a, b) => (b['date'] ?? '').toString()
-            .compareTo((a['date'] ?? '').toString()));
-        final trimmed = all.take(50).toList();
-        await _prefs.setString(_kIncidents, jsonEncode(trimmed));
-      } else {
-        rethrow;
-      }
+    // _put never throws on a full store; it returns false. Then keep the
+    // newest 50 incidents (older ones are on the server) so the report just
+    // filed is what survives a reload.
+    if (!await _put(_kIncidents, jsonEncode(all))) {
+      all.sort((a, b) => (b['date'] ?? '').toString()
+          .compareTo((a['date'] ?? '').toString()));
+      final trimmed = all.take(50).toList();
+      await _put(_kIncidents, jsonEncode(trimmed));
     }
   }
 
@@ -668,9 +794,9 @@ class LocalDB {
   /// Used by admin to clear all data and start fresh.
   /// WARNING: This cannot be undone!
   static Future<void> clearAllIncidents() async {
-    await _prefs.setString(_kIncidents, jsonEncode([]));
+    await _put(_kIncidents, jsonEncode([]));
     // Also clear the tombstone tracking
-    await _prefs.remove(_kDeletedIncidentIds);
+    await _del(_kDeletedIncidentIds);
   }
 
   /// Apply an incident row that came FROM the server (realtime or a pull).
@@ -791,12 +917,12 @@ class LocalDB {
 
   static Future<void> deleteIncident(String id) async {
     // Read the RAW list (getIncidents() already hides tombstoned ids).
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     final incidents = raw == null
         ? <Map<String, dynamic>>[]
         : (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e)).toList();
     incidents.removeWhere((i) => i['id']?.toString() == id);
-    await _prefs.setString(_kIncidents, jsonEncode(incidents));
+    await _put(_kIncidents, jsonEncode(incidents));
     // Tombstone so a backend re-fetch can't resurrect it.
     await addDeletedIncidentId(id);
   }
@@ -834,7 +960,7 @@ class LocalDB {
   ///
   /// Returns the number of local incidents removed.
   static Future<int> reconcileWithServer(Set<String> serverIds) async {
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return 0;
     final list = (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e as Map))
@@ -845,7 +971,7 @@ class LocalDB {
         !isUnsyncedIncident(i));
     final removed = before - list.length;
     if (removed > 0) {
-      await _prefs.setString(_kIncidents, jsonEncode(list));
+      await _put(_kIncidents, jsonEncode(list));
     }
     return removed;
   }
@@ -882,7 +1008,7 @@ class LocalDB {
   /// confusion that method's comment warns about.
   static Future<void> markIncidentSynced(String id, {bool synced = true}) async {
     if (id.isEmpty) return;
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return;
     final list = (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e as Map))
@@ -894,7 +1020,7 @@ class LocalDB {
     } else {
       list[idx].remove('_synced');
     }
-    await _prefs.setString(_kIncidents, jsonEncode(list));
+    await _put(_kIncidents, jsonEncode(list));
   }
 
   /// Merge [fields] into one stored incident, leaving every other key alone.
@@ -907,7 +1033,7 @@ class LocalDB {
   static Future<void> updateIncidentFields(
       String id, Map<String, dynamic> fields) async {
     if (id.isEmpty || fields.isEmpty) return;
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return;
     final list = (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e as Map))
@@ -915,7 +1041,7 @@ class LocalDB {
     final idx = list.indexWhere((i) => i['id']?.toString() == id);
     if (idx < 0) return;
     list[idx].addAll(fields);
-    await _prefs.setString(_kIncidents, jsonEncode(list));
+    await _put(_kIncidents, jsonEncode(list));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -925,7 +1051,7 @@ class LocalDB {
   // ═══════════════════════════════════════════════════════════════
   static Future<void> updateIncidentAudit(
       String id, Map<String, dynamic> auditData) async {
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return;
     final list = (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e as Map))
@@ -937,7 +1063,7 @@ class LocalDB {
     for (final entry in auditData.entries) {
       list[idx][entry.key] = entry.value;
     }
-    await _prefs.setString(_kIncidents, jsonEncode(list));
+    await _put(_kIncidents, jsonEncode(list));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -970,11 +1096,11 @@ class LocalDB {
     final cleaned =
         incidents.map((inc) => clean(inc, keep: owesImage(inc))).toList();
     try {
-      await _prefs.setString(_kIncidents, jsonEncode(cleaned));
+      await _put(_kIncidents, jsonEncode(cleaned));
     } catch (_) {
       // Over quota even so: fall back to the old behaviour rather than lose
       // the whole incident list.
-      await _prefs.setString(_kIncidents,
+      await _put(_kIncidents,
           jsonEncode(incidents.map((i) => clean(i, keep: false)).toList()));
     }
   }
@@ -984,7 +1110,7 @@ class LocalDB {
   /// Web: keep the newest few (only copy available for the PDF), strip the rest.
   /// Returns number of incidents cleaned.
   static Future<int> purgeStoredImages() async {
-    final raw = _prefs.getString(_kIncidents);
+    final raw = _get(_kIncidents);
     if (raw == null) return 0;
 
     try {
@@ -1016,7 +1142,7 @@ class LocalDB {
         }
       }
       if (cleaned > 0) {
-        await _prefs.setString(_kIncidents, jsonEncode(list));
+        await _put(_kIncidents, jsonEncode(list));
       }
       return cleaned;
     } catch (_) {
@@ -1026,12 +1152,12 @@ class LocalDB {
 
   static Future<void> replaceAllUsers(
       List<Map<String, dynamic>> users) async {
-    await _prefs.setString(_kUsers, jsonEncode(users));
+    await _put(_kUsers, jsonEncode(users));
   }
 
   static Future<void> replaceAllKnowledgeDocs(
       List<Map<String, dynamic>> docs) async {
-    await _prefs.setString(_kKbDocs, jsonEncode(docs));
+    await _put(_kKbDocs, jsonEncode(docs));
     _bumpKb();
   }
 
@@ -1054,7 +1180,7 @@ class LocalDB {
       }
     }
     if (n > 0) {
-      await _prefs.setString(_kKbDocs, jsonEncode(all));
+      await _put(_kKbDocs, jsonEncode(all));
       _bumpKb();
     }
     return n;
@@ -1135,7 +1261,7 @@ class LocalDB {
       if (!seen.contains(e.key)) merged.add(e.value);
     }
 
-    await _prefs.setString(_kKbDocs, jsonEncode(merged));
+    await _put(_kKbDocs, jsonEncode(merged));
     _bumpKb();
     return kept;
   }
@@ -1225,11 +1351,11 @@ class LocalDB {
       'timestamp': DateTime.now().toIso8601String(),
       'user':      (await getCurrentUser())?['name'] ?? 'unknown',
     });
-    await _prefs.setString(_kFeedback, jsonEncode(all));
+    await _put(_kFeedback, jsonEncode(all));
   }
 
   static Future<List<Map<String, dynamic>>> getAllFeedback() async {
-    final raw = _prefs.getString(_kFeedback);
+    final raw = _get(_kFeedback);
     if (raw == null) return [];
     return (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e))
@@ -1248,11 +1374,11 @@ class LocalDB {
     hazard['addedAt'] = DateTime.now().toIso8601String();
     hazard['addedBy'] = (await getCurrentUser())?['name'] ?? 'unknown';
     all.add(hazard);
-    await _prefs.setString(_kCustomHazards, jsonEncode(all));
+    await _put(_kCustomHazards, jsonEncode(all));
   }
 
   static Future<List<Map<String, dynamic>>> getCustomHazards() async {
-    final raw = _prefs.getString(_kCustomHazards);
+    final raw = _get(_kCustomHazards);
     if (raw == null) return [];
     return (jsonDecode(raw) as List)
         .map((e) => Map<String, dynamic>.from(e))
@@ -1260,8 +1386,8 @@ class LocalDB {
   }
 
   static Future<void> clearFeedback() async {
-    await _prefs.remove(_kFeedback);
-    await _prefs.remove(_kCustomHazards);
+    await _del(_kFeedback);
+    await _del(_kCustomHazards);
   }
 
   static Future<Map<String, int>> getFeedbackStats() async {
@@ -1358,7 +1484,7 @@ class LocalDB {
       all.add(row);
     }
 
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
     return ids;
   }
@@ -1397,7 +1523,7 @@ class LocalDB {
     final before = all.length;
     all.removeWhere((d) => d['docGroup']?.toString() == docGroup);
     if (all.length == before) return 0;
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
     return before - all.length;
   }
@@ -1417,7 +1543,7 @@ class LocalDB {
       }
     }
     if (n == 0) return 0;
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
     return n;
   }
@@ -1439,7 +1565,7 @@ class LocalDB {
       }
     }
     if (!hit) return false;
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
     return true;
   }
@@ -1458,7 +1584,7 @@ class LocalDB {
   static List<Map<String, dynamic>> _kbDocsParsed() {
     final cached = _kbCache;
     if (cached != null) return cached;
-    final raw = _prefs.getString(_kKbDocs);
+    final raw = _get(_kKbDocs);
     if (raw == null || raw.isEmpty) return _kbCache = <Map<String, dynamic>>[];
     try {
       return _kbCache = (jsonDecode(raw) as List)
@@ -1484,7 +1610,7 @@ class LocalDB {
       all[idx]['title']   = title;
       all[idx]['content'] = content;
       if (source != null) all[idx]['source'] = source;
-      await _prefs.setString(_kKbDocs, jsonEncode(all));
+      await _put(_kKbDocs, jsonEncode(all));
       _bumpKb();
     }
   }
@@ -1492,7 +1618,7 @@ class LocalDB {
   static Future<void> deleteKnowledgeDoc(String id) async {
     final all = await getKnowledgeDocs();
     all.removeWhere((d) => d['id'] == id);
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
   }
 
@@ -1840,7 +1966,7 @@ class LocalDB {
   //  TWO THINGS THIS USED TO DO, BOTH OF WHICH LOST OR BURIED UPLOADS
   //
   //  1. `replace` defaulted to TRUE and `replace: true` did
-  //     `_prefs.remove(_kKbDocs)` — it deleted the WHOLE key, so every PDF,
+  //     `_del(_kKbDocs)` — it deleted the WHOLE key, so every PDF,
   //     DOCX, scan and hand-typed entry the admin had ever added went with the
   //     old seeds. The single live caller passes `replace: false`, so this never
   //     fired in production; it was simply armed, and `seedKnowledgeBase()`
@@ -1898,7 +2024,7 @@ class LocalDB {
     // plant's own documents are the ones that were never candidates for removal.
     all.insertAll(0, kept);
 
-    await _prefs.setString(_kKbDocs, jsonEncode(all));
+    await _put(_kKbDocs, jsonEncode(all));
     _bumpKb();
     return added;
   }
@@ -1914,28 +2040,28 @@ class LocalDB {
     bool keepLogin = true,
   }) async {
     // 1. Always clear incidents
-    await _prefs.remove(_kIncidents);
+    await _del(_kIncidents);
 
     // 2. Always clear feedback/learning data linked to past scans
-    await _prefs.remove(_kFeedback);
-    await _prefs.remove(_kCustomHazards);
+    await _del(_kFeedback);
+    await _del(_kCustomHazards);
 
     // 3. Clear best-effort caches if they exist (no-op if absent)
-    await _prefs.remove('image_hashes');
-    await _prefs.remove('sync_queue');
-    await _prefs.remove('pending_pdfs');
-    await _prefs.remove('chat_history');
+    await _del('image_hashes');
+    await _del('sync_queue');
+    await _del('pending_pdfs');
+    await _del('chat_history');
 
     // 4. Optional clears
     if (!keepKb) {
-      await _prefs.remove(_kKbDocs);
+      await _del(_kKbDocs);
       _bumpKb();
     }
     if (!keepUsers) {
-      await _prefs.remove(_kUsers);
-      await _prefs.remove(_kCachedUsers);
+      await _del(_kUsers);
+      await _del(_kCachedUsers);
     }
-    if (!keepLogin) await _prefs.remove(_kCurrentUser);
+    if (!keepLogin) await _del(_kCurrentUser);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1944,21 +2070,21 @@ class LocalDB {
   static Future<Map<String, int>> dataCounts() async {
     int incidents = 0, kb = 0, users = 0;
     try {
-      final raw = _prefs.getString(_kIncidents);
+      final raw = _get(_kIncidents);
       if (raw != null) {
         final list = jsonDecode(raw);
         if (list is List) incidents = list.length;
       }
     } catch (_) {}
     try {
-      final raw = _prefs.getString(_kKbDocs);
+      final raw = _get(_kKbDocs);
       if (raw != null) {
         final list = jsonDecode(raw);
         if (list is List) kb = list.length;
       }
     } catch (_) {}
     try {
-      final raw = _prefs.getString(_kUsers);
+      final raw = _get(_kUsers);
       if (raw != null) {
         final list = jsonDecode(raw);
         if (list is List) users = list.length;
@@ -1974,7 +2100,7 @@ class LocalDB {
   //  (b) a fallback the admin panel reads when the backend is down.
   // ═══════════════════════════════════════════════════════════════
   static Future<List<Map<String, dynamic>>> getAiCorrections() async {
-    final raw = _prefs.getString(_kAiCorrections);
+    final raw = _get(_kAiCorrections);
     if (raw == null) return [];
     try {
       return (jsonDecode(raw) as List)
@@ -1996,7 +2122,7 @@ class LocalDB {
     } else {
       all.add(correction);
     }
-    await _prefs.setString(_kAiCorrections, jsonEncode(all));
+    await _put(_kAiCorrections, jsonEncode(all));
   }
 
   /// Merge a batch of correction rows (e.g. pulled from Supabase) into the
@@ -2011,10 +2137,10 @@ class LocalDB {
       if (id.isEmpty) continue;
       byId[id] = {...?byId[id], ...c};
     }
-    await _prefs.setString(_kAiCorrections, jsonEncode(byId.values.toList()));
+    await _put(_kAiCorrections, jsonEncode(byId.values.toList()));
   }
 
   static Future<void> clearAiCorrections() async {
-    await _prefs.remove(_kAiCorrections);
+    await _del(_kAiCorrections);
   }
 }
