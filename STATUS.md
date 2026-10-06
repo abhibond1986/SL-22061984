@@ -1,5 +1,10 @@
 ## 2026-10-06
 
+- Voice input fix (VoiceTextField: AI Scan Location / "What is in the picture?", SOP fields).
+  - Dictated words were repeated ("near near cast near cast house") because each interim result was appended. They now replace the dictated part, and Chrome's duplicated phrases are collapsed.
+  - The second voice field got no words because the shared speech engine's callbacks belonged to the first field and the second could start before the first had ended. Now one field owns the session, a new mic waits for the old session to end (with one retry), status is routed to the owner, and an 8 s silence watchdog ends quiet sessions.
+  - Test: tools/voice_field_test.dart. Audit: AUDIT_2026-10-06_VOICE_INPUT.md.
+
 - Copyright footer on every page: a small (9.5 px) line reading "© <year> Designed & developed by Abhishek Kumar, AGM(SSO)". It is `lib/widgets/copyright_footer.dart`, added through `MaterialApp.builder` in main.dart. It is a thin strip below each route, not an overlay, so it never covers the nav bar or buttons. It takes the iPhone home-indicator inset and hides while the keyboard is open. The line also shows a tap-to-call "Contact: 8986880340" beside the credit. On phones it steps down to 8.4 px to stay on one line; it wraps only below 335 px. Audit: AUDIT_2026-10-06_COPYRIGHT_FOOTER.md.
 - iPhone web login fix (Safari + Chrome): "QuotaExceededError". The ~2.7 MB KB cache filled WebKit's ~5 MB localStorage, and then every write, including the login's own, threw. On the web the KB and user-directory caches now live in memory (local-only KB docs are still saved). Existing full storage is cleared on load, and every LocalDB write is quota-safe and never throws. Test reproduces the old failure. AUDIT_2026-10-06_SAFARI_LOGIN.md §Follow-up.
 - Safari login fix: Flutter web leaves `autocorrect="on"` on inputs, and only Safari acts on it, so usernames (and revealed passwords) could be changed before sending. Credential fields now turn off autocorrect, suggestions and smart punctuation, and a stray trailing keyboard space no longer fails the login. AUDIT_2026-10-06_SAFARI_LOGIN.md.
