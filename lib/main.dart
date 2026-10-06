@@ -18,6 +18,7 @@ import 'services/branding.dart';
 import 'widgets/brand_logo.dart';
 import 'services/i18n.dart';  // ← ADDED: fixes "I18n not defined" error
 import 'widgets/scan_status_overlay.dart';
+import 'widgets/copyright_footer.dart';
 import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
@@ -516,11 +517,15 @@ class _SafetyLensAppState extends State<SafetyLensApp> with WidgetsBindingObserv
           // ScaffoldMessenger key, so a service has no other way to reach a
           // BuildContext. The overlay renders nothing at all when no job is in
           // flight, and is IgnorePointer-free only around its own buttons.
-          builder: (context, child) => Stack(
-            children: [
-              child ?? const SizedBox.shrink(),
-              const ScanStatusOverlay(),
-            ],
+          // The copyright strip wraps everything, so it sits below every
+          // route (and below the scan overlay) on every page.
+          builder: (context, child) => CopyrightFooter(
+            child: Stack(
+              children: [
+                child ?? const SizedBox.shrink(),
+                const ScanStatusOverlay(),
+              ],
+            ),
           ),
           // ✅ On web, skip Flutter splash — HTML splash (index.html) already
           // shows branding while Flutter loads. Going straight to login/home

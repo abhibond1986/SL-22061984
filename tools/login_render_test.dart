@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:safety_lens/widgets/copyright_footer.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:safety_lens/screens/login_screen.dart';
@@ -67,6 +68,8 @@ void main() {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(fontFamily: 'Roboto', useMaterial3: true,
             brightness: dark ? Brightness.dark : Brightness.light),
+        // Same as main.dart: the copyright strip sits below every route.
+        builder: (context, child) => CopyrightFooter(child: child!),
         home: LoginScreen(toggleTheme: () {}),
       )));
       Future<void> settle() async {

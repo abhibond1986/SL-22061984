@@ -1,4 +1,6 @@
 ## 2026-10-06
+
+- Copyright footer on every page: a small (9.5 px) line reading "© <year> Designed & developed by Abhishek Kumar, AGM(SSO)". It is `lib/widgets/copyright_footer.dart`, added through `MaterialApp.builder` in main.dart. It is a thin strip below each route, not an overlay, so it never covers the nav bar or buttons. It takes the iPhone home-indicator inset and hides while the keyboard is open. Audit: AUDIT_2026-10-06_COPYRIGHT_FOOTER.md.
 - iPhone web login fix (Safari + Chrome): "QuotaExceededError". The ~2.7 MB KB cache filled WebKit's ~5 MB localStorage, and then every write, including the login's own, threw. On the web the KB and user-directory caches now live in memory (local-only KB docs are still saved). Existing full storage is cleared on load, and every LocalDB write is quota-safe and never throws. Test reproduces the old failure. AUDIT_2026-10-06_SAFARI_LOGIN.md §Follow-up.
 - Safari login fix: Flutter web leaves `autocorrect="on"` on inputs, and only Safari acts on it, so usernames (and revealed passwords) could be changed before sending. Credential fields now turn off autocorrect, suggestions and smart punctuation, and a stray trailing keyboard space no longer fails the login. AUDIT_2026-10-06_SAFARI_LOGIN.md.
 

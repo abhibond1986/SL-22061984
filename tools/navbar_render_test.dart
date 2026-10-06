@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:safety_lens/widgets/copyright_footer.dart';
 import 'package:safety_lens/main.dart';
 import 'package:safety_lens/widgets/nav_bar_style.dart';
 
@@ -77,13 +78,13 @@ void main() {
         t.view.physicalSize = Size(w, 300);
         t.view.devicePixelRatio = 1;
         final key = GlobalKey();
-        await t.pumpWidget(MaterialApp(
+        await t.pumpWidget(RepaintBoundary(key: key, child: MaterialApp(
+          builder: (context, child) => CopyrightFooter(child: child!),
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
               brightness: dark ? Brightness.dark : Brightness.light,
               fontFamily: 'Roboto'),
           home: RepaintBoundary(
-            key: key,
             child: Builder(builder: (ctx) {
               final sl = SL.of(ctx);
               return Scaffold(
@@ -109,7 +110,7 @@ void main() {
               );
             }),
           ),
-        ));
+        )));
         await t.pumpAndSettle();
         expect(tester_takeException(t), isNull);
         await t.runAsync(() async {
