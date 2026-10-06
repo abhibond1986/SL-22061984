@@ -1573,7 +1573,9 @@ If the text is already fine, return it unchanged.''';
         'name': 'Small-bore process tubing / conduit',
         'desc': 'Small diameter instrumentation line, impulse line, or process tubing tracking along the primary structural bracket alignment. Safe fixed configuration.',
         'action': 'Maintain standard periodic mechanical integrity checks on pipes and structural bracket elements.',
-        'reg': 'FA 1948 S39 (Equipment Integrity & Inspection)',
+        // S39 is the Inspector's power to ask for specifications/tests, not an
+        // occupier duty; safe, maintained plant is S7A(2)(a).
+        'reg': 'FA 1948 S7A(2)(a)',
         // Was 'Equipment failure' — off-list, because the WSA-13 member carries
         // a '5. ' prefix. Resolved so it charts as itself.
         'cause': _canonicalWsa('5. Equipment failure'),
@@ -1872,7 +1874,7 @@ If the text is already fine, return it unchanged.''';
         _aiHazards = annotatable;
         _aiBrief = {
           'identified': refinedData['name'],
-          'statutory':  (refinedData['reg']?.toString() ?? '').isEmpty ? 'Refer Factories Act S35-41' : refinedData['reg'].toString(),
+          'statutory':  (refinedData['reg']?.toString() ?? '').isEmpty ? 'FA 1948 S7A (general duties of occupier)' : refinedData['reg'].toString(),
           'type':       refinedData['obsType'],
           'severity':   sev,
           'confidence': first?['confidence'] ?? result?['confidence'] ?? 75,

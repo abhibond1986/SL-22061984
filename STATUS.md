@@ -1,5 +1,11 @@
 ## 2026-10-06
 
+- Factories Act citations in AI scans: almost every hazard was cited as S21 or S32 because the citable table had only 12 FA sections.
+  - The table now has 25, adding S7A (with sub-clauses), S11, S12, S13, S14, S17, S24, S30, S34, S36A, S40, S41F and S111.
+  - The prompt has a subject→section guide. kHazardPromptRev is 3, so old cached answers are ignored.
+  - S39 (an Inspector power) is no longer used in the tubing preset. Wrong chat/offline section text is fixed (S111A vs S111, S39).
+  - Tests: tools/regulation_catalog_test.dart and tools/pdf_regulation_column_test.dart. Audit: AUDIT_2026-10-06_FACTORIES_ACT_CITATIONS.md.
+
 - Voice input fix (VoiceTextField: AI Scan Location / "What is in the picture?", SOP fields).
   - Dictated words were repeated ("near near cast near cast house") because each interim result was appended. They now replace the dictated part, and Chrome's duplicated phrases are collapsed.
   - The second voice field got no words because the shared speech engine's callbacks belonged to the first field and the second could start before the first had ended. Now one field owns the session, a new mic waits for the old session to end (with one retry), status is routed to the owner, and an 8 s silence watchdog ends quiet sessions.

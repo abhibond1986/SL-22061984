@@ -90,6 +90,96 @@ class RegulationCatalog {
       appliesTo: ['cylinder', 'storage', 'gas'],
     ),
 
+    // ── General Duties & Systems of Work ──
+    // Added 2026-10-06. Before this the only Factories Act sections in the
+    // table were S21, S22, S28, S29, S31-S33, S35-S38 and S41C, so every
+    // finding about storage, plant roads, isolation, training, dust, heat,
+    // lighting, housekeeping or a worker's own conduct had NO correct section
+    // to cite and was pushed onto S21 or S32. Section titles and sub-clauses
+    // follow the Factories Act 1948 as amended in 1987.
+    RegulationEntry(
+      group: 'General Duties & Systems of Work',
+      alsoUnder: ['Material Handling & Storage'],
+      citation: 'FA 1948 S7A',
+      meaning: 'General duties of occupier: (2)(a) safe plant & systems of '
+          'work (isolation/LOTO, permits); (2)(b) safe use, handling, storage '
+          '& transport of articles and substances (stacks, coils, stockpiles); '
+          '(2)(c) information, instruction, training, supervision; (2)(d) safe '
+          'workplace & safe access/egress (plant roads, rail, traffic); (2)(e) '
+          'safe working environment (e.g. noise). Use ONLY when no specific '
+          'section fits; cite the sub-clause, e.g. FA 1948 S7A(2)(b)',
+      appliesTo: [
+        'system of work', 'permit', 'isolation', 'isolate', 'lockout', 'loto',
+        'procedure', 'training', 'supervision', 'storage', 'stored', 'stack',
+        'stockpile', 'coil', 'chock', 'handling', 'transport', 'vehicle',
+        'road', 'rail', 'traffic', 'access', 'egress', 'noise', 'barricad',
+        'unsafe', 'maintenance',
+      ],
+    ),
+
+    // ── Working Environment ──
+    RegulationEntry(
+      group: 'Working Environment',
+      citation: 'FA 1948 S13',
+      meaning: 'Ventilation and temperature: adequate ventilation; protect '
+          'workers from excessive heat by separating or insulating hot parts '
+          '(furnace, ladle, hot-metal and rolling areas)',
+      appliesTo: [
+        'heat', 'hot', 'radiant', 'temperature', 'ventilation', 'furnace',
+        'thermal', 'insulat',
+      ],
+    ),
+    RegulationEntry(
+      group: 'Working Environment',
+      citation: 'FA 1948 S14',
+      meaning: 'Dust and fume: prevent inhalation and accumulation; exhaust '
+          'at the point of origin (visible dust plume, fume, fugitive '
+          'emission)',
+      appliesTo: [
+        'dust', 'fume', 'smoke', 'exhaust', 'emission', 'plume', 'fugitive',
+        'particulate', 'airborne',
+      ],
+    ),
+    RegulationEntry(
+      group: 'Working Environment',
+      citation: 'FA 1948 S17',
+      meaning: 'Lighting: sufficient and suitable lighting of work areas and '
+          'passages; prevent glare and shadows',
+      appliesTo: [
+        'light', 'dark', 'dim', 'illuminat', 'glare', 'shadow', 'lamp',
+        'visibility',
+      ],
+    ),
+    RegulationEntry(
+      group: 'Working Environment',
+      citation: 'FA 1948 S41F',
+      meaning: 'Permissible limits of exposure to chemical and toxic '
+          'substances (Second Schedule), e.g. CO, H2S, benzene in gas areas',
+      appliesTo: [
+        'exposure', 'carbon monoxide', 'toxic', 'h2s', 'benzene', 'gas leak',
+        'monitor', 'concentration',
+      ],
+    ),
+
+    // ── Housekeeping ──
+    RegulationEntry(
+      group: 'Housekeeping',
+      citation: 'FA 1948 S11',
+      meaning: 'Cleanliness: dirt, refuse, spillage and scrap removed from '
+          'floors, benches, stairs and passages',
+      appliesTo: [
+        'housekeeping', 'spillage', 'spill', 'debris', 'scrap', 'refuse',
+        'dirt', 'waste', 'clean', 'accumulat', 'litter', 'offcut',
+      ],
+    ),
+    RegulationEntry(
+      group: 'Housekeeping',
+      citation: 'FA 1948 S12',
+      meaning: 'Disposal of wastes and effluents (drains, sludge, effluent '
+          'discharge)',
+      appliesTo: ['effluent', 'drain', 'sludge', 'discharge', 'waste water'],
+    ),
+
     // ── Machinery & Guards ──
     RegulationEntry(
       group: 'Machinery & Guards',
@@ -108,12 +198,31 @@ class RegulationCatalog {
       meaning: 'Work near machinery in motion',
       appliesTo: ['machinery', 'motion', 'moving', 'lubricat', 'cleaning', 'adjust'],
     ),
+    RegulationEntry(
+      group: 'Machinery & Guards',
+      citation: 'FA 1948 S24',
+      meaning: 'Striking gear and devices for cutting off power in '
+          'emergencies (emergency stop, pull-cord, lockable isolator)',
+      appliesTo: [
+        'emergency stop', 'e-stop', 'pull cord', 'pull-cord', 'isolat',
+        'switch', 'cut off', 'cut-off', 'power', 'starter',
+      ],
+    ),
+    RegulationEntry(
+      group: 'Machinery & Guards',
+      citation: 'FA 1948 S30',
+      meaning: 'Revolving machinery: grinding/abrasive wheels and revolving '
+          'parts with maximum safe speed marked and not exceeded',
+      appliesTo: ['grind', 'abrasive', 'wheel', 'saw', 'disc', 'speed', 'flywheel'],
+    ),
 
     // ── Height & Access ──
     RegulationEntry(
       group: 'Height & Access',
       citation: 'FA 1948 S32',
-      meaning: 'Floors, stairs, means of access (trip/slip/fall, safe access)',
+      meaning: 'Floors, stairs and means of access: (a) sound, free from '
+          'obstructions and slippery substances, handrails; (b) safe means of '
+          'access; (c) fencing/other means where a person may fall from height',
       alsoUnder: ['Housekeeping'],
       appliesTo: [
         'floor', 'stair', 'access', 'trip', 'slip', 'fall', 'walkway',
@@ -149,6 +258,18 @@ class RegulationCatalog {
       appliesTo: [
         'crane', 'lifting', 'chain', 'rope', 'sling', 'tackle', 'load',
         'hook', 'suspended', 'shackle',
+      ],
+    ),
+
+    // ── Material Handling & Storage ──
+    RegulationEntry(
+      group: 'Material Handling & Storage',
+      citation: 'FA 1948 S34',
+      meaning: 'Excessive weights: no manual lifting, carrying or moving of a '
+          'load likely to cause injury',
+      appliesTo: [
+        'manual', 'carry', 'carrying', 'heavy', 'weight', 'posture',
+        'ergonomic', 'by hand', 'lifting by',
       ],
     ),
 
@@ -218,7 +339,9 @@ class RegulationCatalog {
     RegulationEntry(
       group: 'PPE',
       citation: 'FA 1948 S41C',
-      meaning: 'PPE provision (employer duty)',
+      meaning: 'Hazardous process (integrated iron & steel is in the First '
+          'Schedule): occupier to provide all necessary protective facilities '
+          'and PPE at the workplace, competent supervision, health records',
       appliesTo: [
         'ppe', 'helmet', 'glove', 'apron', 'shoe', 'boot', 'protective',
         'hot metal', 'slag', 'ladle',
@@ -244,6 +367,47 @@ class RegulationCatalog {
       meaning: 'Dangerous fumes/gases (confined space ONLY)',
       appliesTo: ['confined', 'fume', 'vessel entry', 'manhole', 'tank', 'oxygen deficien'],
       neverFor: ['height', 'scaffold', 'harness', 'floor opening'],
+    ),
+    RegulationEntry(
+      group: 'Confined Space & Fumes',
+      citation: 'FA 1948 S36A',
+      meaning: 'Portable electric light in confined spaces: max 24 V; '
+          'flameproof where flammable gas, fume or dust may be present',
+      appliesTo: ['portable', 'hand lamp', 'lamp', 'inspection light', 'torch', '24 v', '24v'],
+    ),
+
+    // ── Structures & Buildings ──
+    RegulationEntry(
+      group: 'Structures & Buildings',
+      citation: 'FA 1948 S40',
+      // S40 is the Inspector's power to order repairs or prohibit use; the
+      // occupier's own duty for a dangerous structure is S7A(2)(a)/(d). Kept
+      // citable because inspectors' orders cite it, but the prompt's subject
+      // guide points structures at S7A(2)(d) first.
+      meaning: 'Safety of buildings and machinery: Inspector may order repair '
+          'or prohibit use of a building, structure or plant dangerous to life '
+          '(corrosion, cracking, missing members, collapse risk). Occupier '
+          'duty for the same defect = S7A(2)(d)',
+      appliesTo: [
+        'structur', 'corroded', 'corrosion', 'rust', 'collapse', 'crack',
+        'dilapidat', 'cladding', 'roof', 'gallery', 'building', 'member',
+        'perforat',
+      ],
+    ),
+
+    // ── Worker Conduct ──
+    RegulationEntry(
+      group: 'Worker Conduct',
+      citation: 'FA 1948 S111',
+      meaning: 'Obligations of workers: (1)(a) not misuse or interfere with '
+          'safety appliances (e.g. removed or bypassed guard); (1)(b) not '
+          'wilfully endanger self or others (e.g. under a suspended load, '
+          'crossing a running conveyor); (1)(c) not neglect to use PPE or '
+          'appliances provided. Cite the sub-clause, e.g. FA 1948 S111(1)(c)',
+      appliesTo: [
+        'worker', 'person', 'not wearing', 'without', 'bypass', 'misuse',
+        'unsafe act', 'standing under', 'crossing', 'removed', 'neglect',
+      ],
     ),
 
     // ── Chemical ──
@@ -275,12 +439,17 @@ class RegulationCatalog {
     'Machinery & Guards',
     'Height & Access',
     'Crane & Lifting',
+    'Material Handling & Storage',
     'Pressure & Fire',
     'Electrical',
     'PPE',
     'Confined Space & Fumes',
+    'Working Environment',
     'Housekeeping',
+    'Structures & Buildings',
+    'Worker Conduct',
     'Chemical',
+    'General Duties & Systems of Work',
   ];
 
   static String promptTable() {

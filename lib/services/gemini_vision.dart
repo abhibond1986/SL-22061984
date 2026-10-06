@@ -891,7 +891,9 @@ HOW TO USE IT:
   /// prompt change should stop old cached answers being served.
   ///   2 — 2026-10-03: per-person PPE audit ("persons", "personIds"), after a
   ///       scan put the chin-strap box on the worker who WAS wearing it.
-  static const int kHazardPromptRev = 2;
+  ///   3 — 2026-10-06: Factories Act table widened from 12 to 25 sections
+  ///       plus a subject→section guide; old answers were almost all S21/S32.
+  static const int kHazardPromptRev = 3;
 
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
@@ -3816,8 +3818,9 @@ STOCKPILES: fencing is not a stockpile control and asking for it marks the repor
 as inexpert. The controls are: maintain the angle of repose, never undercut or
 work the face from below, keep personnel off and out from under the face, control
 dust at the transfer and the face, and bench the pile for machine access. Cite
-material-handling and dust provisions — NOT FA 1948 S32, which is about floors,
-passages and handrails, and reads as a mis-citation to any factory inspector.
+FA 1948 S7A(2)(b) (storage and handling) and S14 (dust) — NOT FA 1948 S32, which
+is about floors, passages and handrails, and reads as a mis-citation to any
+factory inspector.
 
 ═══════════════════════════════════════════════════════
 CLASSES OF HAZARD THESE SCANS KEEP MISSING
@@ -3881,9 +3884,37 @@ REGULATION REFERENCE TABLE — CITE ONLY FROM HERE
 ${RegulationCatalog.promptTable()}
 {{KB_CONTEXT}}
 HARD RULES:
-• S21 = machinery fencing ONLY. NEVER for gas cylinders.
+• Cite the MOST SPECIFIC section for THIS hazard. S21 and S32 are NOT defaults
+  — a report where every row says S21 or S32 reads as unchecked to a factory
+  inspector.
+• S21 = fencing of a REACHABLE moving part ONLY. NEVER for gas cylinders.
+• S32 = floors, stairs, passages, handrails, means of access, falls from height
+  (write S32(c) for work at height). NEVER confuse with S36.
 • S36 = confined space ONLY. NEVER for height work.
-• S32 = height/access/floors. NEVER confuse with S36.
+• Which section, by subject (Factories Act 1948):
+    dust plume / fume / fugitive emission → S14 (S37 only if flammable/explosive)
+    radiant heat, hot work area, poor ventilation → S13
+    poor or no lighting → S17
+    housekeeping, scrap, spillage, debris → S11 (S32(a) only if it obstructs a
+      floor or passage people use)
+    effluent, drains, sludge → S12
+    manual lifting / carrying → S34
+    grinding / abrasive wheel → S30 (+ S35 for the eyes)
+    emergency stop, pull-cord, power isolator → S24
+    cleaning, lubricating or adjusting moving machinery → S22
+    pits, sumps, floor openings → S33
+    corroded / damaged structure, cladding, gallery members → S7A(2)(d)
+      (S40 only if the structure is dangerous to life — risk of collapse)
+    stacking, coils, stockpiles, storage, transport → S7A(2)(b)
+    isolation / LOTO, permits, unsafe system of work → S7A(2)(a)
+    plant roads, rail, vehicle movement, access/egress → S7A(2)(d)
+    noise → S7A(2)(e)
+    PPE not provided in a hot-metal / hazardous-process area → S41C
+    a worker not using PPE that is provided, standing under a suspended load,
+      bypassing a guard or crossing a running conveyor → S111(1)(c)/(b)/(a)
+    toxic gas exposure (CO, H2S) → S41F (S36 if inside a confined space)
+• Write the sub-clause when the table gives one, e.g. "FA 1948 S7A(2)(b)",
+  "FA 1948 S32(c)", "FA 1948 S111(1)(c)". One citation per hazard.
 • IS 14489:2018 is an audit standard — do NOT cite for individual hazards.
 • NEVER invent regulation numbers not in this table. The Plant Knowledge Bank
   section above, when present, is part of this table and may be cited freely.
