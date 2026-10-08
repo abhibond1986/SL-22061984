@@ -29,6 +29,7 @@ import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
 import '../widgets/bottom_nav_gap.dart';
+import '../widgets/safe_backdrop_filter.dart';
 
 class HomeTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -586,7 +587,7 @@ class _HomeTabState extends State<HomeTab> {
           // Glass card — MY AI Scans + Near Miss breakdown
           ClipRRect(
             borderRadius: BorderRadius.circular(16),
-            child: BackdropFilter(
+            child: SafeBackdropFilter(
               filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
               child: Container(
                 padding: const EdgeInsets.all(14),
@@ -729,7 +730,7 @@ class _HomeTabState extends State<HomeTab> {
       {VoidCallback? onTap}) {
     final tile = ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -793,7 +794,7 @@ class _HomeTabState extends State<HomeTab> {
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Container(
             padding: const EdgeInsets.all(16),
@@ -972,7 +973,7 @@ class _HomeTabState extends State<HomeTab> {
       onTap: onTap,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
           child: Container(
             height: 90,
@@ -1013,7 +1014,7 @@ class _HomeTabState extends State<HomeTab> {
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Container(
             padding: const EdgeInsets.all(16),
@@ -1088,7 +1089,7 @@ class _HomeTabState extends State<HomeTab> {
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Container(
             padding: const EdgeInsets.all(16),
@@ -1214,7 +1215,7 @@ class _HomeTabState extends State<HomeTab> {
       padding: const EdgeInsets.only(bottom: 8),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
           child: Container(
             padding: const EdgeInsets.all(12),

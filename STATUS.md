@@ -1,3 +1,7 @@
+## 2026-10-08
+
+- iPhone crash ("A problem repeatedly occurred on safetylens.in"): WebKit killed the tab. Cause: on mobile browsers Flutter 3.19 uses the HTML renderer. There, the login backdrop's ~60 animated blur draws per frame become DOM elements with CSS blur, and they sit under live `backdrop-filter` layers (the login card, plus the app bar, nav bar and glass cards). Fix: `SafeBackdropFilter`/`kLiteWebEffects` (lib/widgets/safe_backdrop_filter.dart) disables live blur on mobile web, and the login animation overlay is off there. The login card and nav bar fills are near-opaque to compensate. App and desktop are unchanged. Audit: AUDIT_2026-10-08_IPHONE_CRASH.md.
+
 ## 2026-10-06
 
 - Factories Act citations in AI scans: almost every hazard was cited as S21 or S32 because the citable table had only 12 FA sections.

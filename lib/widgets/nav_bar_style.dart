@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../main.dart';
+import 'safe_backdrop_filter.dart' show kLiteWebEffects;
 
 /// One colour scheme for the bottom navigation bar, shared by the employee
 /// shell (home_screen.dart) and the contractor shell
@@ -26,14 +27,21 @@ class NavBarStyle {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
+          // Mobile browsers get no blur behind the bar (it crashed iPhone
+          // Safari — see safe_backdrop_filter.dart), so the tint goes near
+          // opaque there to keep labels off the scrolling content.
           colors: sl.isDark
               ? [
-                  const Color(0xFF0C4A6E).withOpacity(0.45), // sky-900 glass
-                  const Color(0xFF082F49).withOpacity(0.60),
+                  const Color(0xFF0C4A6E)
+                      .withOpacity(kLiteWebEffects ? 0.94 : 0.45), // sky-900
+                  const Color(0xFF082F49)
+                      .withOpacity(kLiteWebEffects ? 0.97 : 0.60),
                 ]
               : [
-                  const Color(0xFFE0F2FE).withOpacity(0.50), // sky-100 glass
-                  const Color(0xFFBAE6FD).withOpacity(0.62), // sky-200
+                  const Color(0xFFE0F2FE)
+                      .withOpacity(kLiteWebEffects ? 0.95 : 0.50), // sky-100
+                  const Color(0xFFBAE6FD)
+                      .withOpacity(kLiteWebEffects ? 0.97 : 0.62), // sky-200
                 ],
         ),
         // A bright hairline on top gives the glass an edge against content.

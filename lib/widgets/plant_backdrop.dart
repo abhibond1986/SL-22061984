@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'safe_backdrop_filter.dart' show kLiteWebEffects;
 
 /// Login background: the user's night-time steel plant illustration
 /// (assets/images/login_backdrop.jpg, 1672 × 941; master in icon_src/), with
@@ -47,7 +48,7 @@ class _PlantBackdropState extends State<PlantBackdrop>
 
   bool get _run {
     final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    return widget.animate && !reduce;
+    return widget.animate && !reduce && !kLiteWebEffects;
   }
 
   @override
@@ -142,12 +143,19 @@ class _PlantBackdropState extends State<PlantBackdrop>
               ),
             ),
           ),
-        RepaintBoundary(
-          child: CustomPaint(
-            painter: _LifePainter(
-                t: _c, still: PlantBackdrop.debugFrame == null && !_run),
+        // Not on a mobile browser (2026-10-08): this painter issues ~60
+        // MaskFilter.blur draws per frame, and Safari's HTML renderer turns
+        // each one into a DOM element with a CSS blur. Re-created every frame
+        // under the card's backdrop blur, that got the iPhone tab killed
+        // ("A problem repeatedly occurred"). See safe_backdrop_filter.dart.
+        // The illustration already has its smoke and pour painted in.
+        if (!kLiteWebEffects)
+          RepaintBoundary(
+            child: CustomPaint(
+              painter: _LifePainter(
+                  t: _c, still: PlantBackdrop.debugFrame == null && !_run),
+            ),
           ),
-        ),
       ]);
 }
 

@@ -1,6 +1,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart' show AppColors, SL;
+import 'safe_backdrop_filter.dart';
 
 class GlassCard extends StatelessWidget {
   final Widget child;
@@ -27,7 +28,7 @@ class GlassCard extends StatelessWidget {
       margin: margin,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
           child: Container(
             padding: padding ?? const EdgeInsets.all(16),
@@ -73,7 +74,7 @@ class GlassContainer extends StatelessWidget {
     final sl = SL.of(context);
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
         child: Container(
           padding: padding,

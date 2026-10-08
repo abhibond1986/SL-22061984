@@ -18,6 +18,7 @@ import 'contractor_home_screen.dart';
 import 'force_password_change_screen.dart';
 import '../widgets/brand_logo.dart';
 import '../widgets/plant_backdrop.dart';
+import '../widgets/safe_backdrop_filter.dart';
 
 class LoginScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -572,7 +573,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(26),
-          child: BackdropFilter(
+          child: SafeBackdropFilter(
             filter: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
             child: Container(
               padding: const EdgeInsets.fromLTRB(22, 22, 22, 24),
@@ -1277,9 +1278,17 @@ class _LoginGlass {
   static Color base(SL sl) =>
       sl.isDark ? const Color(0xFF0F1438) : const Color(0xFFEEF0FF);
 
-  static List<Color> cardFill(SL sl) => sl.isDark
-      ? [Colors.white.withOpacity(0.11), Colors.white.withOpacity(0.05)]
-      : [Colors.white.withOpacity(0.66), Colors.white.withOpacity(0.44)];
+  // On a mobile browser the card has no live blur (it crashed iPhone Safari —
+  // see safe_backdrop_filter.dart), so the fill must carry legibility alone:
+  // a deep navy / near-white glass at the same tile tone as below.
+  static List<Color> cardFill(SL sl) => kLiteWebEffects
+      ? (sl.isDark
+          ? [const Color(0xFF16205A).withOpacity(0.90),
+             const Color(0xFF0B1240).withOpacity(0.86)]
+          : [Colors.white.withOpacity(0.92), Colors.white.withOpacity(0.86)])
+      : sl.isDark
+          ? [Colors.white.withOpacity(0.11), Colors.white.withOpacity(0.05)]
+          : [Colors.white.withOpacity(0.66), Colors.white.withOpacity(0.44)];
 
   /// Sign-in card edge: a hairline of molten amber.
   static Color edge(SL sl) =>

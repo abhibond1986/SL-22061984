@@ -9,6 +9,7 @@ import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/safe_backdrop_filter.dart';
 
 /// Plant dashboard — cross-plant, for everyone.
 ///
@@ -744,7 +745,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -799,7 +800,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -894,7 +895,7 @@ class _PlantWiseTabState extends State<PlantWiseTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),

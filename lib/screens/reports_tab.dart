@@ -8,6 +8,7 @@ import 'analytics/overview_tab.dart';
 import 'analytics/incident_log_tab.dart';
 import 'analytics/data_analysis_tab.dart';
 import 'analytics/plant_wise_tab.dart';
+import '../widgets/safe_backdrop_filter.dart';
 
 class ReportsTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -83,7 +84,7 @@ class _ReportsTabState extends State<ReportsTab>
               maxWidth: SLLayout.wide,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
-                child: BackdropFilter(
+                child: SafeBackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 12),

@@ -16,6 +16,7 @@ import 'ai_scan_tab.dart';
 import 'near_miss_tab.dart';
 import '../services/branding.dart';
 import '../widgets/brand_logo.dart';
+import '../widgets/safe_backdrop_filter.dart';
 
 class ContractorHomeScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -177,7 +178,7 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
     ];
 
     return ClipRRect(
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
       decoration: NavBarStyle.decoration(sl),

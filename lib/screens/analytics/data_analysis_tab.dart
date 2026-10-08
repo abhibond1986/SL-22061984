@@ -8,6 +8,7 @@ import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/safe_backdrop_filter.dart';
 
 class DataAnalysisTab extends StatefulWidget {
   const DataAnalysisTab({super.key});
@@ -447,7 +448,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     return Expanded(
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 10),

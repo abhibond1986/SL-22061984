@@ -11,6 +11,7 @@ import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../incident_detail_screen.dart';
 import '../../widgets/bottom_nav_gap.dart';
+import '../../widgets/safe_backdrop_filter.dart';
 
 /// Org overview.
 ///
@@ -447,7 +448,7 @@ class _OverviewTabState extends State<OverviewTab> {
         onTap: onTap,
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
-          child: BackdropFilter(
+          child: SafeBackdropFilter(
             filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
             child: Container(
               padding: const EdgeInsets.all(12),
@@ -497,7 +498,7 @@ class _OverviewTabState extends State<OverviewTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -558,7 +559,7 @@ class _OverviewTabState extends State<OverviewTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -640,7 +641,7 @@ class _OverviewTabState extends State<OverviewTab> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -718,7 +719,7 @@ class _OverviewTabState extends State<OverviewTab> {
   Widget _problemAreas(SL sl) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           padding: const EdgeInsets.all(14),
@@ -923,7 +924,7 @@ class _OverviewTabState extends State<OverviewTab> {
       onTap: () => setState(() => _spiExpanded = !_spiExpanded),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
+        child: SafeBackdropFilter(
           filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
           child: Container(
             decoration: BoxDecoration(

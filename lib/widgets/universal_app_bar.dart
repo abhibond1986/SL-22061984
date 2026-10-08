@@ -16,6 +16,7 @@ import '../utils/sail_logo.dart';
 import 'brand_logo.dart';
 import 'notification_bell.dart';
 import 'nav_bar_style.dart' show TopBarStyle;
+import 'safe_backdrop_filter.dart';
 
 class UniversalAppBar extends StatefulWidget implements PreferredSizeWidget {
   /// Global "return to Home" hook. The parent shell (HomeScreen /
@@ -409,7 +410,7 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
       child: ClipRRect(
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
         child: Container(
           // Brand-gradient header with white foregrounds — see TopBarStyle.

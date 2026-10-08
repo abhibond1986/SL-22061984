@@ -23,6 +23,7 @@ import 'sop_scan_screen.dart';
 import 'chat_tab.dart';
 import 'reports_tab.dart';
 import '../widgets/universal_app_bar.dart';
+import '../widgets/safe_backdrop_filter.dart';
 
 class HomeScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -340,7 +341,7 @@ class _HomeScreenState extends State<HomeScreen>
     ];
 
     return ClipRRect(
-      child: BackdropFilter(
+      child: SafeBackdropFilter(
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
           decoration: NavBarStyle.decoration(sl),
