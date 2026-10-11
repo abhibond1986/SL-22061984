@@ -626,7 +626,10 @@ class SyncService {
             }
           }
         }
-      } catch (_) {}
+      } catch (e, stack) {
+        debugPrint('⚠️ SyncService.pullMasterData: Failed to fetch API keys from Apps Script: $e');
+        debugPrint('   Stack: ${stack.toString().split('\n').take(3).join('\n')}');
+      }
 
       return out.isEmpty ? null : out;
     }

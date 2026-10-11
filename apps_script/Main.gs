@@ -195,7 +195,7 @@ function handleGetMasterData_(data) {
       geminiApiKey:       props.getProperty('GOOGLE_AI_KEY') || '',
       geminiModel:        props.getProperty('GEMINI_MODEL') || '',
       openRouterApiKey:   props.getProperty('OPENROUTER_API_KEY') || '',
-      openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY2') || '',
+      openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY_2') || '',
       groqApiKey:         props.getProperty('GROQ_API_KEY') || ''
     };
 
@@ -230,7 +230,7 @@ function handleGetAiKeys_(data) {
       geminiApiKey:       props.getProperty('GOOGLE_AI_KEY') || '',
       geminiModel:        props.getProperty('GEMINI_MODEL') || '',
       openRouterApiKey:   props.getProperty('OPENROUTER_API_KEY') || '',
-      openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY2') || '',
+      openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY_2') || '',
       groqApiKey:         props.getProperty('GROQ_API_KEY') || '',
       naraApiKey:         props.getProperty('NARA_API_KEY') || '',
       naraModel:          props.getProperty('NARA_MODEL') || 'mimo-v2.5-free'
