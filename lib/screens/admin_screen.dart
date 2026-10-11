@@ -355,8 +355,9 @@ class _AdminScreenState extends State<AdminScreen>
   void dispose() {
     AdminMasterData.lastPushError.removeListener(_onPushError);
     _unameCtrl.dispose(); _pwCtrl.dispose();
-    _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose(); _naraKeyCtrl.dispose();
-    _naraProxyCtrl.dispose();
+    _groqKeyCtrl.dispose(); _geminiVisionKeyCtrl.dispose();
+    _openRouterKey1Ctrl.dispose(); _openRouterKey2Ctrl.dispose();
+    _naraKeyCtrl.dispose(); _naraProxyCtrl.dispose();
     super.dispose();
   }
 
@@ -2245,12 +2246,17 @@ class _AdminScreenState extends State<AdminScreen>
       _groqConfigCard(sl),
 
       const SizedBox(height: 16),
-      _sectionHeader('Gemini Vision (Hazard Analysis)', sl),
+      _sectionHeader('Gemini Vision (Hazard Analysis - Tier 1)', sl),
       const SizedBox(height: 8),
       _geminiVisionConfigCard(sl),
 
       const SizedBox(height: 16),
-      _sectionHeader('NaraRouter (Extra Scan Allowance)', sl),
+      _sectionHeader('OpenRouter (Backup Scan Provider - Tier 2)', sl),
+      const SizedBox(height: 8),
+      _openRouterConfigCard(sl),
+
+      const SizedBox(height: 16),
+      _sectionHeader('NaraRouter (Final Fallback - Tier 3)', sl),
       const SizedBox(height: 8),
       _naraConfigCard(sl),
 
@@ -2269,8 +2275,11 @@ class _AdminScreenState extends State<AdminScreen>
           _intRow('Cloudinary image CDN', 'dzt1vxsdg',
               AppColors.green, Icons.image_rounded, sl),
           const SizedBox(height: 8),
-          _intRow('Gemini Vision (Hazard AI)', _geminiVisionConfigured ? 'active (direct API)' : 'not configured',
+          _intRow('Gemini Vision (Tier 1 AI)', _geminiVisionConfigured ? 'active (direct API)' : 'not configured',
               _geminiVisionConfigured ? AppColors.green : AppColors.amber, Icons.remove_red_eye_rounded, sl),
+          const SizedBox(height: 8),
+          _intRow('OpenRouter (Tier 2 AI)', _openRouterConfigured ? 'active' : 'optional (not configured)',
+              _openRouterConfigured ? AppColors.green : AppColors.amber, Icons.swap_horiz_rounded, sl),
           const SizedBox(height: 8),
           // ON WEB, A LOCAL KEY IS NOT WHAT MAKES THIS WORK. The browser goes
           // through the Apps Script proxy, which signs the request with the key
@@ -2279,7 +2288,7 @@ class _AdminScreenState extends State<AdminScreen>
           // there would send an admin to fix something that is not broken, which
           // is how this provider came to look dead for days. Mobile still needs
           // the local key, so the test stays platform-specific.
-          _intRow('NaraRouter (Extra scan allowance)',
+          _intRow('NaraRouter (Tier 3 AI)',
               _naraConfigured
                   ? 'active — $_naraSelectedModel'
                   : (kIsWeb && _naraProxyCtrl.text.trim().isNotEmpty
@@ -3034,7 +3043,12 @@ class _AdminScreenState extends State<AdminScreen>
   final _geminiVisionKeyCtrl = TextEditingController();
   String _geminiVisionSelectedModel = GeminiDirectVision.defaultModel;
 
-  // NaraRouter (Tier 1b vision provider) — separate account, separate allowance.
+  // OpenRouter (Tier 2 vision provider) — ~50 free requests/day shared across all models
+  bool _openRouterConfigured = false;
+  final _openRouterKey1Ctrl = TextEditingController();
+  final _openRouterKey2Ctrl = TextEditingController(); // Optional secondary key
+
+  // NaraRouter (Tier 3 vision provider) — separate account, separate allowance.
   bool _naraConfigured = false;
   final _naraKeyCtrl = TextEditingController();
   String _naraSelectedModel = NaraVision.defaultModel;
@@ -3073,6 +3087,7 @@ class _AdminScreenState extends State<AdminScreen>
     final visionModel = await GeminiVision.getGroqVisionModel();
     final gemKey = await GeminiDirectVision.getApiKey();
     final gemModel = await GeminiDirectVision.getModel();
+    final openRouterKeys = await GeminiVision.openRouterKeys(); // Returns list of keys
     final naraKey = await NaraVision.getApiKey();
     final naraModel = await NaraVision.getModel();
     final naraProxy = await NaraVision.getProxyUrl();
@@ -3115,6 +3130,10 @@ class _AdminScreenState extends State<AdminScreen>
                 .any((m) => m['id'] == gemModel)
             ? gemModel
             : GeminiDirectVision.defaultModel;
+        // OpenRouter keys - validates prefix 'sk-or-' same as runtime chain
+        _openRouterConfigured = openRouterKeys.isNotEmpty;
+        _openRouterKey1Ctrl.text = openRouterKeys.isNotEmpty ? openRouterKeys[0] : '';
+        _openRouterKey2Ctrl.text = openRouterKeys.length > 1 ? openRouterKeys[1] : '';
         // Same prefix test the runtime chain uses, so this indicator cannot say
         // "connected" for a key that every scan will silently skip.
         _naraConfigured =
@@ -3318,7 +3337,144 @@ class _AdminScreenState extends State<AdminScreen>
     );
   }
 
-  /// NaraRouter key + model. Tier 1b of the vision chain.
+  /// OpenRouter keys (Tier 2 vision provider).
+  ///
+  /// Supports TWO keys for failover: primary + optional secondary. Both draw from
+  /// the same account quota (~50 free requests/day) unless they're from different
+  /// accounts, in which case the second provides genuine redundancy.
+  Widget _openRouterConfigCard(SL sl) {
+    if (_openRouterKey1Ctrl.text.isEmpty && !_openRouterConfigured) {
+      _loadGroqConfig(); // loads all AI keys together
+    }
+    const orAccent = Color(0xFFFF6B35);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: sl.card, borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _openRouterConfigured ? AppColors.green.withOpacity(0.5) : sl.border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(_openRouterConfigured ? Icons.check_circle : Icons.info_outline_rounded,
+            color: _openRouterConfigured ? AppColors.green : AppColors.amber, size: 16),
+          const SizedBox(width: 8),
+          Text(_openRouterConfigured ? 'OpenRouter Connected' : 'OpenRouter Key (Optional)',
+            style: TextStyle(color: sl.text1, fontSize: 12, fontWeight: FontWeight.w700)),
+        ]),
+        const SizedBox(height: 4),
+        Text('Backup image-scan provider (~50 free requests/day). Get key at openrouter.ai',
+          style: TextStyle(color: sl.text4, fontSize: 10)),
+        const SizedBox(height: 12),
+        _apiKeyInputField(
+          _openRouterKey1Ctrl, 'Primary OpenRouter Key (sk-or-...)', sl,
+          accent: orAccent,
+          onSave: (key) async {
+            if (!key.startsWith('sk-or-') || key.length <= 20) {
+              _toast(
+                  key.startsWith('sk-or-')
+                      ? 'Key looks truncated — paste the whole thing'
+                      : 'Invalid key — must start with sk-or-',
+                  AppColors.red);
+              return;
+            }
+            // Save to local storage
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString(GeminiVision.kOpenRouterKey1, key);
+            // Push to backend for cross-device sync
+            await _pushOpenRouterKeysToBackend(
+                key, _openRouterKey2Ctrl.text.trim());
+            setState(() => _openRouterConfigured = true);
+            _toast('✓ OpenRouter key saved & synced to all devices!', AppColors.green);
+          },
+        ),
+        const SizedBox(height: 10),
+        // Optional secondary key for failover
+        _apiKeyInputField(
+          _openRouterKey2Ctrl, 'Secondary Key (optional failover - sk-or-...)', sl,
+          accent: orAccent,
+          onSave: (key) async {
+            // Empty is allowed (clearing the secondary key)
+            if (key.isNotEmpty && (!key.startsWith('sk-or-') || key.length <= 20)) {
+              _toast(
+                  key.startsWith('sk-or-')
+                      ? 'Key looks truncated — paste the whole thing'
+                      : 'Invalid key — must start with sk-or-',
+                  AppColors.red);
+              return;
+            }
+            // Save to local storage
+            final prefs = await SharedPreferences.getInstance();
+            if (key.isEmpty) {
+              await prefs.remove(GeminiVision.kOpenRouterKey2);
+            } else {
+              await prefs.setString(GeminiVision.kOpenRouterKey2, key);
+            }
+            // Push to backend
+            await _pushOpenRouterKeysToBackend(
+                _openRouterKey1Ctrl.text.trim(), key);
+            setState(() {});
+            _toast(key.isEmpty
+                ? '✓ Secondary key removed'
+                : '✓ Secondary key saved & synced!', AppColors.green);
+          },
+        ),
+        const SizedBox(height: 10),
+        // Info about dual keys
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: sl.glassColor,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: sl.glassBorder)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('About OpenRouter Keys',
+                style: TextStyle(
+                    color: sl.text2,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text(
+              '• Free tier: ~50 requests/day (shared across all :free models)\n'
+              '• Tier 2 provider (runs when Gemini quota exhausted)\n'
+              '• Two keys from SAME account share one quota\n'
+              '• Two keys from DIFFERENT accounts = true redundancy\n'
+              '• Alternative: Configure via Apps Script Script Properties',
+              style: TextStyle(color: sl.text3, fontSize: 9, height: 1.4)),
+          ]),
+        ),
+        const SizedBox(height: 10),
+        // Current model info (read-only, hardcoded in gemini_vision.dart)
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: sl.isDark ? const Color(0xFF1C1F2E) : const Color(0xFFF8F9FC),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: sl.border)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Active Model (read-only)',
+                style: TextStyle(
+                    color: sl.text3,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600)),
+            const SizedBox(height: 3),
+            Text('dots-3-note-preview:free',
+                style: TextStyle(
+                    color: sl.text1,
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 3),
+            Text('AtlasCloud • MoE 16B active • 512k context • ~15s latency',
+                style: TextStyle(color: sl.text4, fontSize: 8.5)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  /// NaraRouter key + model. Tier 3 of the vision chain.
   ///
   /// Kept as its own card rather than folded into the Gemini one because the two
   /// are different accounts with different billing: an admin needs to see at a
@@ -6326,6 +6482,27 @@ class _AdminScreenState extends State<AdminScreen>
       final body = {
         'action': 'saveMasterData',
         'groqApiKey': groqKey,
+        'updatedBy': _currentActor,
+      };
+      await http.post(Uri.parse(url),
+        body: jsonEncode(body),
+        headers: {'Content-Type': 'text/plain;charset=utf-8'},
+      ).timeout(const Duration(seconds: 15));
+    } catch (_) {}
+  }
+
+  /// Push OpenRouter keys for cross-device sync.
+  ///
+  /// Sends both primary and secondary keys (if configured) to Apps Script backend.
+  /// The backend stores them in Script Properties and syncs to all devices via
+  /// getMasterData action on app launch.
+  Future<void> _pushOpenRouterKeysToBackend(String key1, String key2) async {
+    try {
+      final url = await SyncService.getBackendUrl();
+      final body = {
+        'action': 'saveMasterData',
+        'openRouterApiKey': key1,
+        if (key2.isNotEmpty) 'openRouterApiKey2': key2,
         'updatedBy': _currentActor,
       };
       await http.post(Uri.parse(url),
