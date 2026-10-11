@@ -95,6 +95,16 @@ function doPost(e) {
     if (action === 'getMasterData') return handleGetMasterData_(data);
 
     // ═══════════════════════════════════════════════════════════════════
+    // API KEYS DISTRIBUTION (Supabase-enabled apps call this separately)
+    //
+    // When SupabaseConfig.enabled = true, the Flutter app gets master data
+    // from Supabase but still needs API keys from Apps Script (keys should
+    // NEVER be stored in Supabase for security). This handler returns ONLY
+    // the keys, without plants/departments/etc.
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === 'getAiKeys') return handleGetAiKeys_(data);
+
+    // ═══════════════════════════════════════════════════════════════════
     // DOCUMENT Q&A — requires DocQaProxy.gs in this project.
     //
     // Answers a question using ONLY extracts from a document the user
@@ -182,7 +192,7 @@ function handleGetMasterData_(data) {
       // Only served if set in THIS project's Script Properties. Leave them
       // unset here if the main backend is already distributing them, so
       // there is one source of truth per key rather than two that can differ.
-      geminiApiKey:       props.getProperty('GEMINI_API_KEY') || '',
+      geminiApiKey:       props.getProperty('GOOGLE_AI_KEY') || '',
       geminiModel:        props.getProperty('GEMINI_MODEL') || '',
       openRouterApiKey:   props.getProperty('OPENROUTER_API_KEY') || '',
       openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY2') || '',
@@ -200,6 +210,44 @@ function handleGetMasterData_(data) {
 
   } catch (err) {
     Logger.log('Error in getMasterData: ' + err.toString());
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/**
+ * Handle getAiKeys action — returns ONLY API keys (no master data).
+ * Called by Flutter app when Supabase is enabled (gets master data from DB,
+ * but still needs keys from Apps Script for security).
+ */
+function handleGetAiKeys_(data) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+
+    const payload = {
+      geminiApiKey:       props.getProperty('GOOGLE_AI_KEY') || '',
+      geminiModel:        props.getProperty('GEMINI_MODEL') || '',
+      openRouterApiKey:   props.getProperty('OPENROUTER_API_KEY') || '',
+      openRouterApiKey2:  props.getProperty('OPENROUTER_API_KEY2') || '',
+      groqApiKey:         props.getProperty('GROQ_API_KEY') || '',
+      naraApiKey:         props.getProperty('NARA_API_KEY') || '',
+      naraModel:          props.getProperty('NARA_MODEL') || 'mimo-v2.5-free'
+    };
+
+    Logger.log('getAiKeys: served keys (gemini=' +
+        (payload.geminiApiKey ? 'SET' : 'unset') +
+        ', groq=' + (payload.groqApiKey ? 'SET' : 'unset') +
+        ', openRouter=' + (payload.openRouterApiKey ? 'SET' : 'unset') + ')');
+
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: true,
+      data: payload
+    })).setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    Logger.log('Error in getAiKeys: ' + err.toString());
     return ContentService.createTextOutput(JSON.stringify({
       ok: false,
       error: err.toString()
