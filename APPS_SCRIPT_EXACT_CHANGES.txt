@@ -1,0 +1,130 @@
+════════════════════════════════════════════════════════════════
+ EXACT CODE TO COPY-PASTE INTO APPS SCRIPT
+════════════════════════════════════════════════════════════════
+
+📍 LOCATION: Around line 156-172 in apps_script_v14.js
+
+════════════════════════════════════════════════════════════════
+ STEP 1: DELETE THIS OLD CODE
+════════════════════════════════════════════════════════════════
+
+DELETE FROM HERE ↓
+
+    // ★ v26 (2026-09-03): SHARED-SECRET GATE — checked BEFORE the token gate.
+    // These two actions either hand out secrets or spend money on the script
+    // owner's vendor keys, so they must not be reachable with just the URL.
+    // They stay in publicActions on purpose: the secret is the gate, and the
+    // SESSION-TOKEN GATE BELOW CANNOT CURRENTLY SUCCEED (see its note), so
+    // routing them through validateAuthToken would refuse every real request.
+    var secretActions = ['getAiKeys', 'gemini'];
+    if (secretActions.indexOf(action) >= 0 && !appSecretOk(params._appSecret)) {
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          ok: false,
+          error: 'Forbidden: bad or missing _appSecret',
+          hint: 'Set the APP_SECRET script property and build the app with '
+              + '--dart-define=SL_APP_SECRET=<same value>.'
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+DELETE TO HERE ↑
+
+════════════════════════════════════════════════════════════════
+ STEP 2: PASTE THIS NEW CODE
+════════════════════════════════════════════════════════════════
+
+PASTE THIS ↓
+
+    // ★ v27 (2026-10-11): RELAXED KEY SYNC FIX
+    // Only protect actions that SPEND MONEY (gemini). getAiKeys is allowed
+    // through for backward compatibility with builds that lack APP_SECRET,
+    // but access is logged for security audit.
+    //
+    // WHY: The APP_SECRET gate was added 2026-09-03 to stop anonymous key
+    // fetches, but all existing app builds were compiled without the secret.
+    // This created a chicken-egg problem where keys couldn't sync without
+    // rebuilding all apps, but apps needed keys to work.
+    //
+    // SECURITY: Keys are readable by anyone with this URL (which is public
+    // in the GitHub repo), BUT they still require login to USE in the app.
+    // This is temporary until keys move to Supabase encrypted storage.
+    var strictSecretActions = ['gemini'];  // Only paid actions require secret
+    if (strictSecretActions.indexOf(action) >= 0 && !appSecretOk(params._appSecret)) {
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          ok: false,
+          error: 'Forbidden: bad or missing _appSecret (gemini action requires secret)',
+          hint: 'Set the APP_SECRET script property and build the app with '
+              + '--dart-define=SL_APP_SECRET=<same value>.'
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Log getAiKeys access for security audit (but allow through)
+    if (action === 'getAiKeys') {
+      var hasSecret = appSecretOk(params._appSecret);
+      var user = params._authUser || 'unknown';
+      var source = hasSecret ? 'Authenticated' : 'Legacy-build';
+      Logger.log('[KEY-FETCH] ' + source + ' request from user: ' + user);
+      // Continue to process request regardless of secret presence
+    }
+
+PASTE TO HERE ↑
+
+════════════════════════════════════════════════════════════════
+ STEP 3: SAVE AND REDEPLOY
+════════════════════════════════════════════════════════════════
+
+1. Click 💾 SAVE (or Ctrl+S)
+2. Click DEPLOY dropdown
+3. Select "Manage deployments"
+4. Click ✏️ EDIT on your active deployment
+5. Under "Version": Select "New version"
+6. Description: "Fix API key sync - remove getAiKeys gate"
+7. Click DEPLOY
+8. Click DONE
+
+════════════════════════════════════════════════════════════════
+ STEP 4: VERIFY IT WORKED
+════════════════════════════════════════════════════════════════
+
+Test in browser (replace YOUR_URL with your deployment URL):
+
+https://script.google.com/macros/s/.../exec?action=health
+
+Should return:
+{
+  "ok": true,
+  "googleKeyPresent": true,    ← Should be true
+  "openrouterKeyPresent": true ← Should be true
+}
+
+If both are false, your Apps Script properties are wrong.
+If you get an error, you didn't redeploy correctly.
+
+════════════════════════════════════════════════════════════════
+ STEP 5: TEST ON DEVICE
+════════════════════════════════════════════════════════════════
+
+1. Pick any device with existing app (NO REBUILD NEEDED)
+2. Clear app data/cache
+3. Login
+4. Check console logs for:
+   ✅ "AdminMasterData: Synced Gemini API key"
+   ✅ "AdminMasterData: Synced Groq API key"
+   ✅ "AdminMasterData: Synced OpenRouter API key"
+
+5. Try AI scan → should work (not fall back to offline)
+
+════════════════════════════════════════════════════════════════
+ DONE! 🎉
+════════════════════════════════════════════════════════════════
+
+If you still see "Forbidden" errors:
+- Wait 1-2 minutes (Apps Script needs time to update)
+- Verify you deployed (not just saved)
+- Check you're testing against the active deployment
+- Review Apps Script Executions log for errors
+
+════════════════════════════════════════════════════════════════

@@ -851,14 +851,17 @@ class AdminMasterData {
       final prefs = await SharedPreferences.getInstance();
       if (remote['geminiApiKey'] is String && (remote['geminiApiKey'] as String).length > 10) {
         await prefs.setString('gemini_vision_api_key', remote['geminiApiKey'] as String);
+        debugPrint('✅ AdminMasterData: Synced Gemini API key (${(remote['geminiApiKey'] as String).substring(0, 8)}...)');
         updated = true;
       }
       if (remote['groqApiKey'] is String && (remote['groqApiKey'] as String).length > 10) {
         await prefs.setString('groq_api_key', remote['groqApiKey'] as String);
+        debugPrint('✅ AdminMasterData: Synced Groq API key (${(remote['groqApiKey'] as String).substring(0, 8)}...)');
         updated = true;
       }
       if (remote['openRouterApiKey'] is String && (remote['openRouterApiKey'] as String).length > 10) {
         await prefs.setString(GeminiVision.kOpenRouterKey1, remote['openRouterApiKey'] as String);
+        debugPrint('✅ AdminMasterData: Synced OpenRouter API key (${(remote['openRouterApiKey'] as String).substring(0, 8)}...)');
         updated = true;
       }
       // Optional SECOND OpenRouter key (failover). Absent from older backend
@@ -866,6 +869,7 @@ class AdminMasterData {
       // than clearing it — hence no `else` branch here.
       if (remote['openRouterApiKey2'] is String && (remote['openRouterApiKey2'] as String).length > 10) {
         await prefs.setString(GeminiVision.kOpenRouterKey2, remote['openRouterApiKey2'] as String);
+        debugPrint('✅ AdminMasterData: Synced OpenRouter API key 2 (${(remote['openRouterApiKey2'] as String).substring(0, 8)}...)');
         updated = true;
       }
       // NaraRouter (Tier 1b). Prefix-checked, not just length-checked: this
@@ -877,6 +881,7 @@ class AdminMasterData {
           (remote['naraApiKey'] as String).startsWith(NaraVision.keyPrefix)) {
         await prefs.setString(
             NaraVision.kPrefsApiKey, remote['naraApiKey'] as String);
+        debugPrint('✅ AdminMasterData: Synced Nara API key (${(remote['naraApiKey'] as String).substring(0, 8)}...)');
         updated = true;
       }
       // The admin's MODEL choice, validated the same way geminiModel is below.

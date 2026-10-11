@@ -685,7 +685,11 @@ class SyncService {
         }
       }
       return null;
-    } catch (_) {
+    } catch (e, stack) {
+      debugPrint('SyncService: _fetchApiKeysFromAppsScript FAILED: $e');
+      if (e.toString().contains('Forbidden')) {
+        debugPrint('  ⚠️  APP_SECRET issue - build with --dart-define=SL_APP_SECRET=<value>');
+      }
       return null;
     }
   }
