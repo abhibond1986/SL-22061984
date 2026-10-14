@@ -140,32 +140,51 @@ class _WsaBarChartState extends State<WsaBarChart> {
 
   /// Count incidents per WSA category using flexible matching.
   /// Matches the incident's wsaCategory field against the custom list entries.
+  ///
+  /// ★ 2026-10-14: each incident is counted in AT MOST ONE bar. The old rule
+  /// counted an incident under EVERY category sharing any keyword with it, so
+  /// one "Fall from height" report also lit up "Slip/Fall" and "Fall of
+  /// Material", and "Material Handling" lit up "Fall of Material" — the bars
+  /// summed to more than "Total Cases". Now: exact wording first (what the
+  /// Near Miss form and AI scan store), then containment, then best keyword
+  /// score — the same ladder data_analysis_tab uses.
   Map<String, int> get _wsaCounts {
-    final filtered = _filteredIncidents;
-    final counts = <String, int>{};
-
-    for (final cat in _wsaCategories) {
-      final catLower = cat.toLowerCase();
-      // Extract keywords: strip leading number+dot, split on whitespace/punctuation
-      final stripped = cat.replaceFirst(RegExp(r'^\d+\.\s*'), '').toLowerCase();
-      final keywords = stripped.split(RegExp(r'[\s/()]+'))
-          .where((w) => w.length > 2).toList();
-
-      counts[cat] = filtered.where((i) {
-        final wsa = (i['wsaCategory']?.toString() ?? '').toLowerCase();
-        if (wsa.isEmpty) return false;
-        // Exact match
-        if (wsa == catLower) return true;
-        // Contains match (either direction)
-        if (wsa.contains(stripped) || stripped.contains(wsa)) return true;
-        // Keyword match: any keyword from the category appears in the incident's wsaCategory
-        for (final kw in keywords) {
-          if (wsa.contains(kw)) return true;
-        }
-        return false;
-      }).length;
+    final counts = <String, int>{for (final c in _wsaCategories) c: 0};
+    for (final i in _filteredIncidents) {
+      final cat = _matchCategory(i['wsaCategory']?.toString() ?? '');
+      if (cat != null) counts[cat] = (counts[cat] ?? 0) + 1;
     }
     return counts;
+  }
+
+  static String _strip(String s) =>
+      s.trim().toLowerCase().replaceFirst(RegExp(r'^\d+\.\s*'), '');
+
+  String? _matchCategory(String raw) {
+    final r = _strip(raw);
+    if (r.isEmpty) return null;
+    // 1. exact (ignoring a leading "1." number)
+    for (final c in _wsaCategories) {
+      if (_strip(c) == r) return c;
+    }
+    // 2. containment, either direction
+    for (final c in _wsaCategories) {
+      final s = _strip(c);
+      if (s.isNotEmpty && (r.contains(s) || s.contains(r))) return c;
+    }
+    // 3. keyword overlap — pick the single best-scoring category
+    final words = r.split(RegExp(r'[\s/()]+')).where((w) => w.length > 2);
+    String? best;
+    var bestScore = 0;
+    for (final c in _wsaCategories) {
+      final s = _strip(c);
+      final score = words.where(s.contains).length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    return best;
   }
 
   @override
