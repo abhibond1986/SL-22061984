@@ -13,11 +13,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:speech_to_text/speech_recognition_error.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:permission_handler/permission_handler.dart';
 import '../main.dart' show AppColors, SL;
+import '../services/dictation_session.dart' as dictation;
 import '../services/i18n.dart';
+import '../services/voice_engine.dart';
 
 class VoiceTextField extends StatefulWidget {
   final TextEditingController controller;
@@ -44,22 +43,14 @@ class VoiceTextField extends StatefulWidget {
 }
 
 class _VoiceTextFieldState extends State<VoiceTextField> {
-  static bool _micPermissionGranted = false;
-
   // ── One engine, many fields ───────────────────────────────────────────────
-  // `stt.SpeechToText()` is a process-wide SINGLETON, and `initialize()` only
-  // stores the status/error callbacks of the FIRST caller. Before 2026-10-06
-  // every field kept its own "is listening" flag and the engine's callbacks
-  // belonged to whichever field initialised first, so the second field on a
-  // screen never heard its own "done", could start while the first session
-  // was still shutting down (the browser then refuses to start and nothing is
-  // written), and any field being disposed stopped whichever session was live.
-  // Now one static owner holds the session and callbacks are routed to it.
-  static final stt.SpeechToText _speech = stt.SpeechToText();
-  static _VoiceTextFieldState? _owner;
-  static stt.SpeechStatusListener? _foreignStatus;
-  static stt.SpeechErrorListener? _foreignError;
-  static bool _speechAvailable = false;
+  // `stt.SpeechToText()` is a process-wide SINGLETON whose `initialize()` keeps
+  // only the FIRST caller's callbacks. This widget used to hold its own static
+  // owner + router; since 2026-10-14 that lives in VoiceEngine so the Near Miss
+  // screen shares it too (AUDIT_2026-10-14_NEAR_MISS_MIC.md). Exactly one
+  // field — here or on Near Miss — owns the engine at a time; a new claim tells
+  // the previous owner it lost the session.
+  bool _speechAvailable = false;
 
   bool _isListening = false;
   int _session = 0;
@@ -77,45 +68,8 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     _initSpeech();
   }
 
-  static void _routeStatus(String status) {
-    _owner?._onStatus(status);
-    _foreignStatus?.call(status);
-  }
-
-  static void _routeError(SpeechRecognitionError e) {
-    _owner?._onError(e);
-    _foreignError?.call(e);
-  }
-
-  /// Puts the router in front of whatever callbacks the singleton holds
-  /// (e.g. the Near Miss tab's), keeping those working as well.
-  static void _installRouter() {
-    if (_speech.statusListener != _routeStatus) {
-      _foreignStatus = _speech.statusListener;
-      _speech.statusListener = _routeStatus;
-    }
-    if (_speech.errorListener != _routeError) {
-      _foreignError = _speech.errorListener;
-      _speech.errorListener = _routeError;
-    }
-  }
-
   Future<void> _initSpeech() async {
-    try {
-      if (!kIsWeb && !_micPermissionGranted) {
-        final status = await Permission.microphone.request();
-        if (status != PermissionStatus.granted) return;
-        _micPermissionGranted = true;
-      }
-      if (!_speechAvailable) {
-        _speechAvailable = await _speech.initialize(
-            onError: _routeError, onStatus: _routeStatus);
-      }
-      _installRouter();
-    } catch (e) {
-      debugPrint('VoiceTextField: speech init failed: $e');
-      _speechAvailable = false;
-    }
+    _speechAvailable = await VoiceEngine.ensureReady();
     if (mounted) setState(() {});
   }
 
@@ -133,22 +87,22 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     }
   }
 
-  void _onError(SpeechRecognitionError e) {
-    debugPrint('VoiceTextField: speech error ${e.errorMsg}');
+  void _onError(String code) {
+    debugPrint('VoiceTextField: speech error $code');
     _finish();
   }
 
   void _finish() {
     _silence?.cancel();
-    if (_owner == this) _owner = null;
+    VoiceEngine.release(this);
     if (mounted && _isListening) setState(() => _isListening = false);
   }
 
   void _armSilence(int session) {
     _silence?.cancel();
     _silence = Timer(_silenceLimit, () {
-      if (_owner == this && _session == session && _isListening) {
-        _speech.stop();
+      if (VoiceEngine.owns(this) && _session == session && _isListening) {
+        VoiceEngine.stop();
         _finish();
       }
     });
@@ -162,37 +116,10 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     }
   }
 
-  /// Collapses phrases the recogniser repeats back-to-back. Chrome (notably
-  /// on Android) can return every interim step as its own result — "near",
-  /// "near cast", "near cast house" — and the plugin joins them all, giving
-  /// "near near cast near cast house". Removing an immediately repeated run of
-  /// words (keeping the later, longer copy) restores "near cast house".
+  /// Collapses phrases the recogniser repeats back-to-back (Chrome on Android
+  /// returns every interim step as its own result). Shared with Near Miss.
   @visibleForTesting
-  static String collapseRepeats(String text) {
-    final w = text.split(RegExp(r'\s+')).where((x) => x.isNotEmpty).toList();
-    var changed = true;
-    while (changed) {
-      changed = false;
-      outer:
-      for (var len = w.length ~/ 2; len >= 1; len--) {
-        for (var i = 0; i + 2 * len <= w.length; i++) {
-          var same = true;
-          for (var k = 0; k < len; k++) {
-            if (w[i + k].toLowerCase() != w[i + len + k].toLowerCase()) {
-              same = false;
-              break;
-            }
-          }
-          if (same) {
-            w.removeRange(i, i + len);
-            changed = true;
-            break outer;
-          }
-        }
-      }
-    }
-    return w.join(' ');
-  }
+  static String collapseRepeats(String text) => dictation.collapseRepeats(text);
 
   void _write(String words) {
     final spoken = collapseRepeats(words);
@@ -207,22 +134,9 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     widget.onChanged?.call(text);
   }
 
-  Future<void> _stopOwner() async {
-    final prev = _owner;
-    if (prev == null && !_speech.isListening) return;
-    try { await _speech.stop(); } catch (_) {}
-    prev?._finish();
-    // The browser fires "end" asynchronously; starting before it has done so
-    // throws InvalidStateError and the new field silently gets nothing.
-    for (var i = 0; i < 10 && _speech.isListening; i++) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
-    await Future.delayed(const Duration(milliseconds: 250));
-  }
-
   Future<void> _toggleListening() async {
     if (_isListening) {
-      try { await _speech.stop(); } catch (_) {}
+      await VoiceEngine.stop();
       _finish();
       return;
     }
@@ -239,21 +153,24 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
       }
     }
 
-    await _stopOwner();
+    // Ends whichever session is live — in this widget or on Near Miss — and
+    // waits for the browser's `end` before starting, or it refuses to start.
+    await VoiceEngine.stopAndWait();
     if (!mounted) return;
-    _installRouter();
-    _owner = this;
+    VoiceEngine.claim(this,
+        onStatus: _onStatus, onError: _onError, onLost: _finish);
     final session = ++_session;
     _sawListening = false;
     _baseText = widget.controller.text;
     _lastWords = '';
     setState(() => _isListening = true);
 
-    Future<void> start() => _speech.listen(
-          onResult: (result) {
-            if (_owner != this || _session != session || !mounted) return;
+    Future<void> start() => VoiceEngine.listen(
+          onWords: (words) {
+            if (!VoiceEngine.owns(this) || _session != session || !mounted) {
+              return;
+            }
             _sawListening = true;
-            final words = result.recognizedWords;
             if (words != _lastWords) {
               _lastWords = words;
               _armSilence(session);
@@ -261,11 +178,8 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
             _write(words);
           },
           localeId: _getSpeechLocale(),
-          listenMode: stt.ListenMode.dictation,
-          listenFor: const Duration(minutes: 3),
           pauseFor: const Duration(seconds: 10),
           cancelOnError: true,
-          partialResults: true,
         );
 
     try {
@@ -274,9 +188,9 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
       // Usually "recognition has already started": give the engine a moment
       // to finish the previous session, then try once more.
       debugPrint('VoiceTextField: listen failed ($e), retrying');
-      try { await _speech.cancel(); } catch (_) {}
+      await VoiceEngine.cancel();
       await Future.delayed(const Duration(milliseconds: 600));
-      if (_owner != this || _session != session || !mounted) return;
+      if (!VoiceEngine.owns(this) || _session != session || !mounted) return;
       try {
         await start();
       } catch (e2) {
@@ -289,7 +203,7 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
         return;
       }
     }
-    if (_owner == this && _session == session) _armSilence(session);
+    if (VoiceEngine.owns(this) && _session == session) _armSilence(session);
   }
 
   @override
@@ -297,9 +211,9 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     _silence?.cancel();
     // Only stop the engine if THIS field owns the session; another field on
     // the screen may be mid-dictation.
-    if (_owner == this) {
-      _owner = null;
-      _speech.stop();
+    if (VoiceEngine.owns(this)) {
+      VoiceEngine.release(this);
+      VoiceEngine.stop();
     }
     super.dispose();
   }

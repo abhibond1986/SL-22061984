@@ -18,8 +18,8 @@ import 'package:flutter/material.dart';
 // call this file used to make (_callAiTextFallback) hardcoded the URL and so
 // ignored that override.
 import 'package:image_picker/image_picker.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:permission_handler/permission_handler.dart';
+import '../services/dictation_session.dart';
+import '../services/voice_engine.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
 // GeminiVision is no longer called from this screen: the photo analysis goes
@@ -219,32 +219,20 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   // GPS geo-tagging
   LocationData? _capturedLocation;
 
-  final stt.SpeechToText _speech         = stt.SpeechToText();
+  // ── VOICE DICTATION ───────────────────────────────────────────────────────
+  // ★ 2026-10-14 (AUDIT_2026-10-14_NEAR_MISS_MIC.md): the session logic lives in
+  // DictationSession (plain Dart, tested by tools/dictation_session_test.dart)
+  // and the engine is owned by VoiceEngine, shared with AI Scan's voice fields.
+  // This State used to call `initialize()` itself — a no-op after the first
+  // time, because the engine is a singleton that keeps only the FIRST caller's
+  // callbacks — so from the second visit on it never heard "done" or an error.
   bool                    _speechAvailable = false;
   bool                    _isListening     = false;
-  bool                    _pauseTimedOut   = false; // ★ v25: track pause-timeout vs error
-  bool                    _voiceSessionEnded = false; // ★ v29: prevent double AI trigger
-  int                     _voiceSessionId = 0; // ★ v29: stale timeout protection
+  /// True once the engine has confirmed it is listening — the banner says
+  /// "Starting microphone…" until then, so the worker knows when to speak.
+  bool                    _micLive         = false;
+  DictationSession?       _dictation;
   TextEditingController? _activeMicField;
-
-  // ── SILENCE WATCHDOG ──────────────────────────────────────────────────────
-  // `pauseFor` on speech_to_text is advisory, and on web it is routinely not
-  // honoured at all: if the engine never hears a single word it often emits no
-  // terminal status, so the mic stayed armed indefinitely and the AI never ran.
-  // This timer is the guarantee that a dictation session always ends.
-  Timer? _silenceTimer;
-  static const _silenceLimit = Duration(seconds: 5);
-
-  /// Field contents when the current session started, so the watchdog can tell
-  /// "spoke, then went quiet" (hand it to the AI) from "never heard anything"
-  /// (nothing to analyse — tell the user why).
-  String _voiceBaseText = '';
-
-  /// Last string the engine reported this session. Partial results repeat the
-  /// same text while the user is silent, so the watchdog is only re-armed when
-  /// the transcript actually GREW — otherwise a chattery engine would keep the
-  /// mic alive forever and defeat the whole mechanism.
-  String _lastRecognized = '';
   String                  _detectedLang    = I18n.currentLang; // input language (seed from app locale)
 
   // Mic pulse animation
@@ -435,76 +423,12 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     }
   }
 
-  static bool _micPermissionGranted = false;
-
   // ═══════════════════════════════════════════════════════════════
-  //  SILENCE WATCHDOG — 5s of nothing heard ⇒ stop mic, run AI
+  //  VOICE DICTATION — one DictationSession per mic tap
   // ═══════════════════════════════════════════════════════════════
 
-  /// (Re)start the 5-second countdown. Called when a session begins and again
-  /// each time the transcript actually grows, so the clock only runs against
-  /// genuine silence.
-  void _armSilenceWatchdog(TextEditingController field, int sessionId) {
-    _silenceTimer?.cancel();
-    _silenceTimer = Timer(_silenceLimit, () => _onSilenceTimeout(field, sessionId));
-  }
-
-  void _cancelSilenceWatchdog() {
-    _silenceTimer?.cancel();
-    _silenceTimer = null;
-  }
-
-  /// Five seconds with no new words. Ends the session unconditionally, then
-  /// either hands the text to the AI (the worker spoke and stopped — the normal
-  /// case) or explains why nothing was captured.
-  Future<void> _onSilenceTimeout(TextEditingController field, int sessionId) async {
-    // Bail if this timer belongs to a session that has already moved on: the
-    // user may have tapped the mic off, switched fields, or started a new
-    // dictation while this callback was queued.
-    if (!mounted ||
-        sessionId != _voiceSessionId ||
-        !_isListening ||
-        _activeMicField != field) return;
-
-    final heardSomething = field.text.trim() != _voiceBaseText.trim();
-
-    // Both guards matter: _pauseTimedOut stops onError from auto-restarting the
-    // engine behind our back, and _voiceSessionEnded stops onStatus from firing
-    // the AI a second time when the plugin finally reports 'done'.
-    _pauseTimedOut     = true;
-    _voiceSessionEnded = true;
-    _cancelSilenceWatchdog();
-
-    try {
-      await _speech.stop();
-    } catch (e) {
-      debugPrint('Speech stop (silence timeout) error: $e');
-    }
-    if (!mounted) return;
-    setState(() { _isListening = false; _activeMicField = null; });
-
-    if (heardSomething) {
-      _autoRefineAfterVoice(field);
-    } else {
-      // Nothing at all was recognised. The likely cause differs by platform, and
-      // the advice has to match: on a phone it really is usually a missing
-      // on-device dictation model, but in a browser there is no "language pack"
-      // to install — it is a muted/blocked mic, a noisy room, or a browser
-      // without speech support. Telling a desktop user to install a keyboard
-      // language pack sends them somewhere that does not exist.
-      final langName = _selectedVoiceLang == 'hi' ? 'Hindi (हिंदी)' : 'English';
-      _snack(
-        kIsWeb
-          ? 'Didn\'t catch anything. Check that the mic is unmuted and allowed for '
-            'this site, then tap the mic again — or just type it, AI will still '
-            'refine it in $langName.'
-          : '$langName speech recognition isn\'t available on this device. '
-            'Install the $langName language pack in your keyboard/voice settings, '
-            'or type the report — AI will still refine it in $langName.',
-        AppColors.amber,
-      );
-    }
-  }
+  String get _voiceLangName =>
+      _selectedVoiceLang == 'hi' ? 'Hindi (हिंदी)' : 'English';
 
   /// Hand a just-dictated field to the AI. Single copy of a rule that used to be
   /// pasted in three places (manual stop, plugin 'done', silence timeout) and so
@@ -518,149 +442,36 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
     }
   }
 
-  /// Note the transcript growing, and report whether it did. Used to decide
-  /// whether the watchdog deserves a fresh 5 seconds.
-  bool _noteRecognized(String words) {
-    if (words == _lastRecognized) return false;
-    _lastRecognized = words;
-    return true;
-  }
-
   Future<void> _initSpeech() async {
-    try {
-      if (!kIsWeb && !_micPermissionGranted) {
-        final status = await Permission.microphone.request();
-        if (!status.isGranted) {
-          debugPrint('Speech: Microphone permission denied (status: $status)');
-          if (mounted) setState(() => _speechAvailable = false);
-          return;
-        }
-        _micPermissionGranted = true;
-        debugPrint('Speech: Microphone permission granted');
-      }
-
-      _speechAvailable = await _speech.initialize(
-        onError: (e) {
-          debugPrint('Speech error: ${e.errorMsg} (permanent: ${e.permanent})');
-          if (mounted) setState(() => _isListening = false);
-          _cancelSilenceWatchdog();
-          // ✅ Auto-retry on non-permanent errors (but NOT after pause-timeout)
-          if (!e.permanent && _activeMicField != null && !_pauseTimedOut) {
-            Future.delayed(const Duration(seconds: 1), () {
-              if (mounted && _isListening) _restartListening();
-            });
-          }
-        },
-        onStatus: (s) {
-          debugPrint('Speech status: $s');
-          // ★ v29: Unified handler for BOTH 'done' and 'notListening'
-          // On web, pause-timeout fires 'notListening' not 'done'
-          // _voiceSessionEnded guard prevents double AI trigger
-          if ((s == 'done' || s == 'notListening') && _isListening && _activeMicField != null) {
-            if (_voiceSessionEnded) return; // already handled
-            _voiceSessionEnded = true;
-            _cancelSilenceWatchdog();
-            final field = _activeMicField;
-            setState(() { _isListening = false; _activeMicField = null; });
-            // ★ Auto-trigger AI for description & location only (not corrective action)
-            if (field != null) _autoRefineAfterVoice(field);
-          } else if (s == 'notListening' && mounted) {
-            _cancelSilenceWatchdog();
-            setState(() => _isListening = false);
-          }
-        },
-      );
-      debugPrint('Speech: initialized=$_speechAvailable');
-      if (mounted) setState(() {});
-    } catch (e) {
-      debugPrint('Speech init error: $e');
-      if (mounted) setState(() => _speechAvailable = false);
-    }
-  }
-
-  Future<void> _restartListening() async {
-    if (!_isListening || _activeMicField == null) return;
-    final field    = _activeMicField!;
-    final baseText = field.text;
-    _pauseTimedOut = false;
-    // A retry continues the same logical dictation, so the watchdog keeps the
-    // same session id — but the clock restarts, since the dropout itself is not
-    // the worker's fault.
-    final sessionId = _voiceSessionId;
-    _voiceBaseText  = baseText;
-    _lastRecognized = '';
-    try {
-      await Future.delayed(const Duration(milliseconds: 300));
-      await _speech.listen(
-        onResult: (result) {
-          if (!mounted || _activeMicField != field) return;
-          if (_noteRecognized(result.recognizedWords)) {
-            _armSilenceWatchdog(field, sessionId);
-          }
-          final appended = result.recognizedWords.isEmpty
-              ? baseText
-              : '$baseText ${result.recognizedWords}'.trim();
-          setState(() {
-            field.text      = appended;
-            field.selection = TextSelection.fromPosition(
-                TextPosition(offset: field.text.length));
-            _noteProgrammaticWrite(field);
-          });
-          // ★ v25: Detect language from recognized words
-          _detectLanguageFromText(result.recognizedWords);
-        },
-        localeId:     _voiceLocaleId,
-        listenFor:    const Duration(minutes: 3),
-        pauseFor:     const Duration(seconds: 5), // auto-stops after 5s pause → AI analysis
-        partialResults: true,
-        cancelOnError:  false,
-        listenMode:   stt.ListenMode.dictation,
-      );
-      // Armed after listen() resolves, for the same reason as in _toggleVoice:
-      // engine startup must not eat into the worker's five seconds.
-      _armSilenceWatchdog(field, sessionId);
-    } catch (e) {
-      debugPrint('Speech restart error: $e');
-      _cancelSilenceWatchdog();
-      if (mounted) setState(() => _isListening = false);
-    }
+    _speechAvailable = await VoiceEngine.ensureReady();
+    debugPrint('Speech: available=$_speechAvailable');
+    if (mounted) setState(() {});
   }
 
   Future<void> _toggleVoice([TextEditingController? field]) async {
     final targetField = field ?? _location;
+    final current = _dictation;
 
-    // If already listening on the same field, stop
-    if (_isListening && _activeMicField == targetField) {
-      _voiceSessionEnded = true; // prevent double AI from onStatus
-      _cancelSilenceWatchdog();
-      await _speech.stop();
-      setState(() { _isListening = false; _activeMicField = null; });
-      // ★ v28: AI correction for description & location only (not corrective action)
-      _autoRefineAfterVoice(targetField);
+    // Same field ⇒ the worker is stopping. Text goes to the AI via onEnded.
+    if (current != null && current.isActive && _activeMicField == targetField) {
+      await current.userStop();
       return;
     }
-
-    // If listening on a different field, stop first
-    if (_isListening) {
-      _voiceSessionEnded = true;
-      _cancelSilenceWatchdog();
-      await _speech.stop();
-      setState(() { _isListening = false; _activeMicField = null; });
-      await Future.delayed(const Duration(milliseconds: 300));
+    // A different field ⇒ close that one first (its text stays, no AI pass —
+    // the worker has moved on, as before).
+    if (current != null && current.isActive) {
+      await current.end(DictationEnd.switchedField);
     }
 
-    // ★ v29: Reset session guard for new voice session
-    _voiceSessionEnded = false;
-    _voiceSessionId++;
-
-    // Check availability — re-init if needed
     if (!_speechAvailable) {
       await _initSpeech();
       if (!_speechAvailable) {
         if (mounted) {
           _snack(
             kIsWeb
-              ? 'Voice input requires a supported browser (Chrome, Edge). Please allow microphone access when prompted.'
+              ? 'Voice input needs Chrome, Edge or Safari, with microphone access '
+                'allowed for this site. Links opened inside WhatsApp or Gmail '
+                'often block the mic — open safetylens.in in the browser.'
               : 'Microphone unavailable. Please check app permissions in Settings.',
             AppColors.amber,
           );
@@ -669,59 +480,100 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
       }
     }
 
-    final baseText = targetField.text;
-    _activeMicField = targetField;
-    _pauseTimedOut = false;
-    _voiceBaseText  = baseText;
-    _lastRecognized = '';
-    final sessionId = _voiceSessionId;
-    debugPrint('Speech: Starting with locale=${_voiceLocaleId} (selectedVoiceLang=$_selectedVoiceLang)');
-    try {
-      setState(() => _isListening = true);
-      await _speech.listen(
-        onResult: (result) {
-          if (!mounted || _activeMicField != targetField) return;
-          final words = result.recognizedWords;
-          // Re-arm on real progress only. Repeated identical partials mean the
-          // worker has gone quiet even though callbacks keep arriving.
-          if (_noteRecognized(words)) {
-            _armSilenceWatchdog(targetField, sessionId);
-          }
-          if (words.isEmpty) return;
-          final appended = baseText.isEmpty ? words : '$baseText $words';
-          setState(() {
-            targetField.text      = appended.trim();
-            targetField.selection = TextSelection.fromPosition(
-                TextPosition(offset: targetField.text.length));
-          });
-          // ★ v25: Detect language from recognized words
-          _detectLanguageFromText(words);
-        },
-        localeId:       _voiceLocaleId,
-        listenFor:      const Duration(minutes: 3),
-        pauseFor:       const Duration(seconds: 5), // auto-stops after 5s pause → AI analysis
-        partialResults: true,
-        cancelOnError:  false,
-        listenMode:     stt.ListenMode.dictation,
-      );
-      // The clock starts HERE, only once listen() has actually resolved — not
-      // before the call. `listen()` does not return until the engine is up, and
-      // on web that includes the browser's "Allow microphone?" prompt, which the
-      // worker may take several seconds to click. Arming earlier meant the five
-      // seconds could elapse during permission/startup and the mic was killed
-      // before it had ever been able to hear a word. The user's five seconds are
-      // five seconds of *listening*, not of waiting.
-      //
-      // This is still ahead of any onResult callback, so the case the watchdog
-      // exists for — an engine that never reports anything at all — is caught.
-      // (It also replaces an older 8-second "locale not installed" probe that
-      // used to sit here, so there is one timer now instead of two racing ones.)
-      _armSilenceWatchdog(targetField, sessionId);
-    } catch (e) {
-      debugPrint('Speech listen error: $e');
-      _cancelSilenceWatchdog();
-      if (mounted) setState(() { _isListening = false; _activeMicField = null; });
-      _snack('Voice input failed. Try again.', AppColors.red);
+    // Ends a live session anywhere in the app (AI Scan / SOP fields included)
+    // and waits for the browser's `end` — starting before it throws
+    // "recognition has already started", which used to surface here as a bare
+    // "Voice input failed".
+    await VoiceEngine.stopAndWait();
+    if (!mounted) return;
+
+    debugPrint('Speech: starting, locale=$_voiceLocaleId');
+    late final DictationSession session;
+    session = DictationSession(
+      baseText: targetField.text,
+      collapse: VoiceEngine.isAndroidWeb,
+      listen: (onWords) =>
+          VoiceEngine.listen(localeId: _voiceLocaleId, onWords: onWords),
+      stop: VoiceEngine.stop,
+      waitIdle: VoiceEngine.waitIdle,
+      onLive: () {
+        if (mounted && identical(_dictation, session)) {
+          setState(() => _micLive = true);
+        }
+      },
+      onText: (text) {
+        if (!mounted || !identical(_dictation, session)) return;
+        setState(() {
+          targetField.text      = text;
+          targetField.selection = TextSelection.fromPosition(
+              TextPosition(offset: text.length));
+          // Clears the AI chip / "required" error, as typing would.
+          _noteProgrammaticWrite(targetField);
+        });
+        _detectLanguageFromText(text);
+      },
+      onEnded: (reason, heard) =>
+          _onDictationEnded(session, targetField, reason, heard),
+    );
+    _dictation = session;
+    // Keyed by the SESSION, not by `this`: an old session of this same screen
+    // ending late must not release a newer session's claim.
+    VoiceEngine.claim(
+      session,
+      onStatus: session.handleStatus,
+      onError: session.handleError,
+      onLost: () => session.end(DictationEnd.superseded, stopEngine: false),
+    );
+    setState(() {
+      _isListening    = true;
+      _micLive        = false;
+      _activeMicField = targetField;
+    });
+    await session.start();
+  }
+
+  void _onDictationEnded(DictationSession session, TextEditingController field,
+      DictationEnd reason, bool heard) {
+    VoiceEngine.release(session);
+    debugPrint('Speech: session ended ($reason, heard=$heard, '
+        'restarts=${session.restarts}, error=${session.lastErrorCode})');
+    // During dispose `mounted` is still true but setState is illegal; dispose
+    // clears _dictation first, which this identity check relies on.
+    if (!mounted || !identical(_dictation, session)) return;
+    _dictation = null;
+    setState(() {
+      _isListening    = false;
+      _micLive        = false;
+      _activeMicField = null;
+    });
+
+    switch (reason) {
+      case DictationEnd.userStopped:
+      case DictationEnd.timeLimit:
+      case DictationEnd.superseded:
+        if (heard) _autoRefineAfterVoice(field);
+        break;
+      case DictationEnd.silence:
+        if (heard) {
+          _autoRefineAfterVoice(field);
+        } else {
+          _snack(nothingHeardMessage(web: kIsWeb, langName: _voiceLangName),
+              AppColors.amber);
+        }
+        break;
+      case DictationEnd.micNeverStarted:
+        _snack(micNeverStartedMessage(web: kIsWeb), AppColors.amber);
+        break;
+      case DictationEnd.failed:
+        if (heard) _autoRefineAfterVoice(field);
+        _snack(
+            voiceProblemMessage(session.lastErrorCode,
+                web: kIsWeb, langName: _voiceLangName),
+            AppColors.amber);
+        break;
+      case DictationEnd.switchedField:
+      case DictationEnd.disposed:
+        break;
     }
   }
 
@@ -1293,9 +1145,11 @@ If the text is already fine, return it unchanged.''';
     _descDebounce?.cancel();
     _locationDebounce?.cancel();
     _actionDebounce?.cancel();
-    _silenceTimer?.cancel();
+    // Clear first so the session's onEnded cannot setState during dispose.
+    final dictation = _dictation;
+    _dictation = null;
+    dictation?.end(DictationEnd.disposed);
     _micPulseCtrl.dispose();
-    _speech.cancel();
     AdminMasterData.revision.removeListener(_loadMasterData);
     // Only the listener goes — the analysis itself must keep running.
     ScanJobs.revision.removeListener(_onScanJobChanged);
@@ -2772,8 +2626,20 @@ If the text is already fine, return it unchanged.''';
           Expanded(child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Listening...', style: TextStyle(color: Colors.red.shade700, fontSize: 12, fontWeight: FontWeight.w700)),
-              Text('Speak in any language. Auto-stops after 5s pause → AI frames it.',
+              // The engine listens in ONE language — the chip above — so the
+              // banner names it. It used to say "Speak in any language", and a
+              // worker speaking Hindi with English selected got nothing.
+              Text(
+                _micLive
+                  ? (_selectedVoiceLang == 'hi'
+                      ? 'Listening… हिंदी में बोलें'
+                      : 'Listening… speak in English')
+                  : 'Starting microphone…',
+                style: TextStyle(color: Colors.red.shade700, fontSize: 12, fontWeight: FontWeight.w700)),
+              Text(
+                _micLive
+                  ? 'Stops 5 s after you finish → AI frames it. Short pauses are fine.'
+                  : 'Wait for "Listening" before you speak.',
                 style: TextStyle(color: sl.text3, fontSize: 10)),
             ])),
           GestureDetector(
