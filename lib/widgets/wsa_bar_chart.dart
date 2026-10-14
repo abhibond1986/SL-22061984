@@ -92,7 +92,18 @@ class _WsaBarChartState extends State<WsaBarChart> {
         }).toList(),
       ];
       // Pin a locked user to their own plant instead of leaving the stale 'all'.
-      if (scope.isLocked) _selectedPlant = _codeOf(scope.plant);
+      // ★ 2026-10-14: resolve the plant ENTRY and take its code. _codeOf() only
+      // works on a "CODE — Name" label; for a bare-name label such as
+      // 'SSO Ranchi' it returned the whole name, which matched no dropdown code,
+      // so the guard below silently re-pinned the user to _plants.first (BSP)
+      // and the chart showed BSP's numbers — all zero — under an "SSO Ranchi"
+      // pill. (_filteredIncidents now bypasses the plant filter for a locked
+      // user anyway; this keeps _selectedPlant truthful too.)
+      if (scope.isLocked) {
+        _selectedPlant =
+            AdminMasterData.plantEntryFor(scope.plant, plants)?['code'] ??
+                _codeOf(scope.plant);
+      }
       // Keep the selection inside the rebuilt list. DropdownButton ASSERTS when
       // its value matches no item, and this list is now rebuilt in place on every
       // master-data change rather than only on a remount — so an admin deleting
@@ -112,17 +123,18 @@ class _WsaBarChartState extends State<WsaBarChart> {
       : canonicalLabel.trim();
 
   List<Map<String, dynamic>> get _filteredIncidents {
-    if (_selectedPlant == 'all') return _incidents;
+    // A locked user's list was already scoped by PlantScope.filterIncidents,
+    // which compares plant CODES and is the single authority on visibility.
+    // Re-filtering here by a second, string-based rule is what zeroed the chart
+    // for SSO Ranchi (see _loadData) — the two rules disagreed.
+    if (_scope.isLocked || _selectedPlant == 'all') return _incidents;
     final target = _selectedPlant.toUpperCase();
     return _incidents.where((i) {
-      // Canonicalize first so "DSP Durgapur" / "Durgapur Steel Plant" etc.
-      // all resolve to the same "CODE — Name" and match by code token.
-      final canon = AdminMasterData.canonicalPlantFrom(
+      // Resolve to the plant ENTRY and compare codes — the old
+      // `canon.contains(target)` fallback put BSP_MINES rows under BSP.
+      final entry = AdminMasterData.plantEntryFor(
           i['plant']?.toString() ?? '', _plantDefs);
-      final code = canon.contains(' — ')
-          ? canon.split(' — ').first.toUpperCase()
-          : canon.toUpperCase();
-      return code == target || canon.toUpperCase().contains(target);
+      return (entry?['code'] ?? '').toUpperCase() == target;
     }).toList();
   }
 
