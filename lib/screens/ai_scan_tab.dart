@@ -43,6 +43,7 @@ import '../widgets/content_width.dart';
 import '../services/branding.dart';
 import '../services/mamr_service.dart';
 import '../services/assignment_notifications.dart';
+import '../services/assignment_inbox.dart';
 import '../widgets/mamr_area_picker.dart';
 
 class AIScanTab extends StatefulWidget {
@@ -122,7 +123,7 @@ class _AIScanTabState extends State<AIScanTab> {
   MamrRegister _mamrReg = const MamrRegister(plant: '');
   String? _mamrDept;
   String? _mamrAreaId;
-  String? _mamrCategory;
+  List<String> _mamrMine = const []; // areas the user is responsible for
   bool _mamrLoaded = false;
   // First / last stage of the admin's status ladder — new reports start at the
   // first, "all hazards mitigated" goes to the last. Never literal OPEN/CLOSED.
@@ -395,13 +396,23 @@ class _AIScanTabState extends State<AIScanTab> {
       }
       final reg = await MamrService.getRegister(plant);
       final label = plant.isEmpty ? '' : await MamrService.plantLabelFor(plant);
+      final mine = _ownedAreas(reg, user);
       if (!mounted) return;
       _mamrPlantLabel = label;
       setState(() {
         _mamrPlants = plants;
         _mamrPlant = plant;
         _mamrReg = reg;
+        _mamrMine = mine;
         _mamrLoaded = true;
+        // The reporter's own area is the most likely place, so start there.
+        if (_mamrAreaId == null && mine.isNotEmpty && !_isSaved) {
+          final a = reg.byId(mine.first);
+          if (a != null) {
+            _mamrAreaId = a.id;
+            _mamrDept = a.dept;
+          }
+        }
         // Drop a selection the SED has since deactivated.
         final a = _mamrAreaId == null ? null : reg.byId(_mamrAreaId!);
         if (a == null || !a.active) _mamrAreaId = null;
@@ -413,6 +424,15 @@ class _AIScanTabState extends State<AIScanTab> {
     } catch (_) {
       if (mounted) setState(() => _mamrLoaded = true);
     }
+  }
+
+  List<String> _ownedAreas(MamrRegister reg, Map<String, dynamic>? user) {
+    final ids = AssignmentInbox.identities(user);
+    final mobile = user?['mobile']?.toString() ?? '';
+    return [
+      for (final a in reg.activeAreas)
+        if (MamrObs.ownsArea(a, ids, mobile)) a.id,
+    ];
   }
 
   /// Home card → "Report" for one area: preselect it here.
@@ -441,8 +461,10 @@ class _AIScanTabState extends State<AIScanTab> {
   Future<void> _onMamrPlant(String code) async {
     final reg = await MamrService.getRegister(code);
     _mamrPlantLabel = await MamrService.plantLabelFor(code);
+    final mine = _ownedAreas(reg, widget.user ?? await LocalDB.getCurrentUser());
     if (!mounted) return;
     setState(() {
+      _mamrMine = mine;
       _mamrPlant = code;
       _mamrReg = reg;
       _mamrDept = null;
@@ -464,7 +486,7 @@ class _AIScanTabState extends State<AIScanTab> {
         register: _mamrReg,
         dept: _mamrDept,
         areaId: _mamrAreaId,
-        category: _mamrCategory,
+        myAreaIds: _mamrMine,
         loaded: _mamrLoaded,
         locked: _isSaved,
         compact: compact,
@@ -476,7 +498,6 @@ class _AIScanTabState extends State<AIScanTab> {
           _mamrAreaId = areas.length == 1 ? areas.first.id : null;
         }),
         onArea: (id) => setState(() => _mamrAreaId = id),
-        onCategory: (c) => setState(() => _mamrCategory = c),
       );
 
   /// Risk score for the report on screen, out of 100.
@@ -1859,11 +1880,11 @@ class _AIScanTabState extends State<AIScanTab> {
 
     // MAMR: an observation belongs to an area, and the area decides who must
     // comply. No area, no filing — same rule as the analysis guard above.
-    if (_mamrArea == null || _mamrCategory == null) {
+    if (_mamrArea == null) {
       _snack(
           _mamrReg.isEmpty
               ? 'MAMR areas are not set up for ${_mamrPlant.isEmpty ? 'your plant' : _mamrPlant} — contact your SED.'
-              : 'Choose the MAMR area and observation category first (top of the page).',
+              : 'Choose the MAMR area first (top of the page).',
           const Color(0xFFD97706));
       if (_scrollController.hasClients) {
         _scrollController.animateTo(0,
@@ -2777,7 +2798,8 @@ class _AIScanTabState extends State<AIScanTab> {
       incident['mamrAreaId'] = area.id;
       incident['mamrDept'] = area.dept;
       incident['mamrArea'] = area.area;
-      incident['mamrCategory'] = _mamrCategory ?? '';
+      // No category: that step was removed 2026-10-15 (the hazard list
+      // already classifies the finding). Old rows keep theirs.
       // Snapshot: a later reassignment must not rewrite who owned this one.
       incident['mamrResponsible'] = area.responsibleSnapshot();
       // Auto-assign to the first responsible person who has an app account.

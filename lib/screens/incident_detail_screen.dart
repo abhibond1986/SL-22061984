@@ -664,7 +664,10 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         row('Deptt./Shop', _inc['mamrDept']?.toString() ?? ''),
         row('Section/Area', _inc['mamrArea']?.toString() ?? ''),
-        row('Category', _inc['mamrCategory']?.toString() ?? ''),
+        if ((_inc['mamrCategory']?.toString() ?? '').isNotEmpty)
+          row('Category', _inc['mamrCategory'].toString()),
+        if ((_inc['targetDate']?.toString() ?? '').isNotEmpty)
+          row('Target date', _inc['targetDate'].toString()),
         row('Responsible',
             persons.isEmpty
                 ? 'Not assigned'

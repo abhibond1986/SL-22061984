@@ -963,7 +963,7 @@ class PdfExport {
           pw.TableRow(children: [
             cell('Deptt. / Shop', inc['mamrDept']?.toString() ?? '', hi: true),
             cell('MAMR Area', inc['mamrArea']?.toString() ?? '', hi: true),
-            cell('Category', inc['mamrCategory']?.toString() ?? ''),
+            cell('Target Date', _ddmmyyyy(inc['targetDate']?.toString() ?? '')),
             cell('Compliance',
                 complied
                     ? 'Complied${closedOn.isEmpty ? '' : ' ($closedOn)'}'
@@ -971,7 +971,7 @@ class PdfExport {
                 ink: complied ? PdfColors.green800 : PdfColors.orange800),
           ]),
           pw.TableRow(children: [
-            cell('Target Date', _ddmmyyyy(inc['targetDate']?.toString() ?? '')),
+            cell('Reporter Dept.', inc['reporterDept']?.toString() ?? ''),
             cell('Responsible Person',
                 persons.isEmpty ? 'Not assigned' : persons.join('\n'),
                 hi: true),
