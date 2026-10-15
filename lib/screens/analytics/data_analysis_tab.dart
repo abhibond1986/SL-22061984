@@ -315,7 +315,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
             children: [
               _typeChip(sl, 'All', 'ALL'),
               const SizedBox(width: 6),
-              _typeChip(sl, 'AI Scan', 'AI_SCAN'),
+              _typeChip(sl, 'MAMR / AI Scan', 'AI_SCAN'),
               const SizedBox(width: 6),
               _typeChip(sl, 'Near Miss', 'NEAR_MISS'),
             ],
@@ -603,7 +603,7 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _legendRow('AI Scan', _aiScanCount, AppColors.accent, sl),
+              _legendRow('MAMR / AI Scan', _aiScanCount, AppColors.accent, sl),
               _legendRow('Near Miss', _nearMissCount, AppColors.amber, sl),
             ],
           ),

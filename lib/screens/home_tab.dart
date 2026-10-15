@@ -28,6 +28,7 @@ import 'incident_detail_screen.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
+import '../widgets/mamr_home_card.dart';
 import '../widgets/bottom_nav_gap.dart';
 import '../widgets/safe_backdrop_filter.dart';
 
@@ -393,6 +394,14 @@ class _HomeTabState extends State<HomeTab> {
                 _heroSection(sl, firstName),
                 ContentWidth(child: Column(children: [
                   const SizedBox(height: 16),
+                  // MAMR — My Area My Responsibility: the user's own area(s)
+                  // first, then the plant's full area list. Top of Home because
+                  // it is the reason most users open the app now.
+                  MamrHomeCard(
+                    user: widget.user,
+                    incidents: _incidents,
+                    onReport: () => widget.onTabChange(AppTabs.aiScan),
+                  ),
                   // Above the stats: this is the one thing on the home screen that
                   // is addressed to the person reading it. Renders nothing at all
                   // when they have no assignments, so it costs non-investigators

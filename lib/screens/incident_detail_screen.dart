@@ -12,6 +12,7 @@ import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
+import '../services/mamr_service.dart';
 import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
@@ -77,7 +78,14 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
 
   Future<void> _checkPermission() async {
     final scope = await PlantScope.forUser();
-    final ok = await scope.canActOn(_inc);
+    var ok = await scope.canActOn(_inc);
+    // MAMR: the area's responsible person may always work their own
+    // observation, even when their profile's plant is blank or spelled in a
+    // way the plant rule cannot resolve.
+    if (!ok && MamrObs.isMamr(_inc)) {
+      ok = await MamrService.canMarkComplied(
+          await LocalDB.getCurrentUser(), _inc);
+    }
     if (!mounted) return;
     setState(() {
       _canAct = ok;
@@ -199,6 +207,15 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final isFinal = _statusOrder.isNotEmpty && newStatus == _statusOrder.last;
     if (isFinal && _actionCtrl.text.trim().isEmpty) {
       _snack('Enter corrective action first', AppColors.red); return;
+    }
+    // MAMR: only the area's responsible person may mark it COMPLIED
+    // (SED/admin only when the area has nobody responsible).
+    if (isFinal && MamrObs.isMamr(_inc) &&
+        !await MamrService.canMarkComplied(
+            await LocalDB.getCurrentUser(), _inc)) {
+      _snack('Only the area\'s responsible person can mark this Complied',
+          AppColors.amber);
+      return;
     }
     // ★ 2026-10-04. A case cannot move into investigation / corrective action
     // with nobody responsible for it. Any stage after the first needs an
@@ -552,7 +569,8 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
             const SizedBox(width: 6),
             _pill(
               _inc['type']?.toString() == 'AI_SCAN'
-                  ? '🔍 AI Scan' : '⚠️ Near Miss',
+                  ? (MamrObs.isMamr(_inc) ? '📍 MAMR' : '🔍 AI Scan')
+                  : '⚠️ Near Miss',
               AppColors.accent),
             const Spacer(),
             if (_inc['riskScore'] != null)
@@ -566,6 +584,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           // ── COMPACT INFO ROWS (not giant grid) ───────────────
           _buildCompactInfo(sl, bgColor),
           const SizedBox(height: 12),
+          // ── MAMR area & responsible person ───────────────────
+          if (MamrObs.isMamr(_inc)) ...[
+            _buildMamrSection(sl, bgColor),
+            const SizedBox(height: 12),
+          ],
           // Phones: actions straight after the facts, not below the hazards.
           if (quickActionsInline) ...[
             _buildQuickActions(sl, bgColor),
@@ -619,6 +642,41 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   /// it on, share the PDF report, copy a text summary, open the reporter's or
   /// owner's profile. Each button calls the same code path as the app bar /
   /// bottom bar / Log row, so there is one behaviour per action.
+  /// MAMR — My Area My Responsibility: which area, which category, who must
+  /// comply, and whether they have. "Complied" is the admin's last stage.
+  Widget _buildMamrSection(SL sl, Color bg) {
+    final persons = MamrObs.responsible(_inc);
+    final complied = _isClosed;
+    Widget row(String label, String value, {Color? ink}) => Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(width: 104, child: Text(label,
+            style: TextStyle(color: sl.text4, fontSize: 11.5))),
+        Expanded(child: Text(value.isEmpty ? '—' : value,
+            style: TextStyle(color: ink ?? sl.text1, fontSize: 12.5,
+                fontWeight: FontWeight.w700))),
+      ]),
+    );
+    return _section(sl, bg,
+      title: 'MAMR — My Area My Responsibility',
+      icon: Icons.place_rounded,
+      color: _SecColors.mitigation,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        row('Deptt./Shop', _inc['mamrDept']?.toString() ?? ''),
+        row('Section/Area', _inc['mamrArea']?.toString() ?? ''),
+        row('Category', _inc['mamrCategory']?.toString() ?? ''),
+        row('Responsible',
+            persons.isEmpty
+                ? 'Not assigned'
+                : persons.map((p) =>
+                    '${p.label}${p.mobile.isEmpty ? '' : ' · ${p.mobilePretty}'}')
+                    .join('\n')),
+        row('Compliance', complied ? 'Complied' : 'Pending',
+            ink: complied ? sl.greenText : sl.amberText),
+      ]),
+    );
+  }
+
   Widget _buildQuickActions(SL sl, Color bg) {
     final owner = IncidentAssign.assigneeName(_inc);
     final ownerId = _inc['assignedTo']?.toString().trim() ?? '';

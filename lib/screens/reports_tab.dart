@@ -8,6 +8,7 @@ import 'analytics/overview_tab.dart';
 import 'analytics/incident_log_tab.dart';
 import 'analytics/data_analysis_tab.dart';
 import 'analytics/plant_wise_tab.dart';
+import 'analytics/mamr_stats_tab.dart';
 import '../widgets/safe_backdrop_filter.dart';
 
 class ReportsTab extends StatefulWidget {
@@ -41,7 +42,7 @@ class _ReportsTabState extends State<ReportsTab>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     // ★ v35: Auto-switch to Log tab if pending filters from Home
     if (ReportsTab.pendingGoToLog) {
       _tabController.index = 1;
@@ -106,9 +107,13 @@ class _ReportsTabState extends State<ReportsTab>
                       ),
                       indicatorSize: TabBarIndicatorSize.tab,
                       dividerColor: Colors.transparent,
-                      isScrollable: false,
+                      // Five tabs: scroll on a narrow phone rather than
+                      // squeezing every label below the type floor.
+                      isScrollable: MediaQuery.of(context).size.width < 420,
                       padding: const EdgeInsets.all(3),
-                      labelPadding: EdgeInsets.zero,
+                      labelPadding: MediaQuery.of(context).size.width < 420
+                          ? const EdgeInsets.symmetric(horizontal: 14)
+                          : EdgeInsets.zero,
                       // ★ 2026-10-04. 36 px instead of the default 46 px + 8 px
                       // padding: every pixel of this fixed header was taken
                       // from the incident list below it on a laptop screen.
@@ -117,6 +122,8 @@ class _ReportsTabState extends State<ReportsTab>
                         Tab(height: 36, text: I18n.t('reports.tab.log')),
                         Tab(height: 36, text: I18n.t('reports.tab.analysis')),
                         Tab(height: 36, text: I18n.t('reports.tab.plantWise')),
+                        // MAMR statistics: recorded / complied / pending, From–To.
+                        const Tab(height: 36, text: 'MAMR'),
                       ],
                     ),
                   ),
@@ -132,6 +139,7 @@ class _ReportsTabState extends State<ReportsTab>
                   IncidentLogTab(),
                   DataAnalysisTab(),
                   PlantWiseTab(),
+                  MamrStatsTab(),
                 ],
               ),
             ),

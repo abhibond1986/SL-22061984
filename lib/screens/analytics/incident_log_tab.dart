@@ -772,7 +772,7 @@ class _IncidentLogTabState extends State<IncidentLogTab>
 
   Widget _typeChip(SL sl, String label) {
     final active = _typeFilter == label;
-    final displayLabel = label == 'AI_SCAN' ? 'AI Scan'
+    final displayLabel = label == 'AI_SCAN' ? 'MAMR / AI Scan'
         : label == 'NEAR_MISS' ? 'Near Miss' : 'All Types';
     return Padding(
       padding: const EdgeInsets.only(right: 6),
@@ -1131,7 +1131,9 @@ class _IncidentLogTabState extends State<IncidentLogTab>
     final cat = inc['wsaCategory']?.toString() ?? '';
     final audit = inc['auditStatus']?.toString() ?? '';
     return [
-      _pillBox(isAiScan ? 'AI Scan' : 'Near Miss',
+      _pillBox(isAiScan
+          ? ((inc['mamrAreaId']?.toString() ?? '').isNotEmpty ? 'MAMR' : 'AI Scan')
+          : 'Near Miss',
           isAiScan ? AppColors.accent : AppColors.amber,
           icon: isAiScan
               ? Icons.image_search_rounded

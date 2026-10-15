@@ -41,6 +41,9 @@ import 'package:uuid/uuid.dart';
 import '../widgets/bottom_nav_gap.dart';
 import '../widgets/content_width.dart';
 import '../services/branding.dart';
+import '../services/mamr_service.dart';
+import '../services/assignment_notifications.dart';
+import '../widgets/mamr_area_picker.dart';
 
 class AIScanTab extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -109,6 +112,23 @@ class _AIScanTabState extends State<AIScanTab> {
   int? _likelihoodOverride;
   int? _severityRatingOverride;
 
+  // ── MAMR — My Area My Responsibility ──────────────────────────────────
+  // This tab is the MAMR tab: every observation names an area of the plant's
+  // area-responsibility register, and is assigned to that area's responsible
+  // person on save. Kept across _reset() on purpose — an observer usually
+  // records several findings in the same area one after another.
+  List<String> _mamrPlants = const [];
+  String _mamrPlant = '';
+  MamrRegister _mamrReg = const MamrRegister(plant: '');
+  String? _mamrDept;
+  String? _mamrAreaId;
+  String? _mamrCategory;
+  bool _mamrLoaded = false;
+  // First / last stage of the admin's status ladder — new reports start at the
+  // first, "all hazards mitigated" goes to the last. Never literal OPEN/CLOSED.
+  String _firstStatus = AdminMasterData.defaultStatuses.first;
+  String _lastStatus = AdminMasterData.defaultStatuses.last;
+
   // GPS geo-tagging
   LocationData? _capturedLocation;
   bool _capturingLocation = false;
@@ -148,6 +168,9 @@ class _AIScanTabState extends State<AIScanTab> {
     super.initState();
     _loadMasterData();
     AdminMasterData.revision.addListener(_loadMasterData);
+    _loadMamr();
+    MamrService.revision.addListener(_loadMamr);
+    MamrService.pendingArea.addListener(_adoptPendingArea);
     // The analysis is owned by ScanJobs, not by this widget — the shell
     // disposes this State on every tab change. Listening here, and syncing in
     // _onScanJobChanged, is what turns this screen into a *view* of a running
@@ -346,13 +369,115 @@ class _AIScanTabState extends State<AIScanTab> {
     try {
       final sevs = await AdminMasterData.getSeverities();
       final scores = await AdminMasterData.getSeverityScores();
+      final first = await AdminMasterData.firstStatus();
+      final last = await AdminMasterData.lastStatus();
       if (!mounted) return;
       setState(() {
         _severities = sevs;
         _severityScores = scores;
+        if (first.isNotEmpty) _firstStatus = first;
+        if (last.isNotEmpty) _lastStatus = last;
       });
     } catch (_) {}
   }
+
+  // ── MAMR selection ─────────────────────────────────────────────────────
+  Future<void> _loadMamr() async {
+    try {
+      final user = widget.user ?? await LocalDB.getCurrentUser();
+      final plants = await MamrService.fileablePlants(user);
+      var plant = _mamrPlant;
+      if (!plants.contains(plant)) {
+        final own = await MamrService.userPlantCode(user);
+        plant = plants.contains(own)
+            ? own
+            : (plants.isEmpty ? own : plants.first);
+      }
+      final reg = await MamrService.getRegister(plant);
+      final label = plant.isEmpty ? '' : await MamrService.plantLabelFor(plant);
+      if (!mounted) return;
+      _mamrPlantLabel = label;
+      setState(() {
+        _mamrPlants = plants;
+        _mamrPlant = plant;
+        _mamrReg = reg;
+        _mamrLoaded = true;
+        // Drop a selection the SED has since deactivated.
+        final a = _mamrAreaId == null ? null : reg.byId(_mamrAreaId!);
+        if (a == null || !a.active) _mamrAreaId = null;
+        if (_mamrDept != null && reg.areasIn(_mamrDept!).isEmpty) {
+          _mamrDept = null;
+        }
+      });
+      _adoptPendingArea();
+    } catch (_) {
+      if (mounted) setState(() => _mamrLoaded = true);
+    }
+  }
+
+  /// Home card → "Report" for one area: preselect it here.
+  Future<void> _adoptPendingArea() async {
+    final v = MamrService.pendingArea.value;
+    if (v.isEmpty || !v.contains('|') || _isSaved) return;
+    final code = v.split('|').first;
+    final id = v.split('|').last;
+    MamrService.pendingArea.value = '';
+    final reg = code == _mamrPlant ? _mamrReg : await MamrService.getRegister(code);
+    final a = reg.byId(id);
+    if (a == null || !mounted) return;
+    if (code != _mamrPlant) {
+      _mamrPlantLabel = await MamrService.plantLabelFor(code);
+      if (!mounted) return;
+    }
+    setState(() {
+      if (!_mamrPlants.contains(code)) _mamrPlants = [..._mamrPlants, code];
+      _mamrPlant = code;
+      _mamrReg = reg;
+      _mamrDept = a.dept;
+      _mamrAreaId = a.id;
+    });
+  }
+
+  Future<void> _onMamrPlant(String code) async {
+    final reg = await MamrService.getRegister(code);
+    _mamrPlantLabel = await MamrService.plantLabelFor(code);
+    if (!mounted) return;
+    setState(() {
+      _mamrPlant = code;
+      _mamrReg = reg;
+      _mamrDept = null;
+      _mamrAreaId = null;
+    });
+  }
+
+  MamrArea? get _mamrArea =>
+      _mamrAreaId == null ? null : _mamrReg.byId(_mamrAreaId!);
+
+  /// Display label of the register's plant ("ASP — Alloy Steels Plant"), set
+  /// by [_loadMamr]. The incident's `plant` uses it so a report filed by an
+  /// admin or contractor for ASP lands in ASP, not in the filer's own plant.
+  String _mamrPlantLabel = '';
+
+  Widget _mamrPicker({bool compact = false}) => MamrAreaPicker(
+        plants: _mamrPlants,
+        plant: _mamrPlant,
+        register: _mamrReg,
+        dept: _mamrDept,
+        areaId: _mamrAreaId,
+        category: _mamrCategory,
+        loaded: _mamrLoaded,
+        locked: _isSaved,
+        compact: compact,
+        onPlant: _onMamrPlant,
+        onDept: (d) => setState(() {
+          _mamrDept = d;
+          final areas = d == null ? const <MamrArea>[] : _mamrReg.areasIn(d);
+          // A department with a single area needs no second tap.
+          _mamrAreaId = areas.length == 1 ? areas.first.id : null;
+        }),
+        onArea: (id) => setState(() => _mamrAreaId = id),
+        onCategory: (c) => setState(() => _mamrCategory = c),
+      );
 
   /// Risk score for the report on screen, out of 100.
   ///
@@ -483,6 +608,8 @@ class _AIScanTabState extends State<AIScanTab> {
   @override
   void dispose() {
     AdminMasterData.revision.removeListener(_loadMasterData);
+    MamrService.revision.removeListener(_loadMamr);
+    MamrService.pendingArea.removeListener(_adoptPendingArea);
     // Only the listener goes. The analysis itself is deliberately NOT touched:
     // it belongs to ScanJobs and must keep running while the user is elsewhere
     // in the app. That is the whole change.
@@ -1730,6 +1857,21 @@ class _AIScanTabState extends State<AIScanTab> {
       return;
     }
 
+    // MAMR: an observation belongs to an area, and the area decides who must
+    // comply. No area, no filing — same rule as the analysis guard above.
+    if (_mamrArea == null || _mamrCategory == null) {
+      _snack(
+          _mamrReg.isEmpty
+              ? 'MAMR areas are not set up for ${_mamrPlant.isEmpty ? 'your plant' : _mamrPlant} — contact your SED.'
+              : 'Choose the MAMR area and observation category first (top of the page).',
+          const Color(0xFFD97706));
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(0,
+            duration: const Duration(milliseconds: 350), curve: Curves.easeOut);
+      }
+      return;
+    }
+
     if (_imageBytes != null) {
       final hash = _computeHash(_imageBytes!);
       if (_savedImageHash == hash) {
@@ -1873,6 +2015,8 @@ class _AIScanTabState extends State<AIScanTab> {
       _savedIncidentId = dbInc['id']?.toString();
       _currentStep     = 5;
     });
+    // The responsible person's My Assignments card / bell on THIS device.
+    AssignmentNotifications.refresh().catchError((_) {});
 
     if (mounted) {
       _showSaveSuccessDialog(dbInc, uploadResult);
@@ -2425,8 +2569,12 @@ class _AIScanTabState extends State<AIScanTab> {
 
     all[incIdx]['hazards'] = jsonEncode(hazards);
     final allClosed = _hazardClosed.values.every((v) => v);
-    if (allClosed) {
-      all[incIdx]['status']   = 'CLOSED';
+    // The admin's LAST stage, not a literal 'CLOSED' — a renamed final stage
+    // would otherwise leave the row off the ladder and miscounted.
+    // An MAMR observation is NOT auto-closed by the reporter: Complied is the
+    // responsible person's (or SED's) call, made from the incident screen.
+    if (allClosed && !MamrObs.isMamr(all[incIdx])) {
+      all[incIdx]['status']   = _lastStatus;
       all[incIdx]['closedAt'] = DateTime.now().toIso8601String();
     }
 
@@ -2525,11 +2673,19 @@ class _AIScanTabState extends State<AIScanTab> {
 
     final incident = <String, dynamic>{
       'id':              DateTime.now().millisecondsSinceEpoch.toString(),
-      'title':           'AI Hazard Scan: ${firstHazard.toString()}',
-      'plant':           user['plant']?.toString() ?? 'SSO Ranchi',
-      'dept':            user['department']?.toString().isNotEmpty == true
-                         ? user['department'].toString()
-                         : detectedSection,
+      'title':           'MAMR: ${firstHazard.toString()}',
+      'plant':           _mamrPlantLabel.isNotEmpty
+                         ? _mamrPlantLabel
+                         : (user['plant']?.toString() ?? 'SSO Ranchi'),
+      // MAMR: `dept` is the AREA's department — where the hazard is — so the
+      // department analytics answer "which shop has the open findings". The
+      // reporter's own department is kept in `reporterDept`.
+      'dept':            _mamrArea != null
+                         ? _mamrArea!.dept
+                         : (user['department']?.toString().isNotEmpty == true
+                             ? user['department'].toString()
+                             : detectedSection),
+      'reporterDept':    user['department']?.toString() ?? '',
       'detectedSection': detectedSection,
       'sectionCues':     sectionCues,
       // ★ 2026-10-04: the GPS place name (from the photo's EXIF or the
@@ -2555,8 +2711,13 @@ class _AIScanTabState extends State<AIScanTab> {
       'desc':            _result!['summary']?.toString() ?? '',
       'immediateAction': firstHazardMap['correctiveAction']?.toString()
                          ?? 'Investigate per IS 14489:2018',
+      // Still 'AI_SCAN': the MAMR tab IS the photo-scan path, and ~15 places
+      // (analytics type filters, the PDF, the AI audit, the log) key on this
+      // value. An MAMR observation is told apart by `mamrAreaId` — see
+      // MamrObs.isMamr — so old AI-scan history and new MAMR rows share one
+      // series instead of splitting it.
       'type':            'AI_SCAN',
-      'status':          'OPEN',
+      'status':          _firstStatus,
       'date':            DateTime.now().toIso8601String(),
       'reportedBy':      user['name']?.toString() ?? Branding.defaultReporter,
       'reportedByPno':   user['pno']?.toString()  ?? '',
@@ -2609,6 +2770,33 @@ class _AIScanTabState extends State<AIScanTab> {
       'thumbnailBase64': _imageBytes != null
                          ? _generateThumbnail(_imageBytes!) : null,
     };
+
+    // ── MAMR area, category and responsible person(s) ──
+    final area = _mamrArea;
+    if (area != null) {
+      incident['mamrAreaId'] = area.id;
+      incident['mamrDept'] = area.dept;
+      incident['mamrArea'] = area.area;
+      incident['mamrCategory'] = _mamrCategory ?? '';
+      // Snapshot: a later reassignment must not rewrite who owned this one.
+      incident['mamrResponsible'] = area.responsibleSnapshot();
+      // Auto-assign to the first responsible person who has an app account.
+      // A co-owner (two names in one Excel cell) is matched through the
+      // snapshot by AssignmentInbox, so both see it.
+      final owner = area.persons.where((p) => p.isLinked).toList();
+      if (owner.isNotEmpty) {
+        incident['assignedTo'] = owner.first.username;
+        incident['assignedToName'] = owner.first.name;
+        incident['assignedAt'] = DateTime.now().toIso8601String();
+      }
+      if (_locationController.text.trim().isEmpty) {
+        incident['location'] = '${area.dept} · ${area.area}';
+      }
+      // Automatic compliance deadline from the worst severity — see
+      // MamrDeadlines. Editable later on the incident screen.
+      incident['targetDate'] =
+          MamrDeadlines.targetFor(DateTime.now(), _overallRisk);
+    }
 
     // ✅ Add GPS location data if available
     if (_capturedLocation != null && _capturedLocation!.isValid) {
@@ -2835,7 +3023,7 @@ class _AIScanTabState extends State<AIScanTab> {
       _hazardRowKeys.clear(); _highlightedRow = null;
       _isSaved         = false; _savedIncidentId = null;
       _currentStep     = 0;
-    });
+    });    _adoptPendingArea();
   }
 
   void _snack(String msg, Color color) {
@@ -2936,6 +3124,8 @@ class _AIScanTabState extends State<AIScanTab> {
     // comments in main.dart claim, since both were calibrated ON darkCard.
     final cardBg = sl.surface;
     return Column(children: [
+      _mamrPicker(),
+      const SizedBox(height: 12),
       GestureDetector(
         onTap: () => _pickImage(ImageSource.camera),
         child: Container(
@@ -3296,6 +3486,11 @@ class _AIScanTabState extends State<AIScanTab> {
     return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+
+      // MAMR area + category — editable until saved, so a photo taken first
+      // can still be tagged before filing.
+      _mamrPicker(compact: true),
+      const SizedBox(height: 12),
 
       // ★ Online/offline source badge — makes it obvious whether this report
       // came from the live AI or the offline knowledge-base fallback.

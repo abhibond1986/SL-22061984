@@ -22,6 +22,7 @@ import 'gemini_vision.dart';
 // For the NaraVision pref-key names, key prefix and model list — the Tier 1b
 // key and model are synced here.
 import 'nara_vision.dart';
+import 'mamr_service.dart';
 
 class AdminMasterData {
   // ── LIVE CHANGE NOTIFICATION ─────────────────────────────────────
@@ -706,6 +707,15 @@ class AdminMasterData {
       // not need to bump `revision` (which re-primes every master-data list).
       if (remote['branding'] != null) {
         await Branding.applyRemote(remote['branding']);
+      }
+
+      // MAMR registers and SED list. Own notifier (MamrService.revision), so
+      // it does not need to set `updated`.
+      if (remote['mamr'] is Map) {
+        try {
+          await MamrService.applyRemote(
+              Map<String, dynamic>.from(remote['mamr'] as Map));
+        } catch (_) {}
       }
 
       // The admin panel is AUTHORITATIVE. A key that is PRESENT but holds an

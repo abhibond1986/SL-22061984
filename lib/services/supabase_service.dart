@@ -104,6 +104,15 @@ class SupabaseService {
     'auditStatus': 'audit_status',
     'auditScore': 'audit_score',
     'date': 'date',
+    // ── MAMR — My Area My Responsibility (migration_mamr.sql) ──
+    // upsertIncident drops an unknown column and retries, so a project that
+    // has not run the migration loses only these fields, never the row.
+    'mamrAreaId': 'mamr_area_id',
+    'mamrDept': 'mamr_dept',
+    'mamrArea': 'mamr_area',
+    'mamrCategory': 'mamr_category',
+    'mamrResponsible': 'mamr_responsible',
+    'reporterDept': 'reporter_dept',
   };
   static final Map<String, String> _dbToApp = {
     for (final e in _appToDb.entries) e.value: e.key,
@@ -115,7 +124,7 @@ class SupabaseService {
     _appToDb.forEach((appKey, dbCol) {
       if (!inc.containsKey(appKey)) return;
       var v = inc[appKey];
-      if (appKey == 'hazards') {
+      if (appKey == 'hazards' || appKey == 'mamrResponsible') {
         // Store as jsonb — pass a List/Map through; parse if it's a JSON string.
         if (v is String) { try { v = jsonDecode(v); } catch (_) {} }
       }
@@ -796,6 +805,41 @@ class SupabaseService {
       usersLastError = _describeError(e);
       return [];
     }
+  }
+
+  /// Users whose mobile ends with any of [last10s] (10-digit, normalised).
+  ///
+  /// Suffix match (`ilike %XXXXXXXXXX`) because the roster stores mobiles
+  /// with the country code ("918986875493") and self-registered accounts hold
+  /// whatever was typed. Chunked so the `or=` filter stays a sane length.
+  /// Used by MAMR to link an area's responsible person to their account.
+  static Future<List<Map<String, dynamic>>> findUsersByMobiles(
+      List<String> last10s) async {
+    if (!isReady) return [];
+    final digits = last10s
+        .map((m) => m.replaceAll(RegExp(r'\D'), ''))
+        .where((m) => m.length == 10)
+        .toSet()
+        .toList();
+    final out = <Map<String, dynamic>>[];
+    for (var i = 0; i < digits.length; i += 25) {
+      final chunk = digits.sublist(
+          i, i + 25 > digits.length ? digits.length : i + 25);
+      try {
+        final rows = await _db
+            .from('app_users')
+            .select('username,name,designation,plant,unit,mobile,status')
+            .or(chunk.map((m) => 'mobile.ilike.%$m').join(','))
+            .not('status', 'in', '("disabled","blocked","inactive")')
+            .limit(200)
+            .timeout(const Duration(seconds: 15));
+        out.addAll((rows as List)
+            .map((r) => _userFromRow(Map<String, dynamic>.from(r as Map))));
+      } catch (e) {
+        usersLastError = _describeError(e);
+      }
+    }
+    return out;
   }
 
   /// Write ONLY the credential columns for an existing user.

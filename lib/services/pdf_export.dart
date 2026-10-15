@@ -134,6 +134,11 @@ class PdfExport {
       return s.isEmpty ? 'UNKNOWN' : s;
     }();
     final isAiScan   = incident['type']?.toString() == 'AI_SCAN';
+    // MAMR block: Complied = the admin's final stage, read once up front so
+    // the synchronous page builder below can use it.
+    final mamrComplied = (incident['mamrAreaId']?.toString() ?? '').isNotEmpty &&
+        await AdminMasterData.isTerminalStatus(
+            incident['status']?.toString() ?? '');
     // ── WAS THIS PHOTO ACTUALLY ANALYSED? ────────────────────────────────────
     //
     // Defence in depth for rows the app can no longer refuse to create: reports
@@ -317,6 +322,14 @@ class PdfExport {
         w.add(pw.SizedBox(height: 4));
         w.add(_detailsGrid(incident, dateStr, reporterName, reporterPno));
         w.add(pw.SizedBox(height: 10));
+        // MAMR — the one block this feature adds to the report. Everything
+        // above and below is unchanged.
+        if ((incident['mamrAreaId']?.toString() ?? '').isNotEmpty) {
+          w.add(_sectionTitle('MAMR  -  MY AREA MY RESPONSIBILITY'));
+          w.add(pw.SizedBox(height: 4));
+          w.add(_mamrBlock(incident, mamrComplied));
+          w.add(pw.SizedBox(height: 10));
+        }
         if (imgBytes != null) {
           w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
           w.add(pw.SizedBox(height: 4));
@@ -878,13 +891,97 @@ class PdfExport {
         ]),
         pw.TableRow(children: [
           cell('Report Type',
-            inc['type'] == 'AI_SCAN' ? 'AI Image Scan' : 'Near Miss'),
+            inc['type'] == 'AI_SCAN'
+                ? ((inc['mamrAreaId']?.toString() ?? '').isNotEmpty
+                    ? 'MAMR Observation' : 'AI Image Scan')
+                : 'Near Miss'),
           cell('WSA Category', inc['wsaCategory']?.toString() ?? ''),
           cell('Reference No.', _refNo(inc)),
           cell('People Involved', inc['people']?.toString() ?? '0'),
         ]),
       ],
     ));
+  }
+
+  static String _ddmmyyyy(String iso) {
+    final d = DateTime.tryParse(iso);
+    if (d == null) return '';
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(d.day)}-${two(d.month)}-${d.year}';
+  }
+
+  /// Area, category, responsible person(s) and compliance for an MAMR
+  /// observation. Styled as a twin of [_detailsGrid] so it reads as part of
+  /// the same facts panel.
+  static pw.Widget _mamrBlock(Map<String, dynamic> inc, bool complied) {
+    var raw = inc['mamrResponsible'];
+    if (raw is String && raw.trim().isNotEmpty) {
+      try { raw = jsonDecode(raw); } catch (_) { raw = null; }
+    }
+    final persons = raw is List
+        ? raw.whereType<Map>().map((p) {
+            // Name and designation ONLY — decided 2026-10-15. The PDF is
+            // shared on WhatsApp/e-mail, so the mobile number stays in the app.
+            final n = p['name']?.toString().trim() ?? '';
+            final d = p['designation']?.toString().trim() ?? '';
+            return [n, if (d.isNotEmpty) d].join(', ');
+          }).where((s) => s.isNotEmpty).toList()
+        : const <String>[];
+
+    pw.Widget cell(String lbl, String val, {bool hi = false, PdfColor? ink}) =>
+      pw.Container(
+        padding: const pw.EdgeInsets.fromLTRB(8, 4.5, 8, 4.5),
+        child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(_safe(lbl).toUpperCase(), style: pw.TextStyle(
+              fontSize: 5.8, color: _steel,
+              fontWeight: pw.FontWeight.bold, letterSpacing: 0.7)),
+            pw.SizedBox(height: 2),
+            pw.Text(val.isEmpty ? '-' : _safe(val), maxLines: 3,
+              style: pw.TextStyle(
+                fontSize: 8.3, color: ink ?? (hi ? _navyDeep : _ink),
+                fontWeight: pw.FontWeight.bold)),
+          ]));
+
+    final closedAt = inc['closedAt']?.toString() ?? '';
+    final closedOn = closedAt.length >= 10 ? closedAt.substring(0, 10) : '';
+    return pw.Container(
+      decoration: pw.BoxDecoration(
+        color: _panel, borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.7)),
+      child: pw.Table(
+        border: pw.TableBorder(
+          horizontalInside: pw.BorderSide(color: _hair, width: 0.6),
+          verticalInside: pw.BorderSide(color: _hair, width: 0.6)),
+        columnWidths: const {
+          0: pw.FlexColumnWidth(1.3),
+          1: pw.FlexColumnWidth(2.2),
+          2: pw.FlexColumnWidth(1.3),
+          3: pw.FlexColumnWidth(1.2),
+        },
+        children: [
+          pw.TableRow(children: [
+            cell('Deptt. / Shop', inc['mamrDept']?.toString() ?? '', hi: true),
+            cell('MAMR Area', inc['mamrArea']?.toString() ?? '', hi: true),
+            cell('Category', inc['mamrCategory']?.toString() ?? ''),
+            cell('Compliance',
+                complied
+                    ? 'Complied${closedOn.isEmpty ? '' : ' ($closedOn)'}'
+                    : 'Pending',
+                ink: complied ? PdfColors.green800 : PdfColors.orange800),
+          ]),
+          pw.TableRow(children: [
+            cell('Target Date', _ddmmyyyy(inc['targetDate']?.toString() ?? '')),
+            cell('Responsible Person',
+                persons.isEmpty ? 'Not assigned' : persons.join('\n'),
+                hi: true),
+            cell('Corrective Action',
+                complied ? (inc['correctiveAction']?.toString() ?? '') : ''),
+            cell('Closed By',
+                complied ? (inc['closedBy']?.toString() ?? '') : ''),
+          ]),
+        ],
+      ));
   }
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@
 // knows the reporter's account. So "assigned to me" matches on username and
 // "my report" matches on P.no — they are not interchangeable.
 
+import 'mamr_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Why an item is in someone's inbox.
@@ -165,6 +166,16 @@ class AssignmentInbox {
       if (!isOpen(i)) continue;
 
       final assignee = i['assignedTo']?.toString().trim().toLowerCase() ?? '';
+
+      // MAMR: an area can have two responsible persons (ASP rows 10 and 15).
+      // Only one can be `assignedTo`, so the co-owner is matched through the
+      // responsible-person snapshot instead — by linked username or mobile.
+      if (MamrObs.isMamr(i) &&
+          MamrObs.isResponsible(i, me, user?['mobile']?.toString() ?? '')) {
+        items.add(AssignmentItem(i, AssignmentKind.assignedToMe));
+        continue;
+      }
+
       if (assignee.isEmpty) continue;   // nobody assigned: nothing to notify
 
       if (me.contains(assignee)) {

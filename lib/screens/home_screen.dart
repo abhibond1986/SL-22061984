@@ -325,7 +325,9 @@ class _HomeScreenState extends State<HomeScreen>
     // hidden tab costs a list entry and nothing else.
     final items = [
       _NavItem(Icons.home_outlined,             Icons.home_rounded,             'Home'),
-      _NavItem(Icons.document_scanner_outlined, Icons.document_scanner_rounded, 'AI Scan'),
+      // MAMR — My Area My Responsibility. Same slot (AppTabs.aiScan) and the
+      // same photo-analysis screen, now tagged to an area of the plant.
+      _NavItem(Icons.place_outlined, Icons.place_rounded, 'MAMR'),
       _NavItem(Icons.warning_amber_outlined,    Icons.warning_amber_rounded,    'Near Miss'),
       // menu_book, not document_scanner: AI Scan already owns the scanner glyph
       // and at 22px the two are near-identical. An SOP is the rule book, so the

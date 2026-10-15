@@ -587,6 +587,13 @@ class SyncService {
         if (raw['severity_scores'] != null) 'severityScores': raw['severity_scores'],
         // WHITELIST entry — without it the brand never reaches other devices.
         if (raw['branding'] != null) 'branding': raw['branding'],
+        // MAMR area registers + SED list. Passed through as one map because
+        // the keys are per plant (mamr_areas_ASP, …) — a fixed whitelist entry
+        // per plant would silently drop every plant nobody remembered to add.
+        'mamr': {
+          for (final e in raw.entries)
+            if (e.key.startsWith('mamr_')) e.key: e.value,
+        },
       };
 
       // ★ CRITICAL: AI API keys (OpenRouter/Gemini/Groq) do NOT live in the

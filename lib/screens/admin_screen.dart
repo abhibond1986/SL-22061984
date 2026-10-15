@@ -45,6 +45,8 @@ import '../services/assign_scope.dart';
 // (hiding a safety report is worse than over-sharing one), so the count is the
 // admin's to-fix list, not a cosmetic statistic.
 import '../services/plant_scope.dart';
+import '../services/mamr_service.dart';
+import 'mamr_admin_screen.dart';
 import '../services/kb_seed_data.dart';
 import '../services/knowledge_service.dart';
 import '../services/groq_service.dart';
@@ -137,6 +139,9 @@ class _AdminScreenState extends State<AdminScreen>
     // White-label: company name + logo across the app and PDF reports.
     _AdminModule(17,'branding',  'Company Branding',   'Name & logo',
         Icons.storefront_rounded,      Color(0xFF0E7490), true),
+    // MAMR — My Area My Responsibility: per-plant area register + SED.
+    _AdminModule(18,'mamr',      'MAMR Areas',         'Area responsibility',
+        Icons.map_rounded,             Color(0xFF0F766E), true),
   ];
 
   // ── Login state ─────────────────────────────────────────────────
@@ -262,6 +267,8 @@ class _AdminScreenState extends State<AdminScreen>
   // ── User mgmt state ─────────────────────────────────────────────
   String _userSearch = '';
   String? _userExpandedUname;
+  // MAMR SED list: plant code → usernames. See MamrService.
+  Map<String, List<String>> _mamrSed = {};
 
   // ── User Management at 10,000 accounts ────────────────────────────────────
   // `_users` is whatever fetchUsers() returned, which is capped at 1,000 rows.
@@ -444,6 +451,9 @@ class _AdminScreenState extends State<AdminScreen>
 
   Future<void> _loadAll() async {
     setState(() => _loading = true);
+    MamrService.getSedMap().then((m) {
+      if (mounted) setState(() => _mamrSed = m);
+    }).catchError((_) {});
     // Deliberately not awaited: the whole dashboard should never sit behind a
     // spinner waiting on a visitor counter. It fills in when it arrives.
     _loadVisitorStats().catchError((_) {});
@@ -931,6 +941,7 @@ class _AdminScreenState extends State<AdminScreen>
       case 15: return _moduleAiCorrections(sl);
       case 16: return _moduleAiTelemetry(sl);
       case 17: return BrandingPanel(actor: _currentActor);
+      case 18: return MamrAdminPanel(actor: _currentActor, superAdmin: true);
       default: return _modulePlaceholder(m, sl);
     }
   }
@@ -5371,6 +5382,12 @@ class _AdminScreenState extends State<AdminScreen>
     final pno   = u['pno']?.toString() ?? '';
     final mob   = u['mobile']?.toString() ?? '';
     final expanded = _userExpandedUname == uname;
+    final ids = {uname.toLowerCase(), pno.toLowerCase()}..remove('');
+    final sedPlants = [
+      for (final e in _mamrSed.entries)
+        if (e.value.any(ids.contains)) e.key,
+    ];
+    final isSed = sedPlants.isNotEmpty;
 
     final activity = _auditLog.where(
         (e) => e['actor']?.toString() == uname).toList();
@@ -5421,6 +5438,17 @@ class _AdminScreenState extends State<AdminScreen>
                         borderRadius: BorderRadius.circular(3)),
                       child: const Text('ADMIN',
                           style: TextStyle(
+                              color: Colors.white, fontSize: 8,
+                              fontWeight: FontWeight.w800))),
+                    if (isSed) Container(
+                      margin: const EdgeInsets.only(left: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F766E),
+                        borderRadius: BorderRadius.circular(3)),
+                      child: Text('SED ${sedPlants.join('/')}',
+                          style: const TextStyle(
                               color: Colors.white, fontSize: 8,
                               fontWeight: FontWeight.w800))),
                   ]),
@@ -5481,6 +5509,10 @@ class _AdminScreenState extends State<AdminScreen>
                       const Color(0xFF8E24AA), () => _userResetPw(u)),
                   _userBtn('Change plant', Icons.factory_outlined,
                       const Color(0xFF1E88E5), () => _userChangePlant(u)),
+                  _userBtn(isSed ? 'Revoke SED' : 'Make SED (MAMR)',
+                      Icons.map_rounded,
+                      isSed ? AppColors.red : const Color(0xFF0F766E),
+                      () => _userToggleSed(u, sedPlants)),
                   if (uname != 'admin' && uname != _currentActor)
                     _userBtn('Delete', Icons.delete_outline_rounded,
                         AppColors.red, () => _userDelete(u)),
@@ -5609,6 +5641,43 @@ class _AdminScreenState extends State<AdminScreen>
       meta: {'isAdmin': (!wasAdm).toString()});
     await _loadAll();
     _toast(wasAdm ? 'Admin revoked' : 'Admin granted', AppColors.amber);
+  }
+
+  /// Grant / revoke the plant SED role (MAMR manager for the user's OWN
+  /// plant). Stored in master_data `mamr_sed`, not on app_users — see
+  /// MamrService for why.
+  Future<void> _userToggleSed(
+      Map<String, dynamic> u, List<String> currentPlants) async {
+    final uname = (u['username']?.toString() ?? '').trim().toLowerCase();
+    if (uname.isEmpty) return;
+    bool ok;
+    String msg;
+    if (currentPlants.isNotEmpty) {
+      ok = true;
+      for (final c in currentPlants) {
+        ok = await MamrService.setSed(c, uname, false) && ok;
+      }
+      msg = 'SED revoked';
+    } else {
+      final code = await MamrService.userPlantCode(u);
+      if (code.isEmpty || code == 'OTHER') {
+        _toast('Set this user\'s plant first — an SED manages MAMR for '
+            'their own plant.', AppColors.amber);
+        return;
+      }
+      ok = await MamrService.setSed(code, uname, true);
+      msg = 'SED granted for $code';
+    }
+    await AdminAudit.log(
+      action: AdminAudit.actUserRoleChange,
+      actor: _currentActor,
+      target: uname,
+      targetName: u['name']?.toString(),
+      meta: {'mamrSed': currentPlants.isEmpty ? 'granted' : 'revoked'});
+    final m = await MamrService.getSedMap();
+    if (mounted) setState(() => _mamrSed = m);
+    _toast(ok ? msg : '$msg on this device — will sync when online',
+        ok ? const Color(0xFF0F766E) : AppColors.amber);
   }
 
   Future<void> _userToggleStatus(Map<String, dynamic> u) async {

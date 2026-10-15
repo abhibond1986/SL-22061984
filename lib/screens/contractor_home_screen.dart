@@ -171,8 +171,7 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
 
   Widget _bottomNav(SL sl) {
     final items = [
-      _NavItem(Icons.document_scanner_outlined,
-          Icons.document_scanner_rounded, 'AI Scan'),
+      _NavItem(Icons.place_outlined, Icons.place_rounded, 'MAMR'),
       _NavItem(Icons.warning_amber_outlined,
           Icons.warning_amber_rounded, 'Near Miss'),
     ];
