@@ -591,7 +591,11 @@ class _MamrAdminPanelState extends State<MamrAdminPanel> {
           for (final c in _plants)
             DropdownMenuItem(value: c, child: Text(c)),
         ],
-        onChanged: _busy ? null : (c) => c == null ? null : _selectPlant(c),
+        onChanged: _busy
+            ? null
+            : (c) {
+                if (c != null) _selectPlant(c);
+              },
       );
 
   Widget _stats(SL sl, int depts, int persons, int unlinked) {

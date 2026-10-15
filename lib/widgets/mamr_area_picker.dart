@@ -95,7 +95,11 @@ class MamrAreaPicker extends StatelessWidget {
             label: 'Plant / Unit',
             value: plants.contains(plant) ? plant : null,
             items: {for (final c in plants) c: c},
-            onChanged: locked ? null : (v) => v == null ? null : onPlant(v),
+            onChanged: locked
+                ? null
+                : (v) {
+                    if (v != null) onPlant(v);
+                  },
           ),
           const SizedBox(height: 8),
         ],

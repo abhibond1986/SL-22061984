@@ -82,7 +82,7 @@ class MamrService {
       if (c.isNotEmpty) return c;
     }
     final u = (user['unit']?.toString() ?? '').trim();
-    return u.isEmpty ? '' : plantCodeOf(u);
+    return u.isEmpty ? '' : await plantCodeOf(u);
   }
 
   /// "ASP — Alloy Steels Plant" for a code; the code itself when unknown.
@@ -141,7 +141,7 @@ class MamrService {
     try {
       final v = raw is String ? jsonDecode(raw) : raw;
       if (v is! Map) return {};
-      return v.map((k, l) => MapEntry(
+      return v.map<String, List<String>>((k, l) => MapEntry<String, List<String>>(
             k.toString().toUpperCase(),
             ((l as List?) ?? const [])
                 .map((e) => e.toString().trim().toLowerCase())
