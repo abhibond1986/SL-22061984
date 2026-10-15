@@ -474,9 +474,7 @@ class _MamrStatsTabState extends State<MamrStatsTab> {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: kMamrTeal.withOpacity(0.45)),
       ),
-      child: MamrAreaBackdrop(
-        intensity: 0.9,
-        child: Padding(
+      child: Padding(
       padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Row(children: [
@@ -550,7 +548,6 @@ class _MamrStatsTabState extends State<MamrStatsTab> {
         ]),
       ]),
         ),
-      ),
     );
   }
 

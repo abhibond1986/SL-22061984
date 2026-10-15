@@ -239,9 +239,7 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
               blurRadius: 18, offset: const Offset(0, 6)),
           ],
         ),
-        child: MamrAreaBackdrop(
-          intensity: 0.8,
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             _header(sl, mine, byArea, myShop),
             if (_collapsed)
               const SizedBox.shrink()
@@ -272,7 +270,6 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
               _allAreas(sl, byArea),
             ],
           ]),
-        ),
       ),
     );
   }

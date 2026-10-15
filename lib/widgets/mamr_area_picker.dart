@@ -152,10 +152,20 @@ class _MamrAreaPickerState extends State<MamrAreaPicker> {
                   child: Icon(Icons.lock_outline_rounded, size: 18, color: sl.text4),
                 )
               else
-                TextButton(
+                FilledButton.icon(
                   onPressed: () => setState(() => _expandedOverride = true),
-                  child: const Text('Change area'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: kMamrTeal,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  icon: const Icon(Icons.edit_location_alt_rounded, size: 18),
+                  label: const Text('Change area',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
                 ),
+                const SizedBox(width: 6),
             ]),
           ),
         ),
@@ -238,7 +248,7 @@ class _MamrAreaPickerState extends State<MamrAreaPicker> {
     return _shell(sl, Padding(padding: const EdgeInsets.all(14), child: body));
   }
 
-  /// Card surface with the plant-layout motif painted behind the content.
+  /// Plain card surface (the plant-layout background was removed 2026-10-15).
   Widget _shell(SL sl, Widget child) => Container(
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
@@ -246,7 +256,7 @@ class _MamrAreaPickerState extends State<MamrAreaPicker> {
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: kMamrTeal.withOpacity(0.6), width: 1.6),
         ),
-        child: MamrAreaBackdrop(intensity: 0.7, child: child),
+        child: child,
       );
 
   Widget _myAreaTile(SL sl, MamrArea a, bool selected) => Padding(
