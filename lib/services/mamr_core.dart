@@ -629,6 +629,36 @@ class MamrObs {
       (inc['type']?.toString().toUpperCase() ?? '') == kMamrType ||
       (inc['mamrAreaId']?.toString() ?? '').isNotEmpty;
 
+  /// Report heading: "MAMR: <area name>" (decided 2026-10-15). Falls back to
+  /// the stored title for anything that is not an MAMR row.
+  static String heading(Map<String, dynamic> inc) {
+    final area = (inc['mamrArea']?.toString() ?? '').trim();
+    if (isMamr(inc) && area.isNotEmpty) return 'MAMR: $area';
+    return inc['title']?.toString() ?? '';
+  }
+
+  /// The headline hazard of an MAMR row ("Corroded control mounting
+  /// bracket"), kept as a sub-line now that the heading names the area.
+  static String finding(Map<String, dynamic> inc) {
+    final f = (inc['mamrFinding']?.toString() ?? '').trim();
+    if (f.isNotEmpty) return f;
+    final t = (inc['title']?.toString() ?? '').trim();
+    final area = (inc['mamrArea']?.toString() ?? '').trim();
+    final stripped = t.replaceFirst(RegExp(r'^(MAMR|AI Hazard Scan):\s*'), '');
+    return stripped == area ? '' : stripped;
+  }
+
+  /// True when [user] filed this observation (P.no first, then name).
+  static bool isReporter(Map<String, dynamic>? user, Map<String, dynamic> inc) {
+    if (user == null) return false;
+    final pno = (user['pno']?.toString() ?? '').trim().toLowerCase();
+    final rp = (inc['reportedByPno']?.toString() ?? '').trim().toLowerCase();
+    if (pno.isNotEmpty && rp.isNotEmpty) return pno == rp;
+    final name = (user['name']?.toString() ?? '').trim().toLowerCase();
+    final rb = (inc['reportedBy']?.toString() ?? '').trim().toLowerCase();
+    return name.isNotEmpty && rb == name;
+  }
+
   /// The responsible-person snapshot stored on an observation. Tolerates the
   /// JSON-string form a round trip through SharedPreferences or Sheets leaves.
   static List<MamrPerson> responsible(Map<String, dynamic> inc) {

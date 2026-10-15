@@ -13,6 +13,7 @@
 // Stored fields are unchanged (assignedTo / assignedToName / assignedAt), so
 // AssignmentInbox keeps notifying the assignee with no migration.
 
+import 'mamr_service.dart';
 import 'package:flutter/material.dart';
 
 import '../widgets/user_picker.dart';
@@ -62,7 +63,11 @@ class IncidentAssign {
     VoidCallback? beforeSave,
   }) async {
     final scopeUser = await PlantScope.forUser();
-    if (!await scopeUser.canActOn(inc)) {
+    // MAMR: the reporter (and the area's responsible person / SED) may hand
+    // the job to someone else even when the plant rule would say no — e.g.
+    // an SSO officer who filed an observation in ASP.
+    if (!await scopeUser.canActOn(inc) &&
+        !await MamrService.mayAssign(await LocalDB.getCurrentUser(), inc)) {
       return const AssignResult(AssignOutcome.denied,
           'You can only assign incidents of your own plant.');
     }

@@ -44,6 +44,7 @@ import '../services/branding.dart';
 import '../services/mamr_service.dart';
 import '../services/assignment_notifications.dart';
 import '../services/assignment_inbox.dart';
+import '../services/incident_assign.dart';
 import '../widgets/mamr_area_picker.dart';
 
 class AIScanTab extends StatefulWidget {
@@ -2143,6 +2144,37 @@ class _AIScanTabState extends State<AIScanTab> {
               )),
             ]),
             const SizedBox(height: 12),
+            // The reporter can hand the job to someone other than the area's
+            // responsible person (or to someone at all, if nobody is linked).
+            if (MamrObs.isMamr(incident)) ...[
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final res = await IncidentAssign.pickAndSave(
+                        context, incident,
+                        title: 'Assign this job to');
+                    if (res.message.isNotEmpty) {
+                      _snack(res.message,
+                          res.changed ? AppColors.accent : AppColors.red);
+                    }
+                  },
+                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                  label: Text(
+                    IncidentAssign.hasAssignee(incident)
+                        ? 'Assigned to ${IncidentAssign.assigneeName(incident)}. Change'
+                        : 'Assign this job to someone',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10))),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             Row(children: [
               Expanded(child: ElevatedButton.icon(
                 onPressed: () => Navigator.pop(ctx),
@@ -2802,6 +2834,10 @@ class _AIScanTabState extends State<AIScanTab> {
       // already classifies the finding). Old rows keep theirs.
       // Snapshot: a later reassignment must not rewrite who owned this one.
       incident['mamrResponsible'] = area.responsibleSnapshot();
+      // Heading names the AREA (2026-10-15); the headline hazard moves to a
+      // sub-line so it is not lost.
+      incident['mamrFinding'] = firstHazard.toString();
+      incident['title'] = 'MAMR: ${area.area}';
       // Auto-assign to the first responsible person who has an app account.
       // A co-owner (two names in one Excel cell) is matched through the
       // snapshot by AssignmentInbox, so both see it.

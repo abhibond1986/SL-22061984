@@ -59,6 +59,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   /// Target date for completing the corrective action. Stored as an ISO date
   /// string ('yyyy-MM-dd') in the `targetDate` field.
   DateTime? _targetDate;
+  /// MAMR: reporter / responsible person / SED may assign — see
+  /// MamrService.mayAssign.
+  bool _canAssignMamr = false;
 
   @override
   void initState() {
@@ -82,10 +85,12 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     // MAMR: the area's responsible person may always work their own
     // observation, even when their profile's plant is blank or spelled in a
     // way the plant rule cannot resolve.
+    final me = await LocalDB.getCurrentUser();
     if (!ok && MamrObs.isMamr(_inc)) {
-      ok = await MamrService.canMarkComplied(
-          await LocalDB.getCurrentUser(), _inc);
+      ok = await MamrService.canMarkComplied(me, _inc);
     }
+    final mayAssign = await MamrService.mayAssign(me, _inc);
+    if (mounted) _canAssignMamr = mayAssign;
     if (!mounted) return;
     setState(() {
       _canAct = ok;
@@ -560,9 +565,18 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           {bool quickActionsInline = false}) =>
       Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // ── HEADER ROW ───────────────────────────────────────
-          Text(_inc['title']?.toString() ?? 'Incident',
+          Text(
+              MamrObs.isMamr(_inc)
+                  ? MamrObs.heading(_inc)
+                  : (_inc['title']?.toString() ?? 'Incident'),
               style: TextStyle(color: sl.text1, fontSize: 17,
                   fontWeight: FontWeight.w800, height: 1.3)),
+          if (MamrObs.isMamr(_inc) && MamrObs.finding(_inc).isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(MamrObs.finding(_inc),
+                style: TextStyle(color: sl.text2, fontSize: 13.5,
+                    fontWeight: FontWeight.w600)),
+          ],
           const SizedBox(height: 8),
           Row(children: [
             _pill(sev, sc),
@@ -686,6 +700,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final reporterPno = (_inc['reportedByPno']?.toString() ??
             _inc['reporterPno']?.toString() ?? '').trim();
     final canEdit = _permChecked && _canAct && !_isClosed;
+    // The reporter of an MAMR observation may assign / transfer it even when
+    // they may not otherwise work the case.
+    final canAssign = _permChecked && (_canAct || _canAssignMamr) && !_isClosed;
 
     final curIdx = _statusOrder.indexOf(_status);
     final nextSt = (curIdx >= 0 && curIdx + 1 < _statusOrder.length)
@@ -728,7 +745,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                 : (target.isEmpty ? sl.text4 : null)),
         const SizedBox(height: 6),
         Wrap(spacing: 8, runSpacing: 8, children: [
-          if (canEdit)
+          if (canAssign)
             _qaButton(
               icon: owner.isEmpty
                   ? Icons.person_add_alt_1_rounded
@@ -1244,7 +1261,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   /// reassignment could be silently lost when the screen was closed.
   Future<void> _assignInvestigator({bool required = false}) async {
     if (_saving) return;
-    if (!await _assertCanAct()) return;
+    if (!_canAssignMamr && !await _assertCanAct()) return;
     if (!mounted) return;
     setState(() => _saving = true);
     // Shared with the Log row's "Assign" button — see IncidentAssign.

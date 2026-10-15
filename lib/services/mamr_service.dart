@@ -254,6 +254,24 @@ class MamrService {
     return code.isNotEmpty && await canManage(user, code);
   }
 
+  /// Who may assign / transfer an MAMR observation to someone else, beyond
+  /// the normal same-plant rule: the person who REPORTED it (2026-10-15),
+  /// any of its responsible persons, and the plant SED.
+  static Future<bool> mayAssign(
+      Map<String, dynamic>? user, Map<String, dynamic> inc) async {
+    if (user == null || !MamrObs.isMamr(inc)) return false;
+    if (PlantScope.isAdminUser(user)) return true;
+    if (MamrObs.isReporter(user, inc)) return true;
+    final ids = AssignmentInbox.identities(user);
+    final assignee = inc['assignedTo']?.toString().trim().toLowerCase() ?? '';
+    if (assignee.isNotEmpty && ids.contains(assignee)) return true;
+    if (MamrObs.isResponsible(inc, ids, user['mobile']?.toString() ?? '')) {
+      return true;
+    }
+    final code = await plantCodeOf(inc['plant']?.toString() ?? '');
+    return code.isNotEmpty && await canManage(user, code);
+  }
+
   /// Usernames that should see this observation in My Assignments.
   static Set<String> responsibleUsernames(Map<String, dynamic> inc) =>
       MamrObs.responsible(inc)

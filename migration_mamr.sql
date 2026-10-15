@@ -4,7 +4,7 @@
 --  BEFORE installing the build that contains the MAMR tab.
 -- ═══════════════════════════════════════════════════════════════════════════
 --
---  What it adds: six columns on `incidents` that tie an observation to an area
+--  What it adds: seven columns on `incidents` that tie an observation to an area
 --  of the plant's area-responsibility register.
 --
 --  If you install the app first: nothing breaks. upsertIncident drops an
@@ -31,6 +31,9 @@ alter table public.incidents add column if not exists mamr_responsible jsonb;
 -- The reporter's own department. For MAMR observations `dept` holds the
 -- AREA's department (where the hazard is), so the reporter's is kept here.
 alter table public.incidents add column if not exists reporter_dept    text;
+-- Headline hazard of an MAMR observation. The title is "MAMR: <area name>",
+-- so the finding ("Corroded control mounting bracket") is kept here.
+alter table public.incidents add column if not exists mamr_finding     text;
 
 -- Reports → MAMR filters by plant + area and orders by date.
 create index if not exists idx_incidents_mamr_area

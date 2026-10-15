@@ -17,9 +17,10 @@
 // open right now"; Reports answers "what happened between these dates".
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../main.dart' show SL;
+import '../main.dart' show AppColors, SL;
 import '../screens/mamr_admin_screen.dart';
 import '../services/admin_master_data.dart';
 import '../services/assignment_inbox.dart';
@@ -57,6 +58,9 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
   bool _loaded = false;
   bool _allOpen = false;
   String _search = '';
+  /// The whole card folds down to its status band. Remembered per device.
+  bool _collapsed = false;
+  static const _kCollapsedPref = 'mamr_home_collapsed';
 
   @override
   void initState() {
@@ -64,6 +68,16 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
     MamrService.revision.addListener(_load);
     AdminMasterData.revision.addListener(_load);
     _load();
+    SharedPreferences.getInstance().then((p) {
+      final v = p.getBool(_kCollapsedPref) ?? false;
+      if (mounted && v != _collapsed) setState(() => _collapsed = v);
+    });
+  }
+
+  void _toggleCollapsed() {
+    setState(() => _collapsed = !_collapsed);
+    SharedPreferences.getInstance()
+        .then((p) => p.setBool(_kCollapsedPref, _collapsed));
   }
 
   @override
@@ -219,12 +233,19 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
           color: sl.surface,
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: kMamrTeal.withOpacity(0.6), width: 1.5),
+          boxShadow: [
+            BoxShadow(
+              color: kMamrTeal.withOpacity(sl.isDark ? 0.25 : 0.15),
+              blurRadius: 18, offset: const Offset(0, 6)),
+          ],
         ),
         child: MamrAreaBackdrop(
           intensity: 0.8,
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            _header(sl),
-            if (_reg.isEmpty)
+            _header(sl, mine, byArea, myShop),
+            if (_collapsed)
+              const SizedBox.shrink()
+            else if (_reg.isEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                 child: Text(
@@ -236,6 +257,7 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
                   style: TextStyle(color: sl.text2, fontSize: 13, height: 1.45)),
               )
             else ...[
+              const SizedBox(height: 12),
               // 1 ── My area / my shop
               if (mine.isNotEmpty)
                 for (final a in mine)
@@ -255,51 +277,118 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
     );
   }
 
-  Widget _header(SL sl) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 8, 12),
-        child: Row(children: [
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-                color: kMamrTeal, borderRadius: BorderRadius.circular(12)),
-            child: const Icon(Icons.place_rounded, color: Colors.white, size: 22),
+  /// Teal status band. Always visible; tapping it folds the card. When
+  /// folded it carries the one-line status so nothing important is hidden.
+  Widget _header(SL sl, List<MamrArea> mine, Map<String, MamrTally> byArea,
+      String myShop) {
+    final t = MamrTally();
+    if (mine.isNotEmpty) {
+      for (final a in mine) {
+        final x = byArea[a.id];
+        if (x == null) continue;
+        t.recorded += x.recorded;
+        t.complied += x.complied;
+        t.overdue += x.overdue;
+      }
+    } else if (myShop.isNotEmpty) {
+      final x = _mamrInShop(myShop);
+      t.recorded = x.recorded;
+      t.complied = x.complied;
+      t.overdue = x.overdue;
+    }
+    final shop = mine.isNotEmpty ? mine.first.dept : myShop;
+    final (nmOpen, _) = shop.isEmpty ? (0, 0) : _nearMissIn(shop);
+    final where = mine.isNotEmpty
+        ? mine.map((a) => a.area).join(' / ')
+        : (myShop.isEmpty ? _plant : 'Shop: $myShop');
+
+    Widget chip(String label, int n, Color fill) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+          decoration: BoxDecoration(
+            color: n > 0 ? fill : Colors.white.withOpacity(0.16),
+            borderRadius: BorderRadius.circular(20),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('My Area My Responsibility',
-                  style: TextStyle(color: sl.text1, fontSize: 16,
-                      fontWeight: FontWeight.w800)),
+          child: Text('$n $label',
+              style: TextStyle(
+                  color: n > 0 && fill == AppColors.amber
+                      ? const Color(0xFF3B2600)
+                      : Colors.white,
+                  fontSize: 12, fontWeight: FontWeight.w800)),
+        );
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: _toggleCollapsed,
+        child: Ink(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF0F766E), Color(0xFF0E7490)],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(children: [
+              Container(
+                width: 38, height: 38,
+                decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(11)),
+                child: const Icon(Icons.place_rounded, color: Colors.white, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('My Area My Responsibility',
+                      style: TextStyle(color: Colors.white, fontSize: 16,
+                          fontWeight: FontWeight.w800)),
+                  Text(where,
+                      maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: Colors.white.withOpacity(0.9),
+                          fontSize: 12.5)),
+                ]),
+              ),
               if (_plants.length > 1)
                 PopupMenuButton<String>(
                   tooltip: 'Choose plant',
                   onSelected: _switchPlant,
+                  icon: const Icon(Icons.factory_outlined, color: Colors.white),
                   itemBuilder: (_) => [
                     for (final c in _plants)
                       PopupMenuItem(value: c, child: Text(c)),
                   ],
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Text(_plant, style: TextStyle(color: sl.accentText,
-                        fontSize: 13, fontWeight: FontWeight.w700)),
-                    Icon(Icons.arrow_drop_down_rounded, color: sl.accentText),
-                  ]),
-                )
-              else
-                Text(_plant, style: TextStyle(color: sl.text3, fontSize: 13)),
+                ),
+              if (_canManage)
+                IconButton(
+                  tooltip: 'Manage MAMR areas',
+                  onPressed: () async {
+                    await Navigator.push(context,
+                        MaterialPageRoute(builder: (_) => const MamrAdminScreen()));
+                    _load();
+                  },
+                  icon: const Icon(Icons.tune_rounded, color: Colors.white),
+                ),
+              Icon(_collapsed ? Icons.expand_more_rounded : Icons.expand_less_rounded,
+                  color: Colors.white),
+              const SizedBox(width: 6),
             ]),
-          ),
-          if (_canManage)
-            TextButton.icon(
-              onPressed: () async {
-                await Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const MamrAdminScreen()));
-                _load();
-              },
-              icon: const Icon(Icons.tune_rounded, size: 18),
-              label: const Text('Manage'),
-            ),
-        ]),
-      );
+            if (!_reg.isEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(spacing: 6, runSpacing: 6, children: [
+                chip('done', t.complied, AppColors.green),
+                chip('pending', t.pending, AppColors.amber),
+                chip('overdue', t.overdue, AppColors.red),
+                if (shop.isNotEmpty)
+                  chip('near miss open', nmOpen, AppColors.amber),
+              ]),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
 
   Widget _panelShell(SL sl, Widget child) => Container(
         margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),

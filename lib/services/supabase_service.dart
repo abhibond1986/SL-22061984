@@ -112,6 +112,7 @@ class SupabaseService {
     'mamrArea': 'mamr_area',
     'mamrCategory': 'mamr_category',
     'mamrResponsible': 'mamr_responsible',
+    'mamrFinding': 'mamr_finding',
     'reporterDept': 'reporter_dept',
   };
   static final Map<String, String> _dbToApp = {

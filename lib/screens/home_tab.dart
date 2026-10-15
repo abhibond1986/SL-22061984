@@ -29,6 +29,7 @@ import '../widgets/universal_app_bar.dart';
 import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
 import '../widgets/mamr_home_card.dart';
+import '../services/mamr_service.dart';
 import '../widgets/bottom_nav_gap.dart';
 import '../widgets/safe_backdrop_filter.dart';
 
@@ -89,10 +90,32 @@ class _HomeTabState extends State<HomeTab> {
     _load();
     RealtimeSync.incidentsRevision.addListener(_onRealtime);
     AdminMasterData.revision.addListener(_onRealtime);
+    MamrService.revision.addListener(_loadMyMamrArea);
+    _loadMyMamrArea();
+  }
+
+  /// Area(s) the user is responsible for, shown in the hero after the plant:
+  /// "DGM  ASP, MAMR: Pit Side, LF #1, VAD, MS Bay".
+  String _myMamrArea = '';
+  Future<void> _loadMyMamrArea() async {
+    try {
+      final u = widget.user;
+      final code = await MamrService.userPlantCode(u);
+      if (code.isEmpty) return;
+      final reg = await MamrService.getRegister(code);
+      final ids = AssignmentInbox.identities(u);
+      final mobile = u?['mobile']?.toString() ?? '';
+      final names = reg.activeAreas
+          .where((a) => MamrObs.ownsArea(a, ids, mobile))
+          .map((a) => a.area)
+          .join(' / ');
+      if (mounted && names != _myMamrArea) setState(() => _myMamrArea = names);
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    MamrService.revision.removeListener(_loadMyMamrArea);
     I18n.instance.removeListener(_rebuild);
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
     AdminMasterData.revision.removeListener(_onRealtime);
@@ -523,8 +546,10 @@ class _HomeTabState extends State<HomeTab> {
               style: const TextStyle(color: Colors.white, fontSize: 24,
                   fontWeight: FontWeight.w800, height: 1.1)),
           const SizedBox(height: 4),
-          // Designation + Plant
-          Row(children: [
+          // Designation + Plant (+ MAMR area). Wrap, not Row: an area name
+          // like "Pit Side, LF #1, VAD, MS Bay" must not be clipped.
+          Wrap(crossAxisAlignment: WrapCrossAlignment.center, runSpacing: 4,
+              children: [
             if ((widget.user?['designation']?.toString() ?? '').isNotEmpty) ...[
               Icon(Icons.work_outline_rounded,
                   color: Colors.white.withOpacity(0.85), size: 12),
@@ -539,11 +564,21 @@ class _HomeTabState extends State<HomeTab> {
               Icon(Icons.factory_outlined,
                   color: Colors.white.withOpacity(0.85), size: 12),
               const SizedBox(width: 4),
-              Flexible(child: Text(widget.user!['plant'].toString(),
-                  overflow: TextOverflow.ellipsis,
+              Text(widget.user!['plant'].toString() +
+                      (_myMamrArea.isEmpty ? '' : ','),
                   style: TextStyle(
                       color: Colors.white.withOpacity(0.9),
-                      fontSize: 12, fontWeight: FontWeight.w600))),
+                      fontSize: 12, fontWeight: FontWeight.w600)),
+            ],
+            if (_myMamrArea.isNotEmpty) ...[
+              const SizedBox(width: 6),
+              Icon(Icons.place_rounded,
+                  color: Colors.white.withOpacity(0.95), size: 13),
+              const SizedBox(width: 3),
+              Text('MAMR: $_myMamrArea',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12, fontWeight: FontWeight.w800)),
             ],
           ]),
           const SizedBox(height: 12),
@@ -623,7 +658,7 @@ class _HomeTabState extends State<HomeTab> {
                           const Icon(Icons.camera_alt_rounded,
                               color: Colors.white, size: 14),
                           const SizedBox(width: 5),
-                          Text('My AI Scans',
+                          Text('My MAMR',
                               style: TextStyle(color: Colors.white70,
                                   fontSize: 10,
                                   fontWeight: FontWeight.w600,
@@ -634,7 +669,7 @@ class _HomeTabState extends State<HomeTab> {
                             style: const TextStyle(color: Colors.white,
                                 fontSize: 32,
                                 fontWeight: FontWeight.w800, height: 1)),
-                        Text('hazard scans',
+                        Text('observations',
                             style: TextStyle(color: Colors.white.withOpacity(0.7),
                                 fontSize: 9)),
                       ]),

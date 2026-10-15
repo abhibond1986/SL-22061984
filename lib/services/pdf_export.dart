@@ -23,6 +23,7 @@ import 'branding.dart';
 import 'hazard_quality.dart';
 import 'image_storage.dart';
 import 'line_of_fire.dart';
+import 'mamr_core.dart';
 import 'pdf_export_stub.dart' if (dart.library.html) 'pdf_export_web.dart' as html; // ignore: avoid_web_libraries_in_flutter
 
 class PdfExport {
@@ -690,9 +691,16 @@ class PdfExport {
     // Lighter band than the body's severity ink (user request 2026-10-04:
     // "a little less dark"). See [_mastCol].
     final sc = rated ? _mastCol(sev) : PdfColor.fromHex('#6B7C93');
-    final title = _safe(inc['title']?.toString().trim().isNotEmpty == true
-        ? inc['title'].toString().trim()
-        : (isAi ? 'AI Hazard Scan' : 'Near Miss Report'));
+    // MAMR rows are headed "MAMR: <area name>" (2026-10-15), also for rows
+    // filed before the title itself changed.
+    final isMamr = MamrObs.isMamr(inc);
+    final mamrHead = isMamr ? MamrObs.heading(inc) : '';
+    final finding = isMamr ? MamrObs.finding(inc) : '';
+    final title = _safe(mamrHead.isNotEmpty
+        ? mamrHead
+        : inc['title']?.toString().trim().isNotEmpty == true
+            ? inc['title'].toString().trim()
+            : (isAi ? 'AI Hazard Scan' : 'Near Miss Report'));
     // ★ 2026-10-03 (user request): the masthead is titled with the reporting
     // Plant / Unit, and is painted in the RISK-LEVEL colour (green LOW, teal
     // MEDIUM, orange HIGH, red CRITICAL, grey when not rated) instead of navy,
@@ -772,7 +780,9 @@ class PdfExport {
                   fontSize: 13.5, fontWeight: pw.FontWeight.bold, color: _ink)),
                 pw.SizedBox(height: 2),
                 pw.Text(
-                  isAi
+                  finding.isNotEmpty
+                    ? _safe('$finding${where.isEmpty ? '' : '  ·  $where'}')
+                    : isAi
                     ? 'AI-assisted photographic hazard assessment'
                         '${where.isEmpty ? '' : '  ·  $where'}'
                     : 'Near miss / unsafe condition report'
