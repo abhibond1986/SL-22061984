@@ -357,6 +357,29 @@ class GeminiVision {
   // different architecture and carries no information about this one.
   static const String _orDotsModel     = 'dots-studio/dots-3-note-preview:free';
 
+  // ── NEMOTRON 3.5 SUPER VL — Tier 2 position 2, added 2026-10-16 ──────────────
+  // Added on the user's choice after a scan where Gemini 503'd/timed out,
+  // Dots3-Note timed out at 20s and Nara's proxy 503'd — Tier 2 had no partner
+  // for the 10s hedge to start. Checked live on 2026-10-16, both required tests:
+  //   • `/endpoints` → 1 endpoint, provider **Nvidia**, prompt AND completion
+  //     price 0. A FOURTH company: not Google (Tier 1), not AtlasCloud (Dots3),
+  //     not NaraRouter (Tier 3) — so it can cover the failures the others share.
+  //   • `reasoning: {mandatory: false}` with NO `default_enabled`, like Dots3:
+  //     thinking is off unless asked (we also send `enabled: false`).
+  //   • uptime 100% (30m) / 98.4% (1d); `response_format`, `structured_outputs`
+  //     and `seed` all supported. 12B active of 120B MoE, 1M context.
+  // ⚠ UNMEASURED on this prompt (released 2026-10-15), and its data-use policy
+  // was not checked from here — the Inkling banner (training on images, "no
+  // faces") is the precedent for why that matters on shop-floor photos. It sits
+  // SECOND, so it only runs when Dots3 is still silent at [_kOrHedgeAfter].
+  static const String _orNemotron35Model = 'nvidia/nemotron-3.5-super-vl:free';
+
+  /// Models whose OpenRouter request carries `response_format: json_object`
+  /// (2026-10-16). Both list it in `supported_parameters`; it stops tokens
+  /// being spent on markdown fences and preamble. Only these — a provider that
+  /// does not support it can 400 the whole request.
+  static const Set<String> _kJsonModeModels = {_orDotsModel, _orNemotron35Model};
+
   /// Models whose request body should carry `reasoning: {enabled: false}`.
   ///
   /// AN EXPLICIT SET, NOT A SUBSTRING TEST. The first version of this checked
@@ -389,6 +412,7 @@ class GeminiVision {
     _orNemotronModel,
     _orGemma31bModel,
     _orDotsModel,
+    _orNemotron35Model,
   };
 
   // Rate-limiting between analyses (kept small — only affects back-to-back scans)
@@ -1723,8 +1747,12 @@ HOW TO USE IT:
             // stopwatch, not this model's latency. It keeps [kAttemptTimeout] rather
             // than inheriting MiniMax's 45s, which was sized for a different
             // architecture's ~47 tokens/sec.
+            // ★ 2026-10-16: two deep again. Nemotron 3.5 Super VL (NVIDIA) is
+            // the hedge partner Dots3 has lacked since MiniMax 404'd: started at
+            // [_kOrHedgeAfter] if Dots3 is still silent, 10s + 20s ≤ 70s ceiling.
             : const [
                 [_orDotsModel, 'Dots3-Note Preview (primary, free — AtlasCloud)'],
+                [_orNemotron35Model, 'Nemotron 3.5 Super VL (2nd, free — NVIDIA)'],
               ];
         // Drop any slug whose provider told us it was throttling within the last
         // minute — see [_applyOrCooldowns], which refuses to empty the chain and
@@ -2391,6 +2419,7 @@ HOW TO USE IT:
     // the ⚠ note above requires — offering a dead slug is how a device ends up
     // pinned to a model that can only fail, with the fallback chain disabled.
     {'id': _orDotsModel,     'name': 'Dots3-Note Preview (free, OpenRouter primary, 512k ctx)'},
+    {'id': _orNemotron35Model, 'name': 'Nemotron 3.5 Super VL (free, OpenRouter 2nd — NVIDIA, new Oct 2026)'},
     // ── Pinnable but NOT in the auto chain as of 2026-09-07 ─────────────────
     // Labels say so out loud. An admin comparing this dropdown against the
     // "Model reliability" table needs to know why these show no recent attempts:
@@ -2442,7 +2471,8 @@ HOW TO USE IT:
             'model': m,
             'provider': 'gemini',
             'tier': '1',
-            'note': 'Google AI Studio key, 8s each (cut from 15s on 2026-09-07). '
+            'note': 'Google AI Studio key, 8s each, 24s for the whole tier, '
+                'thinking set to minimal, one retry on a 503. '
                 'The tier bails on the FIRST key-wide block, so later entries may '
                 'show no attempts — and after a TOTAL failure the whole tier is '
                 'parked for 90s, so a scan may show no Gemini attempts at all.',
@@ -2467,6 +2497,15 @@ HOW TO USE IT:
               'on Google AI Studio nor reasoning-on-by-default. With no partner in '
               'the tier, the ${_kOrHedgeAfter.inSeconds}s hedge has nothing to '
               'start and this model is simply waited out.',
+        },
+        {
+          'model': _orNemotron35Model,
+          'provider': 'openrouter',
+          'tier': '2',
+          'note': 'Tier 2 position 2 (NVIDIA), added 2026-10-16. Started '
+              'alongside Dots3 when Dots3 has not answered in '
+              '${_kOrHedgeAfter.inSeconds}s; ${kAttemptTimeout.inSeconds}s cap. '
+              'Unmeasured on this prompt when added — watch its row here.',
         },
         for (final m in NaraVision.availableModels)
           {
@@ -3261,6 +3300,8 @@ HOW TO USE IT:
       // switch off for that specific model.
       if (_kReasoningOptOutModels.contains(model))
         'reasoning': {'enabled': false},
+      if (_kJsonModeModels.contains(model))
+        'response_format': {'type': 'json_object'},
     };
 
     // NOTE: there is deliberately no "reset the outcome" step here any more.
@@ -4041,11 +4082,21 @@ it, or withdrawn if there is no such person.
 ═══════════════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY (no markdown, no preamble)
 ═══════════════════════════════════════════════════════
+KEEP THE REPLY SHORT — it is read on a phone, and every extra word is time the
+safety officer waits. Keep EVERY field and EVERY hazard you would report; cut
+wording, never findings.
+  • Write the JSON COMPACT: no indentation, no line breaks between fields.
+  • Leave out optional keys that do not apply — never write null, "" or "N/A".
+  • Coordinates: 2 decimals (0.25, not 0.2500).
+  • Word limits: "sceneInventory" 25-50 · "summary" 3 sentences, at most 55 in
+    all · "description" at most 35 · "visualEvidence" at most 15 ·
+    "correctiveAction" at most 25 · "absenceCheck" at most 20 · "where" at
+    most 6 · "regulation" the reference only, no explanation.
 {
   "sceneInventory": "<FIRST, before anything else: what is physically visible in
                       this frame, in plain words. Objects, people, equipment,
                       surfaces, materials, and where they are. NO judgements, NO
-                      hazards, NO absences. 30-80 words. Every hazard below must
+                      hazards, NO absences. 25-50 words. Every hazard below must
                       concern something named here.>",
   "overallRisk": "{{SEVERITIES}}",
   "riskScore": 0-100,

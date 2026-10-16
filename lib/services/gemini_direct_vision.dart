@@ -122,9 +122,11 @@ class GeminiDirectVision {
   // how an admin ends up "selecting" a model that is not actually tried first.
   static const List<Map<String, String>> availableModels = [
     {'id': 'gemini-3.1-flash-lite', 'name': 'Gemini 3.1 Flash-Lite (Recommended — highest quota, fastest)'},
+    {'id': 'gemini-3.5-flash-lite', 'name': 'Gemini 3.5 Flash-Lite (newer Lite, free tier)'},
     {'id': 'gemini-3.6-flash',      'name': 'Gemini 3.6 Flash (fast)'},
-    {'id': 'gemini-3.7-flash',      'name': 'Gemini 3.7 Flash (Newest)'},
-    {'id': 'gemini-2.5-flash',      'name': 'Gemini 2.5 Flash (Older, still supported)'},
+    {'id': 'gemini-3.8-flash',      'name': 'Gemini 3.8 Flash (newest Flash, free tier)'},
+    {'id': 'gemini-3.7-flash',      'name': 'Gemini 3.7 Flash'},
+    {'id': 'gemini-2.5-flash',      'name': 'Gemini 2.5 Flash (older — Google now limits 2.5 access)'},
     {'id': 'gemini-2.5-pro',        'name': 'Gemini 2.5 Pro (Most accurate, low quota)'},
   ];
 
@@ -137,11 +139,63 @@ class GeminiDirectVision {
   // model with the most quota headroom and the fastest response is the one most
   // likely to actually finish the scan. The heavier Flash models follow as
   // quality fallbacks.
+  // ★ 2026-10-16 (user-approved, after a scan where every Gemini model 503'd
+  // or timed out): 2.5 Flash OUT, 3.5 Flash-Lite and 3.8 Flash IN. Google's
+  // models page now says it is "limiting access to the 2.5 models to users who
+  // have actively used them in the past" and recommends 3.5 Flash-Lite or
+  // 3.8 Flash for new work; both are "Free of charge" on the free tier
+  // (pricing page, checked 2026-10-16). Each is its own capacity pool, so a
+  // "high demand" 503 on one is not a verdict on the next. 3.1 Flash-Lite
+  // stays first because it is the one with a measured ~7s leg on this prompt.
+  // Four entries, but [_kTierBudget] still caps the tier at ~3 slow attempts.
   static const List<String> _modelFallbackChain = [
-    'gemini-3.1-flash-lite', // FIRST: highest quota, fastest; documented replacement for 2.0-flash-lite
+    'gemini-3.1-flash-lite', // FIRST: measured ~7s on this prompt, highest quota
+    'gemini-3.5-flash-lite', // Google's current recommended Lite
     'gemini-3.6-flash',      // Documented replacement for 2.0-flash
-    'gemini-2.5-flash',      // Older generation, still supported — extra headroom
+    'gemini-3.8-flash',      // Newest Flash; thinking cannot go below "low"
   ];
+
+  /// Ceiling on the WHOLE tier (2026-10-16). With four models a run of 8s
+  /// timeouts could otherwise cost 32s before Tier 2 starts; a new attempt is
+  /// only begun if it can finish inside this. Fast failures (503, 404) cost
+  /// about a second each, so they still reach every model.
+  static const Duration _kTierBudget = Duration(seconds: 24);
+
+  /// One short pause-and-retry on a 503 per scan. Google's own 503 text is
+  /// "This model is currently experiencing high demand. Spikes in demand are
+  /// usually temporary" — a 1.5s retry often lands, where moving straight on
+  /// meets the same spike on the next model.
+  static const Duration _k503Backoff = Duration(milliseconds: 1500);
+
+  /// Status of the last [_callModel] (0 = no HTTP response: timeout/network).
+  /// Safe as a static: this tier calls its models strictly one at a time.
+  static int _lastStatus = 0;
+
+  /// Models that rejected `thinkingConfig` with a 400 this session; they are
+  /// called without it from then on.
+  static final Set<String> _noThinkingConfig = {};
+
+  /// Lowest thinking setting each model family accepts (2026-10-16).
+  ///
+  /// Gemini 3.x and 2.5 Flash THINK BY DEFAULT ("dynamic thinking"; 3.6 Flash
+  /// defaults to "medium" per Google's thinking docs), and those tokens are
+  /// generated before the JSON — the main reason a healthy model overran the
+  /// 8s cap. Hazard JSON from a photo is extraction, not multi-step reasoning:
+  /// Google's own guidance is "minimal or low thinking for ... classification".
+  ///   3.x → thinkingLevel "minimal" (3.8 Flash's floor is "low")
+  ///   2.5 Flash / Flash-Lite → thinkingBudget 0 (off)
+  ///   2.5 Pro → cannot be switched off; sent nothing
+  /// A model that answers 400 to this is remembered in [_noThinkingConfig] and
+  /// re-asked without it, so a wrong guess costs one fast round trip, once.
+  static Map<String, dynamic>? _thinkingFor(String model) {
+    if (_noThinkingConfig.contains(model)) return null;
+    final m = model.toLowerCase();
+    if (m.startsWith('gemini-2.5-pro')) return null;
+    if (m.startsWith('gemini-2.5-flash')) return {'thinkingBudget': 0};
+    if (m.startsWith('gemini-3.8')) return {'thinkingLevel': 'low'};
+    if (m.startsWith('gemini-3')) return {'thinkingLevel': 'minimal'};
+    return null;
+  }
 
   /// Read-only view of [_modelFallbackChain] for display.
   ///
@@ -390,11 +444,33 @@ class GeminiDirectVision {
       ..._modelFallbackChain,
     ].map((m) => _retiredModels[m] ?? m).toSet().toList();
 
+    final tierClock = Stopwatch()..start();
+    var retried503 = false;
     for (int i = 0; i < attempts.length; i++) {
       final model = attempts[i];
+      // Do not START an attempt that cannot finish inside the tier budget —
+      // the time is better spent on Tier 2. The first attempt always runs.
+      if (i > 0 && tierClock.elapsed + _kPerModelTimeout > _kTierBudget) {
+        print('GeminiDirectVision: ⏭ tier budget '
+            '(${_kTierBudget.inSeconds}s) reached after '
+            '${tierClock.elapsed.inMilliseconds}ms — leaving '
+            '${attempts.length - i} model(s) untried, moving to Tier 2');
+        break;
+      }
       print('GeminiDirectVision: ▶ [${i + 1}/${attempts.length}] $model');
-      final result = await _callModel(model, apiKey, base64Image,
+      var result = await _callModel(model, apiKey, base64Image,
           kbContext: kbContext, sceneContext: sceneContext);
+      // One pause-and-retry per scan on "high demand" — see [_k503Backoff].
+      if (result == null && _lastStatus == 503 && !retried503 &&
+          tierClock.elapsed + _k503Backoff + _kPerModelTimeout <=
+              _kTierBudget) {
+        retried503 = true;
+        print('GeminiDirectVision: ↻ $model 503 (high demand) — retrying once '
+            'after ${_k503Backoff.inMilliseconds}ms');
+        await Future.delayed(_k503Backoff);
+        result = await _callModel(model, apiKey, base64Image,
+            kbContext: kbContext, sceneContext: sceneContext);
+      }
 
       // 429/403 is key-wide, not model-specific, so every remaining attempt
       // would fail the same way. This bail is correct — unlike the previous
@@ -440,6 +516,7 @@ class GeminiDirectVision {
     final String prompt = await resolvedComprehensivePrompt(
         kbContext: kbContext ?? '', sceneContext: sceneContext);
 
+    final thinking = _thinkingFor(model);
     final requestBody = {
       'contents': [
         {
@@ -461,6 +538,7 @@ class GeminiDirectVision {
         'topP': 0.8,
         'maxOutputTokens': 8192,
         'responseMimeType': 'application/json',
+        if (thinking != null) 'thinkingConfig': thinking,
       }
     };
 
@@ -476,12 +554,27 @@ class GeminiDirectVision {
       );
     }
 
+    _lastStatus = 0;
     try {
       final response = await http.post(
         Uri.parse(url),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(requestBody),
       ).timeout(_kPerModelTimeout);
+      _lastStatus = response.statusCode;
+
+      // A model that does not accept our thinkingConfig: remember, re-ask
+      // without it. Checked before every other 400 branch; API_KEY_INVALID
+      // never mentions thinking, so it cannot be caught here by mistake.
+      if (response.statusCode == 400 && thinking != null &&
+          response.body.toLowerCase().contains('thinking') &&
+          !response.body.contains('API_KEY_INVALID')) {
+        print('GeminiDirectVision: [$model] rejected thinkingConfig $thinking '
+            '— retrying without it (remembered for this session)');
+        _noThinkingConfig.add(model);
+        return _callModel(model, apiKey, base64Image,
+            kbContext: kbContext, sceneContext: sceneContext);
+      }
 
       if (response.statusCode == 200) {
         // ★ v29 FIX: Force UTF-8 decode for non-English text support
