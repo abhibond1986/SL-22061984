@@ -734,14 +734,14 @@ class _HomeTabState extends State<HomeTab> {
           // Total Cases → Reports (no filter)
           Expanded(child: _statTile(
               sl, I18n.t('home.totalCases'), '$_total',
-              Icons.assessment_rounded, const Color(0xFF6366F1),
+              Icons.assessment_rounded, _TileTone.indigo,
               onTap: () => _goReports(null, null))),
           const SizedBox(width: 8),
           // Open → Reports filtered by the admin's FIRST status, not a literal
           // 'OPEN' that no longer exists once the stage is renamed.
           Expanded(child: _statTile(
               sl, I18n.t('home.openCases'), '$_open',
-              Icons.lock_open_rounded, const Color(0xFFF59E0B),
+              Icons.lock_open_rounded, _TileTone.amber,
               onTap: () => _goReports(null,
                   _statuses.isEmpty ? null : _statuses.first.toUpperCase()))),
         ]),
@@ -750,13 +750,13 @@ class _HomeTabState extends State<HomeTab> {
           // Critical → Reports filtered by CRITICAL severity
           Expanded(child: _statTile(
               sl, I18n.t('home.criticalCases'), '$_critical',
-              Icons.warning_rounded, const Color(0xFFEF4444),
+              Icons.warning_rounded, _TileTone.red,
               onTap: () => _goReports('CRITICAL', null))),
           const SizedBox(width: 8),
           // Closed → Reports filtered by the admin's closing status.
           Expanded(child: _statTile(
               sl, I18n.t('home.closedCases'), '$_closed',
-              Icons.check_circle_rounded, const Color(0xFF10B981),
+              Icons.check_circle_rounded, _TileTone.green,
               onTap: () => _goReports(null,
                   _closedStatus.isEmpty ? null : _closedStatus))),
         ]),
@@ -771,46 +771,56 @@ class _HomeTabState extends State<HomeTab> {
     widget.onTabChange(AppTabs.reports);
   }
 
-  Widget _statTile(SL sl, String label, String value, IconData icon, Color color,
-      {VoidCallback? onTap}) {
-    final tile = ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: SafeBackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: sl.card.withOpacity(0.7),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: color.withOpacity(0.25), width: 1)),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Container(
-                width: 32, height: 32,
-                decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(10)),
-                child: Icon(icon, color: sl.textOn(color), size: 18)),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(4)),
-                child: Text(I18n.t('home.thisWeek'),
-                    style: TextStyle(color: sl.textOn(color), fontSize: 10,
-                        fontWeight: FontWeight.w700, letterSpacing: 0.3))),
-            ]),
-            const SizedBox(height: 12),
-            Text(value,
-                style: TextStyle(color: sl.text1, fontSize: 26,
-                    fontWeight: FontWeight.w800, height: 1)),
-            const SizedBox(height: 3),
-            Text(label,
-                style: TextStyle(color: sl.text3, fontSize: 10,
-                    fontWeight: FontWeight.w600)),
+  /// ★ 2026-10-16 (user: "put some colors in these cards"): each tile is a
+  /// solid two-stop gradient in its own colour with white text, instead of a
+  /// near-white glass card with a coloured hairline. The tones are the 700/800
+  /// steps, not the 500 fills used elsewhere, because white text has to clear
+  /// 4.5:1 on BOTH stops (lowest: amber-700 #B45309 at 5.0:1) and the tile
+  /// looks the same in light and dark mode.
+  Widget _statTile(SL sl, String label, String value, IconData icon,
+      _TileTone tone, {VoidCallback? onTap}) {
+    final tile = Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: [tone.from, tone.to]),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [BoxShadow(
+          color: tone.to.withOpacity(sl.isDark ? 0.35 : 0.22),
+          blurRadius: 12, offset: const Offset(0, 4))]),
+      child: Stack(children: [
+        // Large faint icon in the corner: texture, not information.
+        Positioned(right: -6, bottom: -10,
+          child: Icon(icon, size: 64, color: Colors.white.withOpacity(0.10))),
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(10)),
+              child: Icon(icon, color: Colors.white, size: 18)),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.18),
+                borderRadius: BorderRadius.circular(4)),
+              child: Text(I18n.t('home.thisWeek'),
+                  style: const TextStyle(color: Colors.white, fontSize: 10,
+                      fontWeight: FontWeight.w700, letterSpacing: 0.3))),
           ]),
-        )),
+          const SizedBox(height: 12),
+          Text(value,
+              style: const TextStyle(color: Colors.white, fontSize: 26,
+                  fontWeight: FontWeight.w800, height: 1)),
+          const SizedBox(height: 3),
+          Text(label,
+              style: TextStyle(color: Colors.white.withOpacity(0.92),
+                  fontSize: 11, fontWeight: FontWeight.w600)),
+        ]),
+      ]),
     );
     if (onTap == null) return tile;
     return Material(
@@ -828,77 +838,86 @@ class _HomeTabState extends State<HomeTab> {
   // ═══════════════════════════════════════════════════════════════
   Widget _safetyScoreCard(SL sl) {
     final score = _safetyScore;
-    Color scoreColor;
+    // The card takes its score band's colour (same tones as the tiles above),
+    // with white ink on it. The band word used to be printed in raw amber on
+    // a near-white card, about 2:1 — the "Good" in the screenshot.
+    _TileTone tone;
     String label;
-    if (score >= 80)      { scoreColor = const Color(0xFF10B981); label = 'Excellent'; }
-    else if (score >= 60) { scoreColor = const Color(0xFFF59E0B); label = 'Good'; }
-    else if (score >= 40) { scoreColor = const Color(0xFFF97316); label = 'Average'; }
-    else                  { scoreColor = const Color(0xFFEF4444); label = 'Needs Attention'; }
+    if (score >= 80)      { tone = _TileTone.green;  label = 'Excellent'; }
+    else if (score >= 60) { tone = _TileTone.amber;  label = 'Good'; }
+    else if (score >= 40) { tone = _TileTone.orange; label = 'Average'; }
+    else                  { tone = _TileTone.red;    label = 'Needs Attention'; }
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: SafeBackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: sl.card.withOpacity(0.7),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: sl.border, width: 1)),
-            child: Row(children: [
-              // Circular gauge
-              SizedBox(width: 90, height: 90,
-                child: CustomPaint(
-                  painter: _GaugePainter(
-                    progress: score / 100,
-                    color: scoreColor,
-                    trackColor: sl.border,
-                  ),
-                  child: Center(child: Column(
-                    mainAxisSize: MainAxisSize.min, children: [
-                    Text('$score',
-                        style: TextStyle(color: scoreColor, fontSize: 26,
-                            fontWeight: FontWeight.w800, height: 1)),
-                    Text('/100',
-                        style: TextStyle(color: sl.text4, fontSize: 9)),
-                  ])),
-                )),
-              const SizedBox(width: 16),
-              Expanded(child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(I18n.t('home.safetyScore'),
-                    style: TextStyle(color: sl.text3, fontSize: 11,
-                        fontWeight: FontWeight.w600, letterSpacing: 0.5)),
-                const SizedBox(height: 4),
-                Text(label,
-                    style: TextStyle(color: scoreColor, fontSize: 18,
-                        fontWeight: FontWeight.w800)),
-                const SizedBox(height: 8),
-                _miniProgressRow(sl, 'Open vs Closed',
-                    _total == 0 ? 1 : _closed / _total,
-                    AppColors.green),
-                const SizedBox(height: 5),
-                _miniProgressRow(sl, 'Critical Ratio',
-                    _total == 0 ? 0 : 1 - (_critical / _total),
-                    AppColors.red),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            colors: [tone.from, tone.to]),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [BoxShadow(
+            color: tone.to.withOpacity(sl.isDark ? 0.35 : 0.22),
+            blurRadius: 14, offset: const Offset(0, 4))]),
+        child: Row(children: [
+          // Circular gauge
+          SizedBox(width: 90, height: 90,
+            child: CustomPaint(
+              painter: _GaugePainter(
+                progress: score / 100,
+                color: Colors.white,
+                trackColor: Colors.white.withOpacity(0.25),
+              ),
+              child: Center(child: Column(
+                mainAxisSize: MainAxisSize.min, children: [
+                Text('$score',
+                    style: const TextStyle(color: Colors.white, fontSize: 26,
+                        fontWeight: FontWeight.w800, height: 1)),
+                Text('/100',
+                    style: TextStyle(color: Colors.white.withOpacity(0.85),
+                        fontSize: 10)),
               ])),
-            ]),
-          ))),
+            )),
+          const SizedBox(width: 16),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(I18n.t('home.safetyScore'),
+                style: TextStyle(color: Colors.white.withOpacity(0.9),
+                    fontSize: 11, fontWeight: FontWeight.w600,
+                    letterSpacing: 0.5)),
+            const SizedBox(height: 4),
+            Text(label,
+                style: const TextStyle(color: Colors.white, fontSize: 18,
+                    fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            _miniProgressRow(sl, 'Open vs Closed',
+                _total == 0 ? 1 : _closed / _total,
+                const Color(0xFF6EE7B7)),
+            const SizedBox(height: 5),
+            _miniProgressRow(sl, 'Critical Ratio',
+                _total == 0 ? 0 : 1 - (_critical / _total),
+                const Color(0xFFFCA5A5)),
+          ])),
+        ]),
+      ),
     );
   }
 
+  /// A labelled bar on the (coloured) safety-score card: white ink, a pale
+  /// fill so the bar reads against the deep band colour.
   Widget _miniProgressRow(SL sl, String label, double v, Color color) {
     return Row(children: [
       Expanded(child: Column(
           crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: TextStyle(color: sl.text4, fontSize: 9)),
+        Text(label, style: TextStyle(color: Colors.white.withOpacity(0.9),
+            fontSize: 10)),
         const SizedBox(height: 2),
         Container(
-          height: 5, width: double.infinity,
+          height: 6, width: double.infinity,
           decoration: BoxDecoration(
-              color: sl.border, borderRadius: BorderRadius.circular(3)),
+              color: Colors.white.withOpacity(0.22),
+              borderRadius: BorderRadius.circular(3)),
           child: FractionallySizedBox(
             alignment: Alignment.centerLeft,
             widthFactor: v.clamp(0, 1),
@@ -908,7 +927,7 @@ class _HomeTabState extends State<HomeTab> {
       ])),
       const SizedBox(width: 6),
       Text('${(v * 100).clamp(0, 100).round()}%',
-          style: TextStyle(color: sl.textOn(color), fontSize: 10,
+          style: const TextStyle(color: Colors.white, fontSize: 11,
               fontWeight: FontWeight.w700)),
     ]);
   }
@@ -1361,4 +1380,17 @@ class _GaugePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _GaugePainter old) =>
       old.progress != progress || old.color != color;
+}
+
+/// Gradient stops for the coloured Home tiles. Every stop keeps white text
+/// at or above 4.5:1 (measured: indigo 6.3, amber 5.0, red 4.8, green 5.5 on
+/// the lighter stop), so nothing on a tile needs a theme-dependent colour.
+class _TileTone {
+  final Color from, to;
+  const _TileTone(this.from, this.to);
+  static const indigo = _TileTone(Color(0xFF4F46E5), Color(0xFF3730A3));
+  static const amber  = _TileTone(Color(0xFFB45309), Color(0xFF92400E));
+  static const red    = _TileTone(Color(0xFFDC2626), Color(0xFF991B1B));
+  static const green  = _TileTone(Color(0xFF047857), Color(0xFF065F46));
+  static const orange = _TileTone(Color(0xFFC2410C), Color(0xFF9A3412));
 }

@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../main.dart' show AppColors, SL, SLLayout;
@@ -8,7 +7,6 @@ import '../../services/admin_master_data.dart';
 import '../../services/plant_scope.dart';
 import '../../services/realtime_sync.dart';
 import '../../widgets/bottom_nav_gap.dart';
-import '../../widgets/safe_backdrop_filter.dart';
 
 class DataAnalysisTab extends StatefulWidget {
   const DataAnalysisTab({super.key});
@@ -260,15 +258,11 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
           // Summary row
           _summaryCards(sl),
           const SizedBox(height: 20),
-          // Severity Pie Chart
-          _sectionTitle('Severity Distribution', sl),
+          // ★ 2026-10-16: both donuts in ONE section, side by side, instead
+          // of two full-width cards each holding a small chart.
+          _sectionTitle('Severity & Report Type', sl),
           const SizedBox(height: 12),
-          _severityPieChart(sl),
-          const SizedBox(height: 24),
-          // Type Pie Chart
-          _sectionTitle('Report Type Breakdown', sl),
-          const SizedBox(height: 12),
-          _typePieChart(sl),
+          _donutsRow(sl),
           const SizedBox(height: 24),
           // Plant-wise Bar Chart
           _sectionTitle('Incidents by Plant', sl),
@@ -433,55 +427,76 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
     final open = _view.where(_isOpen).length;
     return Row(
       children: [
-        _miniCard(sl, 'Total', '$total', AppColors.accent),
+        _miniCard(sl, 'Total', '$total', Icons.assessment_rounded,
+            const Color(0xFF4F46E5), const Color(0xFF3730A3)),
         const SizedBox(width: 8),
-        _miniCard(sl, 'Critical', '$critical', AppColors.crit),
+        _miniCard(sl, 'Critical', '$critical', Icons.warning_rounded,
+            const Color(0xFFDC2626), const Color(0xFF991B1B)),
         const SizedBox(width: 8),
-        _miniCard(sl, 'Open', '$open', AppColors.amber),
+        _miniCard(sl, 'Open', '$open', Icons.lock_open_rounded,
+            const Color(0xFFB45309), const Color(0xFF92400E)),
         const SizedBox(width: 8),
-        _miniCard(sl, 'AI Scans', '$_aiScanCount', AppColors.cyan),
+        _miniCard(sl, 'AI Scans', '$_aiScanCount', Icons.auto_awesome_rounded,
+            const Color(0xFF0E7490), const Color(0xFF155E75)),
       ],
     );
   }
 
-  Widget _miniCard(SL sl, String label, String value, Color color) {
+  /// Solid gradient tile with white ink (same tones as the Home tiles: each
+  /// stop keeps white text above 4.5:1, cyan-700 #0E7490 at 5.4:1).
+  Widget _miniCard(SL sl, String label, String value, IconData icon,
+      Color from, Color to) {
     return Expanded(
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: SafeBackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: color.withOpacity(0.3)),
-            ),
-            child: Column(children: [
-              Text(value, style: TextStyle(
-                  fontSize: 18, fontWeight: FontWeight.w800, color: sl.textOn(color))),
-              const SizedBox(height: 2),
-              Text(label, style: TextStyle(fontSize: 9, color: sl.text3)),
-            ]),
-          ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 8),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+              colors: [from, to]),
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: [BoxShadow(color: to.withOpacity(sl.isDark ? 0.35 : 0.2),
+              blurRadius: 10, offset: const Offset(0, 3))],
         ),
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, size: 15, color: Colors.white.withOpacity(0.9)),
+            const SizedBox(width: 5),
+            Text(value, style: const TextStyle(
+                fontSize: 18, fontWeight: FontWeight.w800, color: Colors.white)),
+          ]),
+          const SizedBox(height: 2),
+          Text(label, style: TextStyle(fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Colors.white.withOpacity(0.92))),
+        ]),
       ),
     );
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  SEVERITY PIE CHART
+  //  SEVERITY + REPORT TYPE — one card, two donuts in a row
   // ═══════════════════════════════════════════════════════════════
-  Widget _severityPieChart(SL sl) {
+  Widget _donutsRow(SL sl) {
     final counts = _severityCounts;
-    final total = counts.values.fold<int>(0, (s, v) => s + v);
-    if (total == 0) return const SizedBox();
+    final sevTotal = counts.values.fold<int>(0, (s, v) => s + v);
+    final total = _view.length;
+    if (sevTotal == 0 && total == 0) return const SizedBox();
 
-    // Driven by the admin's severity list. Previously force-unwrapped four
-    // fixed keys, which would crash if a severity were renamed in admin.
-    final sections = <PieChartSectionData>[
+    final sevSections = <PieChartSectionData>[
       for (final e in counts.entries)
-        _pieSection(e.value, total, _sevColorFor(e.key), _titleCase(e.key)),
+        _pieSection(e.value, sevTotal, _sevColorFor(e.key), _titleCase(e.key)),
+    ];
+    final typeSections = <PieChartSectionData>[
+      _pieSection(_aiScanCount, total, AppColors.accent, 'MAMR / AI Scan'),
+      _pieSection(_nearMissCount, total, AppColors.amber, 'Near Miss'),
+    ];
+    final sevLegend = [
+      for (final e in counts.entries)
+        _legendRow(_titleCase(e.key), e.value, _sevColorFor(e.key), sl),
+    ];
+    final typeLegend = [
+      _legendRow('MAMR / AI Scan', _aiScanCount, AppColors.accent, sl),
+      _legendRow('Near Miss', _nearMissCount, AppColors.amber, sl),
     ];
 
     return Container(
@@ -491,26 +506,54 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: sl.glassBorder),
       ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 130, height: 130,
-            child: PieChart(PieChartData(
-              sections: sections,
-              centerSpaceRadius: 28,
-              sectionsSpace: 2,
-            )),
-          ),
-          const SizedBox(width: 20),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final e in counts.entries)
-                _legendRow(_titleCase(e.key), e.value, _sevColorFor(e.key), sl),
-            ],
-          ),
-        ],
-      ),
+      child: LayoutBuilder(builder: (context, box) {
+        // Wide (tablet/desktop): legend beside each donut. Phone: legend
+        // under each donut, so the two still share one row.
+        final wide = box.maxWidth >= 620;
+        Widget half(String title, List<PieChartSectionData> sections,
+            List<Widget> legend) {
+          final donut = SizedBox(
+            width: wide ? 130 : 112, height: wide ? 130 : 112,
+            child: sections.every((x) => x.value == 0)
+                ? Center(child: Text('No data',
+                    style: TextStyle(color: sl.text4, fontSize: 11)))
+                : PieChart(PieChartData(
+                    sections: sections,
+                    centerSpaceRadius: wide ? 28 : 24,
+                    sectionsSpace: 2,
+                  )),
+          );
+          final legendCol = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: legend);
+          return Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title.toUpperCase(), style: TextStyle(color: sl.text3,
+                  fontSize: 11, fontWeight: FontWeight.w800,
+                  letterSpacing: 0.6)),
+              const SizedBox(height: 10),
+              if (wide)
+                Row(children: [
+                  donut,
+                  const SizedBox(width: 16),
+                  Flexible(child: legendCol),
+                ])
+              else ...[
+                Center(child: donut),
+                const SizedBox(height: 10),
+                legendCol,
+              ],
+            ]));
+        }
+        return IntrinsicHeight(child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+            half('Severity', sevSections, sevLegend),
+            VerticalDivider(width: 24, thickness: 1,
+                color: sl.border.withOpacity(0.6)),
+            half('Report type', typeSections, typeLegend),
+          ]));
+      }),
     );
   }
 
@@ -553,62 +596,6 @@ class _DataAnalysisTabState extends State<DataAnalysisTab> {
         Text('$count', style: TextStyle(
             fontSize: 12, fontWeight: FontWeight.w700, color: sl.text1)),
       ]),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  TYPE PIE CHART
-  // ═══════════════════════════════════════════════════════════════
-  Widget _typePieChart(SL sl) {
-    final total = _view.length;
-    if (total == 0) return const SizedBox();
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: sl.glassColor,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: sl.glassBorder),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 130, height: 130,
-            child: PieChart(PieChartData(
-              sections: [
-                PieChartSectionData(
-                  value: _aiScanCount.toDouble(),
-                  color: AppColors.accent,
-                  radius: 24,
-                  title: _aiScanCount > 0
-                      ? '${(_aiScanCount / total * 100).round()}%' : '',
-                  titleStyle: const TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white),
-                ),
-                PieChartSectionData(
-                  value: _nearMissCount.toDouble(),
-                  color: AppColors.amber,
-                  radius: 24,
-                  title: _nearMissCount > 0
-                      ? '${(_nearMissCount / total * 100).round()}%' : '',
-                  titleStyle: const TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white),
-                ),
-              ],
-              centerSpaceRadius: 28,
-              sectionsSpace: 2,
-            )),
-          ),
-          const SizedBox(width: 20),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _legendRow('MAMR / AI Scan', _aiScanCount, AppColors.accent, sl),
-              _legendRow('Near Miss', _nearMissCount, AppColors.amber, sl),
-            ],
-          ),
-        ],
-      ),
     );
   }
 
