@@ -136,7 +136,12 @@ class PdfExport {
       final s = incident['severity']?.toString().trim() ?? '';
       return s.isEmpty ? 'UNKNOWN' : s;
     }();
-    final isAiScan   = incident['type']?.toString() == 'AI_SCAN';
+    // ★ 2026-10-16: an MAMR observation WRITTEN by the observer (offline
+    // entry) has the AI_SCAN type but no AI behind it — no hazard rows, no
+    // confidence, no matrix. Treated as not-an-AI-scan everywhere below, so it
+    // is never worded, scored or caveated as an AI assessment.
+    final isManual   = incident['entryMode']?.toString() == 'MANUAL';
+    final isAiScan   = incident['type']?.toString() == 'AI_SCAN' && !isManual;
     // MAMR block: Complied = the admin's final stage, read once up front so
     // the synchronous page builder below can use it.
     final caseClosed = await AdminMasterData.isTerminalStatus(
@@ -339,7 +344,9 @@ class PdfExport {
           w.add(pw.SizedBox(height: 10));
         }
         if (imgBytes != null) {
-          w.add(_sectionTitle('EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
+          w.add(_sectionTitle(isManual
+              ? 'PHOTOGRAPH  &  OBSERVATION'
+              : 'EVIDENCE PHOTOGRAPH  &  INCIDENT SUMMARY'));
           w.add(pw.SizedBox(height: 4));
           // Close-ups sit INSIDE the summary column (which otherwise has
           // blank space beside a tall photo) rather than in their own band.
@@ -352,10 +359,11 @@ class PdfExport {
               matrixEstimated: matrixEstimated,
               matrixApplies: isAiScan,
               analysed: !notAnalysed,
+              manual: isManual,
               closeUps: closeUps));
           w.add(pw.SizedBox(height: 10));
         } else {
-          w.add(_sectionTitle('INCIDENT SUMMARY'));
+          w.add(_sectionTitle(isManual ? 'OBSERVATION' : 'INCIDENT SUMMARY'));
           w.add(pw.SizedBox(height: 4));
           w.add(_summaryBox(summary));
           w.add(pw.SizedBox(height: 10));
@@ -767,7 +775,10 @@ class PdfExport {
               decoration: pw.BoxDecoration(
                 borderRadius: _r3,
                 border: pw.Border.all(color: soft, width: 0.7)),
-              child: pw.Text(isAi ? 'AI HAZARD SCAN' : 'NEAR MISS REPORT',
+              child: pw.Text(
+                inc['entryMode']?.toString() == 'MANUAL'
+                    ? 'MAMR OBSERVATION'
+                    : (isAi ? 'AI HAZARD SCAN' : 'NEAR MISS REPORT'),
                 style: pw.TextStyle(color: PdfColors.white, fontSize: 7,
                   fontWeight: pw.FontWeight.bold, letterSpacing: 0.8))),
             pw.SizedBox(height: 4),
@@ -913,7 +924,9 @@ class PdfExport {
           cell('Report Type',
             inc['type'] == 'AI_SCAN'
                 ? ((inc['mamrAreaId']?.toString() ?? '').isNotEmpty
-                    ? 'MAMR Observation' : 'AI Image Scan')
+                    ? (inc['entryMode']?.toString() == 'MANUAL'
+                        ? 'MAMR (manual entry)' : 'MAMR Observation')
+                    : 'AI Image Scan')
                 : 'Near Miss'),
           cell('WSA Category', inc['wsaCategory']?.toString() ?? ''),
           cell('Reference No.', _refNo(inc)),
@@ -1213,7 +1226,7 @@ class PdfExport {
       List<Map<String, dynamic>> hazards, {int verifyCount = 0,
       int matrixL = 0, int matrixS = 0, int matrixScore = 0,
       bool matrixEstimated = false, bool matrixApplies = false,
-      bool analysed = true, pw.Widget? closeUps}) {
+      bool analysed = true, bool manual = false, pw.Widget? closeUps}) {
     final sc = _getSevCol(severity);
     final sb = _getSevBg(severity);
     final s  = (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
@@ -1345,7 +1358,8 @@ class PdfExport {
                   fontWeight: pw.FontWeight.bold, color: scR)),
               pw.SizedBox(height: 2),
               // "0%" on an unanalysed scan reads as a measured confidence.
-              pw.Text(analysed ? 'AI confidence  $c%'
+              pw.Text(manual ? "Observer's assessment"
+                  : analysed ? 'AI confidence  $c%'
                   : 'AI confidence  not assessed', style: pw.TextStyle(
                 fontSize: 6.8, color: _textMed)),
             ])),
@@ -1392,7 +1406,7 @@ class PdfExport {
             children: [
               riskCard,
               pw.SizedBox(height: 8),
-              pw.Text('SUMMARY', style: pw.TextStyle(
+              pw.Text(manual ? 'OBSERVATION' : 'SUMMARY', style: pw.TextStyle(
                 fontSize: 6.5, fontWeight: pw.FontWeight.bold,
                 color: _navyDeep, letterSpacing: 1.1)),
               pw.SizedBox(height: 3),
@@ -1482,6 +1496,7 @@ class PdfExport {
         // "not locatable in this view" rather than silently missing, so the
         // reader knows to look on site rather than on the page.
         child: pw.Text(
+          manual ? 'Photo attached by the observer (not AI-analysed)' :
           (bboxedCount > 0
               ? '$count hazard(s) - $bboxedCount marked on photo'
                   '${unpinnedCount > 0 ? ", $unpinnedCount not locatable in this view" : ""}'

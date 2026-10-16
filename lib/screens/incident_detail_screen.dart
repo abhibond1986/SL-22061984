@@ -1324,10 +1324,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                 decoration: BoxDecoration(
                   color: Colors.black.withOpacity(0.55),
                   borderRadius: BorderRadius.circular(20)),
-                child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.zoom_in_rounded, color: Colors.white, size: 13),
-                  SizedBox(width: 3),
-                  Text('Analysed image', style: TextStyle(
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.zoom_in_rounded, color: Colors.white, size: 13),
+                  const SizedBox(width: 3),
+                  Text(_inc['entryMode']?.toString() == 'MANUAL'
+                      ? 'Attached photo' : 'Analysed image', style: TextStyle(
                       color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
                 ]),
               ),

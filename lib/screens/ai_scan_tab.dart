@@ -20,6 +20,8 @@ import '../main.dart';
 // call and its telemetry attribution both moved into ScanJobs.
 import '../services/local_db.dart';
 import '../services/case_workflow.dart';
+import '../services/action_photo.dart';
+import '../services/network_checker.dart';
 import '../services/admin_master_data.dart';
 import '../services/image_storage.dart';
 import '../services/sync_service.dart';
@@ -132,6 +134,16 @@ class _AIScanTabState extends State<AIScanTab> {
   String _firstStatus = AdminMasterData.defaultStatuses.first;
   String _lastStatus = AdminMasterData.defaultStatuses.last;
 
+  // ── Write observation (manual MAMR entry, offline) ──
+  bool _manualMode = false;
+  bool? _online;
+  final TextEditingController _obsCtrl = TextEditingController();
+  final TextEditingController _manualActionCtrl = TextEditingController();
+  String? _manualSeverity;
+  Uint8List? _manualPhoto;
+  Uint8List? _lastManualPhoto;
+  bool _manualSaving = false;
+
   // GPS geo-tagging
   LocationData? _capturedLocation;
   bool _capturingLocation = false;
@@ -173,6 +185,14 @@ class _AIScanTabState extends State<AIScanTab> {
     AdminMasterData.revision.addListener(_loadMasterData);
     _loadMamr();
     MamrService.revision.addListener(_loadMamr);
+    // Offline → open on "Write observation", which needs no network.
+    NetworkChecker.hasInternet().then((ok) {
+      if (!mounted) return;
+      setState(() {
+        _online = ok;
+        if (!ok && _result == null && !_analyzing) _manualMode = true;
+      });
+    }).catchError((_) {});
     MamrService.pendingArea.addListener(_adoptPendingArea);
     // The analysis is owned by ScanJobs, not by this widget — the shell
     // disposes this State on every tab change. Listening here, and syncing in
@@ -638,6 +658,8 @@ class _AIScanTabState extends State<AIScanTab> {
     // in the app. That is the whole change.
     ScanJobs.revision.removeListener(_onScanJobChanged);
     _scrollController.dispose();
+    _obsCtrl.dispose();
+    _manualActionCtrl.dispose();
     _locationController.dispose();
     _contextController.dispose();
     for (final c in _mitigationControllers.values) { c.dispose(); }
@@ -2144,6 +2166,23 @@ class _AIScanTabState extends State<AIScanTab> {
                 onTap: () { Navigator.pop(ctx); _shareGeneric(incident); },
               )),
             ]),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () { Navigator.pop(ctx); _downloadPdf(incident); },
+                icon: const Icon(Icons.picture_as_pdf_rounded, size: 16,
+                    color: AppColors.red),
+                label: Text('Download PDF report',
+                    style: TextStyle(color: sl.text1, fontSize: 12,
+                        fontWeight: FontWeight.w700)),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: AppColors.red.withOpacity(0.5)),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+              ),
+            ),
             const SizedBox(height: 12),
             // The reporter can hand the job to someone other than the area's
             // responsible person (or to someone at all, if nobody is linked).
@@ -2277,7 +2316,7 @@ class _AIScanTabState extends State<AIScanTab> {
         incident:     incident,
         reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
-        imageBytes:   _imageBytes,
+        imageBytes:   _imageFor(incident),
         text:    channel == 'whatsapp' ? '' : caption,
         subject: '${Branding.appTitle}: $title',
       );
@@ -2908,14 +2947,15 @@ class _AIScanTabState extends State<AIScanTab> {
   }
 
   Future<void> _uploadPdfBackground(
-      Map<String, dynamic> incident, Map<String, dynamic> user) async {
+      Map<String, dynamic> incident, Map<String, dynamic> user,
+      {Uint8List? image}) async {
     try {
       print('PDF Upload: generating PDF for incident ${incident['id']}...');
       final pdfBytes = await PdfExport.generateIncidentReportBytes(
         incident:     incident,
         reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
-        imageBytes:   _imageBytes,
+        imageBytes:   image ?? _imageFor(incident),
       );
       if (pdfBytes.isEmpty) {
         print('PDF Upload: FAILED — empty PDF bytes');
@@ -3208,6 +3248,14 @@ class _AIScanTabState extends State<AIScanTab> {
     return Column(children: [
       _mamrPicker(),
       const SizedBox(height: 12),
+      _modeSwitch(sl),
+      const SizedBox(height: 12),
+      if (_manualMode) _manualForm(sl) else ..._aiCaptureChildren(sl, cardBg),
+    ]);
+  }
+
+  /// The AI photo-scan inputs (the original empty view).
+  List<Widget> _aiCaptureChildren(SL sl, Color cardBg) => [
       GestureDetector(
         onTap: () => _pickImage(ImageSource.camera),
         child: Container(
@@ -3301,8 +3349,411 @@ class _AIScanTabState extends State<AIScanTab> {
       ]),
       const SizedBox(height: 14),
       _infoBox(sl),
+    ];
+
+  // ═══════════════════════════════════════════════════════════════
+  //  WRITE OBSERVATION — manual MAMR entry, works offline (2026-10-16)
+  //
+  //  The AI scan needs a network round-trip, and on a shop floor there often
+  //  is none. This path files the SAME kind of MAMR record — same area,
+  //  responsible person, auto-assignment, target date and closing loop — from
+  //  a typed observation and an optional photo that is only an ATTACHMENT:
+  //  nothing analyses it, so it carries no hazard rows, no AI confidence and
+  //  no L×S matrix. `entryMode: 'MANUAL'` is what tells the PDF and the detail
+  //  screen to word it as an observer's report rather than an AI assessment.
+  //  Saved locally first; SyncService queues the upload until a connection.
+  // ═══════════════════════════════════════════════════════════════
+
+  /// Mode switch under the area picker: AI photo scan | Write observation.
+  Widget _modeSwitch(SL sl) {
+    Widget seg(bool manual, IconData icon, String label) {
+      final on = _manualMode == manual;
+      return Expanded(child: Material(
+        color: on
+            ? AppColors.accent.withOpacity(sl.isDark ? 0.28 : 0.12)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => setState(() => _manualMode = manual),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(icon, size: 16, color: on ? sl.accentText : sl.text3),
+              const SizedBox(width: 6),
+              Flexible(child: Text(label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: on ? sl.accentText : sl.text3,
+                      fontSize: 12.5,
+                      fontWeight: on ? FontWeight.w800 : FontWeight.w600))),
+            ]),
+          ),
+        ),
+      ));
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: sl.surface,
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(color: sl.border)),
+        child: Row(children: [
+          seg(false, Icons.auto_awesome_rounded, 'AI photo scan'),
+          const SizedBox(width: 4),
+          seg(true, Icons.edit_note_rounded, 'Write observation'),
+        ]),
+      ),
+      if (_online == false) ...[
+        const SizedBox(height: 8),
+        Row(children: [
+          Icon(Icons.cloud_off_rounded, size: 14, color: sl.amberText),
+          const SizedBox(width: 6),
+          Expanded(child: Text(
+            _manualMode
+                ? 'You are offline. The observation is saved on this phone and '
+                  'uploads by itself when the connection returns.'
+                : 'You are offline. The AI scan needs internet; use '
+                  '"Write observation" instead.',
+            style: TextStyle(color: sl.amberText, fontSize: 11.5,
+                height: 1.35, fontWeight: FontWeight.w600))),
+        ]),
+      ],
     ]);
   }
+
+  Widget _manualForm(SL sl) {
+    final sevs = _severities;
+    Widget label(String t) => Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(t.toUpperCase(), style: TextStyle(
+          color: sl.text3, fontSize: SLText.minBadge,
+          fontWeight: FontWeight.w700, letterSpacing: 0.6)));
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      VoiceTextField(
+        controller: _locationController,
+        label: 'Location',
+        hint: 'e.g. BF-2 Cast House, Bay 4',
+        maxLines: 1,
+      ),
+      const SizedBox(height: 12),
+      VoiceTextField(
+        controller: _obsCtrl,
+        label: 'Observation *',
+        hint: 'What did you see? e.g. Guard missing on conveyor 3 tail pulley; '
+            'workers pass within reach.',
+        maxLines: 5,
+      ),
+      const SizedBox(height: 12),
+      label('Severity *'),
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        for (final s in sevs)
+          _sevChoice(sl, s),
+      ]),
+      const SizedBox(height: 12),
+      VoiceTextField(
+        controller: _manualActionCtrl,
+        label: 'Immediate action taken (optional)',
+        hint: 'e.g. Area barricaded, supervisor informed',
+        maxLines: 2,
+      ),
+      const SizedBox(height: 12),
+      label('Photo (optional, attached as it is)'),
+      if (_manualPhoto == null)
+        Row(children: [
+          Expanded(child: OutlinedButton.icon(
+            onPressed: () => _pickManualPhoto(ImageSource.camera),
+            icon: Icon(Icons.camera_alt_outlined, size: 15, color: sl.accentText),
+            label: Text('Camera', style: TextStyle(color: sl.accentText,
+                fontSize: 12, fontWeight: FontWeight.w600)),
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: AppColors.accent, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 11),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10))),
+          )),
+          const SizedBox(width: 8),
+          Expanded(child: OutlinedButton.icon(
+            onPressed: () => _pickManualPhoto(ImageSource.gallery),
+            icon: Icon(Icons.photo_library_outlined, size: 15,
+                color: sl.accentText),
+            label: Text('Gallery', style: TextStyle(color: sl.accentText,
+                fontSize: 12, fontWeight: FontWeight.w600)),
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: AppColors.accent, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 11),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10))),
+          )),
+        ])
+      else
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.memory(_manualPhoto!, width: 132, height: 99,
+                fit: BoxFit.cover)),
+          const SizedBox(width: 10),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Photo attached', style: TextStyle(color: sl.text1,
+                  fontSize: 12.5, fontWeight: FontWeight.w700)),
+              Text('Not analysed by AI. It is printed in the report as the '
+                  'observer\'s photo.',
+                  style: TextStyle(color: sl.text3, fontSize: 11, height: 1.35)),
+              Wrap(spacing: 4, children: [
+                TextButton(
+                    onPressed: () => _pickManualPhoto(ImageSource.camera),
+                    child: const Text('Retake')),
+                TextButton(
+                    onPressed: () => setState(() => _manualPhoto = null),
+                    child: Text('Remove',
+                        style: TextStyle(color: sl.redText))),
+              ]),
+            ])),
+        ]),
+      const SizedBox(height: 16),
+      SizedBox(
+        width: double.infinity,
+        child: ElevatedButton.icon(
+          onPressed: _manualSaving ? null : _saveManual,
+          icon: _manualSaving
+              ? const SizedBox(width: 14, height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.save_rounded, size: 16, color: Colors.white),
+          label: Text(_manualSaving ? 'Saving…' : 'Save observation & create PDF',
+              style: const TextStyle(color: Colors.white, fontSize: 13,
+                  fontWeight: FontWeight.w700)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.accent,
+            padding: const EdgeInsets.symmetric(vertical: 13),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+              side: const BorderSide(color: AppColors.accentDark, width: 2))),
+        ),
+      ),
+      const SizedBox(height: 6),
+      Text('Saved on this device straight away, and assigned to the area\'s '
+          'responsible person. Works without internet.',
+          style: TextStyle(color: sl.text4, fontSize: 11, height: 1.35)),
+    ]);
+  }
+
+  /// One severity choice. Hand-built rather than a ChoiceChip: under
+  /// Material 3 the chip paints its own selected tint over `selectedColor`,
+  /// so the chosen level came out grey instead of in its risk colour.
+  Widget _sevChoice(SL sl, String s) {
+    final c = _sevChipColor(s);
+    final on = _manualSeverity == s;
+    return Material(
+      color: on ? c : c.withOpacity(sl.isDark ? 0.10 : 0.06),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(9),
+        side: BorderSide(color: c.withOpacity(on ? 1 : 0.6), width: 1.2)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => setState(() => _manualSeverity = s),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (on) ...[
+              const Icon(Icons.check_rounded, size: 14, color: Colors.white),
+              const SizedBox(width: 4),
+            ],
+            Text(s.toUpperCase(), style: TextStyle(
+                color: on ? Colors.white : sl.text2,
+                fontSize: 12, fontWeight: FontWeight.w800)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Color _sevChipColor(String s) {
+    switch (s.toUpperCase()) {
+      case 'CRITICAL': return AppColors.crit;
+      case 'HIGH':     return AppColors.red;
+      case 'MEDIUM':
+      case 'MODERATE': return AppColors.amber;
+      case 'LOW':      return AppColors.green;
+      default:         return AppColors.accent;
+    }
+  }
+
+  Future<void> _pickManualPhoto(ImageSource source) async {
+    try {
+      final f = await ImagePicker().pickImage(
+          source: source, maxWidth: 1600, maxHeight: 1600, imageQuality: 80);
+      if (f == null) return;
+      final raw = await f.readAsBytes();
+      final bytes = ActionPhoto.compress(raw);
+      if (mounted) setState(() => _manualPhoto = bytes);
+    } catch (e) {
+      _snack('Could not open the camera: $e', AppColors.red);
+    }
+  }
+
+  Future<void> _saveManual() async {
+    if (_manualSaving) return;
+    final area = _mamrArea;
+    if (area == null) {
+      _snack(
+          _mamrReg.isEmpty
+              ? 'MAMR areas are not set up for ${_mamrPlant.isEmpty ? 'your plant' : _mamrPlant} — contact your SED.'
+              : 'Choose the MAMR area first (top of the page).',
+          const Color(0xFFD97706));
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(0,
+            duration: const Duration(milliseconds: 350), curve: Curves.easeOut);
+      }
+      return;
+    }
+    final obs = _obsCtrl.text.trim();
+    if (obs.runes.length < 10) {
+      _snack('Write the observation (at least a short sentence).',
+          const Color(0xFFD97706));
+      return;
+    }
+    final sev = _manualSeverity;
+    if (sev == null) {
+      _snack('Choose the severity.', const Color(0xFFD97706));
+      return;
+    }
+
+    setState(() => _manualSaving = true);
+    try {
+      final user = await LocalDB.getCurrentUser() ?? {};
+      final now = DateTime.now();
+      final id = now.millisecondsSinceEpoch.toString();
+      final photo = _manualPhoto;
+      // Headline: the first sentence of what the observer wrote.
+      var finding = obs.split(RegExp(r'[\n.!?।]')).first.trim();
+      if (finding.isEmpty) finding = obs;
+      if (finding.length > 90) finding = '${finding.substring(0, 87)}...';
+
+      // Best-effort GPS. Satellite fixes need no internet; capped so a
+      // basement with no fix never holds up the save.
+      LocationData? gps;
+      try {
+        gps = await GeoService.getCurrentLocation()
+            .timeout(const Duration(seconds: 6));
+      } catch (_) {}
+
+      final scores = await AdminMasterData.getSeverityScores();
+      final loc = _locationController.text.trim();
+      final action = _manualActionCtrl.text.trim();
+      final inc = <String, dynamic>{
+        'id':              id,
+        'title':           'MAMR: ${area.area}',
+        'plant':           _mamrPlantLabel.isNotEmpty
+                           ? _mamrPlantLabel
+                           : (user['plant']?.toString() ?? ''),
+        'dept':            area.dept,
+        'reporterDept':    user['department']?.toString() ?? '',
+        'location':        loc.isNotEmpty ? loc : '${area.dept} · ${area.area}',
+        'severity':        sev,
+        'overallRisk':     sev,
+        'wsaCategory':     '',
+        'obsType':         'N/A',
+        'summary':         obs,
+        'desc':            obs,
+        'immediateAction': action,
+        // See the MAMR note in _buildIncident: the type stays AI_SCAN and the
+        // row is told apart by mamrAreaId; entryMode says nobody's AI read it.
+        'type':            'AI_SCAN',
+        'entryMode':       'MANUAL',
+        'status':          _firstStatus,
+        'date':            now.toIso8601String(),
+        'reportedBy':      user['name']?.toString() ?? Branding.defaultReporter,
+        'reportedByPno':   user['pno']?.toString() ?? '',
+        'people':          '0',
+        'hazards':         jsonEncode(const []),
+        'riskScore':       AdminMasterData.scoreFromMap(scores, sev),
+        'confidence':      100,
+        'mamrAreaId':      area.id,
+        'mamrDept':        area.dept,
+        'mamrArea':        area.area,
+        'mamrResponsible': area.responsibleSnapshot(),
+        'mamrFinding':     finding,
+        'targetDate':      MamrDeadlines.targetFor(now, sev),
+      };
+      final owner = area.persons.where((p) => p.isLinked).toList();
+      if (owner.isNotEmpty) {
+        inc['assignedTo'] = owner.first.username;
+        inc['assignedToName'] = owner.first.name;
+        inc['assignedAt'] = now.toIso8601String();
+        CaseWorkflow.log(inc, user: user, event: 'assigned',
+            role: 'Auto (area owner)', to: owner.first.name);
+      }
+      if (gps != null && gps.isValid) {
+        inc['latitude'] = gps.latitude;
+        inc['longitude'] = gps.longitude;
+        inc['locationAccuracy'] = gps.accuracy;
+        inc['locationAddress'] = gps.address;
+        inc['locationTimestamp'] = gps.timestamp.toIso8601String();
+      }
+      if (photo != null) {
+        inc['imageHash'] = _computeHash(photo);
+        inc['thumbnailBase64'] = _generateThumbnail(photo);
+        if (!kIsWeb) {
+          try {
+            final ref = await ImageStorage.saveImage(id, photo);
+            if (ref != null) inc['imageRef'] = ref;
+          } catch (_) {}
+        }
+        // Web (no file system), or a failed file write: keep it inline.
+        if (inc['imageRef'] == null) inc['imageBase64'] = base64Encode(photo);
+      }
+
+      await LocalDB.saveIncident(inc);
+      final uploadResult = SyncService.pushIncident(inc).catchError((e) {
+        debugPrint('AiScanTab: manual push failed for $id: $e');
+        return false;
+      });
+      _uploadPdfBackground(inc, user, image: photo);
+      AssignmentNotifications.refresh().catchError((_) {});
+
+      if (!mounted) return;
+      _lastManualPhoto = photo;
+      setState(() {
+        _manualSaving = false;
+        _obsCtrl.clear();
+        _manualActionCtrl.clear();
+        _manualSeverity = null;
+        _manualPhoto = null;
+      });
+      _showSaveSuccessDialog(inc, uploadResult);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _manualSaving = false);
+        _snack('Could not save: $e', AppColors.red);
+      }
+    }
+  }
+
+  /// Download (or, on a phone, open the share sheet for) the PDF of [incident].
+  Future<void> _downloadPdf(Map<String, dynamic> incident) async {
+    _snack('Preparing PDF report...', AppColors.accent);
+    try {
+      await PdfExport.downloadOrShareIncident(
+        incident: incident,
+        reporterName: incident['reportedBy']?.toString() ?? Branding.defaultReporter,
+        reporterPno: incident['reportedByPno']?.toString() ?? '',
+        imageBytes: _imageFor(incident),
+      );
+    } catch (e) {
+      if (mounted) _snack('Could not create the PDF: $e', AppColors.red);
+    }
+  }
+
+  /// The photo that belongs to [incident]: a manual entry's attachment, or
+  /// the scanned image. Never the other one — a stale scan photo must not be
+  /// printed on a manual report.
+  Uint8List? _imageFor(Map<String, dynamic> incident) =>
+      incident['entryMode'] == 'MANUAL' ? _lastManualPhoto : _imageBytes;
 
   /// Explains what the context box is for, with the two examples that matter.
   ///

@@ -22,13 +22,16 @@ alter table public.incidents add column if not exists verified_at      text;
 alter table public.incidents add column if not exists verified_by      text;
 alter table public.incidents add column if not exists sent_back_reason text;
 alter table public.incidents add column if not exists action_log       jsonb;
+-- 'MANUAL' for an MAMR observation typed by the observer (offline entry, no
+-- AI). Without it other devices print that report as an AI scan.
+alter table public.incidents add column if not exists entry_mode       text;
 
 notify pgrst, 'reload schema';
 
--- ── Verify ── should list all seven columns.
+-- ── Verify ── should list all eight columns.
 select column_name, data_type
 from information_schema.columns
 where table_schema = 'public' and table_name = 'incidents'
   and column_name in ('action_by','action_image_url','action_image_at',
-    'verified_at','verified_by','sent_back_reason','action_log')
+    'verified_at','verified_by','sent_back_reason','action_log','entry_mode')
 order by column_name;

@@ -98,6 +98,8 @@ class SupabaseService {
     'verifiedBy': 'verified_by',
     'sentBackReason': 'sent_back_reason',
     'actionLog': 'action_log',
+    // 'MANUAL' = an MAMR observation typed by the observer, no AI (2026-10-16).
+    'entryMode': 'entry_mode',
     'updatedAt': 'updated_at',
     'hazards': 'hazards',
     'riskScore': 'risk_score',
