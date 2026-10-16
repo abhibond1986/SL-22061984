@@ -32,6 +32,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
 import '../services/local_db.dart';
+import '../services/case_workflow.dart';
 import '../services/sync_service.dart';
 // All credential reads/writes go through AuthService so the admin panel can't
 // invent its own password format (it used to store plaintext).
@@ -1826,7 +1827,13 @@ class _AdminScreenState extends State<AdminScreen>
             child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
           ElevatedButton(
             onPressed: () {
-              if (ctrl.text.trim().isEmpty) return;
+              // Same rule as every other close path (CaseWorkflow).
+              final e = CaseWorkflow.validateAction(ctrl.text);
+              if (e != null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(e)));
+                return;
+              }
               Navigator.pop(context, true);
             },
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.green,
@@ -1841,10 +1848,23 @@ class _AdminScreenState extends State<AdminScreen>
       final inc = _incidents.firstWhere(
           (i) => i['id']?.toString() == id, orElse: () => {});
       if (inc.isEmpty) continue;
-      inc['status']           = 'CLOSED';
-      inc['correctiveAction'] = ctrl.text.trim();
+      final from = inc['status']?.toString() ?? '';
+      // The admin's final stage, not the literal 'CLOSED' (renamed ladders).
+      final closing = _statusLadder.isNotEmpty ? _statusLadder.last : 'CLOSED';
+      inc['status']           = closing;
+      // A case that already carries its own corrective action keeps it; the
+      // bulk note is recorded as the closing remark instead of erasing it.
+      final own = inc['correctiveAction']?.toString().trim() ?? '';
+      if (CaseWorkflow.validateAction(own) == null) {
+        inc['closingRemarks'] = ctrl.text.trim();
+      } else {
+        inc['correctiveAction'] = ctrl.text.trim();
+      }
       inc['closedAt']         = DateTime.now().toIso8601String();
-      inc['closedBy']         = _currentActor;
+      inc['closedBy']         = '$_currentActor (admin, bulk)';
+      CaseWorkflow.log(inc, user: _actorUser, event: 'bulk_closed',
+          role: 'Admin (override)', from: from, to: closing,
+          note: ctrl.text.trim());
       try {
         await LocalDB.saveIncident(inc);
         SyncService.pushIncident(inc).catchError((_) => false);
@@ -4950,9 +4970,69 @@ class _AdminScreenState extends State<AdminScreen>
     }
   }
 
+  /// The admin's override still needs a real corrective action. Returns the
+  /// validated text, or null when the admin cancels.
+  Future<String?> _wfAskAction(Map<String, dynamic> inc, String to) async {
+    final sl = SL.of(context);
+    final ctrl = TextEditingController(
+        text: inc['correctiveAction']?.toString() ?? '');
+    String? err;
+    final res = await showDialog<String>(context: context, builder: (_) =>
+      StatefulBuilder(builder: (ctx, setD) => AlertDialog(
+        backgroundColor: sl.card,
+        title: Text('Corrective action required for $to',
+            style: TextStyle(color: sl.text1, fontSize: 14,
+                fontWeight: FontWeight.w800)),
+        content: TextField(controller: ctrl, autofocus: true, maxLines: 4,
+          style: TextStyle(color: sl.text1, fontSize: 12),
+          decoration: InputDecoration(
+            hintText: 'What was done, where, and by whom…',
+            errorText: err, errorMaxLines: 3,
+            hintStyle: TextStyle(color: sl.text4, fontSize: 10),
+            filled: true, fillColor: sl.bg,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: sl.border)))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            onPressed: () {
+              final e = CaseWorkflow.validateAction(ctrl.text);
+              if (e != null) { setD(() => err = e); return; }
+              Navigator.pop(ctx, ctrl.text.trim());
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.green),
+            child: const Text('Save', style: TextStyle(color: Colors.white))),
+        ])));
+    ctrl.dispose();
+    return res;
+  }
+
+  Map<String, dynamic> get _actorUser =>
+      {'username': _currentActor, 'name': _currentActor};
+
   Future<void> _wfChangeStatus(Map<String, dynamic> inc, String newStatus) async {
     final old = inc['status']?.toString();
+    // ★ 2026-10-16: an admin may override WHO moves a case (the reporter
+    // normally verifies and closes), but not WHAT it needs: from the
+    // corrective-action stage on, a real corrective action must be on record.
+    // These chips used to close a case with the action field blank.
+    final ladderU = _statusLadder.map((e) => e.toUpperCase()).toList();
+    final t = CaseWorkflow.indexOf(ladderU, newStatus);
+    final a = CaseWorkflow.actionIndex(ladderU);
+    if (t >= 0 && a >= 0 && t >= a && t > CaseWorkflow.indexOf(ladderU, old ?? '') &&
+        CaseWorkflow.validateAction(
+                inc['correctiveAction']?.toString() ?? '') != null) {
+      final action = await _wfAskAction(inc, newStatus);
+      if (action == null || !mounted) return;
+      inc['correctiveAction'] = action;
+      CaseWorkflow.log(inc, user: _actorUser, event: 'saved',
+          role: 'Admin', note: action);
+    }
     inc['status'] = newStatus;
+    CaseWorkflow.log(inc, user: _actorUser,
+        event: CaseWorkflow.isFinal(ladderU, newStatus) ? 'closed' : 'stage',
+        role: 'Admin (override)', from: old ?? '', to: newStatus);
     // Stamp closure when the case reaches the admin's FINAL stage, whatever it
     // is called. Comparing to 'CLOSED' meant a renamed final stage left closedAt
     // and closedBy empty, which in turn broke every MTTR and closure-rate figure.
@@ -4961,7 +5041,7 @@ class _AdminScreenState extends State<AdminScreen>
         newStatus.trim().toUpperCase() == ladder.last.trim().toUpperCase();
     if (isFinal) {
       inc['closedAt'] = DateTime.now().toIso8601String();
-      inc['closedBy'] = _currentActor;
+      inc['closedBy'] = '$_currentActor (admin override)';
     }
     try {
       await LocalDB.saveIncident(inc);
@@ -5011,6 +5091,11 @@ class _AdminScreenState extends State<AdminScreen>
       inc['assignedToName'] = result.displayName;
       inc['assignedAt'] = DateTime.now().toIso8601String();
     }
+    CaseWorkflow.log(inc, user: _actorUser,
+        event: result.cleared
+            ? 'unassigned' : (previous.isEmpty ? 'assigned' : 'transferred'),
+        role: 'Admin', from: previous,
+        to: result.cleared ? '' : result.displayName);
     try {
       await LocalDB.saveIncident(inc);
       SyncService.pushIncident(inc).catchError((_) => false);
@@ -5081,6 +5166,9 @@ class _AdminScreenState extends State<AdminScreen>
       inc['assignedTo'] = picked;
       inc['assignedAt'] = DateTime.now().toIso8601String();
     }
+    CaseWorkflow.log(inc, user: _actorUser,
+        event: (picked == null || picked!.isEmpty) ? 'unassigned' : 'assigned',
+        role: 'Admin', to: picked ?? '');
     try {
       await LocalDB.saveIncident(inc);
       SyncService.pushIncident(inc).catchError((_) => false);

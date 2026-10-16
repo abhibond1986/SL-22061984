@@ -20,6 +20,7 @@ import '../widgets/user_picker.dart';
 import 'admin_audit.dart';
 import 'assignment_notifications.dart';
 import 'assign_scope.dart';
+import 'case_workflow.dart';
 import 'local_db.dart';
 import 'plant_scope.dart';
 import 'sync_service.dart';
@@ -95,6 +96,7 @@ class IncidentAssign {
       return const AssignResult(AssignOutcome.cancelled, '');
     }
 
+    final previousName = inc['assignedToName']?.toString().trim() ?? '';
     if (picked.cleared) {
       inc.remove('assignedTo');
       inc.remove('assignedToName');
@@ -111,6 +113,19 @@ class IncidentAssign {
     }
 
     beforeSave?.call();
+    // ★ 2026-10-16: every hand-over goes into the case history the closed-case
+    // PDF prints, so "who was responsible, from when" can be checked later.
+    final me = await LocalDB.getCurrentUser();
+    CaseWorkflow.log(
+      inc,
+      user: me,
+      event: picked.cleared
+          ? 'unassigned'
+          : (current.isEmpty ? 'assigned' : 'transferred'),
+      from: current.isEmpty ? '' : (previousName.isEmpty ? current : previousName),
+      to: picked.cleared ? '' : picked.displayName,
+      role: CaseWorkflow.isReporter(me, inc) ? 'Reporter' : 'Assigned by',
+    );
     try {
       await LocalDB.saveIncident(inc);
     } catch (e) {

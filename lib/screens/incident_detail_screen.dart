@@ -6,6 +6,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import '../main.dart';
 import '../widgets/content_width.dart';
@@ -17,6 +18,9 @@ import '../services/sync_service.dart';
 import '../services/pdf_export.dart';
 import '../services/image_storage.dart';
 import '../services/incident_assign.dart';
+import '../services/case_workflow.dart';
+import '../services/action_photo.dart';
+import '../services/assignment_notifications.dart';
 import 'employee_profile_screen.dart';
 import '../services/branding.dart';
 
@@ -33,12 +37,12 @@ class IncidentDetailScreen extends StatefulWidget {
 class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   late Map<String, dynamic> _inc;
   final _actionCtrl   = TextEditingController();
-  final _closedByCtrl = TextEditingController();
-  final _remarksCtrl  = TextEditingController();
   bool _saving = false;
   // Evidence image resolved once (file ref → inline base64 → Supabase URL) and
   // cached, so the detail view shows the same photo the analysis was made on.
   Future<Uint8List?>? _evidenceImageFuture;
+  /// The action owner's "after" photo, if any (see ActionPhoto).
+  Future<Uint8List?>? _actionPhotoFuture;
 
   // The workflow ladder shown here, straight from the admin's status list.
   // This was hardcoded to four stages and omitted VERIFIED entirely, so the
@@ -47,14 +51,21 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   List<String> _statusOrder =
       List<String>.from(AdminMasterData.defaultStatuses);
 
-  /// Whether this user is allowed to advance/close THIS incident.
+  /// Whether this user may interact with THIS incident at all (same plant,
+  /// or it is assigned to / reported by them, or admin). What exactly they
+  /// may do is decided per stage by [CaseWorkflow] using [_actor].
   ///
-  /// There was previously no authorisation check anywhere on this screen: any
-  /// signed-in user who could open a record could drive it to CLOSED, including
-  /// another plant's record. Starts false and is set once the check resolves, so
-  /// the action bar can't be tapped during the async gap.
+  /// Starts false and is set once the check resolves, so the action bar can't
+  /// be tapped during the async gap.
   bool _canAct = false;
   bool _permChecked = false;
+
+  /// ★ 2026-10-16: who this user is relative to the case — action owner,
+  /// reporter, admin, or a same-plant colleague. Drives the closing loop:
+  /// the action owner submits the corrective action, the reporter verifies
+  /// and closes (CaseWorkflow.gate).
+  CaseActor _actor = const CaseActor();
+  Map<String, dynamic>? _me;
 
   /// Target date for completing the corrective action. Stored as an ISO date
   /// string ('yyyy-MM-dd') in the `targetDate` field.
@@ -72,28 +83,31 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     _checkPermission();
     AdminMasterData.revision.addListener(_loadStatuses);
     _actionCtrl.text   = _inc['correctiveAction']?.toString() ?? '';
-    _closedByCtrl.text = _inc['closedBy']?.toString()         ?? '';
-    _remarksCtrl.text  = _inc['closingRemarks']?.toString()   ?? '';
     // Kick off image resolution once (handles mobile file storage where the
     // inline base64 is stripped, plus Supabase-URL images synced from cloud).
     _evidenceImageFuture = _resolveImageBytes();
+    _actionPhotoFuture = ActionPhoto.resolve(_inc);
   }
 
   Future<void> _checkPermission() async {
-    final scope = await PlantScope.forUser();
-    var ok = await scope.canActOn(_inc);
-    // MAMR: the area's responsible person may always work their own
-    // observation, even when their profile's plant is blank or spelled in a
-    // way the plant rule cannot resolve.
     final me = await LocalDB.getCurrentUser();
-    if (!ok && MamrObs.isMamr(_inc)) {
-      ok = await MamrService.canMarkComplied(me, _inc);
-    }
+    final scope = await PlantScope.forUser();
+    final plantOk = await scope.canActOn(_inc);
+    final isAdmin = me != null && PlantScope.isAdminUser(me);
+    final isAssignee = CaseWorkflow.isAssignee(me, _inc);
+    final isReporter = CaseWorkflow.isReporter(me, _inc);
     final mayAssign = await MamrService.mayAssign(me, _inc);
-    if (mounted) _canAssignMamr = mayAssign;
     if (!mounted) return;
     setState(() {
-      _canAct = ok;
+      _me = me;
+      _canAssignMamr = mayAssign;
+      _actor = CaseActor(
+        isAdmin: isAdmin,
+        isAssignee: isAssignee,
+        isReporter: isReporter,
+        canActPlant: plantOk,
+      );
+      _canAct = plantOk || isAdmin || isAssignee || isReporter || mayAssign;
       _permChecked = true;
     });
   }
@@ -109,7 +123,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   @override
   void dispose() {
     AdminMasterData.revision.removeListener(_loadStatuses);
-    _actionCtrl.dispose(); _closedByCtrl.dispose(); _remarksCtrl.dispose();
+    _actionCtrl.dispose();
     super.dispose();
   }
 
@@ -127,6 +141,44 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   /// stage left every closed incident permanently editable.
   bool   get _isClosed =>
       _statusOrder.isNotEmpty && _status == _statusOrder.last;
+
+  int get _statusIdx {
+    final i = CaseWorkflow.indexOf(_statusOrder, _status);
+    return i < 0 ? 0 : i;
+  }
+
+  /// The next rung, or null at the end of the ladder.
+  String? get _nextStatus {
+    final i = _statusOrder.indexOf(_status);
+    return (i >= 0 && i + 1 < _statusOrder.length) ? _statusOrder[i + 1] : null;
+  }
+
+  /// May this user write the corrective action / photo right now?
+  bool get _mayEditAction => _permChecked && !_isClosed &&
+      CaseWorkflow.mayEditAction(_statusOrder, _status, _actor);
+
+  /// May this user set the target date? Whoever plans the job (the person
+  /// assigning it, the reporter) or the action owner, until it is submitted.
+  bool get _mayEditTarget => _permChecked && !_isClosed &&
+      _statusIdx < CaseWorkflow.actionIndex(_statusOrder) &&
+      (_mayEditAction || _actor.canActPlant || _actor.isReporter ||
+          _actor.isAdmin || _canAssignMamr);
+
+  /// Is the next-stage button for THIS user?
+  bool get _mayAdvance {
+    final n = _nextStatus;
+    return n != null && _permChecked && _canAct && !_isClosed &&
+        CaseWorkflow.roleMayMove(_statusOrder, _status, n, _actor);
+  }
+
+  bool get _maySendBack => _permChecked && !_isClosed &&
+      CaseWorkflow.maySendBack(_statusOrder, _status, _actor);
+
+  /// Button label for moving into [st].
+  String _advanceLabel(String st) {
+    final v = CaseWorkflow.verbFor(_statusOrder, st);
+    return v.isNotEmpty ? v : 'Mark as ${_titleCase(st)}';
+  }
 
   Color _statusColor(String s) {
     switch (s.toUpperCase()) {
@@ -160,97 +212,381 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     return [];
   }
 
-  /// Copy the form fields onto [_inc]. Shared by "Save progress" and by
-  /// advancing the status, so the two can never disagree about what is stored.
+  /// Copy the form fields this user may edit onto [_inc]. Shared by "Save",
+  /// by advancing the status and by assigning, so they never disagree.
+  ///
+  /// ★ 2026-10-16: only the fields the user OWNS are written. Before, every
+  /// save wrote every box — so a colleague opening the case could overwrite
+  /// the action owner's corrective action with whatever their screen held.
   void _applyFormFields() {
-    _inc['correctiveAction'] = _actionCtrl.text.trim();
-    _inc['closedBy']         = _closedByCtrl.text.trim();
-    _inc['closingRemarks']   = _remarksCtrl.text.trim();
-    // Date only — the time of day is meaningless for a completion target, and a
-    // bare 'yyyy-MM-dd' sorts and compares correctly as a string.
-    // Written unconditionally: writing only when non-null meant clearing the
-    // date left the old value on the record and it reappeared on reload.
-    _inc['targetDate'] = _targetDate == null
-        ? '' : DateFormat('yyyy-MM-dd').format(_targetDate!);
+    if (_mayEditAction) {
+      _inc['correctiveAction'] = _actionCtrl.text.trim();
+    }
+    if (_mayEditTarget || _mayEditAction) {
+      // Date only — the time of day is meaningless for a completion target,
+      // and a bare 'yyyy-MM-dd' sorts and compares correctly as a string.
+      // Written unconditionally: writing only when non-null meant clearing the
+      // date left the old value on the record and it reappeared on reload.
+      _inc['targetDate'] = _targetDate == null
+          ? '' : DateFormat('yyyy-MM-dd').format(_targetDate!);
+    }
   }
 
   /// Re-resolve authorisation at the point of WRITE, not only when building the
   /// buttons. Hiding a button is presentation; this is the actual gate, and it
-  /// re-checks in case the admin changed this user's plant mid-session.
+  /// re-checks in case the admin changed this user's plant, or the case was
+  /// reassigned, mid-session.
   Future<bool> _assertCanAct() async {
-    final scope = await PlantScope.forUser();
-    if (await scope.canActOn(_inc)) return true;
+    await _checkPermission();
+    if (_canAct) return true;
     if (!mounted) return false;
-    setState(() { _canAct = false; _permChecked = true; });
-    _snack('You can only update incidents of your own plant.', AppColors.red);
+    _snack('You can only update incidents of your own plant, or cases '
+        'assigned to or reported by you.', AppColors.red);
     return false;
   }
 
-  /// Persist the corrective action, target date and remarks WITHOUT advancing
-  /// the status. Without this, a target date could only be saved as a
-  /// side-effect of moving the case to the next stage — so anyone who set a date
-  /// and left the screen lost it silently.
+  Future<void> _persist() async {
+    await LocalDB.saveIncident(_inc);
+    SyncService.pushIncident(_inc).catchError((_) => false);
+    AssignmentNotifications.refresh();
+  }
+
+  /// Persist the corrective action and target date WITHOUT advancing the
+  /// status. Without this, a target date could only be saved as a side-effect
+  /// of moving the case to the next stage — so anyone who set a date and left
+  /// the screen lost it silently.
   Future<void> _saveProgress() async {
     if (_saving) return;
     if (!await _assertCanAct()) return;
+    if (!_mayEditAction && !_mayEditTarget) {
+      _snack('Only the action owner can change the corrective action.',
+          AppColors.amber);
+      return;
+    }
     setState(() => _saving = true);
+    final before = _inc['correctiveAction']?.toString().trim() ?? '';
     _applyFormFields();
-    await LocalDB.saveIncident(_inc);
-    SyncService.pushIncident(_inc).catchError((_) => false);
+    final after = _inc['correctiveAction']?.toString().trim() ?? '';
+    if (_mayEditAction && after != before && after.isNotEmpty) {
+      CaseWorkflow.log(_inc, user: _me, event: 'saved',
+          role: _actor.role, note: after);
+    }
+    await _persist();
     if (!mounted) return;
     setState(() => _saving = false);
     widget.onStatusChanged?.call();
     _snack('✅ Progress saved', AppColors.accent);
   }
 
+  /// Move the case one rung up the ladder, under [CaseWorkflow.gate]:
+  /// investigation stages — anyone working the plant's cases; submitting the
+  /// corrective action — the action owner only, with a real action written;
+  /// verifying / closing — the person who REPORTED it (admin override).
   Future<void> _advanceStatus(String newStatus) async {
     if (_saving) return;
     if (!await _assertCanAct()) return;
-    // Require a corrective action before entering the FINAL stage, whatever
-    // the admin renamed it to — hardcoding 'CLOSED' meant a renamed final
-    // stage could be reached with the action field left blank.
-    final isFinal = _statusOrder.isNotEmpty && newStatus == _statusOrder.last;
-    if (isFinal && _actionCtrl.text.trim().isEmpty) {
-      _snack('Enter corrective action first', AppColors.red); return;
-    }
-    // MAMR: only the area's responsible person may mark it COMPLIED
-    // (SED/admin only when the area has nobody responsible).
-    if (isFinal && MamrObs.isMamr(_inc) &&
-        !await MamrService.canMarkComplied(
-            await LocalDB.getCurrentUser(), _inc)) {
-      _snack('Only the area\'s responsible person can mark this Complied',
-          AppColors.amber);
-      return;
-    }
+    final ladder = _statusOrder;
+    final t = CaseWorkflow.indexOf(ladder, newStatus);
+    final a = CaseWorkflow.actionIndex(ladder);
+    final v = CaseWorkflow.verifyIndex(ladder);
+    final isFinal = CaseWorkflow.isFinal(ladder, newStatus);
+
     // ★ 2026-10-04. A case cannot move into investigation / corrective action
-    // with nobody responsible for it. Any stage after the first needs an
-    // assignee; if there is none, the picker opens here and cancelling it
-    // cancels the status change.
-    final isFirst = _statusOrder.isNotEmpty && newStatus == _statusOrder.first;
-    if (!isFirst && !IncidentAssign.hasAssignee(_inc)) {
+    // with nobody responsible for it. If there is none, the picker opens here
+    // and cancelling it cancels the status change.
+    if (t >= 1 && !IncidentAssign.hasAssignee(_inc)) {
       _snack('Assign a person for the corrective action first',
           AppColors.amber);
       await _assignInvestigator(required: true);
       if (!mounted || !IncidentAssign.hasAssignee(_inc)) return;
+      await _checkPermission();
+      if (!mounted) return;
     }
+
+    // The text the gate checks: the action owner's unsaved box when they are
+    // submitting, otherwise what is stored on the case.
+    final action = _mayEditAction
+        ? _actionCtrl.text.trim()
+        : (_inc['correctiveAction']?.toString().trim() ?? '');
+    final reason = CaseWorkflow.gate(
+      ladder: ladder, from: _status, to: newStatus, who: _actor,
+      hasAssignee: IncidentAssign.hasAssignee(_inc), action: action,
+    );
+    if (reason != null) { _snack(reason, AppColors.red); return; }
+
+    // Verification / closure: the reporter confirms against the submitted
+    // action and may add remarks.
+    String remarks = '';
+    if (t >= v) {
+      final r = await _verifyDialog(newStatus, isFinal: isFinal);
+      if (r == null || !mounted) return;
+      remarks = r;
+    } else if (t >= a) {
+      final ok = await _confirmSubmit(action);
+      if (ok != true || !mounted) return;
+    }
+
     setState(() => _saving = true);
     final now = DateTime.now().toIso8601String();
-    _inc['status'] = newStatus;
+    final from = _status;
     _applyFormFields();
-    // Stage timestamps. The final-stage stamp follows _statusOrder; the two
-    // named stamps only apply if the admin still has those stages.
-    if (isFinal)                      _inc['closedAt']               = now;
+    _inc['status'] = newStatus;
+    final sig = CaseWorkflow.signature(_me) +
+        (_actor.isAdmin && !_actor.isReporter && t >= v
+            ? ' (admin override)' : '');
+    String event;
+    String note = '';
+    if (t >= v) {
+      if (_inc['verifiedAt']?.toString().isNotEmpty != true || t == v) {
+        _inc['verifiedAt'] = now;
+        _inc['verifiedBy'] = sig;
+      }
+      if (remarks.isNotEmpty) {
+        final prev = _inc['closingRemarks']?.toString().trim() ?? '';
+        _inc['closingRemarks'] = prev.isEmpty ? remarks : '$prev\n$remarks';
+      }
+      if (isFinal) {
+        _inc['closedAt'] = now;
+        _inc['closedBy'] = sig;
+      }
+      event = isFinal ? 'closed' : 'verified';
+      note = remarks;
+    } else if (t >= a) {
+      _inc['actionTakenAt'] = now;
+      _inc['actionBy'] = CaseWorkflow.signature(_me);
+      _inc['sentBackReason'] = '';
+      event = 'submitted';
+      note = action;
+    } else {
+      event = 'stage';
+    }
     if (newStatus == 'INVESTIGATING') _inc['investigationStartedAt'] = now;
-    if (newStatus == 'ACTION TAKEN')  _inc['actionTakenAt']          = now;
-    await LocalDB.saveIncident(_inc);
-    SyncService.pushIncident(_inc).catchError((_) => false);
+    CaseWorkflow.log(_inc, user: _me, event: event, role: _actor.role,
+        from: from, to: newStatus, note: note);
+    await _persist();
     if (!mounted) return;
     setState(() => _saving = false);
     widget.onStatusChanged?.call();
     _snack(
-      isFinal ? '✅ Case closed & synced' : '✅ Status → $newStatus',
+      isFinal
+          ? '✅ Verified & closed'
+          : (event == 'submitted'
+              ? '✅ Action submitted — the reporter will verify it'
+              : '✅ Status → $newStatus'),
       isFinal ? const Color(0xFF16A34A) : AppColors.accent,
     );
+  }
+
+  /// The action owner confirms what is being submitted. After this the text
+  /// is locked unless the reporter sends it back.
+  Future<bool?> _confirmSubmit(String action) {
+    final sl = SL.of(context);
+    return showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
+      title: Text('Submit corrective action?',
+          style: TextStyle(color: sl.text1, fontSize: 15,
+              fontWeight: FontWeight.w700)),
+      content: Column(mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(action, style: TextStyle(color: sl.text2, fontSize: 12.5,
+            height: 1.4)),
+        const SizedBox(height: 10),
+        Text(
+          ActionPhoto.has(_inc)
+              ? 'Photo attached. '
+              : 'No photo attached (optional). ',
+          style: TextStyle(color: sl.text3, fontSize: 11.5)),
+        const SizedBox(height: 4),
+        Text('It will be locked and sent to '
+            '${_inc['reportedBy'] ?? 'the reporter'} to verify and close.',
+            style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.4)),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel')),
+        ElevatedButton(onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+            child: const Text('Submit',
+                style: TextStyle(color: Colors.white))),
+      ],
+    ));
+  }
+
+  /// The reporter's verification: shows the submitted action and photo, and
+  /// takes optional remarks. Returns null on cancel, else the remarks.
+  Future<String?> _verifyDialog(String to, {required bool isFinal}) async {
+    final sl = SL.of(context);
+    final ctrl = TextEditingController();
+    final action = _inc['correctiveAction']?.toString().trim() ?? '';
+    final by = _inc['actionBy']?.toString().trim().isNotEmpty == true
+        ? _inc['actionBy'].toString()
+        : IncidentAssign.assigneeName(_inc);
+    final res = await showDialog<String>(context: context, builder: (ctx) =>
+      AlertDialog(
+        backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
+        title: Text(isFinal ? 'Verify & close case' : 'Verify action',
+            style: TextStyle(color: sl.text1, fontSize: 15,
+                fontWeight: FontWeight.w700)),
+        content: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('ACTION TAKEN${by.isEmpty ? '' : ' BY ${by.toUpperCase()}'}',
+                style: TextStyle(color: sl.text4, fontSize: 10,
+                    fontWeight: FontWeight.w800, letterSpacing: 0.5)),
+            const SizedBox(height: 4),
+            Text(action, style: TextStyle(color: sl.text1, fontSize: 12.5,
+                height: 1.4)),
+            const SizedBox(height: 10),
+            FutureBuilder<Uint8List?>(
+              future: _actionPhotoFuture,
+              builder: (_, s) => (s.data == null)
+                  ? const SizedBox.shrink()
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.memory(s.data!, height: 140,
+                          fit: BoxFit.cover))),
+            const SizedBox(height: 10),
+            TextField(
+              controller: ctrl, maxLines: 3,
+              style: TextStyle(color: sl.text1, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'Verification remarks (optional)',
+                hintStyle: TextStyle(color: sl.text4, fontSize: 11.5),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(9)))),
+            const SizedBox(height: 8),
+            Text('Confirm only after checking the action on site. If it is '
+                'not done, cancel and use "Send back".',
+                style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
+          ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            icon: const Icon(Icons.verified_rounded, size: 15,
+                color: Colors.white),
+            label: Text(isFinal ? 'Verify & close' : 'Verify',
+                style: const TextStyle(color: Colors.white)),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF16A34A))),
+        ],
+      ));
+    ctrl.dispose();
+    return res;
+  }
+
+  /// The reporter rejects the submitted action: back to the action owner
+  /// with a mandatory reason, which they see at the top of their form.
+  Future<void> _sendBack() async {
+    if (_saving) return;
+    if (!await _assertCanAct()) return;
+    if (!_maySendBack) {
+      _snack('Only the reporter can send this case back.', AppColors.amber);
+      return;
+    }
+    final sl = SL.of(context);
+    final ctrl = TextEditingController();
+    final reason = await showDialog<String>(context: context, builder: (ctx) =>
+      StatefulBuilder(builder: (ctx, setD) => AlertDialog(
+        backgroundColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
+        title: Text('Send back to action owner',
+            style: TextStyle(color: sl.text1, fontSize: 15,
+                fontWeight: FontWeight.w700)),
+        content: TextField(
+          controller: ctrl, maxLines: 3, autofocus: true,
+          onChanged: (_) => setD(() {}),
+          style: TextStyle(color: sl.text1, fontSize: 13),
+          decoration: InputDecoration(
+            hintText: 'What is still not done? *',
+            hintStyle: TextStyle(color: sl.text4, fontSize: 11.5),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(9)))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: ctrl.text.trim().length < 5
+                ? null : () => Navigator.pop(ctx, ctrl.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.amber),
+            child: const Text('Send back',
+                style: TextStyle(color: Colors.white))),
+        ],
+      )));
+    ctrl.dispose();
+    if (reason == null || !mounted) return;
+    final back = CaseWorkflow.sendBackIndex(_statusOrder);
+    if (back < 0) return;
+    setState(() => _saving = true);
+    final from = _status;
+    final to = _statusOrder[back];
+    _inc['status'] = to;
+    _inc['sentBackReason'] = reason;
+    _inc['verifiedAt'] = '';
+    _inc['verifiedBy'] = '';
+    CaseWorkflow.log(_inc, user: _me, event: 'sent_back', role: _actor.role,
+        from: from, to: to, note: reason);
+    await _persist();
+    if (!mounted) return;
+    setState(() => _saving = false);
+    widget.onStatusChanged?.call();
+    _snack('↩ Sent back to ${IncidentAssign.assigneeName(_inc)}',
+        AppColors.amber);
+  }
+
+  // ── Action photo ─────────────────────────────────────────────────────
+  Future<void> _pickActionPhoto() async {
+    if (!_mayEditAction || _saving) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(child: Column(
+        mainAxisSize: MainAxisSize.min, children: [
+          ListTile(leading: const Icon(Icons.photo_camera_rounded),
+              title: const Text('Take photo'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera)),
+          ListTile(leading: const Icon(Icons.photo_library_rounded),
+              title: const Text('Choose from gallery'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery)),
+        ])));
+    if (source == null || !mounted) return;
+    XFile? f;
+    try {
+      f = await ImagePicker().pickImage(source: source,
+          maxWidth: 1600, maxHeight: 1600, imageQuality: 80);
+    } catch (e) {
+      _snack('Could not open the camera: $e', AppColors.red);
+      return;
+    }
+    if (f == null || !mounted) return;
+    setState(() => _saving = true);
+    final bytes = ActionPhoto.compress(await f.readAsBytes());
+    _applyFormFields();
+    _inc['actionImageBase64'] = base64Encode(bytes);
+    _inc['actionImageUrl'] = '';   // forces the upload on the next push
+    _inc['actionImageAt'] = DateTime.now().toIso8601String();
+    CaseWorkflow.log(_inc, user: _me, event: 'photo', role: _actor.role);
+    await _persist();
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      _actionPhotoFuture = Future.value(bytes);
+    });
+    _snack('📷 Photo attached', AppColors.accent);
+  }
+
+  Future<void> _removeActionPhoto() async {
+    if (!_mayEditAction || _saving) return;
+    setState(() => _saving = true);
+    _applyFormFields();
+    _inc['actionImageBase64'] = '';
+    _inc['actionImageUrl'] = '';
+    _inc['actionImageAt'] = '';
+    await _persist();
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      _actionPhotoFuture = Future.value(null);
+    });
   }
 
   // Resolve the evidence image for PDF/share.
@@ -448,6 +784,19 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
       buf.writeln(action);
       buf.writeln();
     }
+    // ★ 2026-10-16: the closure, so a shared summary of a closed case says
+    // what was done and who verified it, not just what was reported.
+    final taken = _inc['correctiveAction']?.toString().trim() ?? '';
+    if (taken.isNotEmpty && taken != action.trim()) {
+      buf.writeln('✅ *Action taken:*');
+      buf.writeln(taken);
+      final owner = IncidentAssign.assigneeName(_inc);
+      if (owner.isNotEmpty) buf.writeln('👤 *Action owner:* $owner');
+      final vb = _inc['verifiedBy']?.toString().trim() ?? '';
+      if (vb.isNotEmpty) buf.writeln('✔️ *Verified by:* $vb');
+      buf.writeln('📌 *Status:* $_status');
+      buf.writeln();
+    }
     buf.writeln('—');
     buf.write('_Generated by ${Branding.appTitle}_');
     return buf.toString();
@@ -637,14 +986,16 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           ],
 
           // ── MITIGATION / CLOSED ──────────────────────────────
-          // A user who may not act on this record gets the read-only summary,
-          // not an editable form whose Save button would be rejected.
+          // ★ 2026-10-16: only the action owner gets the editable form, and
+          // only until they submit. Everyone else — the reporter verifying it,
+          // a colleague, another plant — sees the progress read-only, with a
+          // line saying whose move it is.
           if (_isClosed)
             _buildClosedSummary(sl, bgColor)
-          else if (_permChecked && !_canAct)
-            _buildReadOnlyNotice(sl, bgColor)
+          else if (_mayEditAction)
+            _buildMitigationForm(sl, bgColor)
           else
-            _buildMitigationForm(sl, bgColor),
+            _buildReadOnlyNotice(sl, bgColor),
           const SizedBox(height: 10),
 
           // ── TIMELINE ─────────────────────────────────────────
@@ -699,14 +1050,16 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     final ownerId = _inc['assignedTo']?.toString().trim() ?? '';
     final reporterPno = (_inc['reportedByPno']?.toString() ??
             _inc['reporterPno']?.toString() ?? '').trim();
-    final canEdit = _permChecked && _canAct && !_isClosed;
+
     // The reporter of an MAMR observation may assign / transfer it even when
     // they may not otherwise work the case.
-    final canAssign = _permChecked && (_canAct || _canAssignMamr) && !_isClosed;
+    // Hand-over is for whoever runs the plant's cases (or the MAMR reporter /
+    // SED), and only until the reporter starts verifying.
+    final canAssign = _permChecked && !_isClosed &&
+        _statusIdx < CaseWorkflow.verifyIndex(_statusOrder) &&
+        (_actor.canActPlant || _actor.isAdmin || _canAssignMamr);
 
-    final curIdx = _statusOrder.indexOf(_status);
-    final nextSt = (curIdx >= 0 && curIdx + 1 < _statusOrder.length)
-        ? _statusOrder[curIdx + 1] : null;
+    final nextSt = _nextStatus;
 
     final target = _targetDate == null
         ? '' : DateFormat('dd MMM yyyy').format(_targetDate!);
@@ -753,15 +1106,19 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               label: owner.isEmpty ? 'Assign owner' : 'Transfer',
               color: AppColors.accent,
               onTap: _saving ? null : () => _assignInvestigator()),
-          if (canEdit && nextSt != null)
+          if (_mayAdvance && nextSt != null)
             _qaButton(
               icon: nextSt == _statusOrder.last
                   ? Icons.lock_rounded : Icons.manage_search_rounded,
-              label: nextSt == _statusOrder.last
-                  ? 'Close case' : _titleCase(nextSt),
+              label: _advanceLabel(nextSt),
               color: nextSt == _statusOrder.last
                   ? const Color(0xFF16A34A) : _statusColor(nextSt),
               onTap: _saving ? null : () => _advanceStatus(nextSt)),
+          if (_maySendBack)
+            _qaButton(
+              icon: Icons.undo_rounded, label: 'Send back',
+              color: AppColors.amber,
+              onTap: _saving ? null : _sendBack),
           _qaButton(
             icon: Icons.chat_rounded, label: 'WhatsApp',
             color: const Color(0xFF25D366),
@@ -1145,26 +1502,109 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   }
 
   // ─── MITIGATION FORM ─────────────────────────────────────────
+  /// The ACTION OWNER's form (see [_mayEditAction]). "Closed / Verified by" and
+  /// the closing remarks are no longer typed here: they are the reporter's,
+  /// stamped from their account when they verify (2026-10-16).
   Widget _buildMitigationForm(SL sl, Color bg) => _section(sl, bg,
-    title: 'Mitigation & closure', icon: Icons.engineering_rounded,
+    title: 'Corrective action', icon: Icons.engineering_rounded,
     color: _SecColors.mitigation,
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _sentBackBanner(sl),
       _formLabel('Corrective action assigned to *', sl),
       _investigatorField(sl, bg),
       const SizedBox(height: 10),
       _formLabel('Corrective Action Taken *', sl),
       _formField(_actionCtrl,
-          'Describe what was done to mitigate…', 3, sl, bg),
+          'What was done, where, and by whom…', 4, sl, bg),
       const SizedBox(height: 10),
-      _formLabel('Closed / Verified by', sl),
-      _formField(_closedByCtrl, 'Name and designation', 1, sl, bg),
+      _formLabel('Photo after action (optional)', sl),
+      _actionPhotoField(sl, bg, editable: true),
       const SizedBox(height: 10),
       _formLabel('Target date for completion', sl),
       _targetDatePicker(sl, bg),
       const SizedBox(height: 10),
-      _formLabel('Additional remarks', sl),
-      _formField(_remarksCtrl, 'Any other notes…', 2, sl, bg),
+      Text(
+        'When the action is complete, tap "Submit action". '
+        '${_inc['reportedBy'] ?? 'The reporter'} will then verify and close it.',
+        style: TextStyle(color: sl.text3, fontSize: 11, height: 1.4)),
     ]));
+
+  /// Shown to the action owner after the reporter sent the case back.
+  Widget _sentBackBanner(SL sl) {
+    final r = _inc['sentBackReason']?.toString().trim() ?? '';
+    if (r.isEmpty) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppColors.amber.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: AppColors.amber.withOpacity(0.45))),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(Icons.undo_rounded, size: 16, color: sl.amberText),
+        const SizedBox(width: 8),
+        Expanded(child: Text('Sent back by the reporter: $r',
+            style: TextStyle(color: sl.amberText, fontSize: 12,
+                fontWeight: FontWeight.w600, height: 1.4))),
+      ]));
+  }
+
+  /// The "after" photo: a thumbnail (tap to enlarge) and, for the action
+  /// owner, attach / replace / remove.
+  Widget _actionPhotoField(SL sl, Color bg, {required bool editable}) {
+    final fieldBg = sl.isDark
+        ? const Color(0xFF2A2D42) : const Color(0xFFF0F1F5);
+    return FutureBuilder<Uint8List?>(
+      future: _actionPhotoFuture,
+      builder: (context, snap) {
+        final bytes = snap.data;
+        if (bytes == null) {
+          if (!editable) return const SizedBox.shrink();
+          return InkWell(
+            borderRadius: BorderRadius.circular(9),
+            onTap: _saving ? null : _pickActionPhoto,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: fieldBg,
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(color: sl.border.withOpacity(0.5))),
+              child: Row(children: [
+                Icon(Icons.add_a_photo_outlined, size: 16, color: sl.text3),
+                const SizedBox(width: 8),
+                Text('Attach a photo of the completed action',
+                    style: TextStyle(color: sl.text3, fontSize: 12.5)),
+              ])));
+        }
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          GestureDetector(
+            onTap: () => _openFullImage(bytes),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(9),
+              child: Image.memory(bytes, width: 120, height: 90,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink()))),
+          const SizedBox(width: 10),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Photo after action',
+                  style: TextStyle(color: sl.text1, fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+              if ((_inc['actionImageAt']?.toString() ?? '').isNotEmpty)
+                Text(_fmt(_inc['actionImageAt']?.toString()),
+                    style: TextStyle(color: sl.text4, fontSize: 10.5)),
+              if (editable) Wrap(spacing: 4, children: [
+                TextButton(onPressed: _saving ? null : _pickActionPhoto,
+                    child: const Text('Replace')),
+                TextButton(onPressed: _saving ? null : _removeActionPhoto,
+                    child: Text('Remove',
+                        style: TextStyle(color: sl.redText))),
+              ]),
+            ])),
+        ]);
+      });
+  }
 
   /// Who is investigating this incident, and the handover control.
   ///
@@ -1275,6 +1715,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     );
     if (!mounted) return;
     setState(() => _saving = false);
+    // The new owner may be this user (or no longer be): re-derive the role.
+    if (res.changed) await _checkPermission();
+    if (!mounted) return;
     if (res.changed) widget.onStatusChanged?.call();
     if (res.message.isNotEmpty) {
       _snack(res.message,
@@ -1341,41 +1784,77 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
     );
   }
 
-  /// Shown instead of the mitigation form when this user may not act on the
-  /// record. Says why, and still surfaces whatever progress has been recorded,
-  /// so viewing another plant's case is informative rather than just blocked.
+  /// Shown instead of the action owner's form to everyone else — the reporter
+  /// waiting for or verifying the action, a colleague, another plant. Says
+  /// whose move it is and shows what has been recorded so far. The person
+  /// planning the job may still set the target date here.
   Widget _buildReadOnlyNotice(SL sl, Color bg) {
+    final a = CaseWorkflow.actionIndex(_statusOrder);
+    final submitted = _statusIdx >= a && a >= 0;
+    final owner = IncidentAssign.assigneeName(_inc);
+    final reporter = _inc['reportedBy']?.toString().trim() ?? 'the reporter';
+
+    String note;
+    Color tone = sl.text3;
+    if (_permChecked && !_canAct) {
+      note = 'This case belongs to another plant, so it can be reviewed here '
+          'but only updated by that plant or an admin.';
+    } else if (!IncidentAssign.hasAssignee(_inc)) {
+      note = 'Nobody is assigned yet. Assign the person who will carry out '
+          'the corrective action.';
+    } else if (submitted && (_actor.isReporter || _actor.isAdmin)) {
+      note = '$owner has submitted the corrective action. Check it on site, '
+          'then verify and close it, or send it back.';
+      tone = sl.greenText;
+    } else if (submitted) {
+      note = 'Action submitted. Waiting for $reporter (who reported it) to '
+          'verify and close.';
+    } else {
+      note = 'Waiting for $owner to record and submit the corrective action.';
+    }
+
     final rows = <List<String>>[
-      ['Corrective Action', _inc['correctiveAction']?.toString() ?? ''],
-      ['Target Date',       _inc['targetDate']?.toString() ?? ''],
-      ['Assigned To',       _inc['assignedToName']?.toString().trim().isNotEmpty
-                               == true
-                               ? '${_inc['assignedToName']} '
-                                   '(@${_inc['assignedTo'] ?? ''})'
-                               : _inc['assignedTo']?.toString() ?? ''],
-    ].where((r) => r[1].isNotEmpty).toList();
+      ['Action owner', owner],
+      ['Corrective action', _inc['correctiveAction']?.toString() ?? ''],
+      ['Submitted', (_inc['actionTakenAt']?.toString() ?? '').isEmpty
+          ? '' : '${_fmt(_inc['actionTakenAt']?.toString())}'
+              '${(_inc['actionBy']?.toString() ?? '').isEmpty ? '' : ' · ${_inc['actionBy']}'}'],
+      ['Verified', (_inc['verifiedAt']?.toString() ?? '').isEmpty
+          ? '' : '${_fmt(_inc['verifiedAt']?.toString())}'
+              ' · ${_inc['verifiedBy'] ?? ''}'],
+    ].where((r) => r[1].trim().isNotEmpty).toList();
 
     return _section(sl, bg,
-      title: 'View only', icon: Icons.visibility_outlined,
-      color: _SecColors.readOnly,
+      title: submitted ? 'Corrective action submitted' : 'Corrective action',
+      icon: submitted ? Icons.fact_check_outlined : Icons.visibility_outlined,
+      color: submitted ? _SecColors.mitigation : _SecColors.readOnly,
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('This incident belongs to another plant, so it can be reviewed '
-             'here but only updated by that plant or an admin.',
-          style: TextStyle(color: sl.text3, fontSize: 11.5, height: 1.4)),
+        if (!submitted) _sentBackBanner(sl),
+        Text(note, style: TextStyle(color: tone, fontSize: 11.5,
+            height: 1.4, fontWeight: FontWeight.w600)),
         if (rows.isNotEmpty) ...[
           const SizedBox(height: 12),
-          ...rows.map((r) => Padding(
-            padding: const EdgeInsets.only(bottom: 7),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              SizedBox(width: 110, child: Text(r[0],
-                style: TextStyle(color: sl.text4, fontSize: 10,
-                    fontWeight: FontWeight.w600))),
-              Expanded(child: Text(r[1],
-                style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4))),
-            ]))),
+          ...rows.map((r) => _kv(sl, r[0], r[1])),
         ],
+        _actionPhotoField(sl, bg, editable: false),
+        if (_mayEditTarget) ...[
+          const SizedBox(height: 10),
+          _formLabel('Target date for completion', sl),
+          _targetDatePicker(sl, bg),
+        ] else if ((_inc['targetDate']?.toString() ?? '').isNotEmpty)
+          _kv(sl, 'Target date', _inc['targetDate'].toString()),
       ]));
   }
+
+  Widget _kv(SL sl, String k, String v) => Padding(
+    padding: const EdgeInsets.only(bottom: 7),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SizedBox(width: 110, child: Text(k,
+        style: TextStyle(color: sl.text4, fontSize: 10,
+            fontWeight: FontWeight.w600))),
+      Expanded(child: Text(v,
+        style: TextStyle(color: sl.text1, fontSize: 12, height: 1.4))),
+    ]));
 
   Widget _formLabel(String lbl, SL sl) => Padding(
     padding: const EdgeInsets.only(bottom: 5),
@@ -1407,50 +1886,74 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   }
 
   // ─── CLOSED SUMMARY ──────────────────────────────────────────
-  Widget _buildClosedSummary(SL sl, Color bg) => _section(sl, bg,
-    title: 'Case closed', icon: Icons.check_circle_rounded,
-    color: _SecColors.closed,
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      ...([
-        ['Corrective Action', _inc['correctiveAction']],
-        ['Target Date',       _inc['targetDate']],
-        ['Closed By',         _inc['closedBy']],
-        ['Remarks',           _inc['closingRemarks']],
-        ['Closed At',         _inc['closedAt'] != null
-            ? _fmt(_inc['closedAt']?.toString()) : null],
-      ].where((r) => r[1] != null && r[1].toString().isNotEmpty)
-        .map((r) => Padding(
-          padding: const EdgeInsets.only(bottom: 7),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(width: 110,
-                child: Text(r[0].toString(),
-                  style: TextStyle(color: sl.text4, fontSize: 10,
-                      fontWeight: FontWeight.w600))),
-              Expanded(child: Text(r[1].toString(),
-                style: TextStyle(color: sl.text1, fontSize: 12,
-                    height: 1.4))),
-            ])))
-        .toList()),
-    ]));
+  /// Everything a later audit checks the closure against: who was given the
+  /// job, what they did (and the photo), who verified it and when.
+  Widget _buildClosedSummary(SL sl, Color bg) {
+    final rows = <List<String>>[
+      ['Action owner',      IncidentAssign.assigneeName(_inc)],
+      ['Corrective Action', _inc['correctiveAction']?.toString() ?? ''],
+      ['Submitted',         (_inc['actionTakenAt']?.toString() ?? '').isEmpty
+          ? '' : '${_fmt(_inc['actionTakenAt']?.toString())}'
+              '${(_inc['actionBy']?.toString() ?? '').isEmpty ? '' : ' · ${_inc['actionBy']}'}'],
+      ['Target Date',       _inc['targetDate']?.toString() ?? ''],
+      ['Verified By',       _inc['verifiedBy']?.toString() ?? ''],
+      ['Closed By',         _inc['closedBy']?.toString() ?? ''],
+      ['Remarks',           _inc['closingRemarks']?.toString() ?? ''],
+      ['Closed At',         (_inc['closedAt']?.toString() ?? '').isEmpty
+          ? '' : _fmt(_inc['closedAt']?.toString())],
+    ].where((r) => r[1].trim().isNotEmpty).toList();
+    return _section(sl, bg,
+      title: 'Case closed', icon: Icons.check_circle_rounded,
+      color: _SecColors.closed,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ...rows.map((r) => _kv(sl, r[0], r[1])),
+        _actionPhotoField(sl, bg, editable: false),
+      ]));
+  }
 
   // ─── TIMELINE ────────────────────────────────────────────────
+  /// The case history (actionLog) when there is one — who did what, when —
+  /// otherwise the legacy stage stamps for cases filed before 2026-10-16.
   Widget _buildTimeline(SL sl, Color bg) {
     final events = <Map<String, String>>[];
-    void add(String? ts, String label, String icon) {
+    void add(String? ts, String label, String icon, {String sub = ''}) {
       if (ts == null || ts.isEmpty) return;
-      events.add({'label': label, 'time': _fmt(ts), 'icon': icon});
+      events.add({'label': label, 'time': _fmt(ts), 'icon': icon, 'sub': sub});
     }
-    add(_inc['date']?.toString(),                  'Reported',               '📝');
-    add(_inc['investigationStartedAt']?.toString(), 'Investigation started',  '🔍');
-    add(_inc['actionTakenAt']?.toString(),           'Action taken',           '🔧');
-    add(_inc['closedAt']?.toString(),               'Closed',                 '✅');
+    add(_inc['date']?.toString(), 'Reported', '📝',
+        sub: _inc['reportedBy']?.toString() ?? '');
+    final trail = CaseWorkflow.trail(_inc);
+    if (trail.isNotEmpty) {
+      const icons = {
+        'assigned': '👤', 'transferred': '🔁', 'unassigned': '👤',
+        'submitted': '🔧', 'verified': '✔️', 'closed': '✅',
+        'sent_back': '↩️', 'photo': '📷', 'saved': '✏️', 'stage': '➡️',
+        'closed_on_spot': '✅', 'bulk_closed': '✅',
+      };
+      for (final e in trail) {
+        final ev = e['event']?.toString() ?? '';
+        final note = e['note']?.toString().trim() ?? '';
+        final who = CaseWorkflow.who(e);
+        add(e['at']?.toString(), CaseWorkflow.describe(e),
+            icons[ev] ?? '•',
+            sub: [
+              if (who.isNotEmpty) who,
+              if (note.isNotEmpty && ev != 'saved') '“$note”',
+            ].join('\n'));
+      }
+    } else {
+      add(_inc['assignedAt']?.toString(), 'Assigned', '👤',
+          sub: IncidentAssign.assigneeName(_inc));
+      add(_inc['investigationStartedAt']?.toString(), 'Investigation started', '🔍');
+      add(_inc['actionTakenAt']?.toString(), 'Action taken', '🔧');
+      add(_inc['closedAt']?.toString(), 'Closed', '✅',
+          sub: _inc['closedBy']?.toString() ?? '');
+    }
     if (events.isEmpty) return const SizedBox.shrink();
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _section(sl, bg,
-        title: 'Timeline', icon: Icons.timeline_rounded,
+        title: 'Case history', icon: Icons.timeline_rounded,
         color: _SecColors.timeline,
         child: Column(children: events.asMap().entries.map((e) {
           final isLast = e.key == events.length - 1;
@@ -1483,6 +1986,9 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                       fontWeight: FontWeight.w600)),
                   Text(ev['time']!, style: TextStyle(
                       color: sl.text4, fontSize: 10)),
+                  if ((ev['sub'] ?? '').isNotEmpty)
+                    Text(ev['sub']!, style: TextStyle(
+                        color: sl.text3, fontSize: 10.5, height: 1.35)),
                 ]))),
           ]);
         }).toList())),
@@ -1490,16 +1996,16 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
   }
 
   // ─── BOTTOM ACTION BAR ───────────────────────────────────────
-  Widget _buildBottomBar(SL sl, Color bg) {
-    final curIdx  = _statusOrder.indexOf(_status);
-    final nextIdx = curIdx + 1;
-    final hasNext = nextIdx < _statusOrder.length;
-    final nextSt  = hasNext ? _statusOrder[nextIdx] : null;
-    // "Closing" = advancing into the FINAL stage, whatever the admin named it.
-    // Checking `== 'CLOSED'` meant renaming the last stage silently dropped the
-    // closure-remarks requirement. (Deliberately the last stage only, not every
-    // terminal status — reaching VERIFIED shouldn't demand closure remarks.)
-    final isClose = hasNext && nextIdx == _statusOrder.length - 1;
+  /// Only the buttons that are this user's move: Save (action owner / the
+  /// person planning the target date), Send back (reporter), and the next
+  /// stage when [CaseWorkflow] says it is theirs. Null when there is nothing.
+  Widget? _buildBottomBar(SL sl, Color bg) {
+    final nextSt  = _nextStatus;
+    final canSave = _mayEditAction || _mayEditTarget;
+    final canNext = _mayAdvance && nextSt != null;
+    final canBack = _maySendBack;
+    if (!canSave && !canNext && !canBack) return null;
+    final isClose = canNext && nextSt == _statusOrder.last;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 26),
@@ -1507,34 +2013,42 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
         color: sl.isDark ? const Color(0xFF252840) : Colors.white,
         border: Border(top: BorderSide(
             color: sl.border.withOpacity(0.4)))),
-      // The bar keeps its full-width top border; the action buttons are capped
-      // to the same column as the body above, so "Close Case" doesn't end up
-      // half a browser away from the case it closes.
       // fillHeight: false — without it the Center inside ContentWidth took the
       // whole screen and this bar hid the app bar and every detail above it.
       child: ContentWidth(maxWidth: SLLayout.wide, fillHeight: false,
           child: Row(children: [
-        // Save without advancing. Replaces the old hardcoded "Investigate"
-        // shortcut, which named a stage the admin may have renamed or removed
-        // and duplicated the advance button's job — while the far more useful
-        // action, saving a target date and corrective action in place, had no
-        // button at all.
-        Expanded(child: OutlinedButton.icon(
-          onPressed: _saving ? null : _saveProgress,
-          icon: Icon(Icons.save_outlined, color: sl.text2, size: 15),
-          label: Text('Save',
-            style: TextStyle(color: sl.text2,
-                fontWeight: FontWeight.w700, fontSize: 12)),
-          style: OutlinedButton.styleFrom(
-            side: BorderSide(color: sl.border, width: 1.5),
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10))),
-        )),
-        const SizedBox(width: 8),
-        if (hasNext)
+        if (canSave)
+          Expanded(child: OutlinedButton.icon(
+            onPressed: _saving ? null : _saveProgress,
+            icon: Icon(Icons.save_outlined, color: sl.text2, size: 15),
+            label: Text('Save',
+              style: TextStyle(color: sl.text2,
+                  fontWeight: FontWeight.w700, fontSize: 12)),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: sl.border, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10))),
+          )),
+        if (canBack) ...[
+          if (canSave) const SizedBox(width: 8),
+          Expanded(child: OutlinedButton.icon(
+            onPressed: _saving ? null : _sendBack,
+            icon: Icon(Icons.undo_rounded, color: sl.amberText, size: 15),
+            label: Text('Send back',
+              style: TextStyle(color: sl.amberText,
+                  fontWeight: FontWeight.w700, fontSize: 12)),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: AppColors.amber, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10))),
+          )),
+        ],
+        if (canNext) ...[
+          if (canSave || canBack) const SizedBox(width: 8),
           Expanded(flex: 2, child: ElevatedButton.icon(
-            onPressed: _saving ? null : () => _advanceStatus(nextSt!),
+            onPressed: _saving ? null : () => _advanceStatus(nextSt),
             icon: _saving
               ? const SizedBox(width: 14, height: 14,
                   child: CircularProgressIndicator(
@@ -1543,9 +2057,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
                     : Icons.arrow_forward_rounded,
                   size: 15, color: Colors.white),
             label: Text(
-              _saving ? 'Saving…'
-                  : isClose ? 'Close Case'
-                  : 'Mark as $nextSt',
+              _saving ? 'Saving…' : _advanceLabel(nextSt),
               style: const TextStyle(color: Colors.white,
                   fontWeight: FontWeight.w700, fontSize: 12)),
             style: ElevatedButton.styleFrom(
@@ -1555,6 +2067,7 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10))),
           )),
+        ],
       ])));
   }
 

@@ -19,6 +19,7 @@ import '../main.dart';
 // GeminiVision and AiRunLog are no longer referenced from this screen — the
 // call and its telemetry attribution both moved into ScanJobs.
 import '../services/local_db.dart';
+import '../services/case_workflow.dart';
 import '../services/admin_master_data.dart';
 import '../services/image_storage.dart';
 import '../services/sync_service.dart';
@@ -2627,8 +2628,31 @@ class _AIScanTabState extends State<AIScanTab> {
     // An MAMR observation is NOT auto-closed by the reporter: Complied is the
     // responsible person's (or SED's) call, made from the incident screen.
     if (allClosed && !MamrObs.isMamr(all[incIdx])) {
+      // ★ 2026-10-16: closed on the spot by the REPORTER (the verifier under
+      // CaseWorkflow), so the close is legitimate — but it used to leave the
+      // case-level corrective action blank, and the PDF then showed a closed
+      // case with no action. The per-hazard comments ARE the action.
+      final me = await LocalDB.getCurrentUser();
+      final notes = <String>[
+        for (final h in hazards.whereType<Map>())
+          if ((h['mitigationComment']?.toString().trim() ?? '').isNotEmpty)
+            '${h['name'] ?? 'Hazard'}: ${h['mitigationComment'].toString().trim()}',
+      ];
+      final now = DateTime.now().toIso8601String();
+      final from = all[incIdx]['status']?.toString() ?? '';
       all[incIdx]['status']   = _lastStatus;
-      all[incIdx]['closedAt'] = DateTime.now().toIso8601String();
+      all[incIdx]['closedAt'] = now;
+      if ((all[incIdx]['correctiveAction']?.toString().trim() ?? '').isEmpty) {
+        all[incIdx]['correctiveAction'] = notes.join(' | ');
+      }
+      all[incIdx]['actionBy'] = CaseWorkflow.signature(me);
+      all[incIdx]['actionTakenAt'] = now;
+      all[incIdx]['closedBy'] = CaseWorkflow.signature(me);
+      all[incIdx]['verifiedBy'] = CaseWorkflow.signature(me);
+      all[incIdx]['verifiedAt'] = now;
+      CaseWorkflow.log(all[incIdx], user: me, event: 'closed_on_spot',
+          role: 'Reporter', from: from, to: _lastStatus,
+          note: notes.join(' | '));
     }
 
     await LocalDB.saveIncident(all[incIdx]);

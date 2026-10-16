@@ -86,6 +86,9 @@ class AssignmentNotifications {
   @visibleForTesting
   static Future<Set<String>> Function() openStatusLoader =
       AdminMasterData.getOpenStatuses;
+  @visibleForTesting
+  static Future<List<String>> Function() ladderLoader =
+      AdminMasterData.getStatuses;
 
   static String _readKey(String username) =>
       'notif_read_${username.trim().toLowerCase()}';
@@ -141,7 +144,8 @@ class AssignmentNotifications {
       final incidents = await incidentLoader();
       final open = await openStatusLoader();
       final items = AssignmentInbox.build(
-          user: user, incidents: incidents, openStatuses: open);
+          user: user, incidents: incidents, openStatuses: open,
+          ladder: await ladderLoader());
 
       final prefs = await SharedPreferences.getInstance();
       final read = (prefs.getStringList(_readKey(username)) ?? const []).toSet();

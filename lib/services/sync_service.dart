@@ -734,6 +734,29 @@ class SyncService {
             if (imgUrl != null) row['imageUrl'] = imgUrl;
           }
         }
+        // ★ 2026-10-16: the corrective-action ("after") photo, uploaded once.
+        // The row only ever carries its URL; a replaced photo clears the URL on
+        // the device, which is what triggers the re-upload here.
+        final actB64 = row['actionImageBase64']?.toString() ?? '';
+        if (actB64.isNotEmpty &&
+            (row['actionImageUrl']?.toString() ?? '').isEmpty &&
+            id.isNotEmpty) {
+          try {
+            final url = await SupabaseService.uploadActionImage(
+                id, base64Decode(actB64));
+            if (url != null) {
+              row['actionImageUrl'] = url;
+              incident['actionImageUrl'] = url;
+              try {
+                // The inline copy is dropped once Storage has it: prefs on web
+                // is a ~5MB budget shared by every incident on the device.
+                await LocalDB.updateIncidentFields(
+                    id, {'actionImageUrl': url, 'actionImageBase64': ''});
+              } catch (_) {}
+            }
+          } catch (_) {}
+        }
+        row.remove('actionImageBase64');
         // Don't store bulky base64 in the DB row — the image lives in Storage.
         row.remove('imageBase64');
         row.remove('shareImageBase64');
@@ -776,8 +799,8 @@ class SyncService {
           body[k] = '[image]'; // never send raw base64 to Sheets (too large)
           return;
         }
-        if (k == 'shareImageBase64') {
-          body[k] = ''; // strip medium image too (50-80KB)
+        if (k == 'shareImageBase64' || k == 'actionImageBase64') {
+          body[k] = ''; // strip medium image / action photo (50-150KB)
           return;
         }
         // Keep thumbnailBase64 — it's only 2-4KB and needed for log display

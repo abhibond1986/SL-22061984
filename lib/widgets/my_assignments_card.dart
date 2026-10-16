@@ -298,6 +298,11 @@ class MyAssignmentsCard extends StatelessWidget {
         final c = _sevColor(sl, sev);
         out.add(_chip(sev, fg: c, bg: c.withOpacity(0.12)));
       }
+    } else if (item.awaitingVerification) {
+      out.add(_chip('ACTION SUBMITTED · VERIFY & CLOSE',
+        fg: sl.greenText,
+        bg: sl.greenText.withOpacity(0.12),
+      ));
     } else {
       final who = item.investigator;
       out.add(_chip(

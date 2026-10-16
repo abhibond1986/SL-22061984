@@ -158,6 +158,7 @@ class _HomeTabState extends State<HomeTab> {
       user: widget.user,
       incidents: allInc,
       openStatuses: openStatuses,
+      ladder: statuses,
     );
 
     if (!mounted || gen != _loadGen) return;

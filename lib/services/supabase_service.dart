@@ -87,6 +87,17 @@ class SupabaseService {
     'assignedToName': 'assigned_to_name',
     'assignedAt': 'assigned_at',
     'targetDate': 'target_date',
+    // ── Closing loop (migration_closure_trail.sql, 2026-10-16) ──
+    // Who submitted the action, who verified it, the "after" photo and the
+    // dated history the closed-case PDF prints. upsertIncident drops an
+    // unknown column and retries, so an un-migrated project loses only these.
+    'actionBy': 'action_by',
+    'actionImageUrl': 'action_image_url',
+    'actionImageAt': 'action_image_at',
+    'verifiedAt': 'verified_at',
+    'verifiedBy': 'verified_by',
+    'sentBackReason': 'sent_back_reason',
+    'actionLog': 'action_log',
     'updatedAt': 'updated_at',
     'hazards': 'hazards',
     'riskScore': 'risk_score',
@@ -125,7 +136,8 @@ class SupabaseService {
     _appToDb.forEach((appKey, dbCol) {
       if (!inc.containsKey(appKey)) return;
       var v = inc[appKey];
-      if (appKey == 'hazards' || appKey == 'mamrResponsible') {
+      if (appKey == 'hazards' || appKey == 'mamrResponsible' ||
+          appKey == 'actionLog') {
         // Store as jsonb — pass a List/Map through; parse if it's a JSON string.
         if (v is String) { try { v = jsonDecode(v); } catch (_) {} }
       }
@@ -379,6 +391,27 @@ class SupabaseService {
         return null;
       }
     }
+  }
+
+  /// Upload the corrective-action ("after") photo for an incident and return
+  /// its public URL. Stored as `act_<id>.jpg`, beside the evidence photo, with
+  /// the same insert-then-upsert fallback as [uploadIncidentImage] — a replaced
+  /// photo is a genuine overwrite. A version query is appended so a device
+  /// that cached the old picture fetches the new one.
+  static Future<String?> uploadActionImage(
+      String incidentId, Uint8List bytes) async {
+    if (!isReady || incidentId.isEmpty || bytes.isEmpty) return null;
+    final path = 'act_$incidentId.jpg';
+    final bucket = _db.storage.from(SupabaseConfig.imageBucket);
+    final v = DateTime.now().millisecondsSinceEpoch;
+    for (final upsert in const [false, true]) {
+      try {
+        await bucket.uploadBinary(path, bytes,
+            fileOptions: FileOptions(contentType: 'image/jpeg', upsert: upsert));
+        return '${bucket.getPublicUrl(path)}?v=$v';
+      } catch (_) {}
+    }
+    return null;
   }
 
   /// Download image bytes for an incident that has an imageUrl. Returns null

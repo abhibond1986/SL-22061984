@@ -18,7 +18,9 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
+import 'action_photo.dart';
 import 'admin_master_data.dart';
+import 'case_workflow.dart';
 import 'branding.dart';
 import 'hazard_quality.dart';
 import 'image_storage.dart';
@@ -137,9 +139,14 @@ class PdfExport {
     final isAiScan   = incident['type']?.toString() == 'AI_SCAN';
     // MAMR block: Complied = the admin's final stage, read once up front so
     // the synchronous page builder below can use it.
-    final mamrComplied = (incident['mamrAreaId']?.toString() ?? '').isNotEmpty &&
-        await AdminMasterData.isTerminalStatus(
-            incident['status']?.toString() ?? '');
+    final caseClosed = await AdminMasterData.isTerminalStatus(
+        incident['status']?.toString() ?? '');
+    final mamrComplied =
+        (incident['mamrAreaId']?.toString() ?? '').isNotEmpty && caseClosed;
+    // The action owner's "after" photo (inline on the filing device, else from
+    // Storage). Null when there is none — the section then prints text only.
+    Uint8List? actionPhoto;
+    try { actionPhoto = await ActionPhoto.resolve(incident); } catch (_) {}
     // ── WAS THIS PHOTO ACTUALLY ANALYSED? ────────────────────────────────────
     //
     // Defence in depth for rows the app can no longer refuse to create: reports
@@ -408,6 +415,9 @@ class PdfExport {
         //     the else-branch above.
         // Do not re-add them for AI scans. If a genuinely new field is ever
         // needed, put it in _detailsGrid as a cell rather than another box.
+        // ★ 2026-10-16: what the action owner did, who verified it, and the
+        // dated history — so a closed case can be checked against its action.
+        w.addAll(_closureSection(incident, caseClosed, actionPhoto));
         w.add(_signOff(reporterName, reporterPno));
         return w;
       },
@@ -992,6 +1002,202 @@ class PdfExport {
           ]),
         ],
       ));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  CORRECTIVE ACTION & CLOSURE + CASE HISTORY (2026-10-16)
+  // ─────────────────────────────────────────────────────────────────────────
+  /// True when the case has any follow-up worth printing.
+  static bool _hasClosure(Map<String, dynamic> inc) =>
+      (inc['assignedTo']?.toString().trim() ?? '').isNotEmpty ||
+      (inc['correctiveAction']?.toString().trim() ?? '').isNotEmpty ||
+      CaseWorkflow.trail(inc).isNotEmpty;
+
+  static String _dt(String iso) {
+    final d = DateTime.tryParse(iso);
+    if (d == null) return '';
+    return DateFormat('dd-MM-yyyy HH:mm').format(d.toLocal());
+  }
+
+  /// What the action owner did and who verified it — the block a closed case
+  /// is later checked against. Printed for every case that has been assigned
+  /// or has an action, open or closed, so an interim PDF also shows progress.
+  static List<pw.Widget> _closureSection(Map<String, dynamic> inc,
+      bool closed, Uint8List? actionPhoto) {
+    if (!_hasClosure(inc)) return const [];
+    String s(String k) => inc[k]?.toString().trim() ?? '';
+    final owner = s('assignedToName').isNotEmpty ? s('assignedToName') : s('assignedTo');
+    final target = _ddmmyyyy(s('targetDate'));
+    final closedAt = DateTime.tryParse(s('closedAt'));
+    final targetD = DateTime.tryParse(s('targetDate'));
+    String timeliness = '';
+    if (targetD != null) {
+      final end = DateTime(targetD.year, targetD.month, targetD.day, 23, 59);
+      if (closed && closedAt != null) {
+        timeliness = closedAt.isAfter(end) ? 'Closed after target' : 'Closed within target';
+      } else if (!closed && DateTime.now().isAfter(end)) {
+        timeliness = 'OVERDUE';
+      }
+    }
+
+    pw.Widget cell(String lbl, String val, {PdfColor? ink, int lines = 3}) =>
+      pw.Container(
+        padding: const pw.EdgeInsets.fromLTRB(8, 4.5, 8, 4.5),
+        child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(_safe(lbl).toUpperCase(), style: pw.TextStyle(
+              fontSize: 5.8, color: _steel,
+              fontWeight: pw.FontWeight.bold, letterSpacing: 0.7)),
+            pw.SizedBox(height: 2),
+            pw.Text(val.isEmpty ? '-' : _safe(val), maxLines: lines,
+              style: pw.TextStyle(fontSize: 8.0,
+                color: ink ?? _ink, fontWeight: pw.FontWeight.bold)),
+          ]));
+
+    final grid = pw.Container(
+      decoration: pw.BoxDecoration(
+        color: _panel, borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.7)),
+      child: pw.Table(
+        border: pw.TableBorder(
+          horizontalInside: pw.BorderSide(color: _hair, width: 0.6),
+          verticalInside: pw.BorderSide(color: _hair, width: 0.6)),
+        columnWidths: const {
+          0: pw.FlexColumnWidth(1.5), 1: pw.FlexColumnWidth(1.3),
+          2: pw.FlexColumnWidth(1.3), 3: pw.FlexColumnWidth(1.2),
+        },
+        children: [
+          pw.TableRow(children: [
+            cell('Action Owner', owner),
+            cell('Assigned On', _dt(s('assignedAt'))),
+            cell('Target Date', target),
+            cell('Closure', closed
+                ? (timeliness.isEmpty ? 'Closed' : timeliness)
+                : (timeliness.isEmpty ? 'In progress' : timeliness),
+                ink: timeliness == 'OVERDUE' || timeliness == 'Closed after target'
+                    ? PdfColors.red800
+                    : (closed ? PdfColors.green800 : PdfColors.orange800)),
+          ]),
+          pw.TableRow(children: [
+            cell('Action Submitted',
+                [_dt(s('actionTakenAt')), s('actionBy')]
+                    .where((e) => e.isNotEmpty).join('\n')),
+            cell('Verified By', [s('verifiedBy'), _dt(s('verifiedAt'))]
+                .where((e) => e.isNotEmpty).join('\n')),
+            cell('Closed By', [s('closedBy'), _dt(s('closedAt'))]
+                .where((e) => e.isNotEmpty).join('\n')),
+            cell('Status', s('status')),
+          ]),
+        ]));
+
+    final action = s('correctiveAction');
+    final actionBox = pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.fromLTRB(10, 7, 10, 7),
+      decoration: pw.BoxDecoration(
+        borderRadius: _r3,
+        border: pw.Border.all(color: _hair, width: 0.8)),
+      child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text('CORRECTIVE ACTION TAKEN', style: pw.TextStyle(
+            fontSize: 5.8, color: _steel,
+            fontWeight: pw.FontWeight.bold, letterSpacing: 0.7)),
+          pw.SizedBox(height: 3),
+          pw.Text(action.isEmpty ? 'Not yet recorded.' : _safe(action),
+            style: pw.TextStyle(fontSize: 8.5, color: _textDark,
+                lineSpacing: 1.3)),
+          if (s('closingRemarks').isNotEmpty) ...[
+            pw.SizedBox(height: 6),
+            pw.Text('VERIFICATION REMARKS', style: pw.TextStyle(
+              fontSize: 5.8, color: _steel,
+              fontWeight: pw.FontWeight.bold, letterSpacing: 0.7)),
+            pw.SizedBox(height: 3),
+            pw.Text(_safe(s('closingRemarks')),
+              style: pw.TextStyle(fontSize: 8.3, color: _textDark,
+                  lineSpacing: 1.3)),
+          ],
+        ]));
+
+    pw.Widget? photo;
+    if (actionPhoto != null) {
+      try {
+        photo = pw.Container(
+          width: 150,
+          padding: const pw.EdgeInsets.all(3),
+          decoration: pw.BoxDecoration(
+            borderRadius: _r3,
+            border: pw.Border.all(color: _hair, width: 0.8)),
+          child: pw.Column(children: [
+            pw.Image(pw.MemoryImage(actionPhoto),
+                height: 110, fit: pw.BoxFit.contain),
+            pw.SizedBox(height: 2),
+            pw.Text('Photo after action'
+                '${s('actionImageAt').isEmpty ? '' : '  ${_dt(s('actionImageAt'))}'}',
+                style: pw.TextStyle(fontSize: 6, color: _steel)),
+          ]));
+      } catch (_) { photo = null; }
+    }
+
+    return [
+      _sectionTitle('CORRECTIVE ACTION  &  CLOSURE'),
+      pw.SizedBox(height: 4),
+      grid,
+      pw.SizedBox(height: 6),
+      if (photo == null) actionBox
+      else pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+        pw.Expanded(child: actionBox),
+        pw.SizedBox(width: 8),
+        photo,
+      ]),
+      pw.SizedBox(height: 10),
+      ..._historySection(inc),
+    ];
+  }
+
+  /// The dated history: who did what, when. One row per [CaseWorkflow] entry.
+  static List<pw.Widget> _historySection(Map<String, dynamic> inc) {
+    final trail = CaseWorkflow.trail(inc);
+    if (trail.isEmpty) return const [];
+    pw.Widget c(String t, {bool head = false, PdfColor? ink}) => pw.Padding(
+      padding: const pw.EdgeInsets.fromLTRB(5, 3, 5, 3),
+      child: pw.Text(_safe(t), style: pw.TextStyle(
+        fontSize: head ? 6.2 : 7.2,
+        color: head ? PdfColors.white : (ink ?? _ink),
+        fontWeight: head ? pw.FontWeight.bold : pw.FontWeight.normal)));
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: pw.BoxDecoration(color: _navyDeep),
+        children: [
+          c('DATE & TIME', head: true), c('ACTION', head: true),
+          c('BY', head: true), c('DETAILS', head: true),
+        ]),
+    ];
+    for (var i = 0; i < trail.length; i++) {
+      final e = trail[i];
+      final ev = e['event']?.toString() ?? '';
+      rows.add(pw.TableRow(
+        decoration: pw.BoxDecoration(color: i.isEven ? _rowNorm : _rowAlt),
+        children: [
+          c(_dt(e['at']?.toString() ?? '')),
+          c(CaseWorkflow.describe(e),
+              ink: ev == 'sent_back' ? PdfColors.orange800
+                  : (ev == 'closed' ? PdfColors.green800 : null)),
+          c(CaseWorkflow.who(e)),
+          c(e['note']?.toString() ?? ''),
+        ]));
+    }
+    return [
+      _sectionTitle('CASE HISTORY'),
+      pw.SizedBox(height: 4),
+      pw.Table(
+        border: pw.TableBorder.all(color: _hair, width: 0.6),
+        columnWidths: const {
+          0: pw.FixedColumnWidth(66), 1: pw.FlexColumnWidth(1.5),
+          2: pw.FlexColumnWidth(1.7), 3: pw.FlexColumnWidth(2.6),
+        },
+        children: rows),
+      pw.SizedBox(height: 10),
+    ];
   }
 
   // ─────────────────────────────────────────────────────────────────────────

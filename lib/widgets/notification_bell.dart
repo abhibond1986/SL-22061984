@@ -58,7 +58,9 @@ class _NotificationBellState extends State<NotificationBell> {
     final text = s.arrivals.length == 1
         ? (first.kind == AssignmentKind.assignedToMe
             ? 'New case assigned to you: ${first.title}'
-            : '${first.investigator} is now investigating your report: ${first.title}')
+            : (first.awaitingVerification
+                ? 'Action submitted on your report, please verify & close: ${first.title}'
+                : '${first.investigator} is now investigating your report: ${first.title}'))
         : '${s.arrivals.length} new case assignments';
     messenger.showSnackBar(SnackBar(
       behavior: SnackBarBehavior.floating,
@@ -376,7 +378,9 @@ class _NotifTile extends StatelessWidget {
                     Text(
                         mine
                             ? 'Case assigned to you'
-                            : 'Your report is being investigated',
+                            : (item.awaitingVerification
+                                ? 'Action submitted: verify & close'
+                                : 'Your report is being investigated'),
                         style: TextStyle(
                             // Lifted on dark: the 700-weight tones are too dim.
                             color: sl.isDark

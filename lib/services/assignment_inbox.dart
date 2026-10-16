@@ -26,6 +26,7 @@
 // knows the reporter's account. So "assigned to me" matches on username and
 // "my report" matches on P.no — they are not interchangeable.
 
+import 'case_workflow.dart';
 import 'mamr_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -43,7 +44,12 @@ class AssignmentItem {
   final Map<String, dynamic> incident;
   final AssignmentKind kind;
 
-  const AssignmentItem(this.incident, this.kind);
+  /// ★ 2026-10-16: my report whose corrective action has been SUBMITTED and
+  /// now waits for me — the reporter — to verify and close it.
+  final bool awaitingVerification;
+
+  const AssignmentItem(this.incident, this.kind,
+      {this.awaitingVerification = false});
 
   String get id => incident['id']?.toString() ?? '';
 
@@ -52,7 +58,8 @@ class AssignmentItem {
   /// and because a reassignment should re-notify.
   String get seenKey {
     final who = incident['assignedTo']?.toString().trim().toLowerCase() ?? '';
-    return '${kind.name}:$id:$who';
+    // ':verify' re-notifies the reporter when the action is submitted.
+    return '${kind.name}:$id:$who${awaitingVerification ? ':verify' : ''}';
   }
 
   String get title {
@@ -138,7 +145,11 @@ class AssignmentInbox {
     required Map<String, dynamic>? user,
     required List<Map<String, dynamic>> incidents,
     required Set<String> openStatuses,
+    // The admin's full ladder, to tell "being worked on" from "waiting for
+    // the reporter to verify". Optional: without it nothing is flagged.
+    List<String> ladder = const [],
   }) {
+    final actionIdx = CaseWorkflow.actionIndex(ladder);
     final me = identities(user);
     if (me.isEmpty) return const [];
     final myName = user?['name']?.toString().trim().toLowerCase() ?? '';
@@ -191,12 +202,18 @@ class AssignmentInbox {
       final mine = (repPno.isNotEmpty && myPno.isNotEmpty && repPno == myPno) ||
           (repPno.isEmpty && myName.isNotEmpty && repName == myName);
       if (mine) {
-        items.add(AssignmentItem(i, AssignmentKind.myReportAssigned));
+        final st = CaseWorkflow.indexOf(ladder, i['status']?.toString() ?? '');
+        items.add(AssignmentItem(i, AssignmentKind.myReportAssigned,
+            awaitingVerification: actionIdx > 0 && st >= actionIdx));
       }
     }
 
     const sevRank = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'MODERATE': 2, 'LOW': 3};
     items.sort((a, b) {
+      // A verification waiting on me is a job too: it goes first.
+      if (a.awaitingVerification != b.awaitingVerification) {
+        return a.awaitingVerification ? -1 : 1;
+      }
       // My own jobs always above news about someone else's progress.
       if (a.kind != b.kind) {
         return a.kind == AssignmentKind.assignedToMe ? -1 : 1;

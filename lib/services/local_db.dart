@@ -908,11 +908,16 @@ class LocalDB {
     'status', 'correctiveAction', 'rootCause', 'closedBy', 'closingRemarks',
     'closedAt', 'investigationStartedAt', 'actionTakenAt', 'assignedTo',
     'assignedToName', 'assignedAt', 'targetDate',
+    // Closing loop, 2026-10-16 (see case_workflow.dart).
+    'actionBy', 'actionImageUrl', 'actionImageAt', 'verifiedAt', 'verifiedBy',
+    'sentBackReason', 'actionLog',
   };
 
   /// Fields that exist only on this device and have no server column.
   static const Set<String> _deviceOnlyKeys = {
     'imageRef', 'imageBase64', 'thumbnailBase64', 'shareImageBase64',
+    // The corrective-action photo before it reaches Storage (actionImageUrl).
+    'actionImageBase64',
   };
 
   static Future<void> deleteIncident(String id) async {
