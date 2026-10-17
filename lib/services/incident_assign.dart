@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 
 import '../widgets/user_picker.dart';
 import 'admin_audit.dart';
+import 'admin_master_data.dart';
 import 'assignment_notifications.dart';
 import 'assign_scope.dart';
 import 'case_workflow.dart';
@@ -63,6 +64,14 @@ class IncidentAssign {
     bool allowClear = true,
     VoidCallback? beforeSave,
   }) async {
+    // ★ 2026-10-17: a closed case has no corrective action left to own. The
+    // UI hides the button, but this is the single write path, so refuse here
+    // too — a stale Log row or any future caller must not reopen ownership.
+    if (await AdminMasterData.isTerminalStatus(
+        inc['status']?.toString() ?? '')) {
+      return const AssignResult(AssignOutcome.denied,
+          'This case is closed — it can no longer be assigned or transferred.');
+    }
     final scopeUser = await PlantScope.forUser();
     // MAMR: the reporter (and the area's responsible person / SED) may hand
     // the job to someone else even when the plant rule would say no — e.g.

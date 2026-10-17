@@ -1203,29 +1203,45 @@ class _IncidentLogTabState extends State<IncidentLogTab>
     ]);
   }
 
+  /// True when [inc] sits on the LAST rung of the admin's status ladder,
+  /// whatever it is named — same rule as IncidentDetailScreen._isClosed.
+  bool _isFinalStage(Map<String, dynamic> inc) {
+    if (_statuses.isEmpty) return false;
+    final s = inc['status']?.toString().trim().toUpperCase() ?? '';
+    return s.isNotEmpty && s == _statuses.last.trim().toUpperCase();
+  }
+
   /// Assign · PDF · Delete, fixed widths. [reserveDeleteSlot] keeps the
   /// column the same width on rows the user may not delete (table layout).
   Widget _actionButtons(Map<String, dynamic> inc,
       {required bool reserveDeleteSlot}) {
     final assigned = IncidentAssign.hasAssignee(inc);
     final canDelete = _canDelete(inc);
+    // A closed case has no corrective action left to hand over — the detail
+    // screen already hides Assign/Transfer at the final stage; the Log row
+    // must agree. In the table layout the slot is kept so columns stay aligned.
+    final closed = _isFinalStage(inc);
     return Row(
       mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
-        _cardAction(
-          icon: assigned
-              ? Icons.swap_horiz_rounded
-              : Icons.person_add_alt_1_rounded,
-          label: assigned ? 'Transfer' : 'Assign',
-          tooltip: assigned
-              ? 'Hand the corrective action to someone else'
-              : 'Assign who will implement the corrective action',
-          color: AppColors.accent,
-          width: _kBtnAssign,
-          onTap: () => _assign(inc),
-        ),
-        const SizedBox(width: _kBtnGap),
+        if (closed && reserveDeleteSlot)
+          const SizedBox(width: _kBtnAssign),
+        if (!closed)
+          _cardAction(
+            icon: assigned
+                ? Icons.swap_horiz_rounded
+                : Icons.person_add_alt_1_rounded,
+            label: assigned ? 'Transfer' : 'Assign',
+            tooltip: assigned
+                ? 'Hand the corrective action to someone else'
+                : 'Assign who will implement the corrective action',
+            color: AppColors.accent,
+            width: _kBtnAssign,
+            onTap: () => _assign(inc),
+          ),
+        if (!closed || reserveDeleteSlot)
+          const SizedBox(width: _kBtnGap),
         _cardAction(
           icon: Icons.picture_as_pdf_rounded,
           label: 'PDF',
