@@ -158,6 +158,10 @@ class HazardQuality {
         }
       }
 
+      // ★ 2026-10-21: every box on one scale (0–1) and readable BEFORE dedupe
+      // compares them or attribution moves them. See [_bbox].
+      var malformedBoxes = sanitizeBoxes(hazards);
+
       final deduped = dedupe(hazards);
       final mergedCount = hazards.length - deduped.length;
 
@@ -195,6 +199,8 @@ class HazardQuality {
       // Before box precision and the counting loop: it can move a box, withdraw
       // one, or downgrade a contradicted row, and both of those read the result.
       final reattributed = auditPersonAttribution(result, deduped);
+      // And again after attribution, which is the pass that can move a box.
+      malformedBoxes += sanitizeBoxes(deduped);
 
       var downgraded = 0;
       var flagged = 0;
@@ -227,7 +233,7 @@ class HazardQuality {
         merged: mergedCount,
         absenceDowngraded: downgraded,
         absenceFlagged: flagged,
-        boxesWithdrawn: boxesWithdrawn,
+        boxesWithdrawn: boxesWithdrawn + malformedBoxes,
         viewCapped: viewCapped,
         sceneWithdrawn: sceneWithdrawn,
         normalWithdrawn: normalWithdrawn,
@@ -781,7 +787,10 @@ class HazardQuality {
     if (inspectable is bool) return !inspectable;
 
     if (hazards.isEmpty) return false;
-    final withdrew = hazards.any((h) => h['locationUnpinned'] == true);
+    // A box withdrawn because the reply was MALFORMED says nothing about how
+    // far away the camera was, so it does not count here.
+    final withdrew = hazards.any(
+        (h) => h['locationUnpinned'] == true && h['bboxMalformed'] != true);
     if (!withdrew) return false;
     final pinned = hazards.any((h) {
       final b = _bbox(h['bbox']);
@@ -1546,6 +1555,17 @@ class HazardQuality {
 
   /// Normalised bbox as (x, y, w, h), accepting both the short and long key
   /// forms the prompt permits. Null when there is nothing usable.
+  ///
+  /// ★ 2026-10-21 — STRICT. Report 17925586 (MS Bay, worker without goggles)
+  /// printed its box as a speck in the TOP-LEFT corner while the worker stood
+  /// bottom-right. The model's own hazard box was right ({x .77, y .77}), but
+  /// its `persons[0].headBox` came back with ONE value on the wrong scale
+  /// ({x 0.77, y 77, …}). The old rule "any value > 1 ⇒ divide all four by
+  /// 1000" turned that into {x 0.00077, y 0.077, w 0.00004, h 0.00006}, and
+  /// [auditPersonAttribution] then "snapped" the correct box onto it. So:
+  ///   * mixed scales (position on 0–1, another value on 0–1000) are rejected,
+  ///   * a box must lie inside the frame after scaling, and
+  ///   * a box thinner than [_minBoxSide] is not a location, it is a typo.
   static ({double x, double y, double w, double h})? _bbox(dynamic bbox) {
     if (bbox is! Map) return null;
     final x = _asDouble(bbox['x']);
@@ -1553,10 +1573,126 @@ class HazardQuality {
     final w = _asDouble(bbox['w'] ?? bbox['width']);
     final h = _asDouble(bbox['h'] ?? bbox['height']);
     if (x == null || y == null || w == null || h == null) return null;
-    if (w <= 0 || h <= 0) return null;
-    // Gemini's 0–1000 convention leaks through here as it does everywhere else.
-    final scale = [x, y, w, h].reduce((a, b) => a > b ? a : b) > 1.0 ? 1000.0 : 1.0;
-    return (x: x / scale, y: y / scale, w: w / scale, h: h / scale);
+    if (w <= 0 || h <= 0 || x < 0 || y < 0) return null;
+    // Gemini's 0–1000 convention leaks through here as it does everywhere
+    // else — but only accepted when the POSITION is on that scale too.
+    var scale = 1.0;
+    if (x > 1.0 || y > 1.0 || w > 1.0 || h > 1.0) {
+      bool onBigScale(double v) => v == 0 || v > 1.0;
+      if (!onBigScale(x) || !onBigScale(y)) return null;
+      scale = 1000.0;
+    }
+    final nx = x / scale, ny = y / scale, nw = w / scale, nh = h / scale;
+    if (nw < _minBoxSide || nh < _minBoxSide) return null;
+    if (nx + nw > 1.0 + _boxSlack || ny + nh > 1.0 + _boxSlack) return null;
+    return (
+      x: nx,
+      y: ny,
+      w: math.min(nw, 1.0 - nx),
+      h: math.min(nh, 1.0 - ny),
+    );
+  }
+
+  /// Smallest side (fraction of the frame) a box may have — 0.5%, about 3 px
+  /// on a 675 px photo. Anything thinner is a malformed reply, not a location.
+  static const double _minBoxSide = 0.005;
+
+  /// How far past the frame edge a box may run before it is called malformed.
+  static const double _boxSlack = 0.02;
+
+  /// A [List] box: `[x, y, w, h]` on 0–1, or Gemini's native
+  /// `[yMin, xMin, yMax, xMax]` on 0–1000 — the same reading the on-screen
+  /// overlay has always used.
+  static ({double x, double y, double w, double h})? _listBox(List l) {
+    if (l.length < 4) return null;
+    final v = [for (final e in l.take(4)) _asDouble(e)];
+    if (v.any((e) => e == null)) return null;
+    final n = v.cast<double>();
+    if (n.every((e) => e <= 1.1)) {
+      return _bbox({'x': n[0], 'y': n[1], 'w': n[2], 'h': n[3]});
+    }
+    return _bbox({
+      'x': n[1] / 1000, 'y': n[0] / 1000,
+      'w': (n[3] - n[1]) / 1000, 'h': (n[2] - n[0]) / 1000,
+    });
+  }
+
+  /// ★ 2026-10-21. The box a renderer should DRAW for [hazard], normalised to
+  /// `{x, y, w, h}` on 0–1, or null when there is nothing trustworthy to draw.
+  ///
+  /// Used by the PDF and the on-screen overlay so a report saved BEFORE the
+  /// strict parser (like 17925586) is drawn correctly when re-opened: if the
+  /// stored `bbox` is malformed and the attribution pass had kept the model's
+  /// own box in `bboxBeforeAttribution`, that one is drawn instead. A hazard
+  /// with no `bbox` key at all (never located, or deliberately withdrawn) gets
+  /// nothing — the fallback is only for a box that exists but is broken.
+  static Map<String, double>? drawableBox(Map hazard) {
+    if (!hazard.containsKey('bbox') || hazard['bbox'] == null) return null;
+    ({double x, double y, double w, double h})? parse(dynamic b) =>
+        b is Map ? _bbox(b) : (b is List ? _listBox(b) : null);
+    final b = parse(hazard['bbox']) ?? parse(hazard['bboxBeforeAttribution']);
+    if (b == null) return null;
+    return {'x': b.x, 'y': b.y, 'w': b.w, 'h': b.h};
+  }
+
+  /// For renderers: a copy of [hazards] whose `bbox` is either a clean 0–1
+  /// map from [drawableBox] or absent. Does not touch the stored record.
+  static List<Map<String, dynamic>> withDrawableBoxes(
+      List<Map<String, dynamic>> hazards) {
+    return [
+      for (final h in hazards)
+        () {
+          final c = Map<String, dynamic>.from(h);
+          if (c.containsKey('bbox')) {
+            final b = drawableBox(c);
+            if (b == null) {
+              c.remove('bbox');
+            } else {
+              c['bbox'] = b;
+            }
+          }
+          return c;
+        }(),
+    ];
+  }
+
+  /// ★ 2026-10-21. Normalises every hazard box in place — before the audits
+  /// read them and again after they have moved any. A box that cannot be read
+  /// is withdrawn the same way [auditBoxPrecision] withdraws one (kept in
+  /// `bboxRejected`, hazard and severity untouched), so a typo in the reply
+  /// can never again print a confident rectangle somewhere random.
+  /// Returns how many boxes were withdrawn.
+  static int sanitizeBoxes(List<Map<String, dynamic>> hazards) {
+    var withdrawn = 0;
+    for (final h in hazards) {
+      if (!h.containsKey('bbox')) continue;
+      final raw = h['bbox'];
+      if (raw == null) {
+        h.remove('bbox');
+        continue;
+      }
+      final b = drawableBox(h);
+      if (b != null) {
+        final fromBefore = raw is Map ? _bbox(raw) == null : (raw is List ? _listBox(raw) == null : true);
+        if (fromBefore) {
+          // The attribution box was the broken one: the model's own box wins.
+          h['bboxAttributionDiscarded'] = raw;
+          h.remove('attributionNote');
+        }
+        h['bbox'] = b;
+        continue;
+      }
+      h['bboxRejected'] = raw;
+      h.remove('bbox');
+      h['locationUnpinned'] = true;
+      // Not evidence of a general view (see [viewIsUninspectable]).
+      h['bboxMalformed'] = true;
+      h['locationIssue'] =
+          'The scan returned a location for this hazard that could not be '
+          'read, so no box was drawn — identify the exact spot on site.';
+      withdrawn++;
+    }
+    return withdrawn;
   }
 
   static double _iou(({double x, double y, double w, double h}) a,

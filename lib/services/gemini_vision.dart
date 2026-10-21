@@ -4161,7 +4161,21 @@ FIELD RULES:
 • per-hazard "confidence" is REQUIRED. The top-level "confidence" is your
   certainty about the ASSESSMENT AS A WHOLE (image quality, coverage), which is
   not the same as your certainty about any single hazard.
-• "bbox" is approximate location of hazard in image (normalized 0-1).
+• "bbox" is REQUIRED on every hazard and must sit EXACTLY on the thing named in
+  its "visualEvidence" — it is printed on the photograph as the proof.
+    - x, y = TOP-LEFT corner; w, h = width and height. ALL FOUR are fractions
+      of the FULL image (0 = left/top edge, 1 = right/bottom edge), all on the
+      same 0-1 scale. Never pixels, never percent, never 0-1000. The same rule
+      applies to every "headBox".
+    - Make it TIGHT round that object: the crumbling column base, the worker's
+      head, the open edge — not the region around it.
+    - A condition spread across the scene (dust, spillage, clutter): box the
+      single worst, most clearly visible patch, not the whole floor.
+    - Before writing it, check: is the CENTRE of the box on the object? A
+      worker in the lower right of the frame has x and y well above 0.5.
+  A recent report put the goggles box for a worker standing bottom-right into
+  the top-left corner because one headBox number was written as 77 instead of
+  0.77, and two other hazards had no box at all.
 • "absenceCheck" is REQUIRED whenever the hazard says a protection is missing,
   absent, inadequate, unguarded or unprotected. Without it the finding is
   auto-reduced to LOW and marked unconfirmed.

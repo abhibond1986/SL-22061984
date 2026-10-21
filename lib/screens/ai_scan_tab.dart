@@ -4001,18 +4001,9 @@ class _AIScanTabState extends State<AIScanTab> {
         ? sl.text4
         : sl.textOn(_sevColor(_matrixBand));
     final riskInk    = sl.textOn(riskColor);
-    final hasBbox     = hazards.any((h) {
-      final bbox = (h as Map)['bbox'];
-      if (bbox == null) return false;
-      if (bbox is Map && bbox.isEmpty) return false;
-      if (bbox is Map) {
-        final w = num.tryParse(bbox['w']?.toString() ?? bbox['width']?.toString() ?? '0') ?? 0;
-        final h = num.tryParse(bbox['h']?.toString() ?? bbox['height']?.toString() ?? '0') ?? 0;
-        return (w > 0 && h > 0);
-      }
-      if (bbox is List && bbox.length >= 4) return true;
-      return false;
-    });
+    // Same test the overlay uses to decide what to draw (2026-10-21).
+    final hasBbox     = hazards.any(
+        (h) => h is Map && HazardQuality.drawableBox(h) != null);
     // The shared card surface — see the note in `_emptyView`.
     final cardBg      = sl.surface;
 

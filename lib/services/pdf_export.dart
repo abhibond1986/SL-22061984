@@ -124,7 +124,12 @@ class PdfExport {
       } catch (_) {}
     }
 
-    List<Map<String, dynamic>> hazards = _parseHazards(incident['hazards']);
+    // ★ 2026-10-21: boxes normalised to 0–1 and malformed ones dropped (or
+    // replaced by the model's own box) — see HazardQuality.drawableBox. Fixes
+    // already-saved reports too, e.g. 17925586 whose goggles box printed in
+    // the top-left corner instead of on the worker.
+    List<Map<String, dynamic>> hazards =
+        HazardQuality.withDrawableBoxes(_parseHazards(incident['hazards']));
     String summary = _cleanSummary(incident);
 
     // ?? 'MEDIUM' until 2026-09-21. A row with no stored severity printed a

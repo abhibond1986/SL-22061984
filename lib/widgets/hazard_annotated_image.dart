@@ -19,6 +19,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/material.dart';
 
+import '../services/hazard_quality.dart';
 import '../services/line_of_fire.dart';
 
 class HazardAnnotatedImage extends StatefulWidget {
@@ -245,43 +246,19 @@ class _BboxOverlay extends StatelessWidget {
             ...hazards.asMap().entries.map((entry) {
             final i = entry.key;
             final hazard = Map<String, dynamic>.from(entry.value as Map);
-            final bbox = hazard['bbox'];
-            if (bbox == null) return const SizedBox.shrink();
-
-            // ✅ v17: Handle bbox as Map {x, y, w, h} OR List [x1, y1, x2, y2]
-            final List<num> box;
-            if (bbox is Map) {
-              // Gemini prompt asks for {x, y, w, h} format
-              final x = num.tryParse(bbox['x']?.toString() ?? '') ?? 0;
-              final y = num.tryParse(bbox['y']?.toString() ?? '') ?? 0;
-              final bw = num.tryParse(bbox['w']?.toString() ?? bbox['width']?.toString() ?? '') ?? 0;
-              final bh = num.tryParse(bbox['h']?.toString() ?? bbox['height']?.toString() ?? '') ?? 0;
-              box = [x, y, bw, bh];
-            } else if (bbox is List) {
-              box = bbox.map((e) => (e is num) ? e : num.tryParse(e.toString()) ?? 0).toList();
-            } else {
-              return const SizedBox.shrink();
-            }
-
-            if (box.length < 4) return const SizedBox.shrink();
-
-            // Determine format: Gemini returns [yMin, xMin, yMax, xMax] in 0-1000 range
-            // OR some APIs return [x, y, width, height] in 0-1 range
-            double left, top, right, bottom;
-
-            if (bbox is Map || box.every((v) => v <= 1.1)) {
-              // Normalized 0-1 format: [x, y, w, h] (from Map or List)
-              left   = box[0].toDouble() * w;
-              top    = box[1].toDouble() * h;
-              right  = (box[0].toDouble() + box[2].toDouble()) * w;
-              bottom = (box[1].toDouble() + box[3].toDouble()) * h;
-            } else {
-              // Gemini 0-1000 format: [yMin, xMin, yMax, xMax]
-              top    = (box[0].toDouble() / 1000) * h;
-              left   = (box[1].toDouble() / 1000) * w;
-              bottom = (box[2].toDouble() / 1000) * h;
-              right  = (box[3].toDouble() / 1000) * w;
-            }
+            // ★ 2026-10-21: one parser for screen and PDF. It normalises a
+            // Map {x,y,w,h} or a List (0–1 or Gemini 0–1000), rejects a box on
+            // mixed scales or outside the frame, and falls back to the model's
+            // own box if the person-attribution pass stored a broken one —
+            // which is what put report 17925586's goggles box in the top-left
+            // corner. A Map on 0–1000 used to be drawn unscaled (clamped into
+            // the bottom-right corner); that is fixed by the same call.
+            final nb = HazardQuality.drawableBox(hazard);
+            if (nb == null) return const SizedBox.shrink();
+            double left   = nb['x']! * w;
+            double top    = nb['y']! * h;
+            double right  = (nb['x']! + nb['w']!) * w;
+            double bottom = (nb['y']! + nb['h']!) * h;
 
             // Clamp to valid range
             left   = left.clamp(0, w);
