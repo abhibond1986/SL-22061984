@@ -881,6 +881,73 @@ void main() {
   ok(mixed['overallRisk'] == 'HIGH',
       'a surviving confirmed hazard keeps the banner where it is');
 
+  // ── Stabled wagon without scotch blocks (report 17925848, 2026-10-21) ──
+  // The scan filed only "Track ballast and debris" under a yellow wagon whose
+  // two near-side wheels sat on bare rail. The finding the safety officer
+  // expected must survive every audit when it is properly checked, must not be
+  // folded into the ballast row, and when unchecked must be downgraded — not
+  // deleted.
+  Map<String, dynamic> scotchRow({String? check, String? evidence}) => hz(
+      name: 'Stabled wagon without scotch blocks',
+      description: 'Visible: the stationary wagon stands on the rails with no '
+          'scotch block or wheel chock at either visible wheel, so it is not '
+          'secured against rolling.',
+      evidence: evidence,
+      absenceCheck: check,
+      severity: 'HIGH',
+      corrective: 'Place scotch blocks both sides of the wheels on both rails, '
+          'apply hand brake, display stop board.',
+      bbox: box(0.32, 0.50, 0.18, 0.16));
+  const goodWheelCheck = 'Both near-side wheels in frame where tread meets '
+      'rail head: bare rail and ballast ahead of and behind each wheel, no '
+      'wedge or block.';
+
+  ok(HazardQuality.claimsAbsence('Stabled wagon without scotch blocks', ''),
+      'a missing scotch block is recognised as an absence claim');
+  ok(HazardQuality.claimsAbsence('No wheel chock under the coil', ''),
+      'a missing wheel chock is recognised as an absence claim');
+
+  final wagon = <String, dynamic>{
+    'overallRisk': 'HIGH',
+    'riskScore': 16,
+    'hazards': [
+      hz(
+          name: 'Track ballast and debris',
+          description: 'Visible: loose stones, ballast and scattered debris '
+              'over and around the rail tracks beneath the yellow wagon.',
+          severity: 'MEDIUM'),
+      scotchRow(
+          check: goodWheelCheck,
+          evidence: 'Both near-side wheels are in frame on the rail head.'),
+    ],
+  };
+  final wagonReport = HazardQuality.apply(wagon);
+  final wagonRows = (wagon['hazards'] as List).cast<Map<String, dynamic>>();
+  ok(wagonRows.length == 2,
+      'scotch-block row and ballast row stay two findings, not merged');
+  final scotch = wagonRows.firstWhere(
+      (h) => h['name'].toString().contains('scotch'),
+      orElse: () => <String, dynamic>{});
+  ok(scotch.isNotEmpty, 'the scotch-block finding survives the audits');
+  ok(scotch['severity'] == 'HIGH' && scotch['absenceUnconfirmed'] != true,
+      'a checked scotch-block absence keeps HIGH');
+  ok(wagonReport.normalWithdrawn == 0 && wagonReport.unverifiableMoved == 0,
+      'a stabled-wagon finding is neither normal-by-design nor verify-on-site');
+  ok(HazardQuality.familyOf(scotch) == 'vehicle',
+      'the scotch-block row is a vehicle finding');
+
+  final unchecked = <String, dynamic>{
+    'overallRisk': 'HIGH',
+    'riskScore': 16,
+    'hazards': [scotchRow()],
+  };
+  HazardQuality.apply(unchecked);
+  final uRows = unchecked['hazards'] as List;
+  ok(uRows.length == 1, 'an unchecked scotch-block claim is kept, not deleted');
+  ok((uRows.first as Map)['severity'] == 'LOW' &&
+          (uRows.first as Map)['absenceUnconfirmed'] == true,
+      'an unchecked scotch-block claim is downgraded to LOW and flagged');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

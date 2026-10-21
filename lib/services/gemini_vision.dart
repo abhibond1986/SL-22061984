@@ -3797,13 +3797,16 @@ BOTH sides. That report went to a safety officer with a regulation citation on i
 
 Before you may say any protection is missing — guardrail, handrail, railing,
 barrier, toe board, machine guard, cover, fence, mesh, net, harness, lanyard,
-helmet, goggles, gloves, safety shoes, signage, earthing, interlock — you MUST:
+helmet, goggles, gloves, safety shoes, signage, earthing, interlock, scotch
+block, wheel chock — you MUST:
 1. LOOK ALONG the whole edge / around the whole machine / at the whole person.
 2. State in "absenceCheck" WHERE you looked and WHAT YOU FOUND THERE instead.
    Good:  "Traced the right edge from the near post to the far wall: bare
            concrete lip, no posts, no post sockets, no rail stubs."
    Good:  "Head fully visible in profile, hair and ears uncovered, no shell,
            brim or chin strap."
+   Good:  "Both near-side wheels in frame where tread meets rail head: bare
+           rail and ballast ahead of and behind each wheel, no wedge or block."
    Bad:   "No guardrail visible."          (that is the claim, not the check)
    Bad:   "Railing is not clearly visible." (that means you could not see —
                                              which is the OPPOSITE of proof)
@@ -3889,6 +3892,23 @@ photograph, because the evidence is right there in the pixels:
   material, an access route no vehicle could pass.
 • UNCHOCKED CYLINDRICAL LOADS — coils, shells, pipes or drums standing or lying
   in a yard without chocks or cradles.
+• STABLED ROLLING STOCK WITHOUT SCOTCH BLOCKS — a wagon, locomotive, transfer
+  car, ladle car, bogie or trolley standing on rails with no scotch block /
+  wheel chock / skid at its wheels. A stationary rail vehicle must be secured
+  against rolling (SAIL SG/25: scotch block under the wheels when stationary);
+  a runaway crushes whoever is crossing, coupling or working beside the track,
+  and is invisible until it moves. When you inventory a rail vehicle, ALSO
+  inventory what is at each wheel you can see where the tread meets the rail.
+  If that contact point is in frame and the rail ahead of and behind the wheel
+  is bare, this is a PROVABLE absence — report it, normally HIGH, cite
+  FA 1948 S7A(2)(d), and state the check in "absenceCheck". It outranks track
+  housekeeping in the same frame and should be the headline finding. Corrective
+  action: scotch blocks on both sides of the wheels on both rails, hand brake
+  applied, stop board / red flag displayed. The bare rail at the wheel IS the
+  finding — do not add remarks about the hand brake or the far-side wheels,
+  which the frame cannot show; put "apply hand brake" in the corrective action
+  instead. If the wheels are cut off by the frame or hidden, say nothing about
+  scotch blocks.
 • AN UNIDENTIFIED RELEASE AT GROUND LEVEL — steam, smoke, gas or dust escaping
   from plant or ground. In an integrated steel works this may be carbon monoxide,
   which is colourless, odourless and the leading cause of fatal gas exposure, so

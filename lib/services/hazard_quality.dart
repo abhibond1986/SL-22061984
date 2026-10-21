@@ -1451,7 +1451,12 @@ class HazardQuality {
     r'harness(?:es)?|lanyards?|fall (?:protection|arrest)|edge protection|'
     r'helmets?|hard ?hats?|goggles?|face ?shields?|gloves?|safety shoes?|'
     r'ppe|personal protective equipment|signage|warning signs?|'
-    r'earthing|interlocks?|extinguishers?)\b',
+    r'earthing|interlocks?|extinguishers?|'
+    // Securing a stationary rail vehicle or a cylindrical load. Added
+    // 2026-10-21 (report 17925848, stabled wagon with bare rails at both
+    // visible wheels). These are visible items like the rest, so the claim is
+    // held to the same "say where you looked" standard as a missing guardrail.
+    r'scotch ?blocks?|wheel ?chocks?|chocks?|skids?|wedges?|sprags?)\b',
     caseSensitive: false,
   );
 
