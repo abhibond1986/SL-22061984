@@ -33,6 +33,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'admin_master_data.dart';
 import 'assignment_inbox.dart';
 import 'local_db.dart';
+import 'mamr_core.dart';
 import 'realtime_sync.dart';
 
 @immutable
@@ -152,7 +153,16 @@ class AssignmentNotifications {
       if (gen != _gen) return;
 
       final keys = items.map((i) => i.seenKey).toSet();
-      final unread = keys.difference(read);
+      // ★ 2026-10-21: an MAMR observation I filed for MY OWN area lands in my
+      // inbox as a job (correctly), but it is not news to me — no badge, no
+      // toast. One filed for ANOTHER area notifies that area's owner, not me.
+      final selfFiled = {
+        for (final i in items)
+          if (i.kind == AssignmentKind.assignedToMe &&
+              MamrObs.isReporter(user, i.incident))
+            i.seenKey,
+      };
+      final unread = keys.difference(read).difference(selfFiled);
 
       // New arrivals = unread keys we did not have last time, same account.
       final prev = state.value;

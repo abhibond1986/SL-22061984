@@ -78,6 +78,20 @@ class AssignmentItem {
 
   String get plant => incident['plant']?.toString().trim() ?? '';
 
+  /// ★ 2026-10-21: an MAMR observation — somebody (often from another
+  /// department) reported a hazard in an area this person is responsible for.
+  /// The bell words these differently from an ordinary case assignment.
+  bool get isMamr => MamrObs.isMamr(incident);
+
+  /// The MAMR area name ("Pit Side, LF #1, VAD, MS Bay"), or ''.
+  String get mamrArea => incident['mamrArea']?.toString().trim() ?? '';
+
+  /// The headline hazard of an MAMR row, or ''.
+  String get mamrFinding => isMamr ? MamrObs.finding(incident) : '';
+
+  /// Who filed it.
+  String get reporter => incident['reportedBy']?.toString().trim() ?? '';
+
   /// Who is on it — the denormalised name if we have it, else the username.
   String get investigator {
     final n = incident['assignedToName']?.toString().trim() ?? '';

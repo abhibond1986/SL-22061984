@@ -16,6 +16,16 @@ import '../screens/incident_detail_screen.dart';
 import '../services/assignment_inbox.dart';
 import '../services/assignment_notifications.dart';
 
+/// ★ 2026-10-21: toast for an MAMR observation filed in an area I am
+/// responsible for — names the area and who reported it, which is what the
+/// area owner needs to act on.
+String _mamrToast(AssignmentItem i) {
+  final area = i.mamrArea.isNotEmpty ? i.mamrArea : i.title;
+  final by = i.reporter.isNotEmpty ? ' by ${i.reporter}' : '';
+  final what = i.mamrFinding.isNotEmpty ? ': ${i.mamrFinding}' : '';
+  return 'New MAMR observation in your area $area, reported$by$what';
+}
+
 class NotificationBell extends StatefulWidget {
   const NotificationBell({super.key, this.onHeader = false});
 
@@ -57,7 +67,9 @@ class _NotificationBellState extends State<NotificationBell> {
     final first = s.arrivals.first;
     final text = s.arrivals.length == 1
         ? (first.kind == AssignmentKind.assignedToMe
-            ? 'New case assigned to you: ${first.title}'
+            ? (first.isMamr
+                ? _mamrToast(first)
+                : 'New case assigned to you: ${first.title}')
             : (first.awaitingVerification
                 ? 'Action submitted on your report, please verify & close: ${first.title}'
                 : '${first.investigator} is now investigating your report: ${first.title}'))
@@ -377,7 +389,9 @@ class _NotifTile extends StatelessWidget {
                   children: [
                     Text(
                         mine
-                            ? 'Case assigned to you'
+                            ? (item.isMamr
+                                ? 'New observation in your area'
+                                : 'Case assigned to you')
                             : (item.awaitingVerification
                                 ? 'Action submitted: verify & close'
                                 : 'Your report is being investigated'),
@@ -399,6 +413,18 @@ class _NotifTile extends StatelessWidget {
                             height: 1.25,
                             fontWeight:
                                 unread ? FontWeight.w700 : FontWeight.w500)),
+                    if (mine && item.isMamr && item.mamrFinding.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(item.mamrFinding,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: sl.text2, fontSize: 12.5)),
+                    ],
+                    if (mine && item.isMamr && item.reporter.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text('Reported by ${item.reporter}',
+                          style: TextStyle(color: sl.text2, fontSize: 12)),
+                    ],
                     if (!mine && item.investigator.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text('Investigator: ${item.investigator}',

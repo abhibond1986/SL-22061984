@@ -9,7 +9,8 @@
 // request — the AI hazard list already says what kind of finding it is.
 //
 // Collapsed to one line once an area is chosen (the reporter's own area is
-// preselected); "Change area" opens the pickers. The MAMR tab still owns the
+// preselected); "Report for another area" (was "Change area" until
+// 2026-10-21) opens the pickers. The MAMR tab still owns the
 // selection itself, so it survives the switch between capture and results —
 // this widget only remembers whether it is open.
 
@@ -121,52 +122,76 @@ class _MamrAreaPickerState extends State<MamrAreaPicker> {
           : isMine
               ? 'You are responsible for this area'
               : 'Goes to ${area.persons.map((p) => p.name).join(' & ')}';
+      final info = Row(children: [
+        Container(
+          width: 36, height: 36,
+          decoration: BoxDecoration(
+              color: kMamrTeal, borderRadius: BorderRadius.circular(10)),
+          child: const Icon(Icons.place_rounded, color: Colors.white, size: 20),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(area.area,
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: sl.text1, fontSize: 14.5,
+                    fontWeight: FontWeight.w800)),
+            Text('${area.dept}  ·  $to',
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: sl.text3, fontSize: 12)),
+          ]),
+        ),
+        if (locked)
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Icon(Icons.lock_outline_rounded, size: 18, color: sl.text4),
+          ),
+      ]);
+      // 2026-10-21: was "Change area". Reworded so it is clear the reporter
+      // can file a hazard seen in SOMEONE ELSE's area — that area's
+      // responsible person is then notified (bell + My Assignments).
+      final button = FilledButton.icon(
+        onPressed: () => setState(() => _expandedOverride = true),
+        style: FilledButton.styleFrom(
+          backgroundColor: kMamrTeal,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10)),
+        ),
+        icon: const Icon(Icons.edit_location_alt_rounded, size: 18),
+        label: const Text('Report for another area',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+      );
       return _shell(
         sl,
         InkWell(
           onTap: locked ? null : () => setState(() => _expandedOverride = true),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
-            child: Row(children: [
-              Container(
-                width: 36, height: 36,
-                decoration: BoxDecoration(
-                    color: kMamrTeal, borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.place_rounded, color: Colors.white, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(area.area,
-                      maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: sl.text1, fontSize: 14.5,
-                          fontWeight: FontWeight.w800)),
-                  Text('${area.dept}  ·  $to',
-                      maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: sl.text3, fontSize: 12)),
-                ]),
-              ),
-              if (locked)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Icon(Icons.lock_outline_rounded, size: 18, color: sl.text4),
-                )
-              else
-                FilledButton.icon(
-                  onPressed: () => setState(() => _expandedOverride = true),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: kMamrTeal,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                  ),
-                  icon: const Icon(Icons.edit_location_alt_rounded, size: 18),
-                  label: const Text('Change area',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                ),
-                const SizedBox(width: 6),
-            ]),
+            // The longer label no longer fits beside the area name on a
+            // phone, so below ~440 px the button drops to its own line.
+            child: LayoutBuilder(builder: (context, c) {
+              if (locked) return info;
+              if (c.maxWidth >= 440) {
+                return Row(children: [
+                  Expanded(child: info),
+                  const SizedBox(width: 8),
+                  button,
+                  const SizedBox(width: 6),
+                ]);
+              }
+              return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    info,
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: button,
+                    ),
+                  ]);
+            }),
           ),
         ),
       );
