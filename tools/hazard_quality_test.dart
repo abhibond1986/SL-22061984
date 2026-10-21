@@ -948,6 +948,122 @@ void main() {
           (uRows.first as Map)['absenceUnconfirmed'] == true,
       'an unchecked scotch-block claim is downgraded to LOW and flagged');
 
+  // ── wheelCheck: the model answered, then forgot to file (report 17925862) ──
+  Map<String, dynamic> ballast() => hz(
+      name: 'Loose ballast and debris on track',
+      description: 'Visible: Loose gravel, stones, and debris are scattered '
+          'across the railway tracks and around the wagon wheels.',
+      severity: 'MEDIUM');
+  Map<String, dynamic> wheels(String verdict,
+          {bool visible = true, String? evidence}) =>
+      {
+        'vehicle': 'yellow wagon no. 10, centre',
+        'wheelsVisible': visible,
+        'scotchBlock': verdict,
+        'evidence': evidence ??
+            'Both near-side wheels at the rail head: bare rail and ballast '
+                'ahead of and behind each, no block.',
+        'bbox': box(0.34, 0.50, 0.20, 0.16),
+      };
+  Map<String, dynamic> scan(List<Map<String, dynamic>> rows,
+          Map<String, dynamic>? wc, {String? viewType}) =>
+      {
+        'overallRisk': 'MEDIUM',
+        'riskScore': 45,
+        'confidence': 75,
+        'sceneInventory': 'Yellow flatbed rail wagon on tracks, steel truss '
+            'roof, loose gravel and debris on the ground.',
+        'summary': 'A yellow flatbed rail wagon sits on tracks.',
+        if (viewType != null) 'viewType': viewType,
+        if (wc != null) 'wheelCheck': wc,
+        'hazards': rows,
+      };
+  List<Map<String, dynamic>> rowsOf(Map<String, dynamic> r) =>
+      (r['hazards'] as List).cast<Map<String, dynamic>>();
+  bool hasScotchRow(Map<String, dynamic> r) =>
+      rowsOf(r).any((h) => h['name'].toString().contains('scotch'));
+
+  final r862 = scan([ballast()], wheels('not_seen'));
+  final q862 = HazardQuality.apply(r862);
+  ok(rowsOf(r862).length == 2 && hasScotchRow(r862),
+      '17925862: the not_seen wheel check files the scotch-block row');
+  final filed = rowsOf(r862).firstWhere(
+      (h) => h['name'].toString().contains('scotch'));
+  ok(filed['name'] == 'Wagon without scotch blocks',
+      'the filed row is named for the vehicle kind');
+  ok(filed['severity'] == 'HIGH' && filed['absenceUnconfirmed'] != true,
+      'the filed row keeps HIGH — its absence check is the model\'s own');
+  ok(filed['regulation'] == 'FA 1948 S7A(2)(d)', 'the filed row cites S7A(2)(d)');
+  ok(filed['bbox'] != null, 'the filed row carries the wheel box');
+  ok(r862['overallRisk'] == 'HIGH' &&
+          r862['overallRiskBeforeWheelCheck'] == 'MEDIUM',
+      'the banner rises to HIGH and keeps the original');
+  ok(q862.wheelCheckFiled == 1, 'the report counts the filing');
+  ok(r862['summary'].toString().contains('scotch'),
+      'the summary no longer reads as if ballast were the only concern');
+
+  final rEmpty = scan([], wheels('not_seen'));
+  HazardQuality.apply(rEmpty);
+  ok(rowsOf(rEmpty).length == 1 && hasScotchRow(rEmpty),
+      'an empty table with a not_seen wheel check gets the row');
+
+  final rSeen = scan([ballast()], wheels('seen'));
+  HazardQuality.apply(rSeen);
+  ok(rowsOf(rSeen).length == 1 && rSeen['overallRisk'] == 'MEDIUM',
+      'scotch block seen: nothing is added');
+
+  final rHidden = scan([ballast()], wheels('not_seen', visible: false));
+  HazardQuality.apply(rHidden);
+  ok(rowsOf(rHidden).length == 1, 'wheels out of frame: nothing is added');
+
+  final rUnclear = scan([ballast()], wheels('unclear'));
+  HazardQuality.apply(rUnclear);
+  ok(rowsOf(rUnclear).length == 1 &&
+          (rUnclear[HazardQuality.kVerifyOnSiteKey] as List).length == 1 &&
+          rUnclear['overallRisk'] == 'MEDIUM',
+      'unclear: one verify-on-site point, table and banner untouched');
+
+  final rHedged = scan([ballast()],
+      wheels('not_seen', evidence: 'Wheels not clearly visible in shadow.'));
+  HazardQuality.apply(rHedged);
+  ok(rowsOf(rHedged).length == 1 &&
+          (rHedged[HazardQuality.kVerifyOnSiteKey] as List).length == 1,
+      'a hedged not_seen goes to verify on site, not the table');
+
+  final rOwn = scan([ballast(), scotchRow()], wheels('not_seen'));
+  HazardQuality.apply(rOwn);
+  final own = rowsOf(rOwn).where(
+      (h) => h['name'].toString().contains('scotch')).toList();
+  ok(own.length == 1, 'a model-filed scotch row is never duplicated');
+  ok(own.first['severity'] == 'HIGH' && own.first['absenceUnconfirmed'] != true,
+      'the model\'s own unchecked scotch row is lent the wheel check and '
+      'keeps HIGH');
+
+  final rCoil = scan([
+    hz(
+        name: 'Unchocked coil on floor',
+        description: 'Visible: a steel coil lying on its side with no chock, '
+            'free to roll.',
+        severity: 'MEDIUM'),
+  ], wheels('not_seen'));
+  HazardQuality.apply(rCoil);
+  ok(rowsOf(rCoil).length == 2 && hasScotchRow(rCoil),
+      'an unrelated chock row does not stand in for the wagon');
+
+  HazardQuality.apply(r862, force: true);
+  ok(rowsOf(r862).length == 2, 'filing is idempotent across a forced re-run');
+
+  final rGeneral = scan([ballast()], wheels('not_seen'),
+      viewType: 'GENERAL_VIEW');
+  HazardQuality.apply(rGeneral);
+  ok(hasScotchRow(rGeneral) &&
+          rowsOf(rGeneral).every((h) => h['severity'] != 'HIGH'),
+      'on a general view the filed row is capped like every other row');
+
+  final rNone = scan([ballast()], null);
+  HazardQuality.apply(rNone);
+  ok(rowsOf(rNone).length == 1, 'no wheelCheck key: nothing is added');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

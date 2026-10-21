@@ -45,6 +45,7 @@ class QualityReport {
     this.normalWithdrawn = 0,
     this.unverifiableMoved = 0,
     this.personsReattributed = 0,
+    this.wheelCheckFiled = 0,
   });
 
   /// Hazards folded into another row.
@@ -85,6 +86,10 @@ class QualityReport {
   /// [HazardQuality.auditPersonAttribution].
   final int personsReattributed;
 
+  /// Scotch-block findings filed (or given their check) from the model's own
+  /// `wheelCheck` answer. See [HazardQuality.auditWheelCheck].
+  final int wheelCheckFiled;
+
   bool get changedAnything =>
       merged > 0 ||
       absenceDowngraded > 0 ||
@@ -94,7 +99,8 @@ class QualityReport {
       sceneWithdrawn > 0 ||
       normalWithdrawn > 0 ||
       unverifiableMoved > 0 ||
-      personsReattributed > 0;
+      personsReattributed > 0 ||
+      wheelCheckFiled > 0;
 
   @override
   String toString() => 'QualityReport(merged: $merged, '
@@ -105,7 +111,8 @@ class QualityReport {
       'sceneWithdrawn: $sceneWithdrawn, '
       'normalWithdrawn: $normalWithdrawn, '
       'unverifiableMoved: $unverifiableMoved, '
-      'personsReattributed: $personsReattributed)';
+      'personsReattributed: $personsReattributed, '
+      'wheelCheckFiled: $wheelCheckFiled)';
 }
 
 class HazardQuality {
@@ -135,6 +142,12 @@ class HazardQuality {
         return const QualityReport(
             merged: 0, absenceDowngraded: 0, absenceFlagged: 0);
       }
+      // FIRST, and before the empty-table exit: on a frame where the model's
+      // only answer about the wagon is its wheelCheck, the table is empty
+      // until this runs. Every audit below then judges the filed row like any
+      // other.
+      final wheelFiled = auditWheelCheck(result);
+
       final raw = result['hazards'];
       if (raw is! List || raw.isEmpty) {
         result[kFlag] = true;
@@ -239,6 +252,7 @@ class HazardQuality {
         normalWithdrawn: normalWithdrawn,
         unverifiableMoved: unverifiableMoved,
         personsReattributed: reattributed,
+        wheelCheckFiled: wheelFiled,
       );
     } catch (_) {
       return const QualityReport(
@@ -1427,6 +1441,176 @@ class HazardQuality {
       }
     }
     return moved.length;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  STATIONARY RAIL VEHICLE — WHEEL CHECK
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ★ 2026-10-21, reports 17925848 and 17925862. Wagon no. 10 stood on bare
+  // rail at both near-side wheels; two scans in a row filed only "loose ballast
+  // and debris" — the second AFTER a prompt bullet told the model to check the
+  // wheels, and while its own description said "around the wagon wheels". A
+  // rule buried in a long prompt is skimmed; a required answer is not. So the
+  // prompt now asks for a `wheelCheck` object BEFORE the hazards, exactly as it
+  // asks for `viewType`, and this audit turns the model's own "not_seen" into
+  // the hazard row it then forgot to write.
+  //
+  // This does NOT invent a finding. It files what the model itself reported
+  // seeing, with the model's own words as the evidence and absence check, and
+  // only when those words are a real, unhedged check. "unclear" goes to the
+  // verify-on-site list, never the table.
+
+  static const String kWheelCheckKey = 'wheelCheck';
+  static const String kWheelCheckFlag = '_wheelCheckFiled';
+
+  /// Words showing a row already deals with securing the vehicle, so nothing is
+  /// added. `rolling` alone is deliberately absent: "rolling stock" and
+  /// "rolling mill" would make every rail or mill row look like it covered it.
+  static final RegExp _securingWords = RegExp(
+    r'\b(scotch|wheel ?chocks?|chocks?|chocked|unchocked|wedges?|sprags?|'
+    r'runaway|run away|rolls? away|rolling away|roll-away|'
+    r'against rolling|from rolling|stabling)\b',
+    caseSensitive: false,
+  );
+
+  static final RegExp _vehicleKind = RegExp(
+    r'\b(locomotive|loco|transfer car|ladle car|torpedo|bogie|wagon|rake|'
+    r'trolley|rail car|railcar|coach)\b',
+    caseSensitive: false,
+  );
+
+  static String _wheelVerdict(Object? v) {
+    final s = _str(v).toLowerCase().replaceAll(RegExp(r'[\s-]+'), '_');
+    if (s == 'not_seen' || s == 'notseen' || s == 'absent' || s == 'none' ||
+        s == 'no' || s == 'missing' || s == 'not_present') {
+      return 'not_seen';
+    }
+    if (s == 'seen' || s == 'present' || s == 'yes' || s == 'fitted') {
+      return 'seen';
+    }
+    return s.isEmpty ? '' : 'unclear';
+  }
+
+  static bool _truthy(Object? v) =>
+      v == true || (v is String && v.trim().toLowerCase() == 'true');
+
+  /// Files the scotch-block finding from `result['wheelCheck']` when the model
+  /// answered "not_seen" with a real check but wrote no hazard for it. Returns
+  /// 1 when a row was filed (or an existing row was given the check it lacked),
+  /// else 0. Must run BEFORE dedupe and the absence audit, so the filed row is
+  /// judged by every rule an ordinary row is.
+  static int auditWheelCheck(Map<String, dynamic> result) {
+    if (result[kWheelCheckFlag] == true) return 0;
+    final wc = result[kWheelCheckKey];
+    if (wc is! Map) return 0;
+    if (!_truthy(wc['wheelsVisible'])) return 0;
+
+    final verdict = _wheelVerdict(wc['scotchBlock']);
+    if (verdict == 'seen' || verdict.isEmpty) return 0;
+
+    final evidence = _str(wc['evidence']);
+    final vehicle = _str(wc['vehicle']);
+    final kind = _vehicleKind.firstMatch(vehicle)?.group(1)?.toLowerCase() ??
+        'rail vehicle';
+    final kindLabel = kind == 'loco' ? 'locomotive' : kind;
+    final where = vehicle.isEmpty ? 'the $kindLabel' : vehicle;
+
+    final raw = result['hazards'];
+    final hazards = <Map<String, dynamic>>[
+      if (raw is List)
+        for (final h in raw)
+          if (h is Map) h.cast<String, dynamic>(),
+    ];
+
+    // The model already wrote a securing row: never add a second. If that row
+    // carries no absence check of its own, lend it the wheel check, which is a
+    // better one than it would otherwise be judged on.
+    for (final h in hazards) {
+      final text = '${_str(h['name'])} ${_str(h['description'])} '
+          '${_str(h['visualEvidence'])}';
+      // Both: a securing word AND the rail vehicle / wheel / rail. An
+      // "unchocked coil" row is about the coil and must not stand in for the
+      // wagon in the same frame.
+      if (!_securingWords.hasMatch(text)) continue;
+      if (!_vehicleKind.hasMatch(text) &&
+          !RegExp(r'\b(wheels?|rails?)\b', caseSensitive: false)
+              .hasMatch(text)) {
+        continue;
+      }
+      if (verdict == 'not_seen' &&
+          _str(h['absenceCheck']).isEmpty &&
+          evidence.length >= 15 &&
+          !_hedged.hasMatch(evidence)) {
+        h['absenceCheck'] = evidence;
+        result[kWheelCheckFlag] = true;
+        return 1;
+      }
+      return 0;
+    }
+
+    final bbox = wc['bbox'];
+    final row = <String, dynamic>{
+      'name': '${kindLabel[0].toUpperCase()}${kindLabel.substring(1)} '
+          'without scotch blocks',
+      'description': 'Visible: $where stands on the rails with no scotch '
+          'block or wheel chock at the visible wheels, so it is not secured '
+          'against rolling. A runaway can crush anyone crossing, coupling or '
+          'working beside the track.',
+      'severity': 'HIGH',
+      'regulation': 'FA 1948 S7A(2)(d)',
+      'type': 'Unsafe Condition',
+      'correctiveAction': 'Place scotch blocks on both sides of the wheels on '
+          'both rails, apply the hand brake, and display a stop board or red '
+          'flag before anyone works near the $kindLabel.',
+      'visualEvidence': evidence.isEmpty
+          ? 'Wheels of $where on the rail head, no block beside them.'
+          : evidence,
+      if (evidence.isNotEmpty) 'absenceCheck': evidence,
+      if (bbox is Map) 'bbox': Map<String, dynamic>.from(bbox),
+      'confidence': _asInt(wc['confidence']) ?? _asInt(result['confidence']) ?? 80,
+      '_derivedFrom': kWheelCheckKey,
+    };
+
+    if (verdict == 'unclear' ||
+        evidence.length < 15 ||
+        _hedged.hasMatch(evidence)) {
+      // Doubtful, not wrong: an inspection point, never a table row and never
+      // the banner — the verify-on-site design decision.
+      row['verifyReason'] = 'The wheels were in frame but the photograph does '
+          'not show clearly whether a scotch block is in place.';
+      final existing = result[kVerifyOnSiteKey];
+      result[kVerifyOnSiteKey] = <Map<String, dynamic>>[
+        if (existing is List)
+          for (final e in existing)
+            if (e is Map) e.cast<String, dynamic>(),
+        row,
+      ];
+      result[kWheelCheckFlag] = true;
+      return 0;
+    }
+
+    hazards.add(row);
+    result['hazards'] = hazards;
+    result[kWheelCheckFlag] = true;
+
+    // The banner follows the rows UP, never down — the same rule _overallRisk
+    // applies on screen. Originals kept, as every audit here does.
+    final overall = _str(result['overallRisk']);
+    if (severityRank(overall) < severityRank('HIGH')) {
+      if (overall.isNotEmpty) result['overallRiskBeforeWheelCheck'] = overall;
+      result['overallRisk'] = 'HIGH';
+    }
+    final score = _asInt(result['riskScore']);
+    if (score == null || score < 62) {
+      if (score != null) result['riskScoreBeforeWheelCheck'] = score;
+      result['riskScore'] = 62;
+    }
+    final summary = _str(result['summary']);
+    const note = ' The stationary vehicle is not secured by scotch blocks at '
+        'its visible wheels.';
+    result['summary'] = summary.isEmpty ? note.trim() : '$summary$note';
+    return 1;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

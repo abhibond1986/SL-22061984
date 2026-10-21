@@ -973,6 +973,20 @@ $causeBlock
       final sceneTypeMatch =
           RegExp(r'"sceneType"\s*:\s*"([A-Z_]+)"').firstMatch(json);
 
+      // Carried through for HazardQuality.auditWheelCheck: on a stabled-wagon
+      // frame the model's only answer about the scotch blocks may be this
+      // object, and it sits ahead of "hazards", so it often survives a cut.
+      Map<String, dynamic>? wheelCheck;
+      final wheelMatch = RegExp(
+              r'"wheelCheck"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})')
+          .firstMatch(json);
+      if (wheelMatch != null) {
+        try {
+          final decoded = jsonDecode(wheelMatch.group(1)!);
+          if (decoded is Map) wheelCheck = decoded.cast<String, dynamic>();
+        } catch (_) {}
+      }
+
       if (riskMatch == null && scoreMatch == null) return null;
 
       // Try to extract complete hazard objects
@@ -990,6 +1004,7 @@ $causeBlock
       final result = <String, dynamic>{
         'sceneInventory': inventoryMatch?.group(1) ?? '',
         if (sceneTypeMatch != null) 'sceneType': sceneTypeMatch.group(1),
+        if (wheelCheck != null) 'wheelCheck': wheelCheck,
         'overallRisk': riskMatch?.group(1) ?? 'UNKNOWN',
         'riskScore': int.tryParse(scoreMatch?.group(1) ?? '0') ?? 0,
         'confidence': int.tryParse(confMatch?.group(1) ?? '0') ?? 0,

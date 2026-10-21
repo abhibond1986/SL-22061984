@@ -917,7 +917,10 @@ HOW TO USE IT:
   ///       scan put the chin-strap box on the worker who WAS wearing it.
   ///   3 — 2026-10-06: Factories Act table widened from 12 to 25 sections
   ///       plus a subject→section guide; old answers were almost all S21/S32.
-  static const int kHazardPromptRev = 3;
+  ///   4 — 2026-10-21: required "wheelCheck" for rail vehicles, after two
+  ///       scans of a stabled wagon on bare rail reported only the ballast.
+  ///       Without this bump a rescan of that photo is served the old answer.
+  static const int kHazardPromptRev = 4;
 
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
@@ -4133,6 +4136,16 @@ wording, never findings.
   "viewType": "CLOSE_UP | WORKING_DISTANCE | GENERAL_VIEW",
   "inspectable": <true only if you can see individual fittings — a rail, a nip
                   point, a person's PPE — well enough to judge them>,
+  "wheelCheck": <REQUIRED whenever a rail vehicle — wagon, locomotive, transfer
+                 car, ladle car, bogie, rail trolley — stands on rails in this
+                 frame; omit the key only when there is none:
+    {"vehicle": "<what and where, e.g. 'yellow wagon no. 10, centre'>",
+     "wheelsVisible": <true if at least one wheel's tread-on-rail contact is
+                       in frame>,
+     "scotchBlock": "seen|not_seen|unclear",
+     "evidence": "<at most 20 words: which wheels you looked at and what is on
+                  the rail ahead of and behind them>",
+     "bbox": {"x": 0.3, "y": 0.5, "w": 0.2, "h": 0.15}}>,
   "summary": "<Sentence 1: what is physically visible. Sentence 2: primary safety concern with evidence. Sentence 3: applicable regulation.>",
   "hazards": [
     {
@@ -4177,6 +4190,14 @@ FIELD RULES:
     Too generic: "Unsafe condition observed in the working area."
     Specific:    "Air hose coiled across the walkway at the foot of the stairs,
                   foreground right, spanning the full width of the tread."
+• "wheelCheck" is REQUIRED whenever a rail vehicle is in the frame, and is
+  answered BEFORE you write any hazard. Look at every wheel you can see where
+  the tread meets the rail head. "seen" = a block, wedge or chock is against a
+  wheel. "not_seen" = the rail ahead of and behind the wheel is bare. "unclear"
+  = the contact point is in frame but too dark, small or obscured to tell.
+  When it is "not_seen", ALSO file the hazard "Wagon without scotch blocks"
+  (HIGH, FA 1948 S7A(2)(d)) — loose ballast beside the same wheels is a
+  separate, lesser finding and never replaces it.
 • "visualEvidence" is REQUIRED for every hazard — proves you actually see it.
 • per-hazard "confidence" is REQUIRED. The top-level "confidence" is your
   certainty about the ASSESSMENT AS A WHOLE (image quality, coverage), which is
