@@ -172,6 +172,48 @@ void main() {
   ok(MamrCategories.all.length == 6, 'six categories');
   ok(MamrImporter.templateCsv('ASP').startsWith('SN,Plant/Unit'), 'template header');
 
+  // ── ★ 2026-10-27: MAMR declarations ("You are the MAMR of this area") ──
+  {
+    const pA = MamrPerson(name: 'A', mobile: '9434798958', username: '111');
+    const pB = MamrPerson(name: 'B', mobile: '9434798762');
+    const pBlinked = MamrPerson(name: 'B', mobile: '9434798762', username: '222');
+    const a1 = MamrArea(id: 'ASP-001', sn: 1, dept: 'SMS', area: 'Pit Side', persons: [pA]);
+    const a2 = MamrArea(id: 'ASP-002', sn: 2, dept: 'SMS', area: 'Furnace', persons: [pB]);
+    const a3off = MamrArea(id: 'ASP-003', sn: 3, dept: 'SMS', area: 'Old', persons: [pA], active: false);
+    const reg = MamrRegister(plant: 'ASP', areas: [a2, a1, a3off]);
+    const bsp = MamrRegister(plant: 'BSP', areas: [
+      MamrArea(id: 'BSP-001', sn: 1, dept: 'BF', area: 'Cast house', persons: [pA]),
+    ]);
+
+    final mine = MamrDeclaration.forUser([reg, bsp], {'111'}, '');
+    ok(mine.length == 2, 'declared in two plants, inactive area skipped');
+    ok(mine.first.plant == 'ASP' && mine.first.area.id == 'ASP-001', 'sorted plant then SN');
+    ok(mine.first.key == 'mamrDeclared:ASP:ASP-001', 'stable key includes plant');
+    ok(MamrDeclaration.forUser([reg], {'999'}, '9434798762').single.area.id == 'ASP-002',
+        'unlinked person matched by mobile');
+    ok(MamrDeclaration.forUser([reg], {'999'}, '+91 94347 98762').length == 1,
+        'mobile normalised before matching');
+    ok(MamrDeclaration.forUser([reg], {'999'}, '').isEmpty, 'other users: no declaration');
+    ok(MamrDeclaration.forUser([const MamrRegister(plant: '', areas: [a1])], {'111'}, '').isEmpty,
+        'register without plant code ignored');
+
+    // newlyDeclared
+    const empty = MamrRegister(plant: 'ASP');
+    ok(MamrDeclaration.newlyDeclared(empty, reg).length == 2, 'first upload declares every active person');
+    ok(MamrDeclaration.newlyDeclared(reg, reg).isEmpty, 're-upload of same file declares nobody');
+    final linkedReg = reg.copyWith(areas: [a2.copyWith(persons: [pBlinked]), a1, a3off]);
+    ok(MamrDeclaration.newlyDeclared(reg, linkedReg).isEmpty, 'linking by mobile is not a new declaration');
+    final reassigned = reg.copyWith(areas: [a2.copyWith(persons: [pA]), a1, a3off]);
+    final nd = MamrDeclaration.newlyDeclared(reg, reassigned);
+    ok(nd.length == 1 && nd.first.$1.id == 'ASP-002' && nd.first.$2.username == '111',
+        'reassignment declares the new person for that area only');
+    final reactivated = reg.copyWith(areas: [a2, a1, a3off.copyWith(active: true)]);
+    ok(MamrDeclaration.newlyDeclared(reg, reactivated).length == 1, 're-activated area re-declares');
+    final second = reg.copyWith(areas: [a2.copyWith(persons: [pB, pA]), a1, a3off]);
+    ok(MamrDeclaration.newlyDeclared(reg, second).single.$2.name == 'A', 'added second person only');
+    ok(MamrDeclaration.newlyDeclared(reg, reg.copyWith(areas: [a1])).isEmpty, 'removal declares nobody');
+  }
+
   print('mamr_core: $_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail failures');
 }

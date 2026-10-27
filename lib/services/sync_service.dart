@@ -183,6 +183,27 @@ class SyncService {
     }
   }
 
+  /// ★ 2026-10-27: POST one action to the Apps Script backend and return its
+  /// decoded JSON reply, or null on any failure (network, HTML error page,
+  /// non-JSON). Goes through [_postWithRedirect], so the app secret and the
+  /// 302 follow are handled the same way as every other call. Used for the
+  /// FCM device registration and the MAMR declaration push.
+  static Future<Map<String, dynamic>?> postAction(Map<String, dynamic> body,
+      {Duration timeout = const Duration(seconds: 30)}) async {
+    try {
+      final url = await getBackendUrl();
+      if (!url.startsWith('https://')) return null;
+      final resp = await _postWithRedirect(url, body, timeout: timeout);
+      if (resp == null || resp.statusCode != 200) return null;
+      final text = resp.body.trimLeft();
+      if (!text.startsWith('{')) return null;
+      final v = jsonDecode(text);
+      return v is Map<String, dynamic> ? v : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  USERS
   // ═══════════════════════════════════════════════════════════════

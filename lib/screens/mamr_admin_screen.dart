@@ -152,9 +152,23 @@ class _MamrAdminPanelState extends State<MamrAdminPanel> {
   Future<void> _save(MamrRegister next, String what,
       {Map<String, dynamic>? meta}) async {
     setState(() => _busy = true);
+    final before = _reg;
     final stamped = next.copyWith(
         updatedBy: _actor, updatedAt: DateTime.now().toIso8601String());
     final ok = await MamrService.saveRegister(stamped);
+    // ★ 2026-10-27: tell the people this save has just declared MAMR. The
+    // in-app bell + popup follow from the register itself once it syncs;
+    // this adds the phone push for linked Android users. Re-uploading the
+    // same file declares nobody new, so nobody is pinged twice.
+    final declared = MamrDeclaration.newlyDeclared(before, stamped);
+    var pushNote = '';
+    if (declared.isNotEmpty) {
+      final linked = declared.where((d) => d.$2.isLinked).length;
+      final sent = ok ? await MamrService.pushDeclarations(_plant, declared) : -1;
+      pushNote = ' · ${declared.length} newly declared MAMR'
+          '${sent > 0 ? ' · push sent to $sent phone${sent == 1 ? '' : 's'}' : ''}'
+          '${linked < declared.length ? ' · ${declared.length - linked} not on the app yet' : ''}';
+    }
     await AdminAudit.log(
       action: AdminAudit.actSettingsChange,
       actor: _actor,
@@ -167,7 +181,7 @@ class _MamrAdminPanelState extends State<MamrAdminPanel> {
       _reg = stamped;
       _busy = false;
     });
-    _toast(ok ? '✅ $what' : '$what — saved on this device, will sync when online',
+    _toast(ok ? '✅ $what$pushNote' : '$what — saved on this device, will sync when online',
         ok ? kMamrColor : AppColors.amber);
   }
 

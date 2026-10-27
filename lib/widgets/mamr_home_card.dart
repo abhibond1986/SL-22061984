@@ -56,6 +56,10 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
   bool _canManage = false;
   String _lastStatus = '';
   bool _loaded = false;
+  /// ★ 2026-10-27: true when some register names this user as responsible,
+  /// or the user is an SED. Everyone else keeps the Home they had before
+  /// MAMR — the card is not drawn for them at all.
+  bool _isMamrPerson = false;
   bool _allOpen = false;
   String _search = '';
   /// The whole card folds down to its status band. Remembered per device.
@@ -99,8 +103,11 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
       final reg = await MamrService.getRegister(plant);
       final manage = plant.isNotEmpty && await MamrService.canManage(u, plant);
       final last = await AdminMasterData.lastStatus();
+      final declared = (await MamrService.declarationsFor(u)).isNotEmpty ||
+          await MamrService.isSed(u);
       if (!mounted) return;
       setState(() {
+        _isMamrPerson = declared;
         _plants = plants;
         _plant = plant;
         _reg = reg;
@@ -205,6 +212,12 @@ class _MamrHomeCardState extends State<MamrHomeCard> {
     if (!_loaded) return const SizedBox.shrink();
     final isAdmin = widget.user != null && PlantScope.isAdminUser(widget.user!);
     if (_reg.isEmpty && !_canManage && !isAdmin && _plant.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    // ★ 2026-10-27 (user decision): only declared MAMR persons, SEDs and
+    // admins see the MAMR card. Other users get the old dashboard unchanged;
+    // they can still report an observation from the MAMR tab.
+    if (!isAdmin && !_canManage && !_isMamrPerson) {
       return const SizedBox.shrink();
     }
 

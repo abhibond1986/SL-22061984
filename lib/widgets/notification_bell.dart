@@ -15,6 +15,8 @@ import '../main.dart' show AppColors, SL, SLRadius;
 import '../screens/incident_detail_screen.dart';
 import '../services/assignment_inbox.dart';
 import '../services/assignment_notifications.dart';
+import '../services/mamr_core.dart' show MamrDeclaration;
+import 'mamr_declaration_dialog.dart';
 
 /// ★ 2026-10-21: toast for an MAMR observation filed in an area I am
 /// responsible for — names the area and who reported it, which is what the
@@ -55,7 +57,8 @@ class _NotificationBellState extends State<NotificationBell> {
 
   void _onState() {
     final s = AssignmentNotifications.state.value;
-    if (s.arrivals.isEmpty || s.arrivalGen <= NotificationBell._toastedGen) {
+    if ((s.arrivals.isEmpty && s.declarationArrivals.isEmpty) ||
+        s.arrivalGen <= NotificationBell._toastedGen) {
       return;
     }
     // Only a bell that is actually on screen announces it (tabs in an
@@ -64,6 +67,12 @@ class _NotificationBellState extends State<NotificationBell> {
     NotificationBell._toastedGen = s.arrivalGen;
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
+    // ★ 2026-10-27: an admin MAMR upload naming me, synced while the app is
+    // open — show the full declaration popup, not just a toast.
+    if (s.declarationArrivals.isNotEmpty) {
+      showMamrDeclarationDialog(context, s.declarationArrivals);
+      if (s.arrivals.isEmpty) return;
+    }
     final first = s.arrivals.first;
     final text = s.arrivals.length == 1
         ? (first.kind == AssignmentKind.assignedToMe
@@ -268,7 +277,7 @@ class NotificationPanel extends StatelessWidget {
               ])),
             ),
             Divider(height: 1, color: sl.border),
-            if (s.items.isEmpty)
+            if (s.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 24),
                 child: Column(children: [
@@ -292,23 +301,111 @@ class NotificationPanel extends StatelessWidget {
                 child: ListView.separated(
                   shrinkWrap: true,
                   padding: EdgeInsets.zero,
-                  itemCount: s.items.length,
+                  // MAMR declarations first: they are about the reader's role,
+                  // and there are only ever a few.
+                  itemCount: s.declarations.length + s.items.length,
                   separatorBuilder: (_, __) =>
                       Divider(height: 1, color: sl.border),
-                  itemBuilder: (ctx, i) => _NotifTile(
-                    item: s.items[i],
-                    unread: s.isUnread(s.items[i]),
-                    onTap: () {
-                      final item = s.items[i];
-                      // Grab the navigator first: popping disposes this panel.
-                      final nav = Navigator.of(ctx);
-                      nav.pop();
-                      _openItem(nav, item);
-                    },
-                  ),
+                  itemBuilder: (ctx, i) {
+                    if (i < s.declarations.length) {
+                      final d = s.declarations[i];
+                      return _DeclarationTile(
+                        decl: d,
+                        unread: s.isDeclarationUnread(d),
+                        onTap: () {
+                          // The panel's context dies on pop; use the root's.
+                          final root = Navigator.of(ctx, rootNavigator: true).context;
+                          Navigator.of(ctx).pop();
+                          showMamrDeclarationDialog(root, [d], fromBell: true);
+                        },
+                      );
+                    }
+                    final item = s.items[i - s.declarations.length];
+                    return _NotifTile(
+                      item: item,
+                      unread: s.isUnread(item),
+                      onTap: () {
+                        // Grab the navigator first: popping disposes this panel.
+                        final nav = Navigator.of(ctx);
+                        nav.pop();
+                        _openItem(nav, item);
+                      },
+                    );
+                  },
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ★ 2026-10-27: "You are the MAMR of <area>" row.
+class _DeclarationTile extends StatelessWidget {
+  const _DeclarationTile(
+      {required this.decl, required this.unread, required this.onTap});
+  final MamrDeclaration decl;
+  final bool unread;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final sl = SL.of(context);
+    const c = Color(0xFF0F766E);
+    return Material(
+      color: unread
+          ? AppColors.accent.withOpacity(sl.isDark ? 0.14 : 0.06)
+          : Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                  color: c.withOpacity(0.12), shape: BoxShape.circle),
+              child: const Icon(Icons.verified_user_rounded, color: c, size: 19),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('You are the MAMR of this area',
+                        style: TextStyle(
+                            color: sl.isDark
+                                ? Color.lerp(c, Colors.white, 0.45)
+                                : c,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.2)),
+                    const SizedBox(height: 2),
+                    Text(decl.area.area,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: sl.text1,
+                            fontSize: 13.5,
+                            height: 1.25,
+                            fontWeight:
+                                unread ? FontWeight.w700 : FontWeight.w500)),
+                    const SizedBox(height: 2),
+                    Text('${decl.area.dept}  ·  ${decl.plant}',
+                        style: TextStyle(color: sl.text4, fontSize: 11.5)),
+                  ]),
+            ),
+            if (unread)
+              Container(
+                margin: const EdgeInsets.only(left: 8, top: 4),
+                width: 9,
+                height: 9,
+                decoration: const BoxDecoration(
+                    color: AppColors.crit, shape: BoxShape.circle),
+              ),
+          ]),
         ),
       ),
     );

@@ -30,6 +30,7 @@ import 'mamr_core.dart';
 import 'plant_scope.dart';
 import 'supabase_config.dart';
 import 'supabase_service.dart';
+import 'sync_service.dart';
 
 export 'mamr_core.dart';
 
@@ -270,6 +271,63 @@ class MamrService {
     }
     final code = await plantCodeOf(inc['plant']?.toString() ?? '');
     return code.isNotEmpty && await canManage(user, code);
+  }
+
+  /// ★ 2026-10-27: every area, in any plant's register, that declares [user]
+  /// a responsible person ("You are the MAMR of this area"). Feeds the bell,
+  /// the one-time Home popup and the Home-card visibility rule.
+  static Future<List<MamrDeclaration>> declarationsFor(
+      Map<String, dynamic>? user) async {
+    if (user == null) return const [];
+    final regs = await getAllRegisters();
+    return MamrDeclaration.forUser(regs.values,
+        AssignmentInbox.identities(user), user['mobile']?.toString() ?? '');
+  }
+
+  /// ★ 2026-10-27: phone push to the people a register save has just
+  /// declared ([MamrDeclaration.newlyDeclared]). Sent through the Apps Script
+  /// `notifyUsers` action, which looks up each username's devices in the
+  /// `fcm_devices` sheet. Only LINKED people (with an app username) can be
+  /// pushed; everyone, linked or matched by mobile, also gets the in-app bell
+  /// and popup from the register itself.
+  ///
+  /// Returns the number of phones the server says it reached, or -1 when the
+  /// backend could not be asked (offline, push not configured, old script).
+  static Future<int> pushDeclarations(
+      String plantCode, List<(MamrArea, MamrPerson)> declared) async {
+    final byUser = <String, List<MamrArea>>{};
+    for (final (a, p) in declared) {
+      if (p.username.isEmpty) continue;
+      (byUser[p.username] ??= <MamrArea>[]).add(a);
+    }
+    if (byUser.isEmpty) return 0;
+    final label = await plantLabelFor(plantCode);
+    var sent = 0;
+    var asked = false;
+    for (final e in byUser.entries) {
+      final areas = e.value;
+      final body = areas.length == 1
+          ? 'You are declared MAMR (My Area My Responsibility) of '
+              '${areas.first.area}, ${areas.first.dept}, $label.'
+          : 'You are declared MAMR (My Area My Responsibility) of '
+              '${areas.length} areas in $label: '
+              '${areas.map((a) => a.area).join('; ')}.';
+      final r = await SyncService.postAction({
+        'action': 'notifyUsers',
+        'usernames': [e.key],
+        'title': 'You are the MAMR of this area',
+        'body': body,
+        'data': {
+          'type': 'mamr_declared',
+          'plant': plantCode,
+          'areaIds': areas.map((a) => a.id).join(','),
+        },
+      });
+      if (r == null || r['ok'] != true) continue;
+      asked = true;
+      sent += (r['sent'] is num) ? (r['sent'] as num).toInt() : 0;
+    }
+    return asked ? sent : -1;
   }
 
   /// Usernames that should see this observation in My Assignments.

@@ -730,6 +730,78 @@ class MamrDeadlines {
   }
 }
 
+/// ★ 2026-10-27: "You are the MAMR of this area". One area of one plant's
+/// register that names the reader as a responsible person.
+///
+/// DERIVED, NOT STORED — same reasoning as AssignmentInbox: the register is
+/// the truth, so a declaration appears the moment the upload syncs to the
+/// person's device and disappears by itself when the area is reassigned or
+/// deactivated. Only the "already read" set is persisted (by the bell).
+class MamrDeclaration {
+  /// Plant CODE ("ASP").
+  final String plant;
+  final MamrArea area;
+
+  const MamrDeclaration(this.plant, this.area);
+
+  /// Stable notification key. Includes the plant because area ids are only
+  /// unique within a plant's register.
+  String get key => 'mamrDeclared:$plant:${area.id}';
+
+  /// Every active area, in every register, that names this person — matched
+  /// on username/P.no OR on mobile (last 10 digits), the same test the Home
+  /// card uses, so a person who is "not on app" by link but whose account
+  /// carries the same mobile still gets told.
+  static List<MamrDeclaration> forUser(
+    Iterable<MamrRegister> registers,
+    Set<String> identities,
+    String mobile,
+  ) {
+    final out = <MamrDeclaration>[];
+    for (final r in registers) {
+      if (r.plant.isEmpty) continue;
+      for (final a in r.activeAreas) {
+        if (MamrObs.ownsArea(a, identities, mobile)) {
+          out.add(MamrDeclaration(r.plant, a));
+        }
+      }
+    }
+    out.sort((x, y) {
+      final p = x.plant.compareTo(y.plant);
+      return p != 0 ? p : x.area.sn.compareTo(y.area.sn);
+    });
+    return out;
+  }
+
+  /// People who are responsible for an area in [after] but were NOT
+  /// responsible for that same area (by id) in [before] — i.e. the people a
+  /// save has just declared. Used to send the phone push once per new
+  /// declaration rather than to everyone on every re-upload.
+  ///
+  /// A person is "the same" when the username matches or, failing a link on
+  /// either side, the mobile matches.
+  static List<(MamrArea, MamrPerson)> newlyDeclared(
+      MamrRegister before, MamrRegister after) {
+    bool same(MamrPerson a, MamrPerson b) {
+      if (a.username.isNotEmpty && b.username.isNotEmpty) {
+        return a.username == b.username;
+      }
+      return a.mobile.isNotEmpty && a.mobile == b.mobile;
+    }
+
+    final out = <(MamrArea, MamrPerson)>[];
+    for (final a in after.activeAreas) {
+      final old = before.byId(a.id);
+      final oldPersons =
+          (old == null || !old.active) ? const <MamrPerson>[] : old.persons;
+      for (final p in a.persons) {
+        if (!oldPersons.any((o) => same(o, p))) out.add((a, p));
+      }
+    }
+    return out;
+  }
+}
+
 /// Recorded / complied / pending counts for one bucket.
 class MamrTally {
   int recorded = 0;

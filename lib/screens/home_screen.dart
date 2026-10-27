@@ -15,6 +15,8 @@ import '../services/sync_service.dart';
 import '../services/admin_master_data.dart';
 import '../services/plant_scope.dart';
 import '../services/scan_jobs.dart';
+import '../services/notification_service.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'login_screen.dart';
 import 'home_tab.dart';
 import 'ai_scan_tab.dart';
@@ -117,6 +119,9 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _loadUser() async {
     final u = await LocalDB.getCurrentUser();
     if (mounted) setState(() => _user = u);
+    // ★ 2026-10-27: register this phone for push (Android only; no-op
+    // elsewhere) so an MAMR declaration can reach it with the app closed.
+    NotificationService.startForUser(u);
     // Warm the shared data for the tabs that don't sync themselves (AI Scan,
     // Near Miss, Reports). Throttled and coalesced inside fullSync, so this and
     // HomeTab's own call cost one round-trip between them. No setState here: it
@@ -133,6 +138,8 @@ class _HomeScreenState extends State<HomeScreen>
     // would re-run the previous user's photo under the previous user's plant
     // and department, with no screen left to receive the answer.
     ScanJobs.clear();
+    // Stop pushes for this account reaching this phone after sign-out.
+    if (!kIsWeb) NotificationService().unregister().catchError((_) {});
     await LocalDB.signOut();
     if (!mounted) return;
     Navigator.pushReplacement(

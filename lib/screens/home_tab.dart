@@ -30,6 +30,8 @@ import '../widgets/wsa_bar_chart.dart';
 import '../widgets/my_assignments_card.dart';
 import '../widgets/mamr_home_card.dart';
 import '../services/mamr_service.dart';
+import '../services/assignment_notifications.dart';
+import '../widgets/mamr_declaration_dialog.dart';
 import '../widgets/bottom_nav_gap.dart';
 import '../widgets/safe_backdrop_filter.dart';
 
@@ -92,6 +94,24 @@ class _HomeTabState extends State<HomeTab> {
     AdminMasterData.revision.addListener(_onRealtime);
     MamrService.revision.addListener(_loadMyMamrArea);
     _loadMyMamrArea();
+    // ★ 2026-10-27: "You are the MAMR of this area" popup for declarations
+    // the person has not acknowledged yet (e.g. uploaded while they were
+    // logged out). Live arrivals are popped by the bell instead.
+    AssignmentNotifications.start();
+    AssignmentNotifications.state.addListener(_maybeShowDeclarations);
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _maybeShowDeclarations());
+  }
+
+  void _maybeShowDeclarations() {
+    if (!mounted) return;
+    final s = AssignmentNotifications.state.value;
+    final pending = s.unreadDeclarations;
+    if (pending.isEmpty) return;
+    // Only when Home is the visible tab and nothing is pushed over it.
+    if (!TickerMode.of(context)) return;
+    if (ModalRoute.of(context)?.isCurrent == false) return;
+    showMamrDeclarationDialog(context, pending);
   }
 
   /// Area(s) the user is responsible for, shown in the hero after the plant:
@@ -116,6 +136,7 @@ class _HomeTabState extends State<HomeTab> {
   @override
   void dispose() {
     MamrService.revision.removeListener(_loadMyMamrArea);
+    AssignmentNotifications.state.removeListener(_maybeShowDeclarations);
     I18n.instance.removeListener(_rebuild);
     RealtimeSync.incidentsRevision.removeListener(_onRealtime);
     AdminMasterData.revision.removeListener(_onRealtime);

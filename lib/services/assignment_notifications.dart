@@ -33,7 +33,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'admin_master_data.dart';
 import 'assignment_inbox.dart';
 import 'local_db.dart';
-import 'mamr_core.dart';
+import 'mamr_service.dart';
 import 'realtime_sync.dart';
 
 @immutable
@@ -52,15 +52,33 @@ class NotificationState {
   /// Bumped whenever [arrivals] is non-empty; used to show each toast once.
   final int arrivalGen;
 
+  /// ★ 2026-10-27: areas whose register names me as responsible — "You are
+  /// the MAMR of this area". Derived from the MAMR registers, like [items] is
+  /// from the incidents. Read state shares the same per-account set, keyed by
+  /// [MamrDeclaration.key].
+  final List<MamrDeclaration> declarations;
+
+  /// Declarations that arrived during this session since the last refresh
+  /// (an admin upload synced while the app was open). Same rules as
+  /// [arrivals]: empty on the first load, so the backlog is shown by the Home
+  /// popup instead of a toast.
+  final List<MamrDeclaration> declarationArrivals;
+
   const NotificationState({
     this.items = const [],
     this.unread = const {},
     this.arrivals = const [],
     this.arrivalGen = 0,
+    this.declarations = const [],
+    this.declarationArrivals = const [],
   });
 
   int get unreadCount => unread.length;
   bool isUnread(AssignmentItem i) => unread.contains(i.seenKey);
+  bool isDeclarationUnread(MamrDeclaration d) => unread.contains(d.key);
+  List<MamrDeclaration> get unreadDeclarations =>
+      declarations.where(isDeclarationUnread).toList();
+  bool get isEmpty => items.isEmpty && declarations.isEmpty;
 }
 
 class AssignmentNotifications {
@@ -90,6 +108,9 @@ class AssignmentNotifications {
   @visibleForTesting
   static Future<List<String>> Function() ladderLoader =
       AdminMasterData.getStatuses;
+  @visibleForTesting
+  static Future<List<MamrDeclaration>> Function(Map<String, dynamic>? user)
+      declarationLoader = MamrService.declarationsFor;
 
   static String _readKey(String username) =>
       'notif_read_${username.trim().toLowerCase()}';
@@ -100,6 +121,9 @@ class AssignmentNotifications {
     _started = true;
     RealtimeSync.incidentsRevision.addListener(_onChange);
     AdminMasterData.revision.addListener(_onChange);
+    // An MAMR upload reaches this device through master_data → applyRemote,
+    // which bumps MamrService.revision.
+    MamrService.revision.addListener(_onChange);
     _timer = Timer.periodic(_pollEvery, (_) => refresh());
     refresh();
   }
@@ -121,6 +145,7 @@ class AssignmentNotifications {
     if (_started) {
       RealtimeSync.incidentsRevision.removeListener(_onChange);
       AdminMasterData.revision.removeListener(_onChange);
+      MamrService.revision.removeListener(_onChange);
     }
     _started = false;
     _loadedFor = null;
@@ -147,6 +172,12 @@ class AssignmentNotifications {
       final items = AssignmentInbox.build(
           user: user, incidents: incidents, openStatuses: open,
           ladder: await ladderLoader());
+      List<MamrDeclaration> decls;
+      try {
+        decls = await declarationLoader(user);
+      } catch (_) {
+        decls = const [];
+      }
 
       final prefs = await SharedPreferences.getInstance();
       final read = (prefs.getStringList(_readKey(username)) ?? const []).toSet();
@@ -162,7 +193,9 @@ class AssignmentNotifications {
               MamrObs.isReporter(user, i.incident))
             i.seenKey,
       };
-      final unread = keys.difference(read).difference(selfFiled);
+      final declKeys = decls.map((d) => d.key).toSet();
+      final unread = keys.difference(read).difference(selfFiled)
+        ..addAll(declKeys.difference(read));
 
       // New arrivals = unread keys we did not have last time, same account.
       final prev = state.value;
@@ -173,13 +206,22 @@ class AssignmentNotifications {
               .where((i) => unread.contains(i.seenKey) && !prevKeys.contains(i.seenKey))
               .toList()
           : const <AssignmentItem>[];
+      final prevDecl = prev.declarations.map((d) => d.key).toSet();
+      final declArrivals = sameUser
+          ? decls
+              .where((d) => unread.contains(d.key) && !prevDecl.contains(d.key))
+              .toList()
+          : const <MamrDeclaration>[];
 
       // Keep the read-set from growing forever: drop keys for items that no
       // longer exist (closed / reassigned). Skipped when nothing loaded, so an
       // empty cache during start-up cannot wipe the user's read history.
-      if (incidents.isNotEmpty && !read.every(keys.contains)) {
+      // Declaration keys are never pruned: there are only a handful, and a
+      // register not yet loaded at start-up must not re-announce them.
+      bool keep(String k) => keys.contains(k) || k.startsWith('mamrDeclared:');
+      if (incidents.isNotEmpty && !read.every(keep)) {
         await prefs.setStringList(
-            _readKey(username), read.intersection(keys).toList());
+            _readKey(username), read.where(keep).toList());
       }
 
       _loadedFor = username;
@@ -187,7 +229,11 @@ class AssignmentNotifications {
         items: items,
         unread: unread,
         arrivals: arrivals,
-        arrivalGen: arrivals.isEmpty ? prev.arrivalGen : prev.arrivalGen + 1,
+        arrivalGen: arrivals.isEmpty && declArrivals.isEmpty
+            ? prev.arrivalGen
+            : prev.arrivalGen + 1,
+        declarations: decls,
+        declarationArrivals: declArrivals,
       );
     } catch (e) {
       debugPrint('[AssignmentNotifications] refresh failed: $e');
@@ -207,11 +253,17 @@ class AssignmentNotifications {
       unread: s.unread.difference(keys.toSet()),
       arrivals: const [],
       arrivalGen: s.arrivalGen,
+      declarations: s.declarations,
     );
   }
 
   static Future<void> markRead(AssignmentItem item) => _setRead([item.seenKey]);
 
-  static Future<void> markAllRead() =>
-      _setRead(state.value.items.map((i) => i.seenKey));
+  static Future<void> markAllRead() => _setRead([
+        ...state.value.items.map((i) => i.seenKey),
+        ...state.value.declarations.map((d) => d.key),
+      ]);
+
+  static Future<void> markDeclarationsRead(Iterable<MamrDeclaration> ds) =>
+      _setRead(ds.map((d) => d.key));
 }

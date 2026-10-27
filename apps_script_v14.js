@@ -159,7 +159,9 @@ function handle(e) {
     // They stay in publicActions on purpose: the secret is the gate, and the
     // SESSION-TOKEN GATE BELOW CANNOT CURRENTLY SUCCEED (see its note), so
     // routing them through validateAuthToken would refuse every real request.
-    var secretActions = ['getAiKeys', 'gemini'];
+    // ★ 2026-10-27: 'notifyUsers' pushes to named phones — gated so an
+    // anonymous caller cannot spam the workforce.
+    var secretActions = ['getAiKeys', 'gemini', 'notifyUsers'];
     if (secretActions.indexOf(action) >= 0 && !appSecretOk(params._appSecret)) {
       return ContentService
         .createTextOutput(JSON.stringify({
@@ -193,7 +195,8 @@ function handle(e) {
       'addIncident', 'updateIncident', 'updateIncidentStatus', 'listIncidents',
       'addFeedback', 'listFeedback', 'uploadPdfToDrive',
       'addKnowledge', 'listKnowledge', 'formatSheet', 'formatIncidentsSheet',
-      'fireAlert', 'registerDevice', 'unregisterDevice', 'syncAlertRules'];
+      'fireAlert', 'registerDevice', 'unregisterDevice', 'syncAlertRules',
+      'notifyUsers'];
     if (publicActions.indexOf(action) < 0) {
       var authResult = validateAuthToken(params._authToken, params._authUser);
       if (!authResult.valid) {
@@ -343,6 +346,7 @@ function handle(e) {
       case 'registerDevice':    result = registerFcmDevice(params); break;
       case 'unregisterDevice':  result = unregisterFcmDevice(params); break;
       case 'listDevices':       result = listFcmDevices(); break;
+      case 'notifyUsers':       result = notifyFcmUsers(params); break;
       case 'syncAlertRules':    result = syncAlertRules(params); break;
 
       default:
@@ -2891,6 +2895,76 @@ function sendFcmPushToAll(rule, reason, incidents) {
 
   Logger.log('[ALERT-FCM] Sent: ' + sent + ', Failed: ' + failed);
   return { ok: true, sent: sent, failed: failed, total: targetDevices.length };
+}
+
+// ── FCM PUSH — to named users (★ 2026-10-27, MAMR declaration) ──
+// params: { usernames: ['22061984', ...], title, body, data: {k: v} }
+// Looks up every device registered under those usernames in fcm_devices
+// (case-insensitive) and sends one FCM v1 message per device.
+function notifyFcmUsers(params) {
+  const projectId = PropertiesService.getScriptProperties().getProperty('FCM_PROJECT_ID');
+  const saJson    = PropertiesService.getScriptProperties().getProperty('FCM_SERVICE_ACCOUNT');
+  if (!projectId || !saJson) {
+    return { ok: false, error: 'FCM not configured. Set FCM_PROJECT_ID and FCM_SERVICE_ACCOUNT in Script Properties.' };
+  }
+  var wanted = (params.usernames || []).map(function(u) {
+    return String(u || '').trim().toLowerCase();
+  }).filter(function(u) { return u; });
+  if (wanted.length === 0) return { ok: true, sent: 0, failed: 0, total: 0 };
+
+  const devices = getRegisteredDevices_().filter(function(d) {
+    return wanted.indexOf(String(d.username || '').trim().toLowerCase()) >= 0;
+  });
+  if (devices.length === 0) return { ok: true, sent: 0, failed: 0, total: 0, note: 'no registered phone' };
+
+  const accessToken = getFcmAccessToken_(saJson);
+  if (!accessToken) return { ok: false, error: 'Failed to get FCM access token' };
+
+  // FCM data values must all be strings.
+  var data = { click_action: 'FLUTTER_NOTIFICATION_CLICK' };
+  var raw = params.data || {};
+  Object.keys(raw).forEach(function(k) { data[k] = String(raw[k]); });
+
+  const url = 'https://fcm.googleapis.com/v1/projects/' + projectId + '/messages:send';
+  var sent = 0, failed = 0;
+  devices.forEach(function(device) {
+    try {
+      const resp = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'Authorization': 'Bearer ' + accessToken },
+        payload: JSON.stringify({
+          message: {
+            token: device.token,
+            notification: {
+              title: String(params.title || 'SAIL Safety Lens'),
+              body : String(params.body || '')
+            },
+            data: data,
+            android: {
+              priority: 'high',
+              notification: { channel_id: 'safety_alerts', sound: 'default' }
+            }
+          }
+        }),
+        muteHttpExceptions: true
+      });
+      if (resp.getResponseCode() === 200) {
+        sent++;
+      } else {
+        failed++;
+        Logger.log('[NOTIFY-FCM] Failed for ' + device.username + ': ' + resp.getContentText());
+        if (resp.getResponseCode() === 404 || resp.getContentText().indexOf('UNREGISTERED') >= 0) {
+          unregisterFcmDevice({ token: device.token });
+        }
+      }
+    } catch (e) {
+      failed++;
+      Logger.log('[NOTIFY-FCM] Exception: ' + e.toString());
+    }
+  });
+  Logger.log('[NOTIFY-FCM] ' + wanted.join(',') + ' → sent ' + sent + ', failed ' + failed);
+  return { ok: true, sent: sent, failed: failed, total: devices.length };
 }
 
 // ── FCM ACCESS TOKEN via Service Account JWT ─────────────────
