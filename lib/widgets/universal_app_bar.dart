@@ -7,6 +7,7 @@
 
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import '../screens/my_profile_screen.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import '../main.dart' show AppColors, SL, SLRadius, SLSpace, SLText;
 import '../services/i18n.dart';
@@ -290,6 +291,21 @@ class _UniversalAppBarState extends State<UniversalAppBar> {
                 const SizedBox(height: 12),
 
                 // ── SETTINGS ROWS ──
+                // ★ 2026-10-30: My Profile - own contact/job details and the
+                // camera / microphone / location choices.
+                _menuRow(
+                  icon: Icons.person_outline_rounded,
+                  label: I18n.t('profile.open'),
+                  trailing: Icon(Icons.chevron_right_rounded,
+                      color: sl.text3, size: 20),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => MyProfileScreen(user: widget.user)));
+                  },
+                  sl: sl,
+                ),
+                const SizedBox(height: 4),
                 _menuRow(
                   icon: widget.isDark ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
                   label: widget.isDark ? I18n.t('settings.darkMode') : I18n.t('settings.lightMode'),

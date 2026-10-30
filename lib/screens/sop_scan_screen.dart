@@ -27,6 +27,7 @@ import 'dart:ui' show FontFeature;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
+import '../services/device_permissions.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../main.dart' show AppColors, SL, SLText;
@@ -294,6 +295,11 @@ class _SopScanScreenState extends State<SopScanScreen> {
   // ═══════════════════════════════════════════════════════════════════════
 
   Future<void> _addPages(ImageSource source) async {
+    // ★ 2026-10-30: respect the user's camera choice (My Profile).
+    if (source == ImageSource.camera &&
+        !await DevicePermissions.guard(context, DeviceFeature.camera)) {
+      return;
+    }
     if (_imported) {
       // Same reasoning as the guard in _addDocument, from the other direction.
       _snack('Start over first — photographs cannot be added to an '
@@ -685,6 +691,7 @@ class _SopScanScreenState extends State<SopScanScreen> {
   }
 
   Future<void> _retake(int index) async {
+    if (!await DevicePermissions.guard(context, DeviceFeature.camera)) return;
     final picker = ImagePicker();
     try {
       final one = await picker.pickImage(source: ImageSource.camera);

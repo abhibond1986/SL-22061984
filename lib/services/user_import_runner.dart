@@ -54,7 +54,11 @@ class ImportResult {
     required this.skipped,
     required this.errors,
     required this.batchId,
+    this.keptSelfEdited = 0,
   });
+
+  /// Existing employees whose own My Profile edits were kept over the file.
+  final int keptSelfEdited;
 
   final int created;
   final int updated;
@@ -73,6 +77,9 @@ class ImportResult {
     if (updated > 0) parts.add('$updated updated');
     if (disabled > 0) parts.add('$disabled disabled');
     if (skipped > 0) parts.add('$skipped skipped');
+    if (keptSelfEdited > 0) {
+      parts.add('$keptSelfEdited kept their own profile edits');
+    }
     if (parts.isEmpty) return 'Nothing to import.';
     return parts.join(', ');
   }
@@ -177,13 +184,32 @@ class UserImportRunner {
 
     // ── 2. Existing accounts: profile refresh, no credentials ───────────────
     var updated = 0;
+    var keptSelfEdited = 0;
     final updates = plan.updates.toList(growable: false);
     if (updates.isNotEmpty) {
       // `importedAt` is set here too, so "when did we last see this person in an
       // export" is answerable for everyone and not only for new joiners.
-      final rows = updates
-          .map((r) => <String, dynamic>{...r.user, 'importedAt': now})
-          .toList(growable: false);
+      // ★ 2026-10-30: fields an employee corrected in My Profile are kept.
+      // Every row keeps the same keys (a PostgREST bulk-upsert rule); for
+      // those people the file's value is replaced by their own current value.
+      final selfEdited = await SupabaseService.fetchSelfEditedProfiles();
+      if (selfEdited == null) {
+        errors.add('Could not read which employees edited their own profile, '
+            'so their mobile/email/designation/department/unit may have been '
+            'replaced by the file. ${SupabaseService.usersLastError}');
+      }
+      final rows = updates.map((r) {
+        final row = <String, dynamic>{...r.user, 'importedAt': now};
+        final uname = (r.user['username']?.toString() ?? '').toLowerCase();
+        final own = selfEdited?[uname];
+        if (own != null) {
+          own.forEach((k, v) {
+            if (row.containsKey(k)) row[k] = v;
+          });
+          keptSelfEdited++;
+        }
+        return row;
+      }).toList(growable: false);
       updated = await SupabaseService.upsertUsers(rows,
           onProgress: (done, total) => onProgress?.call(ImportProgress(
               stage: 'Updating existing accounts', done: done, total: total)));
@@ -235,6 +261,7 @@ class UserImportRunner {
       skipped: skipped,
       errors: errors,
       batchId: plan.batchId,
+      keptSelfEdited: keptSelfEdited,
     );
   }
 

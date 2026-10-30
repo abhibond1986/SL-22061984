@@ -8,10 +8,16 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
+import 'device_permissions.dart';
 
 class GeoService {
   /// Captures current GPS location with high accuracy
   static Future<LocationData?> getCurrentLocation() async {
+    // ★ 2026-10-30: the user turned location off in My Profile - no GPS
+    // prompt, no fix; reports simply carry no coordinates (EXIF still works).
+    if (!DevicePermissions.isEnabled(DeviceFeature.location)) {
+      return LocationData(error: 'Location is turned off in My Profile');
+    }
     try {
       // Check if location services are enabled
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();

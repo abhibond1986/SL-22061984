@@ -17,6 +17,9 @@ import 'near_miss_tab.dart';
 import '../services/branding.dart';
 import '../widgets/brand_logo.dart';
 import '../widgets/safe_backdrop_filter.dart';
+import '../widgets/permission_onboarding.dart';
+import '../services/i18n.dart';
+import 'my_profile_screen.dart';
 
 class ContractorHomeScreen extends StatefulWidget {
   final VoidCallback toggleTheme;
@@ -37,6 +40,16 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
     'plant': '',
     'role': 'contractor',
   };
+
+  @override
+  void initState() {
+    super.initState();
+    // ★ 2026-10-30: one-time camera / mic / location request for this device's
+    // contractor session (there is no account, so it is keyed 'contractor').
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) PermissionOnboarding.maybeShow(context, 'contractor');
+    });
+  }
 
   void _exitToLogin() {
     Navigator.pushReplacement(
@@ -145,6 +158,14 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
                   SnackBar(content: Text('Synced $synced report(s) to Google Sheets'), duration: const Duration(seconds: 2)));
               }
             },
+          ),
+          IconButton(
+            icon: Icon(Icons.verified_user_outlined, color: sl.text3, size: 20),
+            tooltip: I18n.t('perm.section'),
+            onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => MyProfileScreen(user: _contractorUser))),
           ),
           IconButton(
             icon: Icon(

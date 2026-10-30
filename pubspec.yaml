@@ -85,6 +85,9 @@ flutter:
 
   assets:
     - assets/images/
+    # Noto Sans Devanagari (SIL OFL) for Hindi text in PDF reports - see
+    # lib/services/pdf_text.dart.
+    - assets/fonts/
 
 flutter_launcher_icons:
   # Source the HIGH-RES master, not the shipped asset. assets/images/app_icon.png

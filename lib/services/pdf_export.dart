@@ -14,7 +14,12 @@ import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:image/image.dart' as img;
 import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
+// `hide Text` + pdf_text.dart under the same prefix: every pw.Text(...) below
+// goes through pdf_text.dart, which prints Hindi (and any non-Latin script)
+// correctly shaped instead of failing on Helvetica. See that file.
+import 'package:pdf/widgets.dart' as pw hide Text;
+import 'pdf_text.dart' as pw show Text;
+import 'pdf_text.dart' show PdfScript;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
@@ -61,6 +66,21 @@ class PdfExport {
     required Map<String, dynamic> incident,
     String reporterName = 'SAIL Safety Officer',
     String reporterPno = '',
+    Uint8List? imageBytes,
+  }) =>
+      // ★ 2026-10-30: built through PdfScript.run so Hindi text is shaped and
+      // printed (a second pass only when the report has non-Latin text).
+      PdfScript.run(() => _incidentReportBytes(
+            incident: incident,
+            reporterName: reporterName,
+            reporterPno: reporterPno,
+            imageBytes: imageBytes,
+          ));
+
+  static Future<Uint8List> _incidentReportBytes({
+    required Map<String, dynamic> incident,
+    required String reporterName,
+    required String reporterPno,
     Uint8List? imageBytes,
   }) async {
     // ★ 2026-10-04: the report names the person who FILED the incident, not
@@ -2760,8 +2780,30 @@ class PdfExport {
     DateTime? fromDate,
     DateTime? toDate,
   }) async {
+    final now = DateTime.now();
+    // ★ 2026-10-30: built through PdfScript.run (see pdf_text.dart) so Hindi
+    // descriptions print instead of failing on the Latin-1 font.
+    final bytes = await PdfScript.run(() => _consolidatedBytes(
+        incidents: incidents, reporterName: reporterName,
+        reportTitle: reportTitle, plant: plant,
+        fromDate: fromDate, toDate: toDate, now: now));
+    final dir  = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/SafetyLens_Consolidated_'
+        '${DateFormat('yyyyMMdd').format(now)}.pdf');
+    await file.writeAsBytes(bytes);
+    return file;
+  }
+
+  static Future<Uint8List> _consolidatedBytes({
+    required List<Map<String, dynamic>> incidents,
+    required String reporterName,
+    String? reportTitle,
+    String? plant,
+    DateTime? fromDate,
+    DateTime? toDate,
+    required DateTime now,
+  }) async {
     final pdf   = pw.Document();
-    final now   = DateTime.now();
     final title = reportTitle
         ?? '${Branding.appTitle} — Consolidated Incident Report';
 
@@ -2841,11 +2883,7 @@ class PdfExport {
           ]),
       ]));
 
-    final dir  = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/SafetyLens_Consolidated_'
-        '${DateFormat('yyyyMMdd').format(now)}.pdf');
-    await file.writeAsBytes(await pdf.save());
-    return file;
+    return pdf.save();
   }
 
   static Future<void> sharePdf(File file, {String? subject}) async {

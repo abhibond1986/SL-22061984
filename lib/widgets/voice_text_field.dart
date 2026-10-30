@@ -13,6 +13,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../services/device_permissions.dart';
 import '../main.dart' show AppColors, SL;
 import '../services/dictation_session.dart' as dictation;
 import '../services/i18n.dart';
@@ -141,6 +142,11 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
       return;
     }
 
+    // ★ 2026-10-30: respect the user's microphone choice (My Profile).
+    if (!await DevicePermissions.guard(context, DeviceFeature.microphone)) {
+      return;
+    }
+    if (!mounted) return;
     if (!_speechAvailable) {
       await _initSpeech();
       if (!_speechAvailable) {

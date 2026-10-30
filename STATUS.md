@@ -1,3 +1,11 @@
+## 2026-10-30 (applied to working tree, awaiting push)
+
+- **Hindi near-miss PDFs printed empty boxes.** Helvetica is Latin-1 only, and the pdf package cannot shape Hindi. Each Hindi word is now drawn by the text engine (app: Flutter; web: browser canvas) with the bundled Noto Sans Devanagari. Labels stay in English. English reports are unchanged. See `lib/services/pdf_text.dart`. The web path still needs a live check.
+- **One-time camera, mic and location sheet after login.** The answer is remembered per user per device. Features switched off ask before use. See `lib/widgets/permission_onboarding.dart` and `DevicePermissions`.
+- **My Profile (avatar menu).** Users can edit their own mobile, email, designation, department and unit, and manage permissions. The HR import keeps these edits (`self_edited_fields`). Needs `migration_profile_self_edit.sql`.
+- **iOS:** `ios/Podfile` now sets the permission_handler macros.
+- Audit: AUDIT_2026-10-30_HINDI_PDF_PERMISSIONS_PROFILE.md. Evidence: `audit_2026-10-30/`.
+
 ## 2026-10-08
 
 - iPhone crash ("A problem repeatedly occurred on safetylens.in"): WebKit killed the tab. Cause: on mobile browsers Flutter 3.19 uses the HTML renderer. There, the login backdrop's ~60 animated blur draws per frame become DOM elements with CSS blur, and they sit under live `backdrop-filter` layers (the login card, plus the app bar, nav bar and glass cards). Fix: `SafeBackdropFilter`/`kLiteWebEffects` (lib/widgets/safe_backdrop_filter.dart) disables live blur on mobile web, and the login animation overlay is off there. The login card and nav bar fills are near-opaque to compensate. App and desktop are unchanged. Audit: AUDIT_2026-10-08_IPHONE_CRASH.md.

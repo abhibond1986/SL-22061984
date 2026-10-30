@@ -5,6 +5,7 @@
 
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import '../services/device_permissions.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -549,6 +550,11 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
               onTap: () => Navigator.pop(ctx, ImageSource.gallery)),
         ])));
     if (source == null || !mounted) return;
+    // ★ 2026-10-30: respect the user's camera choice (My Profile).
+    if (source == ImageSource.camera &&
+        !await DevicePermissions.guard(context, DeviceFeature.camera)) {
+      return;
+    }
     XFile? f;
     try {
       f = await ImagePicker().pickImage(source: source,

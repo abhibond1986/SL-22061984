@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import '../services/device_permissions.dart';
 // package:http is deliberately NOT imported here. This screen has no business
 // making raw HTTP calls — every network hop belongs in a service under
 // lib/services/, which is where the backend URL override lives. The one direct
@@ -463,6 +464,11 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
       await current.end(DictationEnd.switchedField);
     }
 
+    // ★ 2026-10-30: respect the user's microphone choice (My Profile).
+    if (!await DevicePermissions.guard(context, DeviceFeature.microphone)) {
+      return;
+    }
+    if (!mounted) return;
     if (!_speechAvailable) {
       await _initSpeech();
       if (!_speechAvailable) {
@@ -1187,6 +1193,11 @@ If the text is already fine, return it unchanged.''';
     // drained GeminiVision's mutex. One refusal up front costs nothing.
     if (ScanJobs.isRunning) {
       _snack(ScanJobs.busyMessage(), const Color(0xFFD97706));
+      return;
+    }
+    // ★ 2026-10-30: respect the user's camera choice (My Profile).
+    if (source == ImageSource.camera &&
+        !await DevicePermissions.guard(context, DeviceFeature.camera)) {
       return;
     }
     final picker = ImagePicker();

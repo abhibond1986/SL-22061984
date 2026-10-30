@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import '../services/device_permissions.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
@@ -721,6 +722,11 @@ class _AIScanTabState extends State<AIScanTab> {
     // We downscale in-app afterwards for fast analysis. Camera photos have
     // no useful EXIF GPS here (we watermark with live device GPS instead),
     // so we let the picker resize those directly.
+    // ★ 2026-10-30: respect the user's camera choice (My Profile).
+    if (source == ImageSource.camera &&
+        !await DevicePermissions.guard(context, DeviceFeature.camera)) {
+      return;
+    }
     final picker = ImagePicker();
     final bool isGallery = source == ImageSource.gallery;
     final picked = isGallery
@@ -3584,6 +3590,11 @@ class _AIScanTabState extends State<AIScanTab> {
   }
 
   Future<void> _pickManualPhoto(ImageSource source) async {
+    // ★ 2026-10-30: respect the user's camera choice (My Profile).
+    if (source == ImageSource.camera &&
+        !await DevicePermissions.guard(context, DeviceFeature.camera)) {
+      return;
+    }
     try {
       final f = await ImagePicker().pickImage(
           source: source, maxWidth: 1600, maxHeight: 1600, imageQuality: 80);
