@@ -1,20 +1,37 @@
 // lib/services/device_permissions.dart
 //
-// Camera, microphone and location: ask ONCE, remember the answer, let the
-// user change it in My Profile. (Owner request, 2026-10-30.)
+// Camera, microphone and location. (Owner request 2026-10-30; simplified
+// 2026-11-04.)
+//
+// ★ 2026-11-04 — ONE prompt per permission, asked at first use.
+// The 2026-10-30 version showed an in-app sheet after login and then fired the
+// browser / OS prompt for each ticked item, so every permission was asked
+// twice (owner: "annoying ... duplicacy of permission"). The sheet is gone.
+// Now the only prompt is the device's own, shown the first time the user
+// actually taps the camera, the mic or a GPS capture, with the reason obvious
+// from what they just tapped. Rules that keep it to one prompt:
+//   * [guard] never calls [request] itself; the feature's own plugin
+//     (image_picker / speech_to_text / geolocator) triggers the single system
+//     prompt. [guard] only reads [status] (no prompt) so a BLOCKED permission
+//     gets clear "how to unblock" help instead of a silent failure.
+//   * On the web the camera needs no browser permission at all: image_picker
+//     uses <input type=file capture>, which opens the phone's camera app.
+//     The old getUserMedia({video}) probe produced a browser prompt for
+//     nothing. See device_permissions_web.dart.
+//   * The storage key moved v1 -> v2: "Not now" on the old sheet saved all
+//     three as OFF, which would have kept those users on a double prompt
+//     (in-app "turned off" dialog + browser prompt). Everyone starts ON again;
+//     the My Profile switches still let a user opt out on purpose.
 //
 // Two layers, kept separate on purpose:
 //
 //  1. The device/browser permission. Only the operating system (or the
-//     browser) can grant or revoke it. The app can ask, read the current state,
-//     and send the user to Settings; it cannot switch it off itself.
+//     browser) can grant or revoke it. The app can read the current state and
+//     send the user to Settings; it cannot switch it off itself.
 //
-//  2. The user's own choice in this app, stored per user on this device under
-//     `device_perm_v1_<username>`. It is what makes the request one-time: once
-//     the user has answered the post-login sheet, it is never shown again for
-//     that account on this device, at any later login. If they chose "off" for
-//     a feature, the feature asks before using it ([guard]) instead of
-//     triggering a system prompt, and they can turn it on from My Profile.
+//  2. The user's own choice in this app (My Profile switches), stored per user
+//     on this device under `device_perm_v2_<username>`. Default ON. If they
+//     switched a feature off, [guard] asks before using it.
 //
 // The keys are per device on purpose. A permission granted on one phone means
 // nothing on another phone, so a new device asks once again.
@@ -58,7 +75,7 @@ enum PermissionState {
 class DevicePermissions {
   DevicePermissions._();
 
-  static const String _kPrefix = 'device_perm_v1_';
+  static const String _kPrefix = 'device_perm_v2_';
 
   /// Bumped whenever a choice changes, so open screens can refresh.
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
@@ -98,25 +115,12 @@ class DevicePermissions {
     revision.value++;
   }
 
-  /// True once this user has answered the one-time sheet on this device.
-  static bool get answered => _prefs['answered'] == true;
-
-  /// The user's in-app choice for [f]. Defaults to on, so nothing changes for
-  /// anyone who has not answered yet (the OS still asks as before).
+  /// The user's in-app choice for [f] (My Profile switch). Defaults to on:
+  /// the device simply asks the first time the feature is used.
   static bool isEnabled(DeviceFeature f) => _prefs[f.name] != false;
 
   static Future<void> setEnabled(DeviceFeature f, bool on) async {
     _prefs[f.name] = on;
-    await _save();
-  }
-
-  /// Record the answers from the one-time sheet.
-  static Future<void> recordAnswers(Map<DeviceFeature, bool> choices) async {
-    for (final e in choices.entries) {
-      _prefs[e.key.name] = e.value;
-    }
-    _prefs['answered'] = true;
-    _prefs['answeredAt'] = DateTime.now().toIso8601String();
     await _save();
   }
 
@@ -169,11 +173,25 @@ class DevicePermissions {
 
   /// Call before using [f]. Returns true when the feature may go ahead.
   ///
-  /// If the user switched [f] off, this asks whether to turn it on instead of
-  /// letting the system prompt appear (their choice is respected, and they
-  /// are never stuck). Turning it on here is the same as doing it in Profile.
+  /// Never shows a system prompt itself: the feature that runs next does
+  /// that, once (see the file header). This only
+  ///  * respects a My Profile "off" switch (asks whether to turn it back on),
+  ///  * and, if the device already reports [f] as BLOCKED, explains how to
+  ///    unblock it instead of letting the feature fail silently.
   static Future<bool> guard(BuildContext context, DeviceFeature f) async {
-    if (isEnabled(f)) return true;
+    if (!isEnabled(f)) {
+      if (!await _askTurnOn(context, f)) return false;
+      await setEnabled(f, true);
+    }
+    final s = await status(f);
+    if (s == PermissionState.blocked) {
+      if (context.mounted) await showBlockedHelp(context, f);
+      return false;
+    }
+    return true;
+  }
+
+  static Future<bool> _askTurnOn(BuildContext context, DeviceFeature f) async {
     final turnOn = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -190,14 +208,7 @@ class DevicePermissions {
         ],
       ),
     );
-    if (turnOn != true) return false;
-    await setEnabled(f, true);
-    final s = await request(f);
-    if (s == PermissionState.blocked && context.mounted) {
-      await showBlockedHelp(context, f);
-      return false;
-    }
-    return s != PermissionState.denied;
+    return turnOn == true;
   }
 
   /// Explain how to undo a block that only Settings can change.

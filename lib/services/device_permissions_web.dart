@@ -21,7 +21,14 @@ String _name(DeviceFeature f) => switch (f) {
       DeviceFeature.location => 'geolocation',
     };
 
+// ★ 2026-11-04: photos on the web go through image_picker_for_web, which uses
+// <input type="file" capture>. That opens the phone's own camera app (or a
+// file chooser on a laptop) and needs NO browser camera permission. Asking for
+// one via getUserMedia({video}) only produced an extra browser prompt and
+// switched the camera light on for nothing, so camera is reported as allowed
+// and never requested here.
 Future<PermissionState> status(DeviceFeature f) async {
+  if (f == DeviceFeature.camera) return PermissionState.allowed;
   final perms = html.window.navigator.permissions;
   if (perms == null) return PermissionState.unknown;
   try {
@@ -46,6 +53,7 @@ bool _isRefusal(Object e) {
 }
 
 Future<PermissionState> request(DeviceFeature f) async {
+  if (f == DeviceFeature.camera) return PermissionState.allowed;
   if (f == DeviceFeature.location) {
     try {
       await html.window.navigator.geolocation
@@ -64,8 +72,7 @@ Future<PermissionState> request(DeviceFeature f) async {
   final media = html.window.navigator.mediaDevices;
   if (media == null) return PermissionState.unknown;
   try {
-    final stream = await media.getUserMedia(
-        f == DeviceFeature.camera ? {'video': true} : {'audio': true});
+    final stream = await media.getUserMedia({'audio': true});
     // Only the permission was wanted: release the camera / mic at once.
     for (final t in stream.getTracks()) {
       t.stop();

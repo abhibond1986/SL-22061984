@@ -26,7 +26,7 @@ import 'chat_tab.dart';
 import 'reports_tab.dart';
 import '../widgets/universal_app_bar.dart';
 import '../widgets/safe_backdrop_filter.dart';
-import '../widgets/permission_onboarding.dart';
+import '../services/device_permissions.dart';
 import 'my_profile_screen.dart' show currentUserRevision;
 
 class HomeScreen extends StatefulWidget {
@@ -129,14 +129,12 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _loadUser() async {
     final u = await LocalDB.getCurrentUser();
     if (mounted) setState(() => _user = u);
-    // ★ 2026-10-30: the one-time camera / microphone / location request.
-    // Shown only until this user has answered it on this device; the answer
-    // can be changed later in My Profile. After the first frame so the shell
-    // is on screen behind the sheet.
+    // ★ 2026-11-04: no post-login permission sheet any more (it made every
+    // permission ask twice: our sheet, then the browser / phone prompt). The
+    // device asks once, the first time camera / mic / GPS is used. Only the
+    // user's My Profile switches are loaded here; no prompt.
     final uname = (u?['username'] ?? u?['pno'] ?? '').toString();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) PermissionOnboarding.maybeShow(context, uname);
-    });
+    DevicePermissions.loadFor(uname);
     // ★ 2026-10-27: register this phone for push (Android only; no-op
     // elsewhere) so an MAMR declaration can reach it with the app closed.
     NotificationService.startForUser(u);

@@ -1,5 +1,6 @@
-// Render + behaviour check for 2026-10-30: the one-time permission sheet,
-// the "turned off" guard dialog and My Profile.
+// Render + behaviour check for device permissions: the "turned off" guard
+// dialog and My Profile. (2026-11-04: the post-login sheet was removed - it
+// doubled every system prompt - so its render cases are gone.)
 // Run from a project copy: OUT=/tmp/out flutter test tools/profile_permissions_render_test.dart
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -12,7 +13,6 @@ import 'package:safety_lens/services/device_permissions.dart';
 import 'package:safety_lens/services/i18n.dart';
 import 'package:safety_lens/services/local_db.dart';
 import 'package:safety_lens/screens/my_profile_screen.dart';
-import 'package:safety_lens/widgets/permission_onboarding.dart';
 
 Future<void> _font(String family, List<String> files) async {
   final l = FontLoader(family);
@@ -76,38 +76,6 @@ void main() {
     File('$out/$name.png').writeAsBytesSync(bd!.buffer.asUint8List());
   }
 
-  Future<void> sheet(WidgetTester t, bool dark, String lang, Size size,
-      String name) async {
-    SharedPreferences.setMockInitialValues({});
-    PermissionOnboarding.debugReset();
-    await fonts(t);
-    await t.runAsync(() async {
-      await LocalDB.init();
-      await I18n.setLocale(lang);
-    });
-    debugDisableShadows = false;
-    t.view.physicalSize = size;
-    t.view.devicePixelRatio = 1.0;
-    final key = GlobalKey();
-    late BuildContext ctx;
-    await t.runAsync(() async {
-      await t.pumpWidget(RepaintBoundary(
-          key: key,
-          child: app(
-              dark,
-              Builder(builder: (c) {
-                ctx = c;
-                return const Scaffold(body: SizedBox.expand());
-              }))));
-      // ignore: unawaited_futures
-      PermissionOnboarding.maybeShow(ctx, 'p12345');
-      await snap(t, key, name);
-    });
-    t.takeException();
-    await t.pumpWidget(const SizedBox());
-    debugDisableShadows = true;
-  }
-
   Future<void> profile(WidgetTester t, bool dark, String lang, Size size,
       String name) async {
     SharedPreferences.setMockInitialValues({});
@@ -116,11 +84,7 @@ void main() {
       await LocalDB.init();
       await I18n.setLocale(lang);
       await DevicePermissions.loadFor('p12345');
-      await DevicePermissions.recordAnswers({
-        DeviceFeature.camera: true,
-        DeviceFeature.microphone: false,
-        DeviceFeature.location: true,
-      });
+      await DevicePermissions.setEnabled(DeviceFeature.microphone, false);
     });
     debugDisableShadows = false;
     t.view.physicalSize = size;
@@ -136,12 +100,6 @@ void main() {
     debugDisableShadows = true;
   }
 
-  testWidgets('sheet phone light', (t) =>
-      sheet(t, false, 'en', const Size(400, 860), 'perm_sheet_phone_light'));
-  testWidgets('sheet phone dark hi', (t) =>
-      sheet(t, true, 'hi', const Size(400, 860), 'perm_sheet_phone_dark_hi'));
-  testWidgets('sheet laptop dark', (t) =>
-      sheet(t, true, 'en', const Size(1280, 760), 'perm_sheet_laptop_dark'));
   testWidgets('profile phone light', (t) =>
       profile(t, false, 'en', const Size(400, 1500), 'profile_phone_light'));
   testWidgets('profile phone dark hi', (t) =>
@@ -149,29 +107,37 @@ void main() {
   testWidgets('profile laptop dark', (t) =>
       profile(t, true, 'en', const Size(1280, 1350), 'profile_laptop_dark'));
 
-  testWidgets('one-time answer is remembered across logins', (t) async {
+  testWidgets('Profile switches are remembered across logins', (t) async {
     SharedPreferences.setMockInitialValues({});
     await t.runAsync(() async {
       await DevicePermissions.loadFor('p12345');
-      expect(DevicePermissions.answered, isFalse);
-      // Defaults: nothing blocked for someone who never answered.
-      expect(DevicePermissions.isEnabled(DeviceFeature.camera), isTrue);
-      await DevicePermissions.recordAnswers({
-        DeviceFeature.camera: true,
-        DeviceFeature.microphone: false,
-        DeviceFeature.location: true,
-      });
-      // "Log out" and back in: a fresh load reads the stored answer.
+      // Default ON: the device itself asks once at first use.
+      for (final f in DeviceFeature.values) {
+        expect(DevicePermissions.isEnabled(f), isTrue);
+      }
+      await DevicePermissions.setEnabled(DeviceFeature.microphone, false);
       await DevicePermissions.loadFor('someone_else');
-      expect(DevicePermissions.answered, isFalse);
+      expect(DevicePermissions.isEnabled(DeviceFeature.microphone), isTrue);
       await DevicePermissions.loadFor('P12345'); // case-insensitive
-      expect(DevicePermissions.answered, isTrue);
       expect(DevicePermissions.isEnabled(DeviceFeature.microphone), isFalse);
       expect(DevicePermissions.isEnabled(DeviceFeature.camera), isTrue);
-      // Changed later in My Profile.
       await DevicePermissions.setEnabled(DeviceFeature.microphone, true);
       await DevicePermissions.loadFor('p12345');
       expect(DevicePermissions.isEnabled(DeviceFeature.microphone), isTrue);
+    });
+  });
+
+  testWidgets('old v1 "Not now" answers no longer switch features off',
+      (t) async {
+    SharedPreferences.setMockInitialValues({
+      'device_perm_v1_p12345':
+          '{"camera":false,"microphone":false,"location":false,"answered":true}',
+    });
+    await t.runAsync(() async {
+      await DevicePermissions.loadFor('p12345');
+      for (final f in DeviceFeature.values) {
+        expect(DevicePermissions.isEnabled(f), isTrue);
+      }
     });
   });
 
@@ -181,11 +147,7 @@ void main() {
     await t.runAsync(() async {
       await I18n.setLocale('en');
       await DevicePermissions.loadFor('p12345');
-      await DevicePermissions.recordAnswers({
-        DeviceFeature.camera: false,
-        DeviceFeature.microphone: true,
-        DeviceFeature.location: true,
-      });
+      await DevicePermissions.setEnabled(DeviceFeature.camera, false);
     });
     t.view.physicalSize = const Size(400, 700);
     t.view.devicePixelRatio = 1.0;

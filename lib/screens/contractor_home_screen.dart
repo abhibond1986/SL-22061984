@@ -17,7 +17,7 @@ import 'near_miss_tab.dart';
 import '../services/branding.dart';
 import '../widgets/brand_logo.dart';
 import '../widgets/safe_backdrop_filter.dart';
-import '../widgets/permission_onboarding.dart';
+import '../services/device_permissions.dart';
 import '../services/i18n.dart';
 import 'my_profile_screen.dart';
 
@@ -44,11 +44,10 @@ class _ContractorHomeScreenState extends State<ContractorHomeScreen> {
   @override
   void initState() {
     super.initState();
-    // ★ 2026-10-30: one-time camera / mic / location request for this device's
-    // contractor session (there is no account, so it is keyed 'contractor').
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) PermissionOnboarding.maybeShow(context, 'contractor');
-    });
+    // ★ 2026-11-04: no permission sheet (it doubled every prompt). Load the
+    // contractor session's My Profile switches only; the device asks once, at
+    // first use. Keyed 'contractor' because there is no account.
+    DevicePermissions.loadFor('contractor');
   }
 
   void _exitToLogin() {
