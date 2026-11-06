@@ -33,6 +33,8 @@ library;
 
 import 'dart:math' as math;
 
+import 'line_of_fire.dart';
+
 /// What happened to one hazard, for logging and for the tests.
 class QualityReport {
   const QualityReport({
@@ -147,9 +149,14 @@ class HazardQuality {
       // until this runs. Every audit below then judges the filed row like any
       // other.
       final wheelFiled = auditWheelCheck(result);
+      // Same reason, same place: the model's REQUIRED line-of-fire answer can
+      // be the only record of a worker in a path, so it is turned into rows
+      // and paths before anything else judges the table.
+      auditLineOfFire(result);
 
       final raw = result['hazards'];
       if (raw is! List || raw.isEmpty) {
+        finaliseLineOfFire(result);
         result[kFlag] = true;
         return const QualityReport(
             merged: 0, absenceDowngraded: 0, absenceFlagged: 0);
@@ -241,6 +248,7 @@ class HazardQuality {
       final viewCapped = capSeverityForView(result, deduped);
 
       result['hazards'] = deduped;
+      finaliseLineOfFire(result);
       result[kFlag] = true;
       return QualityReport(
         merged: mergedCount,
@@ -1611,6 +1619,287 @@ class HazardQuality {
         'its visible wheels.';
     result['summary'] = summary.isEmpty ? note.trim() : '$summary$note';
     return 1;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  LINE OF FIRE — THE REQUIRED SCAN-LEVEL CHECK
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ★ 2026-11-06, user report: "sometimes line of fire appears in the image
+  // analysis and sometimes it doesn't". Three causes, all fixed together:
+  //   1. The path was an OPTIONAL per-row `lofZone`. A rule in a long prompt
+  //      is skimmed — the wheelCheck lesson — so the model filled it only
+  //      some of the time, for the same photograph.
+  //   2. The prompt banned every `lofZone` when "people" was 0, so a crane
+  //      lifting over an empty bay, or a coil with no chock, NEVER had one,
+  //      although the renderers have drawn a dashed nobody-in-frame zone since
+  //      2026-08.
+  //   3. The report printed nothing when no path was found, so "checked, none"
+  //      and "never checked" looked identical.
+  // The prompt now asks a REQUIRED `lineOfFire` {verdict, reason, paths[]}
+  // on EVERY photograph, and this audit does the bookkeeping the model
+  // forgets: hang each path on the row that describes its source, file a HIGH
+  // row for a visible person in a path no row covers, keep a zone with nobody
+  // in it and no row as a standalone zone, and record the verdict for the
+  // report. It never INVENTS a path — every coordinate is the model's.
+
+  static const String kLineOfFireKey = 'lineOfFire';
+  static const String kLineOfFireFlag = '_lineOfFireChecked';
+
+  /// Citation for a filed line-of-fire row, by energy type. Every one is in
+  /// RegulationCatalog. A visible person in the path of a suspended load is
+  /// the worker-conduct clause the prompt's subject guide already names;
+  /// the rest are the occupier duty that governs that energy.
+  static const Map<String, String> _lofRegulation = {
+    'GRAVITY': 'FA 1948 S111(1)(b)',
+    'MOTION': 'FA 1948 S7A(2)(d)',
+    'ROTATING': 'FA 1948 S21',
+    'PRESSURE': 'FA 1948 S7A(2)(a)',
+    'THERMAL': 'FA 1948 S7A(2)(a)',
+    'STORED': 'FA 1948 S7A(2)(b)',
+    'ELECTRICAL': 'CEA Regulations 2010 Reg 46',
+    'CHEMICAL': 'FA 1948 S7A(2)(a)',
+  };
+
+  static const Map<String, String> _lofConsequence = {
+    'GRAVITY': 'A dropped or swinging load would strike them; nobody may '
+        'stand or pass under a suspended load.',
+    'MOTION': 'The vehicle can strike them or crush them against fixed '
+        'structure.',
+    'ROTATING': 'The moving part can draw them in or throw material at them.',
+    'PRESSURE': 'A failure would discharge or whip the line straight at them.',
+    'THERMAL': 'A splash or breakout of molten or hot material would reach '
+        'them.',
+    'STORED': 'A roll-away, collapse or snap-back would strike them without '
+        'warning.',
+    'ELECTRICAL': 'An arc flash from the energised part would reach them.',
+    'CHEMICAL': 'A discharge would reach them along its line of release.',
+  };
+
+  static const Map<String, String> _lofAction = {
+    'GRAVITY': 'Move the person out from under the load, barricade the drop '
+        'and swing zone, and guide loads with tag lines.',
+    'MOTION': 'Clear the person from the vehicle path, set a pedestrian '
+        'exclusion zone and post a banksman for every movement.',
+    'ROTATING': 'Withdraw the person from the nip; stop, isolate and lock out '
+        'before any approach, and fit fixed guarding.',
+    'PRESSURE': 'Move the person off the discharge line; depressurise and '
+        'isolate, and restrain hoses with whip checks.',
+    'THERMAL': 'Withdraw the person from the splash zone, barricade it, and '
+        'allow entry only in aluminised PPE under permit.',
+    'STORED': 'Move the person clear; chock, band or restrain the load, or '
+        'release the stored energy before approach.',
+    'ELECTRICAL': 'Move the person back to the arc-flash boundary; isolate, '
+        'lock out and prove dead before work.',
+    'CHEMICAL': 'Move the person off the discharge line; isolate and drain, '
+        'and use chemical PPE under permit.',
+  };
+
+  static String _lofVerdict(Object? v) {
+    final s = _str(v).toUpperCase().replaceAll(RegExp(r'[\s-]+'), '_');
+    if (s == 'EXPOSED') return LineOfFireGeometry.vExposed;
+    if (s == 'ZONE_ONLY' || s == 'ZONE' || s == 'ZONEONLY') {
+      return LineOfFireGeometry.vZoneOnly;
+    }
+    if (s == 'NONE' || s == 'NO' || s == 'CLEAR') return LineOfFireGeometry.vNone;
+    return '';
+  }
+
+  /// Turns `result['lineOfFire']` into paths on rows, filed rows and
+  /// standalone zones. Returns the number of rows FILED. Runs right after
+  /// [auditWheelCheck] and before the empty-table exit, so a filed row is
+  /// judged by every later audit like any other. Never throws.
+  static int auditLineOfFire(Map<String, dynamic> result) {
+    if (result[kLineOfFireFlag] == true) return 0;
+    result[kLineOfFireFlag] = true;
+    final lc = result[kLineOfFireKey];
+    final check = <String, dynamic>{
+      'verdict': '',
+      'modelVerdict': lc is Map ? _lofVerdict(lc['verdict']) : '',
+      if (lc is Map && _str(lc['reason']).isNotEmpty)
+        'reason': _str(lc['reason']),
+      'zones': <Map<String, dynamic>>[],
+      'attached': 0,
+      'filed': 0,
+      'rejected': 0,
+    };
+    result[LineOfFireGeometry.kCheckKey] = check;
+    if (lc is! Map) return 0;
+
+    final rawPaths = lc['paths'] ?? lc['sources'];
+    if (rawPaths is! List || rawPaths.isEmpty) return 0;
+
+    final raw = result['hazards'];
+    final hazards = <Map<String, dynamic>>[
+      if (raw is List)
+        for (final h in raw)
+          if (h is Map) h.cast<String, dynamic>(),
+    ];
+    final people = _peopleVisible(result);
+    var filed = 0;
+
+    for (final p in rawPaths.take(2)) {
+      if (p is! Map) continue;
+      final source = _str(p['source']);
+      final energy = _str(p['energy']).toUpperCase();
+      final evidence = _str(p['evidence']);
+      var exposure = _str(p['exposure']);
+      var personVisible = _truthy(p['personVisible']) && people != 0;
+      if (personVisible && _hedged.hasMatch(evidence)) personVisible = false;
+
+      final zone = <String, dynamic>{
+        'x1': p['x1'], 'y1': p['y1'], 'x2': p['x2'], 'y2': p['y2'],
+        if (p['width'] != null) 'width': p['width'],
+        'source': source,
+        'exposure': exposure,
+        'personVisible': personVisible,
+        if (energy.isNotEmpty) 'energy': energy,
+      };
+
+      // The path must stand on its own before it is hung anywhere: a named,
+      // non-trivial energy source and usable coordinates. Its own evidence is
+      // the corroborating observation.
+      final carrier = <String, dynamic>{
+        'name': source,
+        'description': evidence,
+        'visualEvidence': evidence,
+        'lofZone': zone,
+        if (people != null) '_peopleVisible': people,
+      };
+      if (source.isEmpty || LineOfFireGeometry.parse(carrier) == null) {
+        check['rejected'] = (check['rejected'] as int) + 1;
+        continue;
+      }
+
+      // Already drawn by a row the model wrote with its own lofZone.
+      final covered = hazards.any((h) {
+        final lof = LineOfFireGeometry.parse(h);
+        return lof != null && LineOfFireGeometry.sourceMatches(h, source);
+      });
+      if (covered) continue;
+
+      // Hang it on the most severe row that describes this source, has no
+      // path yet, and is not a fall / PPE / housekeeping finding.
+      final candidates = [
+        for (final h in hazards)
+          if (LineOfFireGeometry.parse(h) == null &&
+              LineOfFireGeometry.sourceMatches(h, source) &&
+              (!LineOfFireGeometry.isBoxOnlyFinding(h) ||
+                  LineOfFireGeometry.claimsLineOfFire(h)))
+            h,
+      ]..sort((a, b) => severityRank(_str(b['severity']))
+          .compareTo(severityRank(_str(a['severity']))));
+      var attached = false;
+      for (final h in candidates) {
+        final before = h['lofZone'];
+        h['lofZone'] = Map<String, dynamic>.from(zone);
+        if (LineOfFireGeometry.parse(h) != null) {
+          h['_lofFrom'] = kLineOfFireKey;
+          attached = true;
+          break;
+        }
+        if (before == null) {
+          h.remove('lofZone');
+        } else {
+          h['lofZone'] = before;
+        }
+      }
+      if (attached) {
+        check['attached'] = (check['attached'] as int) + 1;
+        continue;
+      }
+
+      // No row for it. A REAL person in the path is a finding the model was
+      // told to file and did not — file it, as the wheel check does. Nobody
+      // in the path: a standalone danger zone, drawn dashed, never a row.
+      if (personVisible && LineOfFireGeometry.exposureNamesPerson(exposure)) {
+        final what = source;
+        final row = <String, dynamic>{
+          'name': 'Line of fire: $exposure',
+          'description': 'Visible: $exposure in the line of fire of the '
+              '$what. ${_lofConsequence[energy] ?? 'A release from the source '
+              'would reach them.'}',
+          'severity': 'HIGH',
+          'regulation': _lofRegulation[energy] ?? 'FA 1948 S7A(2)(a)',
+          'type': 'Line of Fire',
+          'correctiveAction': _lofAction[energy] ??
+              'Move the person out of the path of the $what and barricade '
+                  'the danger zone before work resumes.',
+          'visualEvidence': evidence.isEmpty ? '$exposure near the $what.' : evidence,
+          'confidence': _asInt(p['confidence']) ??
+              _asInt(result['confidence']) ?? 75,
+          'lofZone': zone,
+          '_derivedFrom': kLineOfFireKey,
+        };
+        hazards.add(row);
+        filed++;
+        continue;
+      }
+      if (personVisible) {
+        // Flag said yes, wording did not name a person: not an arrow.
+        zone['personVisible'] = false;
+        exposure = exposure.isEmpty ? 'danger zone' : exposure;
+        zone['exposure'] = exposure;
+      }
+      (check['zones'] as List<Map<String, dynamic>>).add({
+        'name': 'Line-of-fire danger zone: $source',
+        'description': evidence,
+        'visualEvidence': evidence,
+        'lofZone': zone,
+        if (people != null) '_peopleVisible': people,
+      });
+    }
+
+    if (filed == 0) return 0;
+    check['filed'] = filed;
+    result['hazards'] = hazards;
+
+    // The banner follows the rows UP, never down — as auditWheelCheck does.
+    final overall = _str(result['overallRisk']);
+    if (severityRank(overall) < severityRank('HIGH')) {
+      if (overall.isNotEmpty) result['overallRiskBeforeLineOfFire'] = overall;
+      result['overallRisk'] = 'HIGH';
+    }
+    final score = _asInt(result['riskScore']);
+    if (score == null || score < 62) {
+      if (score != null) result['riskScoreBeforeLineOfFire'] = score;
+      result['riskScore'] = 62;
+    }
+    final summary = _str(result['summary']);
+    const note = ' A person is standing in the line of fire.';
+    if (!summary.toLowerCase().contains('line of fire')) {
+      result['summary'] = summary.isEmpty ? note.trim() : '$summary$note';
+    }
+    return filed;
+  }
+
+  /// Settles the stored verdict against the rows that SURVIVED every audit —
+  /// a filed row can still be withdrawn by the scene rule, or capped. Called
+  /// at both exits of [apply], and safe to call again.
+  static void finaliseLineOfFire(Map<String, dynamic> result) {
+    final existing = result[LineOfFireGeometry.kCheckKey];
+    final check = existing is Map
+        ? existing.cast<String, dynamic>()
+        : <String, dynamic>{'modelVerdict': '', 'zones': const []};
+    final raw = result['hazards'];
+    final hazards = raw is List ? raw : const [];
+    final all = LineOfFireGeometry.collect(hazards, check: check, max: 99);
+    final modelVerdict = _str(check['modelVerdict']);
+    String verdict;
+    if (all.any((e) => e.lof.personVisible)) {
+      verdict = LineOfFireGeometry.vExposed;
+    } else if (all.isNotEmpty) {
+      verdict = LineOfFireGeometry.vZoneOnly;
+    } else if (modelVerdict == LineOfFireGeometry.vNone) {
+      verdict = LineOfFireGeometry.vNone;
+    } else if (modelVerdict.isNotEmpty ||
+        hazards.any((h) => h is Map && LineOfFireGeometry.claimsLineOfFire(h))) {
+      verdict = LineOfFireGeometry.vNotLocated;
+    } else {
+      verdict = LineOfFireGeometry.vNotReported;
+    }
+    check['verdict'] = verdict;
+    result[LineOfFireGeometry.kCheckKey] = check;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

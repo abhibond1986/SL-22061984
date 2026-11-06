@@ -2885,6 +2885,11 @@ class _AIScanTabState extends State<AIScanTab> {
           (_result![HazardQuality.kVerifyOnSiteKey] as List).isNotEmpty)
         HazardQuality.kVerifyOnSiteKey:
             _result![HazardQuality.kVerifyOnSiteKey],
+      // The scan's line-of-fire verdict and standalone danger zones, so the
+      // PDF and any other device print the same line-of-fire strip the
+      // screen showed — including "checked, none" (2026-11-06).
+      if (_result![LineOfFireGeometry.kCheckKey] is Map)
+        LineOfFireGeometry.kCheckKey: _result![LineOfFireGeometry.kCheckKey],
       'ptw_required':    _result!['ptw_required']?.toString() ?? 'None',
       'section_specific_risks': _result!['section_specific_risks'] ?? [],
       'imageBase64':     _imageBytes != null
@@ -4053,6 +4058,7 @@ class _AIScanTabState extends State<AIScanTab> {
             child: HazardAnnotatedImage(
                 imageBytes: _imageBytes!,
                 hazards: hazards,
+                lofCheck: _result?[LineOfFireGeometry.kCheckKey],
                 onHazardTap: _onBboxTap),
           ),
         ),

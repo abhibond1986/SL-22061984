@@ -590,7 +590,11 @@ class LineOfFireGeometry {
   static String caption(int index, LineOfFire lof, {String arrow = '→'}) {
     final src = lof.source.trim();
     final who = lof.exposure.trim();
-    final head = '${index + 1}  ';
+    // A negative index is a STANDALONE danger zone from the scan's
+    // line-of-fire check — one with no hazard row of its own (see
+    // [collect]). It is labelled Z1, Z2 so it can never be mistaken for the
+    // hazard-table row with the same number.
+    final head = index < 0 ? 'Z${-index}  ' : '${index + 1}  ';
     if (!lof.personVisible) {
       // Says out loud that nobody is standing there. The zone is still worth
       // marking — it is where a person WOULD be struck — but the reader must not
@@ -602,7 +606,131 @@ class LineOfFireGeometry {
     if (src.isNotEmpty && who.isNotEmpty) return '$head$src $arrow $who';
     if (src.isNotEmpty) return '$head$src $arrow person';
     if (who.isNotEmpty) return '${head}line of fire $arrow $who';
-    return 'line of fire ${index + 1}';
+    return index < 0 ? 'line of fire Z${-index}' : 'line of fire ${index + 1}';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  THE SCAN-LEVEL LINE-OF-FIRE CHECK
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ★ 2026-11-06. Line of fire used to exist only as an OPTIONAL `lofZone` on
+  // individual hazard rows, and the prompt forbade it outright whenever
+  // "people" was 0. So it appeared on some photographs and not others with no
+  // visible reason, and a report with no path was indistinguishable from a
+  // report nobody had checked. The prompt now asks a REQUIRED top-level
+  // `lineOfFire` question on every photograph (the same pattern that fixed the
+  // scotch-block misses, see HazardQuality.auditWheelCheck), and
+  // HazardQuality.auditLineOfFire turns the answer into rows and paths. What
+  // it leaves behind is stored under [kCheckKey]:
+  //
+  //   { verdict: EXPOSED | ZONE_ONLY | NONE | NOT_LOCATED | NOT_REPORTED,
+  //     reason:  model's reason for NONE,
+  //     zones:   [hazard-shaped maps carrying a lofZone] — danger zones with
+  //              nobody in them and no row to hang on, drawn dashed as Z1, Z2 }
+  //
+  // Every surface (scan screen, PDF, near-miss brief) reads the SAME key
+  // through [collect] and [checkLine], so they cannot disagree.
+
+  static const String kCheckKey = 'lineOfFireCheck';
+
+  /// Verdicts written to [kCheckKey]. NOT_LOCATED = the model said there was a
+  /// path but none survived validation; NOT_REPORTED = the model never
+  /// answered (older prompt, cut-off reply).
+  static const String vExposed = 'EXPOSED';
+  static const String vZoneOnly = 'ZONE_ONLY';
+  static const String vNone = 'NONE';
+  static const String vNotLocated = 'NOT_LOCATED';
+  static const String vNotReported = 'NOT_REPORTED';
+
+  /// Whether [hazard] is fundamentally a fall / PPE / housekeeping finding.
+  /// A line-of-fire path is never hung on one of those rows: the energy
+  /// source is scenery to them, not their subject.
+  static bool isBoxOnlyFinding(Map hazard) => _boxOnlyHazard.hasMatch(
+      _lower('${hazard['name'] ?? ''} ${hazard['description'] ?? ''}'));
+
+  /// Whether [source] — a line-of-fire path's named energy source — is
+  /// something [hazard]'s own words talk about. Stricter than
+  /// [sourceIsCorroborated] on purpose: that one forgives a row with no
+  /// observation text, which is right when judging a path the row already
+  /// carries, and wrong when choosing which row a new path belongs to.
+  static bool sourceMatches(Map hazard, String source) {
+    final significant = _lower(source)
+        .split(RegExp(r'[^a-z0-9]+'))
+        .where((w) => w.length > 2 && !_genericSourceWords.contains(w))
+        .toList(growable: false);
+    if (significant.isEmpty) return false;
+    final text = _lower('${hazard['name'] ?? ''} ${hazard['description'] ?? ''} '
+        '${hazard['visualEvidence'] ?? ''}');
+    return _containsWord(text, significant);
+  }
+
+  /// Whether an exposure phrase names a real, unhedged person — the bar a
+  /// path must clear before the app files a HIGH row on the model's behalf.
+  /// The model's own `personVisible: true` is not enough on its own for that.
+  static bool exposureNamesPerson(String exposure) {
+    final e = _lower(exposure);
+    if (e.isEmpty || _speculativeExposure.hasMatch(e)) return false;
+    return _containsWord(e, _personWords);
+  }
+
+  /// The standalone danger zones stored in a [kCheckKey] map.
+  static List<Map> zonesFromCheck(Object? check) {
+    if (check is! Map) return const [];
+    final z = check['zones'];
+    if (z is! List) return const [];
+    return [for (final e in z) if (e is Map) e];
+  }
+
+  /// EVERY drawable line of fire for one photograph, most important first,
+  /// capped at [max]: the [pickOne] choice, then the other hazard rows that
+  /// carry a path, then the standalone zones from [check] (index -1, -2, …).
+  static List<({int index, LineOfFire lof})> collect(List hazards,
+      {Object? check, int max = 3}) {
+    final pick = pickOne(hazards);
+    final out = <({int index, LineOfFire lof})>[
+      if (pick != null) (index: pick.index, lof: pick.lof),
+    ];
+    for (var i = 0; i < hazards.length; i++) {
+      if (pick != null && i == pick.index) continue;
+      final h = hazards[i];
+      if (h is! Map) continue;
+      final lof = parse(h);
+      if (lof != null) out.add((index: i, lof: lof));
+    }
+    final zones = zonesFromCheck(check);
+    for (var k = 0; k < zones.length; k++) {
+      final lof = parse(zones[k]);
+      if (lof != null) out.add((index: -(k + 1), lof: lof));
+    }
+    return out.take(max).toList();
+  }
+
+  /// The one line printed when the check produced NO drawable path, so a
+  /// report never stays silent about line of fire. Null when there IS a path
+  /// (the captions say it) — or when [check] is absent AND nothing claims a
+  /// line of fire, in which case [notReported] decides: true on an analysed
+  /// photo (say plainly it was not assessed), false elsewhere.
+  ///
+  /// ASCII only: the PDF's Latin-1 font has no em dash.
+  static String? checkLine(Object? check, {bool notReported = true}) {
+    final verdict = check is Map ? (check['verdict'] ?? '').toString() : '';
+    final reason = check is Map ? (check['reason'] ?? '').toString().trim() : '';
+    switch (verdict) {
+      case vExposed:
+      case vZoneOnly:
+        return null;
+      case vNone:
+        return reason.isEmpty
+            ? 'Checked - no energy source with a line of fire in this frame'
+            : 'Checked - no line of fire in this frame ($reason)';
+      case vNotLocated:
+        return 'Line of fire reported but not locatable on the photo - '
+            'check on site';
+      default:
+        return notReported
+            ? 'Not assessed by the AI for this photo - check line of fire on site'
+            : null;
+    }
   }
 
   /// Whether this hazard SHOULD have had a path. Used to flag a hazard that

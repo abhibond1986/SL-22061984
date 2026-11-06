@@ -27,11 +27,18 @@ class HazardAnnotatedImage extends StatefulWidget {
   final List hazards;
   final void Function(int index)? onHazardTap;
 
+  /// The scan-level line-of-fire check (`LineOfFireGeometry.kCheckKey`).
+  /// Supplies standalone danger zones that have no hazard row, and the status
+  /// line shown when there is no path at all. Null on callers that never ran
+  /// the check — those keep the old behaviour (no strip when no path).
+  final Object? lofCheck;
+
   const HazardAnnotatedImage({
     super.key,
     required this.imageBytes,
     required this.hazards,
     this.onHazardTap,
+    this.lofCheck,
   });
 
   @override
@@ -102,9 +109,23 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
         // photograph, and its height comes out of the space available to the
         // photograph — otherwise a caller that gives this widget a bounded height
         // gets an overflow instead of a legend.
-        final pick = LineOfFireGeometry.pickOne(widget.hazards);
-        final legend =
-            pick == null ? '' : LineOfFireGeometry.caption(pick.index, pick.lof);
+        // Same first path the PDF draws (LineOfFireGeometry.collect), so a
+        // standalone danger zone shows here too.
+        final lofs = LineOfFireGeometry.collect(widget.hazards,
+            check: widget.lofCheck, max: 1);
+        final pick = lofs.isEmpty ? null : lofs.first;
+        // No path: say what the check found rather than nothing (2026-11-06).
+        final status = pick != null
+            ? null
+            : LineOfFireGeometry.checkLine(widget.lofCheck,
+                notReported: widget.lofCheck != null);
+        final checkedNone = widget.lofCheck is Map &&
+            (widget.lofCheck as Map)['verdict'] == LineOfFireGeometry.vNone;
+        final legend = pick != null
+            ? LineOfFireGeometry.caption(pick.index, pick.lof)
+            : status == null
+                ? ''
+                : 'Line of fire: $status';
         final legendH = legend.isEmpty ? 0.0 : _legendHeight;
 
         // Respect a bounded height from the caller. Width-driven sizing alone
@@ -146,6 +167,7 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
                 height: imageRenderH,
                 child: _BboxOverlay(
                   hazards: widget.hazards,
+                  pick: pick,
                   onHazardTap: widget.onHazardTap,
                 ),
               ),
@@ -157,7 +179,15 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
         return Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [photo, _legendBar(legend)],
+          children: [
+            photo,
+            _legendBar(legend,
+                tone: pick != null
+                    ? _LegendTone.path
+                    : checkedNone
+                        ? _LegendTone.clear
+                        : _LegendTone.check),
+          ],
         );
       },
     );
@@ -170,20 +200,21 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
 
   /// The caption that used to be stamped across the photograph. Down here it can
   /// be read, and the number ties it to the bounding box above.
-  Widget _legendBar(String text) => Container(
+  Widget _legendBar(String text, {_LegendTone tone = _LegendTone.path}) =>
+      Container(
         height: _legendHeight,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         alignment: Alignment.centerLeft,
         // Opaque, not a translucent red wash: this strip can sit on the light or
         // the dark surface, and a translucent fill would put dark-red text on a
         // near-black background in dark mode.
-        color: const Color(0xFFFDECEA),
+        color: tone.fill,
         child: Row(children: [
           Container(
             width: 12,
             height: 3,
             decoration: BoxDecoration(
-              color: const Color(0xFFE53935),
+              color: tone.bar,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -193,11 +224,11 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
               text,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                // Not a theme colour: the strip carries its own opaque pale-red
-                // fill in both themes, so the pairing is fixed. #B3261E on
-                // #FDECEA is 5.7:1 — above the 4.5:1 AA floor.
-                color: Color(0xFFB3261E),
+              style: TextStyle(
+                // Not a theme colour: the strip carries its own opaque pale
+                // fill in both themes, so each pairing is fixed. #B3261E on
+                // #FDECEA is 5.7:1; the green and amber pairs are above 7:1.
+                color: tone.ink,
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 0.2,
@@ -208,11 +239,23 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
       );
 }
 
+/// Fixed pale fill / bar / ink triples for the strip under the photo. Opaque
+/// on purpose — see [_HazardAnnotatedImageState._legendBar].
+enum _LegendTone {
+  path(Color(0xFFFDECEA), Color(0xFFE53935), Color(0xFFB3261E)),
+  clear(Color(0xFFE8F5E9), Color(0xFF2E7D32), Color(0xFF1B5E20)),
+  check(Color(0xFFFFF4E5), Color(0xFFEF8F00), Color(0xFF7A4100));
+
+  const _LegendTone(this.fill, this.bar, this.ink);
+  final Color fill, bar, ink;
+}
+
 class _BboxOverlay extends StatelessWidget {
   final List hazards;
+  final ({int index, LineOfFire lof})? pick;
   final void Function(int index)? onHazardTap;
 
-  const _BboxOverlay({required this.hazards, this.onHazardTap});
+  const _BboxOverlay({required this.hazards, this.pick, this.onHazardTap});
 
   @override
   Widget build(BuildContext context) {
@@ -220,7 +263,7 @@ class _BboxOverlay extends StatelessWidget {
       builder: (context, constraints) {
         final w = constraints.maxWidth;
         final h = constraints.maxHeight;
-        final pick = LineOfFireGeometry.pickOne(hazards);
+        final pick = this.pick;
 
         return Stack(
           clipBehavior: Clip.hardEdge,

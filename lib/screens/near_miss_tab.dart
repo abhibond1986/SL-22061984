@@ -75,6 +75,10 @@ class _NearMissTabState extends State<NearMissTab> with TickerProviderStateMixin
   // the first hazard alone — this is about showing the reporter what the model
   // actually looked at, which is otherwise invisible on this screen.
   List<Map<String, dynamic>> _aiHazards = const [];
+  /// The AI result's line-of-fire check (LineOfFireGeometry.kCheckKey), so the
+  /// photo brief draws standalone danger zones and says "checked, none"
+  /// exactly as the AI Scan screen does. Cleared wherever [_aiHazards] is.
+  Object? _aiLofCheck;
   bool        _isOnlineMode = true;
 
   final _brief           = TextEditingController();
@@ -1211,7 +1215,7 @@ If the text is already fine, return it unchanged.''';
     _releaseScanJob();
     setState(() {
       _pickedFile = picked; _imageBytes = bytes;
-      _aiBrief = null; _aiHazards = const [];
+      _aiBrief = null; _aiHazards = const []; _aiLofCheck = null;
       _adoptedJobId = null; _appliedJobId = null;
     });
 
@@ -1524,7 +1528,7 @@ If the text is already fine, return it unchanged.''';
       _snack('Offline - Image analysis skipped. Fill form manually.', const Color(0xFFD97706));
       setState(() {
         _isOnlineMode = false;
-        _aiHazards = const [];
+        _aiHazards = const []; _aiLofCheck = null;
         _aiBrief = {
           'identified': 'Manual entry — Offline',
           'statutory':  'Complete form manually',
@@ -1636,7 +1640,7 @@ If the text is already fine, return it unchanged.''';
         if (!mounted) return;
         setState(() {
           _isOnlineMode = false;
-          _aiHazards = const [];
+          _aiHazards = const []; _aiLofCheck = null;
           _aiBrief = {
             'identified': 'AI unavailable — fill form manually',
             'statutory':  'Refer applicable regulations',
@@ -1737,6 +1741,7 @@ If the text is already fine, return it unchanged.''';
       setState(() {
         _isOnlineMode = isOnline;
         _aiHazards = annotatable;
+        _aiLofCheck = result?[LineOfFireGeometry.kCheckKey];
         _aiBrief = {
           'identified': refinedData['name'],
           'statutory':  (refinedData['reg']?.toString() ?? '').isEmpty ? 'FA 1948 S7A (general duties of occupier)' : refinedData['reg'].toString(),
@@ -1897,7 +1902,7 @@ If the text is already fine, return it unchanged.''';
     if (!mounted) return;
     setState(() {
       _isOnlineMode = false;
-      _aiHazards = const [];
+      _aiHazards = const []; _aiLofCheck = null;
       _aiBrief = {
         'identified': headline,
         'statutory':  'Complete form manually',
@@ -2056,7 +2061,7 @@ If the text is already fine, return it unchanged.''';
     _releaseScanJob();
     setState(() {
       _saved = false;
-      _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const [];
+      _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _aiLofCheck = null;
       _brief.clear(); _deptOther.clear(); _selectedDept = ''; _showOtherDept = false;
       _location.clear(); _description.clear(); _immediateAction.clear();
       for (final c in _additionalActions) { c.dispose(); }
@@ -3003,11 +3008,11 @@ If the text is already fine, return it unchanged.''';
   /// from the plain one, plus a caption promising markings that aren't there.
   bool get _annotatable =>
       _imageBytes != null &&
-      _aiHazards.any((h) =>
-          h['bbox'] != null || LineOfFireGeometry.parse(h) != null);
+      (_aiHazards.any((h) => h['bbox'] != null) || _lofCount > 0);
 
-  int get _lofCount =>
-      _aiHazards.where((h) => LineOfFireGeometry.parse(h) != null).length;
+  int get _lofCount => LineOfFireGeometry.collect(_aiHazards,
+          check: _aiLofCheck, max: 99)
+      .length;
 
   Widget _annotationCaption(SL sl) {
     final boxes = _aiHazards.where((h) => h['bbox'] != null).length;
@@ -3059,6 +3064,7 @@ If the text is already fine, return it unchanged.''';
             ? HazardAnnotatedImage(
                 imageBytes: _imageBytes!,
                 hazards: _aiHazards,
+                lofCheck: _aiLofCheck,
               )
             : Image.memory(_imageBytes!,
                 fit: BoxFit.contain, width: double.infinity),
@@ -3181,7 +3187,7 @@ If the text is already fine, return it unchanged.''';
       OutlinedButton.icon(
         onPressed: () {
           _releaseScanJob();
-          setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _brief.clear(); });
+          setState(() { _pickedFile = null; _imageBytes = null; _aiBrief = null; _aiHazards = const []; _aiLofCheck = null; _brief.clear(); });
         },
         icon: Icon(Icons.delete_outline_rounded, size: 15, color: sl.redText),
         label: Text('Remove Image', style: TextStyle(color: sl.redText, fontSize: 12, fontWeight: FontWeight.w600)),

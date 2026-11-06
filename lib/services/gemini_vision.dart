@@ -920,7 +920,10 @@ HOW TO USE IT:
   ///   4 — 2026-10-21: required "wheelCheck" for rail vehicles, after two
   ///       scans of a stabled wagon on bare rail reported only the ballast.
   ///       Without this bump a rescan of that photo is served the old answer.
-  static const int kHazardPromptRev = 4;
+  ///   5 — 2026-11-06: required "lineOfFire" assessment on EVERY photograph
+  ///       (verdict + up to 2 paths), replacing the optional per-row
+  ///       "lofZone" that the model filled only when it remembered to.
+  static const int kHazardPromptRev = 5;
 
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
@@ -3729,7 +3732,7 @@ HOW TO USE IT:
     final sevEnum = sevs.isEmpty
         ? 'LOW'
         : sevs.reversed.map((s) => s.toUpperCase()).join('|');
-    // 'Line of Fire' drives the lofZone field below, so keep it available
+    // 'Line of Fire' is the type for rows backing a lineOfFire path, so keep it available
     // even if the admin's list doesn't mention it.
     final typeList = <String>[
       ...types,
@@ -3984,84 +3987,97 @@ HARD RULES:
   section above, when present, is part of this table and may be cited freely.
 
 ═══════════════════════════════════════════════════════
-LINE OF FIRE (LOF) — needs a NAMED ENERGY SOURCE, every time
+LINE OF FIRE (LOF) — ASSESSED FOR EVERY PHOTOGRAPH, answered in "lineOfFire"
 ═══════════════════════════════════════════════════════
-"Line of Fire" = a person standing where a SPECIFIC, VISIBLE energy source could
-release and strike them. The arrow you are asked for runs FROM that source TO
-that person, so if you cannot name the thing at the arrow's tail, there is no
-line of fire to draw.
+Line of fire is the path a released energy takes, and the ground it lands on.
+A person is "in the line of fire" when their body is inside that path. In an
+integrated steel works it is the largest single family of fatal accidents, so
+CHECK it on every photograph and say what you found in the required
+"lineOfFire" object, written BEFORE "hazards". "NONE" is a valid answer; a
+missing object is not.
 
-★ You MUST be able to name the source as one of these, and SEE it in the image:
-  • a suspended or hoisted load        • a vehicle or mobile equipment
-  • a moving/rotating machine part     • a pressurised or hot release point
-  • an energised electrical part       • an unstable stack, coil or load
-★ These are NOT energy sources and get a "bbox" ONLY — never a "lofZone":
-  • a fall from height or an open edge (the hazard is the drop, not a projectile)
-  • missing or wrong PPE
-  • housekeeping, spills, clutter, obstructed exits
-  • signage, documentation or training gaps
-  A recent report drew a line of fire straight down an empty walkway from a
-  worker to bare deck, labelled "worker on walkway". Nothing was at either end.
-  That arrow tells a safety officer to look at nothing.
-★ ONLY report LOF if you can SEE both the person AND the energy source.
-★ Do NOT assume LOF if no persons are visible.
+STEP 1 — FIND THE ENERGY SOURCE. It must be VISIBLE and nameable in at most 4
+words. Classify it as one of:
+  GRAVITY    — suspended or hoisted load, grab, magnet, ladle on a hook,
+               material or tools that can fall from a platform or stack above.
+  MOTION     — vehicle or mobile equipment: loco, wagon, dumper, forklift,
+               loader, transfer car, crane travel, charging or pushing car.
+  ROTATING   — moving machine part: belt and pulley, roll, drum, gear,
+               coupling, shaft, shear, roller table, grinding wheel.
+  PRESSURE   — pressurised hose, pipe, flange, valve, relief outlet, hydraulic
+               or pneumatic line, gas cylinder.
+  THERMAL    — molten metal or slag, tap hole, runner, ladle, slag pot, tuyere,
+               furnace door, steam, open flame.
+  STORED     — energy that releases on its own: an unchocked coil or round load
+               that can roll, an unstable stack, a tensioned sling, rope or
+               strap (snap-back), a spring or counterweight, a stabled wagon on
+               bare rail.
+  ELECTRICAL — energised panel, open switchgear, live conductor (arc flash).
+  CHEMICAL   — acid, caustic or gas discharge point.
+NOT energy sources, and never a line of fire: an open edge or fall from height
+(the hazard is the drop), missing PPE, housekeeping, spills, signage,
+paperwork. Those are ordinary hazards with a "bbox".
+A source plainly AT REST AND DE-ENERGISED has no line of fire — a load sitting
+on the ground, an empty hook, a belt you can see is stopped and isolated —
+EXCEPT stored energy, which can release with nobody touching it.
 
-★★★ THE PERSON MUST BE A PERSON YOU CAN SEE ★★★
-Count the people in the photograph first and put that number in "people". If it
-is 0, NO hazard in this image may carry a "lofZone". Not one.
-  A distant view of a coke-oven battery, a stacker structure and ore piles was
-  reported with three lines of fire: "potential worker on platform", "worker near
-  conveyor", "worker near pile". Not one human being was visible anywhere in that
-  photograph, and the same report correctly answered "people": 0 two fields
-  earlier. Three confident arrows were printed at three empty patches of ground.
-Therefore:
-  • "exposure" must name a person you can actually point at in the image, and
-    "personVisible" must be true.
-  • These are BANNED in "exposure": "potential worker", "anyone", "any person",
-    "personnel could", "if a worker", "would be", "workers may". They describe a
-    scenario, not a person. If that is all you can say, nobody is there.
-  • A hazard can still be CRITICAL with nobody in frame — an unguarded conveyor
-    is unguarded whether or not someone is standing beside it right now. Report
-    it with a "bbox" and no "lofZone". You lose nothing but a wrong arrow.
-  • Never write a person into a "description" to justify a severity.
+STEP 2 — PLACE THE DANGER ZONE, by mechanism, from what you see:
+  GRAVITY    — the ground directly beneath the load or edge, widened by any
+               swing; for crane travel, the strip under the travel path.
+  MOTION     — ahead of and behind the vehicle on its path, its blind side, and
+               the gap between it and any fixed structure (crush zone).
+  ROTATING   — the in-running side of the nip; the tangent a grinding wheel or
+               chip would be thrown along.
+  PRESSURE   — the direction a jet would discharge; the whip radius of an
+               unrestrained hose.
+  THERMAL    — the splash zone round the ladle, tap hole, runner or pot,
+               widest on the pouring or tipping side.
+  STORED     — the direction a coil would roll (perpendicular to its axis), the
+               side a stack would topple to, the straight line a tensioned rope
+               would snap along.
+  ELECTRICAL — the floor space in front of the open panel or door.
+  CHEMICAL   — the line of discharge and the area it would wet.
 
-Cite the LOF finding from the regulation table like any other hazard — match the
-energy source you actually named to the provision that governs it. (A list of
-eight worked "person near X → section Y" pairs used to sit here. It was removed
-on purpose: each pair is a ready-made scenario, and a scenario offered in the
-prompt is one the model is measurably more likely to report whether or not the
-frame contains it. The table above carries the same citations without suggesting
-a situation to find.)
+STEP 3 — IS A PERSON INSIDE IT? Only a person you can actually SEE counts.
+  • Count the people first ("people"). If it is 0, every path has
+    "personVisible": false.
+  • BANNED in "exposure", because they describe a scenario, not a person:
+    "potential worker", "anyone", "any person", "personnel could", "if a
+    worker", "would be", "workers may". If that is all you can say, nobody is
+    there — set "personVisible": false and name the ZONE instead, e.g. "drop
+    zone below load", "coil roll-away path".
+  • Never write a person into a description to justify a severity.
 
-MARKING THE PATH — "lofZone"
-The path is drawn on the photograph as an arrow, so the two ends must be the
-two ENDS OF THE PATH, in this order and no other:
-  "lofZone": {
-    "x1": <energy SOURCE centre x, 0-1>,  "y1": <energy SOURCE centre y, 0-1>,
-    "x2": <exposed PERSON centre x, 0-1>, "y2": <exposed PERSON centre y, 0-1>,
-    "source": "<max 4 words NAMING the visible energy source at x1,y1 —
-                e.g. 'suspended steel coil', 'reversing tipper',
-                'open ladle of hot metal'. NOT 'walkway', NOT 'height',
-                NOT 'the floor', NOT 'the worker'.>",
-    "width": <how wide the danger corridor is at the person, 0.02-0.22>,
-    "exposure": "<max 4 words naming a person you can SEE at x2,y2 —
-                  e.g. 'rigger below load', 'operator at panel'.
-                  NEVER 'potential worker', NEVER 'anyone', NEVER 'personnel'.>",
-    "personVisible": true
-  }
-★ "source" is MANDATORY. A "lofZone" without a named, visible energy source is
-  DISCARDED and no arrow is drawn — so an unnamed path loses you the overlay.
-★ x1,y1 is ALWAYS the source and x2,y2 is ALWAYS the person, even when the
-  person is above or to the left of the source. Do not reorder them to make the
-  numbers ascending — the arrow would then point at the machine instead of the
-  worker.
-★ Include "lofZone" for ANY hazard where a person you can SEE stands in the path
-  of a NAMED energy source, whatever "type" you gave it. A worker under a
-  suspended load is in the line of fire whether the row is typed "Line of Fire"
-  or "Unsafe Condition".
-★ Omit "lofZone" entirely when no person is visible in the path, or when you
-  cannot name the energy source. An invented path draws a confident arrow at
-  nobody, and a reader who follows two of those stops following any of them.
+VERDICT ("lineOfFire.verdict"):
+  EXPOSED   — at least one person you can SEE is inside a danger zone.
+  ZONE_ONLY — a live or stored energy source is visible; nobody is in its zone.
+  NONE      — no STEP 1 energy source is visible. Give the reason in at most
+              12 words.
+
+MARKING EACH PATH (at most 2, most dangerous first). The app draws an arrow
+from source to person, or a dashed danger zone when nobody is there:
+  "x1","y1" — centre of the energy SOURCE (0-1 of the full image).
+  "x2","y2" — centre of the exposed PERSON if one is visible; otherwise the
+              centre of the DANGER ZONE where a person would be struck.
+  x1,y1 is ALWAYS the source and x2,y2 ALWAYS the person or zone, even when the
+  person is above or to the left. Never reorder them so the numbers ascend.
+  "source" is MANDATORY and names the visible thing at x1,y1 — e.g. 'suspended
+  steel coil', 'reversing dumper', 'open ladle of hot metal'. NOT 'walkway',
+  NOT 'height', NOT 'the floor', NOT 'the worker'.
+  "evidence" (at most 15 words) says what in the image shows the source is live
+  or can release — the rope is taut and the load is off the ground, the vehicle
+  is on the road with a driver in the cab, the coil has no chock.
+
+EVERY path with "personVisible": true is a finding. It MUST also appear as a
+hazard row (normally HIGH, type "Line of Fire") whose description names the
+same source. Do NOT copy the coordinates onto the hazard row: the app draws
+every path from "lineOfFire" and attaches it to that row itself.
+A ZONE_ONLY path is not by itself a hazard row. File a row only if the photo
+also shows a deviation — no barricade round the swing zone, no chock on the
+coil, a load carried over a walkway in use.
+
+Cite a line-of-fire row from the regulation table like any other hazard —
+match the energy source you named to the provision that governs it.
 
 {{OBS_TYPE_RULES}}
 
@@ -4146,6 +4162,19 @@ wording, never findings.
      "evidence": "<at most 20 words: which wheels you looked at and what is on
                   the rail ahead of and behind them>",
      "bbox": {"x": 0.3, "y": 0.5, "w": 0.2, "h": 0.15}}>,
+  "lineOfFire": {<REQUIRED on EVERY photograph — see LINE OF FIRE>
+    "verdict": "EXPOSED|ZONE_ONLY|NONE",
+    "reason": "<only when NONE: at most 12 words>",
+    "paths": [<omit when NONE; at most 2, most dangerous first:>
+      {"source": "<max 4 words naming the visible energy source>",
+       "energy": "GRAVITY|MOTION|ROTATING|PRESSURE|THERMAL|STORED|ELECTRICAL|CHEMICAL",
+       "x1": 0.4, "y1": 0.2, "x2": 0.45, "y2": 0.7,
+       "width": <danger corridor half-width at x2,y2, 0.02-0.22>,
+       "personVisible": <true only for a person you can SEE at x2,y2>,
+       "exposure": "<max 4 words: the person you see ('rigger below load') or,
+                    when nobody is there, the zone ('drop zone below load')>",
+       "evidence": "<max 15 words: what shows the source is live or can release>"}
+    ]},
   "summary": "<Sentence 1: what is physically visible. Sentence 2: primary safety concern with evidence. Sentence 3: applicable regulation.>",
   "hazards": [
     {
@@ -4161,11 +4190,7 @@ wording, never findings.
                         Where you looked and what you found there instead.
                         Omit entirely for hazards that are not absence claims.>",
       "personIds": [<ids from "persons" this hazard applies to; omit if not about a person>],
-      "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
-      "lofZone": {"x1": 0.2, "y1": 0.3, "x2": 0.8, "y2": 0.7,
-                  "source": "energised 415V panel",
-                  "width": 0.08, "exposure": "operator at panel",
-                  "personVisible": true}
+      "bbox": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
     }
   ]
 }
@@ -4220,12 +4245,13 @@ FIELD RULES:
 • "absenceCheck" is REQUIRED whenever the hazard says a protection is missing,
   absent, inadequate, unguarded or unprotected. Without it the finding is
   auto-reduced to LOW and marked unconfirmed.
-• "lofZone" is REQUIRED for "Line of Fire" type, and expected on ANY other
-  hazard where a visible person stands in the path of a NAMED energy source.
-  Omit when nobody is exposed or the source cannot be named.
-  x1,y1 = source; x2,y2 = person — never swapped. "source" is mandatory.
+• "lineOfFire" is REQUIRED on EVERY photograph and is answered BEFORE any
+  hazard: follow STEPS 1-3 of LINE OF FIRE. x1,y1 = source; x2,y2 = person or
+  danger zone — never swapped. "source" is mandatory on every path. Every path
+  with "personVisible": true must also have a hazard row naming that source.
 • "people" is the count of persons you can actually SEE. If it is 0, every
-  "lofZone" must be omitted — an arrow needs a real person at its head.
+  line-of-fire path has "personVisible": false — an arrow needs a real person
+  at its head, so the app draws a dashed danger zone instead.
 • "sceneType" is WHERE the photograph was taken, and it decides which rules can
   possibly apply. Answer it before you look for a single hazard.
     INDUSTRIAL       = a shop floor, bay, yard, substation, construction site,

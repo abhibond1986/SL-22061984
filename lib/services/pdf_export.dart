@@ -385,7 +385,8 @@ class PdfExport {
               matrixApplies: isAiScan,
               analysed: !notAnalysed,
               manual: isManual,
-              closeUps: closeUps));
+              closeUps: closeUps,
+              lofCheck: incident[LineOfFireGeometry.kCheckKey]));
           w.add(pw.SizedBox(height: 10));
         } else {
           w.add(_sectionTitle(isManual ? 'OBSERVATION' : 'INCIDENT SUMMARY'));
@@ -1251,7 +1252,8 @@ class PdfExport {
       List<Map<String, dynamic>> hazards, {int verifyCount = 0,
       int matrixL = 0, int matrixS = 0, int matrixScore = 0,
       bool matrixEstimated = false, bool matrixApplies = false,
-      bool analysed = true, bool manual = false, pw.Widget? closeUps}) {
+      bool analysed = true, bool manual = false, pw.Widget? closeUps,
+      Object? lofCheck}) {
     final sc = _getSevCol(severity);
     final sb = _getSevBg(severity);
     final s  = (score is int ? score : int.tryParse('$score') ?? 0).clamp(0, 100);
@@ -1306,7 +1308,8 @@ class PdfExport {
         ? (probeW * (photoH / probeH)).clamp(140.0, 300.0).toDouble()
         : 300.0;
 
-    final annotatedPhoto = _buildAnnotatedPhoto(img, hazards, photoW, photoH);
+    final annotatedPhoto =
+        _buildAnnotatedPhoto(img, hazards, photoW, photoH, lofCheck: lofCheck);
 
     final bboxedCount = hazards.where((h) => h['bbox'] != null).length;
     final unpinnedCount =
@@ -1320,8 +1323,13 @@ class PdfExport {
     // _buildAnnotatedPhoto draws a single path, the worst one.
     // One legend line per drawn path (see _allLofs). Nothing at all is
     // printed when there is no line of fire (user request 2026-10-03).
+    // ★ 2026-11-06: the strip is now printed on EVERY assessed photo (user
+    // request, reversing 2026-10-03). A report silent about line of fire
+    // could not be told apart from one where nobody checked; the scan-level
+    // check (LineOfFireGeometry.kCheckKey) now says which it was.
+    final lofs = _allLofs(hazards, lofCheck);
     final lofLines = [
-      for (final e in _allLofs(hazards))
+      for (final e in lofs)
         _safe(LineOfFireGeometry.caption(e.index, e.lof, arrow: '->')),
     ];
     // A hazard the model CALLED line of fire but whose path could not be
@@ -1337,7 +1345,14 @@ class PdfExport {
           'path not locatable on photo, check on site');
     }
     final lofNone = lofLines.isEmpty;
-    final lofLocated = _allLofs(hazards).length;
+    final lofLocated = lofs.length;
+    // What the strip says when there is no path: "checked, none" (green),
+    // or "not assessed" / "not locatable" (amber, an instruction to look).
+    final lofStatus = lofNone
+        ? LineOfFireGeometry.checkLine(lofCheck, notReported: true)
+        : null;
+    final lofChecked = lofCheck is Map &&
+        lofCheck['verdict'] == LineOfFireGeometry.vNone;
     // The line-of-fire strip and the at-a-glance figures are FINDINGS. They
     // are printed only for a photograph the AI actually assessed: on an
     // unanalysed scan, or a near-miss photo nobody ran through the model,
@@ -1455,11 +1470,13 @@ class PdfExport {
               child: pw.Row(children: [
                 metric('$count', count == 1 ? 'Hazard' : 'Hazards'),
                 metric('$bboxedCount', 'Marked on photo'),
-                // Only when there IS a line of fire (user request
-                // 2026-10-03): no "None" figure otherwise.
-                if (!lofNone)
-                  metric(lofLocated > 0 ? '$lofLocated' : '?',
-                    'Line of fire', color: _lofHot),
+                // Always shown since 2026-11-06: 0 = checked and none,
+                // '-' = not assessed, '?' = claimed but not located.
+                metric(lofLocated > 0 ? '$lofLocated'
+                    : !lofNone ? '?'
+                    : lofChecked ? '0' : '-',
+                  'Line of fire',
+                  color: lofLocated > 0 || !lofNone ? _lofHot : null),
                 metric('$verifyCount', 'To verify'),
               ])),
           // Sacrificial 1pt spacer: under TableCellVerticalAlignment.full the
@@ -1472,8 +1489,29 @@ class PdfExport {
       pw.Container(
         padding: const pw.EdgeInsets.all(5),
         child: annotatedPhoto),
-      // Printed only when a line of fire was found (user request
-      // 2026-10-03). The "none identified" variant was dropped.
+      // Located paths: the red strip. No path: one status line instead —
+      // never silence on an assessed photo (2026-11-06).
+      if (assessed && lofNone && lofStatus != null)
+        pw.Container(
+          width: double.infinity,
+          margin: const pw.EdgeInsets.fromLTRB(5, 0, 5, 0),
+          padding: const pw.EdgeInsets.fromLTRB(6, 3, 6, 3),
+          // Opaque pale fills for paper. #1B5E20 on #E8F5E9 and #7A4100 on
+          // #FFF4E5 are both above 7:1.
+          decoration: pw.BoxDecoration(
+            borderRadius: _r3,
+            color: PdfColor.fromHex(lofChecked ? '#E8F5E9' : '#FFF4E5')),
+          child: pw.RichText(
+            text: pw.TextSpan(children: [
+              pw.TextSpan(text: 'LINE OF FIRE  ',
+                style: pw.TextStyle(fontSize: 6.2,
+                  fontWeight: pw.FontWeight.bold, letterSpacing: 0.4,
+                  color: PdfColor.fromHex(lofChecked ? '#1B5E20' : '#7A4100'))),
+              pw.TextSpan(text: _safe(lofStatus),
+                style: pw.TextStyle(fontSize: 6.8,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColor.fromHex(lofChecked ? '#1B5E20' : '#7A4100'))),
+            ]))),
       if (assessed && !lofNone)
         pw.Container(
           width: double.infinity,
@@ -1569,7 +1607,7 @@ class PdfExport {
       Uint8List imgBytes,
       List<Map<String, dynamic>> hazards,
       double containerW,
-      double containerH) {
+      double containerH, {Object? lofCheck}) {
 
     final memImage = pw.MemoryImage(imgBytes);
     final imgW = (memImage.width  ?? 0).toDouble();
@@ -1589,7 +1627,7 @@ class PdfExport {
     // the strip under the photo and the photo is larger, so each located path
     // is drawn (capped at [_maxLofDrawn]); a second energy path that goes
     // unmarked is a hazard the reader never sees.
-    final lofs = _allLofs(hazards);
+    final lofs = _allLofs(hazards, lofCheck);
     // Nothing to annotate, or undecodable image → plain image. A hazard can
     // carry a line of fire without a bbox, so the LOF list has to be consulted
     // too — otherwise the one annotation that shows WHO is in danger is the one
@@ -1704,21 +1742,13 @@ class PdfExport {
   /// centre; the close-up strip shows the real crop.
   static const double _minBoxPt = 14;
 
-  /// Every located line of fire, the [LineOfFireGeometry.pickOne] choice first,
-  /// then by severity, capped at [_maxLofDrawn].
+  /// Every located line of fire — the [LineOfFireGeometry.pickOne] choice
+  /// first, then the other rows, then the standalone danger zones of the
+  /// scan's line-of-fire check — capped at [_maxLofDrawn]. One shared
+  /// implementation ([LineOfFireGeometry.collect]) so the screen agrees.
   static List<({int index, LineOfFire lof})> _allLofs(
-      List<Map<String, dynamic>> hazards) {
-    final pick = LineOfFireGeometry.pickOne(hazards);
-    final out = <({int index, LineOfFire lof})>[
-      if (pick != null) (index: pick.index, lof: pick.lof),
-    ];
-    for (var i = 0; i < hazards.length; i++) {
-      if (pick != null && i == pick.index) continue;
-      final lof = LineOfFireGeometry.parse(hazards[i]);
-      if (lof != null) out.add((index: i, lof: lof));
-    }
-    return out.take(_maxLofDrawn).toList();
-  }
+          List<Map<String, dynamic>> hazards, [Object? lofCheck]) =>
+      LineOfFireGeometry.collect(hazards, check: lofCheck, max: _maxLofDrawn);
 
   /// Hazard boxes in CONTAINER points, already clamped to the image and grown
   /// to [_minBoxPt]. Null-box and zero-size entries are skipped.

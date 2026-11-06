@@ -987,15 +987,41 @@ $causeBlock
         } catch (_) {}
       }
 
+      // The line-of-fire assessment, for HazardQuality.auditLineOfFire. Like
+      // wheelCheck it is written BEFORE "hazards", so it is the line-of-fire
+      // answer most likely to survive a cut. It nests (paths → objects), which
+      // a one-level regex cannot capture, so it is read with the balanced
+      // scanner below.
+      Map<String, dynamic>? lineOfFire;
+      final lofKey = RegExp(r'"lineOfFire"\s*:\s*\{').firstMatch(json);
+      if (lofKey != null) {
+        final obj = balancedObjectAt(json, lofKey.end - 1);
+        if (obj != null) {
+          try {
+            final decoded = jsonDecode(obj);
+            if (decoded is Map) lineOfFire = decoded.cast<String, dynamic>();
+          } catch (_) {}
+        }
+      }
+
       if (riskMatch == null && scoreMatch == null) return null;
 
       // Try to extract complete hazard objects
+      // ★ 2026-11-06: each hazard is read as a BALANCED object. The regex this
+      // replaced ended every match at the first `}` — which is the end of the
+      // row's own "bbox" — so every recovered row that had a box (all of them,
+      // since the prompt requires one) failed to decode and was dropped, and
+      // any line of fire on it with it.
       final hazardObjects = <Map<String, dynamic>>[];
-      final hazardRegex = RegExp(r'\{\s*"name"\s*:\s*"[^"]+?"[^}]*?"correctiveAction"\s*:\s*"[^"]+?"[^}]*?\}', dotAll: true);
-      for (final m in hazardRegex.allMatches(json)) {
+      final hazardStart = RegExp(r'\{\s*"name"\s*:');
+      for (final m in hazardStart.allMatches(json)) {
+        final obj = balancedObjectAt(json, m.start);
+        if (obj == null) continue;
         try {
-          final h = jsonDecode(m.group(0)!) as Map<String, dynamic>;
-          hazardObjects.add(h);
+          final h = jsonDecode(obj);
+          if (h is Map && h['correctiveAction'] != null) {
+            hazardObjects.add(h.cast<String, dynamic>());
+          }
         } catch (_) {}
       }
 
@@ -1005,6 +1031,7 @@ $causeBlock
         'sceneInventory': inventoryMatch?.group(1) ?? '',
         if (sceneTypeMatch != null) 'sceneType': sceneTypeMatch.group(1),
         if (wheelCheck != null) 'wheelCheck': wheelCheck,
+        if (lineOfFire != null) 'lineOfFire': lineOfFire,
         'overallRisk': riskMatch?.group(1) ?? 'UNKNOWN',
         'riskScore': int.tryParse(scoreMatch?.group(1) ?? '0') ?? 0,
         'confidence': int.tryParse(confMatch?.group(1) ?? '0') ?? 0,
@@ -1019,5 +1046,34 @@ $causeBlock
     } catch (_) {
       return null;
     }
+  }
+
+  /// The complete JSON object that opens at [start] (which must index a `{`),
+  /// honouring strings and escapes, or null when the text ends before the
+  /// object closes. Public for the plain-VM test in tools/.
+  static String? balancedObjectAt(String text, int start) {
+    if (start < 0 || start >= text.length || text[start] != '{') return null;
+    var depth = 0;
+    var inStr = false;
+    var esc = false;
+    for (var i = start; i < text.length; i++) {
+      final c = text[i];
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (c == '\\') {
+          esc = true;
+        } else if (c == '"') {
+          inStr = false;
+        }
+        continue;
+      }
+      if (c == '"') { inStr = true; continue; }
+      if (c == '{') depth++;
+      if (c == '}') {
+        depth--;
+        if (depth == 0) return text.substring(start, i + 1);
+      }
+    }
+    return null;
   }
 }
