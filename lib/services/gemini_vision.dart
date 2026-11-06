@@ -926,7 +926,10 @@ HOW TO USE IT:
   ///   6 — 2026-11-06: ACTUAL line of fire only — a live-energy sign is
   ///       required in "evidence", after a cylinder resting on the floor was
   ///       reported as a suspended load with "nobody in frame".
-  static const int kHazardPromptRev = 6;
+  ///   7 — 2026-11-06: "summary" asked for as one flowing paragraph; the old
+  ///       template's "Sentence 1: … Sentence 2: …" labels were being copied
+  ///       into the answer verbatim.
+  static const int kHazardPromptRev = 7;
 
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
@@ -4196,7 +4199,7 @@ wording, never findings.
                     when nobody is there, the zone ('drop zone below load')>",
        "evidence": "<max 15 words: the LIVE sign — hanging on slings, reversing, belt running, glowing, no chock>"}
     ]},
-  "summary": "<Sentence 1: what is physically visible. Sentence 2: primary safety concern with evidence. Sentence 3: applicable regulation.>",
+  "summary": "<ONE coherent paragraph of 2-3 flowing sentences: what is physically visible, the main safety concern with its evidence, and the regulation that applies. Plain prose — NEVER number or label the sentences ('Sentence 1:', '1.').>",
   "hazards": [
     {
       "name": "<max 5 words, specific to what you SEE>",

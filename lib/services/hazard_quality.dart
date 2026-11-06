@@ -138,7 +138,35 @@ class HazardQuality {
   ///
   /// Never throws: a tidy-up step must not be able to lose a scan the worker is
   /// standing in front of right now.
+  /// Turns a model summary into ONE coherent paragraph.
+  ///
+  /// ★ 2026-11-06, user: "why is this coming in sentence 1, 2, 3 … make it a
+  /// coherent sentence". The prompt's template read `"<Sentence 1: what is
+  /// visible. Sentence 2: … Sentence 3: …>"` and models copied the labels into
+  /// the answer verbatim ("Sentence 1: An industrial workshop …"). The prompt
+  /// no longer labels them; this removes labels that still arrive (other
+  /// tiers, cached answers, reports already saved) — "Sentence 2:", "(2)",
+  /// "2." at a sentence start — and joins line breaks into one paragraph.
+  /// Pure and idempotent; never changes the words themselves.
+  static String tidySummary(String text) {
+    var s = text.replaceAll(
+        RegExp(r'\bsentence\s*\d+\s*[:.)\-–—]\s*', caseSensitive: false), '');
+    // A number used as a list marker at the start of a sentence or line.
+    s = s.replaceAllMapped(
+        RegExp(r'(^|[.!?]\s+|\n\s*)\(?\d{1,2}[.)]\s+(?=[A-Za-z])'),
+        (m) => m.group(1)!.contains('\n') ? ' ' : m.group(1)!);
+    s = s.replaceAll(RegExp(r'\s*\n+\s*'), ' ');
+    s = s.replaceAll(RegExp(r'[ \t]{2,}'), ' ').trim();
+    return s;
+  }
+
   static QualityReport apply(Map<String, dynamic> result, {bool force = false}) {
+    // Before the idempotence flag on purpose: a cached answer that was
+    // quality-checked before this existed still gets its summary tidied.
+    final rawSummary = result['summary'];
+    if (rawSummary is String && rawSummary.isNotEmpty) {
+      result['summary'] = tidySummary(rawSummary);
+    }
     try {
       if (result[kFlag] == true && !force) {
         return const QualityReport(

@@ -1064,6 +1064,28 @@ void main() {
   HazardQuality.apply(rNone);
   ok(rowsOf(rNone).length == 1, 'no wheelCheck key: nothing is added');
 
+  // ── summary: one coherent paragraph, no "Sentence 1:" labels (2026-11-06)
+  const labelled = 'Sentence 1: An industrial workshop with scattered metal '
+      'scrap. Sentence 2: Poor housekeeping poses trip hazards. Sentence 3: '
+      'Applicable regulation is Factories Act 1948 Section 11.';
+  final tidy = HazardQuality.tidySummary(labelled);
+  ok(!tidy.contains('Sentence') &&
+          tidy.startsWith('An industrial workshop') &&
+          tidy.endsWith('Section 11.'),
+      'summary labels removed, words kept ($tidy)');
+  ok(HazardQuality.tidySummary('1. A bay. 2. Scrap on floor.') ==
+      'A bay. Scrap on floor.', 'numbered list markers removed');
+  ok(HazardQuality.tidySummary('Ladle at 1600 C. 3 workers seen. S7A(2)(b).') ==
+      'Ladle at 1600 C. 3 workers seen. S7A(2)(b).',
+      'real numbers in the prose are untouched');
+  ok(HazardQuality.tidySummary(tidy) == tidy, 'tidySummary is idempotent');
+  final cachedSum = <String, dynamic>{
+    'summary': labelled, 'hazards': [], HazardQuality.kFlag: true,
+  };
+  HazardQuality.apply(cachedSum);
+  ok(!'${cachedSum['summary']}'.contains('Sentence'),
+      'already-checked (cached) result still gets its summary tidied');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

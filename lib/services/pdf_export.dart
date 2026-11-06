@@ -2596,7 +2596,11 @@ class PdfExport {
     return [];
   }
 
-  static String _cleanSummary(Map<String, dynamic> inc) {
+  static String _cleanSummary(Map<String, dynamic> inc) =>
+      // Reports saved before 2026-11-06 can carry "Sentence 1: …" labels.
+      HazardQuality.tidySummary(_cleanSummaryRaw(inc));
+
+  static String _cleanSummaryRaw(Map<String, dynamic> inc) {
     final s = inc['summary']?.toString() ?? '';
     if (s.isNotEmpty && !s.contains('===')) return s;
     final d = inc['desc']?.toString() ?? '';

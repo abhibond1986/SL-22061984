@@ -13,6 +13,7 @@ import '../main.dart';
 import '../widgets/content_width.dart';
 import '../services/local_db.dart';
 import '../services/admin_master_data.dart';
+import '../services/hazard_quality.dart';
 import '../services/plant_scope.dart';
 import '../services/mamr_service.dart';
 import '../services/sync_service.dart';
@@ -967,7 +968,12 @@ class _IncidentDetailScreenState extends State<IncidentDetailScreen> {
           // ── DESCRIPTION ──────────────────────────────────────
           if ((_inc['desc']?.toString() ?? '').isNotEmpty) ...[
             _textSection(sl, bgColor, 'Description', Icons.notes_rounded,
-                _SecColors.description, _inc['desc']?.toString() ?? ''),
+                _SecColors.description,
+                // AI summaries saved before 2026-11-06 can carry
+                // "Sentence 1: … Sentence 2: …" labels.
+                _inc['type'] == 'AI_SCAN'
+                    ? HazardQuality.tidySummary(_inc['desc']?.toString() ?? '')
+                    : _inc['desc']?.toString() ?? ''),
             const SizedBox(height: 12),
           ],
 
