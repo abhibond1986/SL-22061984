@@ -114,26 +114,15 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
         final lofs = LineOfFireGeometry.collect(widget.hazards,
             check: widget.lofCheck, max: 1);
         final pick = lofs.isEmpty ? null : lofs.first;
-        // No path: say what the check found rather than nothing (2026-11-06).
-        final status = pick != null
-            ? null
-            : LineOfFireGeometry.checkLine(widget.lofCheck,
-                notReported: widget.lofCheck != null);
-        final checkedNone = widget.lofCheck is Map &&
-            (widget.lofCheck as Map)['verdict'] == LineOfFireGeometry.vNone;
+        // No path: nothing at all about line of fire (user, 2026-11-06).
         // A located path gets the line-of-fire READY REFERENCE (source, zone,
         // control — user request 2026-11-06); no path gets the one-line status.
         final ref = pick == null
             ? null
             : LineOfFireGeometry.reference(pick.index, pick.lof);
-        final legend = ref != null || status == null
-            ? ''
-            : 'Line of fire: $status';
         final legendH = ref != null
             ? _cardHeight(ref, containerW, MediaQuery.textScalerOf(context))
-            : legend.isEmpty
-                ? 0.0
-                : _legendHeight;
+            : 0.0;
 
         // Respect a bounded height from the caller. Width-driven sizing alone
         // makes a portrait photo taller than its slot — the widget used to
@@ -189,26 +178,13 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
             children: [photo, _referenceCard(ref, legendH)],
           );
         }
-        if (legend.isEmpty) return photo;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            photo,
-            _legendBar(legend,
-                tone: pick != null
-                    ? _LegendTone.path
-                    : checkedNone
-                        ? _LegendTone.clear
-                        : _LegendTone.check),
-          ],
-        );
+        return photo;
       },
     );
   }
 
   // ── Line-of-fire ready reference ─────────────────────────────────────
-  // Fixed pairs on an opaque pale-red card in BOTH themes (see _legendBar):
+  // Fixed pairs on an opaque pale-red card in BOTH themes:
   // #B3261E on #FDECEA is 5.7:1, #5F1410 on #FDECEA is 12:1.
   static const _refPad = EdgeInsets.fromLTRB(10, 6, 10, 7);
   static const _refBarW = 18.0; // 3px bar + gap
@@ -256,14 +232,17 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
       Container(
         height: height,
         padding: _refPad,
-        color: _LegendTone.path.fill,
+        // Opaque, not a translucent red wash: the card sits on the light or
+        // the dark surface, and a translucent fill would put dark-red text on
+        // a near-black background in dark mode.
+        color: const Color(0xFFFDECEA),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Container(
               width: 3,
               decoration: BoxDecoration(
-                color: _LegendTone.path.bar,
+                color: const Color(0xFFE53935),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -284,62 +263,6 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
           ],
         ),
       );
-
-  /// Reserved height for the legend strip. Fixed rather than measured: the
-  /// caption is one short line by construction (see LineOfFireGeometry.caption)
-  /// and the photograph's height has to be known before the legend is laid out.
-  static const double _legendHeight = 22;
-
-  /// The caption that used to be stamped across the photograph. Down here it can
-  /// be read, and the number ties it to the bounding box above.
-  Widget _legendBar(String text, {_LegendTone tone = _LegendTone.path}) =>
-      Container(
-        height: _legendHeight,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        alignment: Alignment.centerLeft,
-        // Opaque, not a translucent red wash: this strip can sit on the light or
-        // the dark surface, and a translucent fill would put dark-red text on a
-        // near-black background in dark mode.
-        color: tone.fill,
-        child: Row(children: [
-          Container(
-            width: 12,
-            height: 3,
-            decoration: BoxDecoration(
-              color: tone.bar,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                // Not a theme colour: the strip carries its own opaque pale
-                // fill in both themes, so each pairing is fixed. #B3261E on
-                // #FDECEA is 5.7:1; the green and amber pairs are above 7:1.
-                color: tone.ink,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.2,
-              ),
-            ),
-          ),
-        ]),
-      );
-}
-
-/// Fixed pale fill / bar / ink triples for the strip under the photo. Opaque
-/// on purpose — see [_HazardAnnotatedImageState._legendBar].
-enum _LegendTone {
-  path(Color(0xFFFDECEA), Color(0xFFE53935), Color(0xFFB3261E)),
-  clear(Color(0xFFE8F5E9), Color(0xFF2E7D32), Color(0xFF1B5E20)),
-  check(Color(0xFFFFF4E5), Color(0xFFEF8F00), Color(0xFF7A4100));
-
-  const _LegendTone(this.fill, this.bar, this.ink);
-  final Color fill, bar, ink;
 }
 
 class _BboxOverlay extends StatelessWidget {

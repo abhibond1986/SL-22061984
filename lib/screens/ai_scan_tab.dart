@@ -5282,8 +5282,14 @@ class _AIScanTabState extends State<AIScanTab> {
   /// Reading the count as people put "1 person exposed" under a photograph with
   /// no one in it. Ask the same helper the painter asks, and describe what it
   /// actually returned.
-  ({int index, LineOfFire lof})? _lofPick(List hazards) =>
-      LineOfFireGeometry.pickOne(hazards);
+  ({int index, LineOfFire lof})? _lofPick(List hazards) {
+    // EXACTLY what HazardAnnotatedImage draws (collect: live paths only,
+    // standalone zones included), so this note never explains a mark that
+    // is not on the photo.
+    final all = LineOfFireGeometry.collect(hazards,
+        check: _result?[LineOfFireGeometry.kCheckKey], max: 1);
+    return all.isEmpty ? null : all.first;
+  }
 
   Widget _infoBox(SL sl) {
     // The shared card surface — see the note in `_emptyView`.

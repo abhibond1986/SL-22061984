@@ -326,6 +326,95 @@ void main() {
   ok(z.title.startsWith('Z1') && z.zone.startsWith('Zone: coil roll-away path'),
       'standalone zone: Z1 and the model\'s own zone wording');
 
+  // ── 18. ACTUAL line of fire only (user, 2026-11-06, second report).
+  // Replay: a heavy cylinder RESTING on the shop floor, filed as
+  // "Z1 Heavy steel cylindrical component — drop zone — nobody in frame".
+  final r18 = scan([housekeeping()], people: 0, lineOfFire: {
+    'verdict': 'ZONE_ONLY',
+    'paths': [
+      path(source: 'heavy steel cylindrical component', energy: 'GRAVITY',
+          personVisible: false, exposure: 'drop zone below heavy component',
+          evidence: 'Large steel cylinder resting on the shop floor, lid bolted.'),
+    ],
+  });
+  HazardQuality.apply(r18);
+  ok((checkOf(r18)['zones'] as List).isEmpty,
+      'resting cylinder: no danger zone kept');
+  ok(LineOfFireGeometry.collect(rowsOf(r18), check: checkOf(r18)).isEmpty,
+      'resting cylinder: nothing drawn');
+  ok(rowsOf(r18).length == 1, 'resting cylinder: no row filed');
+
+  // "Heavy" alone, no live sign at all → also dropped.
+  ok(!LineOfFireGeometry.isLiveSource('GRAVITY',
+          'heavy steel component large', personVisible: false),
+      'heavy / large is not a live sign');
+  // A load being landed FROM the hook is still live despite "floor".
+  ok(LineOfFireGeometry.isLiveSource('GRAVITY',
+          'coil being landed on the floor from the crane hook',
+          personVisible: false),
+      'hook beats "on the floor"');
+
+  // Damaged cable with nobody at it: shock hazard, not a line of fire.
+  final r19 = scan([housekeeping()], people: 0, lineOfFire: {
+    'verdict': 'ZONE_ONLY',
+    'paths': [
+      path(source: 'damaged electrical cable', energy: 'ELECTRICAL',
+          personVisible: false, exposure: 'danger zone',
+          evidence: 'Cable insulation torn, conductors exposed on floor.'),
+    ],
+  });
+  HazardQuality.apply(r19);
+  ok((checkOf(r19)['zones'] as List).isEmpty,
+      'damaged cable, nobody there: no line of fire');
+  // …but a person AT an open panel is.
+  ok(LineOfFireGeometry.isLiveSource('ELECTRICAL',
+          'electrician working on open panel', personVisible: true),
+      'person at an open panel: arc-flash line of fire');
+
+  // A belt that is stopped is not a rotating line of fire.
+  final r20 = scan([housekeeping()], people: 0, lineOfFire: {
+    'verdict': 'ZONE_ONLY',
+    'paths': [
+      path(source: 'conveyor tail pulley', energy: 'ROTATING',
+          personVisible: false, exposure: 'nip zone',
+          evidence: 'Belt stopped, isolator locked off.'),
+    ],
+  });
+  HazardQuality.apply(r20);
+  ok((checkOf(r20)['zones'] as List).isEmpty, 'stopped belt: no zone');
+
+  // A row carrying its OWN lofZone on a resting object is set aside.
+  final legacy = <String, dynamic>{
+    'name': 'Heavy component on floor',
+    'description': 'Visible: heavy cylinder resting on the floor.',
+    'severity': 'MEDIUM',
+    'visualEvidence': 'Cylinder on the floor.',
+    'correctiveAction': 'Store properly.',
+    'lofZone': {'x1': 0.5, 'y1': 0.4, 'x2': 0.5, 'y2': 0.6,
+        'source': 'heavy cylinder', 'exposure': 'drop zone',
+        'personVisible': false},
+  };
+  final r21 = scan([legacy], people: 0);
+  HazardQuality.apply(r21);
+  ok(rowsOf(r21).first['lofZone'] == null &&
+          rowsOf(r21).first['_lofZoneNotLive'] != null,
+      'row lofZone without a live sign is set aside, not drawn');
+
+  // An already-saved report (no audit re-run) is filtered at draw time.
+  final saved = [
+    {
+      'name': 'Heavy component', 'description': 'Visible: cylinder on floor.',
+      'lofZone': {'x1': 0.5, 'y1': 0.4, 'x2': 0.5, 'y2': 0.6,
+          'source': 'heavy steel component', 'personVisible': false},
+    }
+  ];
+  ok(LineOfFireGeometry.collect(saved).isEmpty,
+      'old saved report: non-live path not drawn');
+
+  // Nothing is said when there is no line of fire: the verdict is internal.
+  ok(LineOfFireGeometry.collect(rowsOf(r6), check: checkOf(r6)).isEmpty,
+      'NONE: nothing to draw or print');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

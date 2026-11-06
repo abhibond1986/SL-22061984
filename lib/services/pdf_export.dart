@@ -1332,27 +1332,13 @@ class PdfExport {
       for (final e in lofs)
         _safe(LineOfFireGeometry.caption(e.index, e.lof, arrow: '->')),
     ];
-    // A hazard the model CALLED line of fire but whose path could not be
-    // located on the photo still has to be said out loud.
-    final claimedUnlocated = <int>[
-      for (var i = 0; i < hazards.length; i++)
-        if (LineOfFireGeometry.claimsLineOfFire(hazards[i]) &&
-            LineOfFireGeometry.parse(hazards[i]) == null)
-          i + 1,
-    ];
-    if (claimedUnlocated.isNotEmpty) {
-      lofLines.add('Line of fire in hazard ${claimedUnlocated.join(', ')} - '
-          'path not locatable on photo, check on site');
-    }
+    // ★ 2026-11-06 (second change that day, user): "give comments only when
+    // there is an actual line of fire … if there is no such thing don't
+    // indicate". So NOTHING about line of fire is printed unless a path was
+    // located — no "checked, none", no "not assessed", no "not locatable".
+    // The verdict is still stored (LineOfFireGeometry.kCheckKey) for audit.
     final lofNone = lofLines.isEmpty;
     final lofLocated = lofs.length;
-    // What the strip says when there is no path: "checked, none" (green),
-    // or "not assessed" / "not locatable" (amber, an instruction to look).
-    final lofStatus = lofNone
-        ? LineOfFireGeometry.checkLine(lofCheck, notReported: true)
-        : null;
-    final lofChecked = lofCheck is Map &&
-        lofCheck['verdict'] == LineOfFireGeometry.vNone;
     // The line-of-fire strip and the at-a-glance figures are FINDINGS. They
     // are printed only for a photograph the AI actually assessed: on an
     // unanalysed scan, or a near-miss photo nobody ran through the model,
@@ -1470,13 +1456,9 @@ class PdfExport {
               child: pw.Row(children: [
                 metric('$count', count == 1 ? 'Hazard' : 'Hazards'),
                 metric('$bboxedCount', 'Marked on photo'),
-                // Always shown since 2026-11-06: 0 = checked and none,
-                // '-' = not assessed, '?' = claimed but not located.
-                metric(lofLocated > 0 ? '$lofLocated'
-                    : !lofNone ? '?'
-                    : lofChecked ? '0' : '-',
-                  'Line of fire',
-                  color: lofLocated > 0 || !lofNone ? _lofHot : null),
+                // Only when a line of fire was located (user, 2026-11-06).
+                if (lofLocated > 0)
+                  metric('$lofLocated', 'Line of fire', color: _lofHot),
                 metric('$verifyCount', 'To verify'),
               ])),
           // Sacrificial 1pt spacer: under TableCellVerticalAlignment.full the
@@ -1489,29 +1471,7 @@ class PdfExport {
       pw.Container(
         padding: const pw.EdgeInsets.all(5),
         child: annotatedPhoto),
-      // Located paths: the red strip. No path: one status line instead —
-      // never silence on an assessed photo (2026-11-06).
-      if (assessed && lofNone && lofStatus != null)
-        pw.Container(
-          width: double.infinity,
-          margin: const pw.EdgeInsets.fromLTRB(5, 0, 5, 0),
-          padding: const pw.EdgeInsets.fromLTRB(6, 3, 6, 3),
-          // Opaque pale fills for paper. #1B5E20 on #E8F5E9 and #7A4100 on
-          // #FFF4E5 are both above 7:1.
-          decoration: pw.BoxDecoration(
-            borderRadius: _r3,
-            color: PdfColor.fromHex(lofChecked ? '#E8F5E9' : '#FFF4E5')),
-          child: pw.RichText(
-            text: pw.TextSpan(children: [
-              pw.TextSpan(text: 'LINE OF FIRE  ',
-                style: pw.TextStyle(fontSize: 6.2,
-                  fontWeight: pw.FontWeight.bold, letterSpacing: 0.4,
-                  color: PdfColor.fromHex(lofChecked ? '#1B5E20' : '#7A4100'))),
-              pw.TextSpan(text: _safe(lofStatus),
-                style: pw.TextStyle(fontSize: 6.8,
-                  fontWeight: pw.FontWeight.bold,
-                  color: PdfColor.fromHex(lofChecked ? '#1B5E20' : '#7A4100'))),
-            ]))),
+      // Only when a line of fire was located (user, 2026-11-06).
       if (assessed && !lofNone)
         pw.Container(
           width: double.infinity,
@@ -1533,22 +1493,6 @@ class PdfExport {
                     _lofReferenceBlock(LineOfFireGeometry.reference(
                         lofs[k].index, lofs[k].lof)),
                   ],
-                  if (lofs.isEmpty)
-                    pw.Text('LINE OF FIRE',
-                      style: pw.TextStyle(fontSize: 6.2,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColor.fromHex('#B3261E'),
-                        letterSpacing: 0.4)),
-                  // Rows that CLAIM a line of fire with no locatable path.
-                  for (final line in lofLines.skip(lofs.length))
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.only(top: 2),
-                      child: pw.Text(line,
-                        maxLines: 2,
-                        style: pw.TextStyle(
-                          fontSize: 6.8,
-                          fontWeight: pw.FontWeight.bold,
-                          color: PdfColor.fromHex('#B3261E')))),
                 ])),
       pw.Container(
         width: double.infinity,

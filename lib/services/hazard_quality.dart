@@ -1724,6 +1724,20 @@ class HazardQuality {
       'rejected': 0,
     };
     result[LineOfFireGeometry.kCheckKey] = check;
+
+    // A row's OWN lofZone (older prompt, or a model that ignored the new one)
+    // faces the same "is the energy live?" gate as a path. One that fails is
+    // set aside, never drawn — kept under _lofZoneNotLive for audit.
+    final rawRows = result['hazards'];
+    if (rawRows is List) {
+      for (final h in rawRows) {
+        if (h is! Map || h['lofZone'] is! Map) continue;
+        if (LineOfFireGeometry.parse(h) == null) continue;
+        if (LineOfFireGeometry.hazardPathIsLive(h)) continue;
+        h['_lofZoneNotLive'] = h.remove('lofZone');
+        check['notLive'] = ((check['notLive'] as int?) ?? 0) + 1;
+      }
+    }
     if (lc is! Map) return 0;
 
     final rawPaths = lc['paths'] ?? lc['sources'];
@@ -1770,6 +1784,19 @@ class HazardQuality {
         check['rejected'] = (check['rejected'] as int) + 1;
         continue;
       }
+      // ACTUAL line of fire only (user, 2026-11-06): the path's own words must
+      // show the energy is live — a load off the ground, a vehicle moving, a
+      // belt running, metal molten, a coil free to roll. "Heavy component" on
+      // the floor is not. Dropped silently: nothing drawn, nothing said.
+      final energyType = LineOfFireGeometry.energyOf(energy, source);
+      if (!LineOfFireGeometry.isLiveSource(
+          energyType, '$source $evidence $exposure',
+          personVisible: personVisible)) {
+        check['notLive'] = ((check['notLive'] as int?) ?? 0) + 1;
+        continue;
+      }
+      zone['energy'] = energyType;
+      if (evidence.isNotEmpty) zone['evidence'] = evidence;
 
       // Already drawn by a row the model wrote with its own lofZone.
       final covered = hazards.any((h) {
@@ -1817,12 +1844,12 @@ class HazardQuality {
         final row = <String, dynamic>{
           'name': 'Line of fire: $exposure',
           'description': 'Visible: $exposure in the line of fire of the '
-              '$what. ${_lofConsequence[energy] ?? 'A release from the source '
+              '$what. ${_lofConsequence[energyType] ?? 'A release from the source '
               'would reach them.'}',
           'severity': 'HIGH',
-          'regulation': _lofRegulation[energy] ?? 'FA 1948 S7A(2)(a)',
+          'regulation': _lofRegulation[energyType] ?? 'FA 1948 S7A(2)(a)',
           'type': 'Line of Fire',
-          'correctiveAction': _lofAction[energy] ??
+          'correctiveAction': _lofAction[energyType] ??
               'Move the person out of the path of the $what and barricade '
                   'the danger zone before work resumes.',
           'visualEvidence': evidence.isEmpty ? '$exposure near the $what.' : evidence,

@@ -923,7 +923,10 @@ HOW TO USE IT:
   ///   5 — 2026-11-06: required "lineOfFire" assessment on EVERY photograph
   ///       (verdict + up to 2 paths), replacing the optional per-row
   ///       "lofZone" that the model filled only when it remembered to.
-  static const int kHazardPromptRev = 5;
+  ///   6 — 2026-11-06: ACTUAL line of fire only — a live-energy sign is
+  ///       required in "evidence", after a cylinder resting on the floor was
+  ///       reported as a suspended load with "nobody in frame".
+  static const int kHazardPromptRev = 6;
 
   static Future<Map<String, dynamic>?> _readCachedResult(String hash) async {
     try {
@@ -4012,7 +4015,9 @@ words. Classify it as one of:
                that can roll, an unstable stack, a tensioned sling, rope or
                strap (snap-back), a spring or counterweight, a stabled wagon on
                bare rail.
-  ELECTRICAL — energised panel, open switchgear, live conductor (arc flash).
+  ELECTRICAL — arc flash at an OPEN, energised panel or switchgear with a
+               person working at it. A damaged cable or exposed conductor
+               with nobody at it is a shock hazard row, NOT a line of fire.
   CHEMICAL   — acid, caustic or gas discharge point.
 NOT energy sources, and never a line of fire: an open edge or fall from height
 (the hazard is the drop), missing PPE, housekeeping, spills, signage,
@@ -4020,6 +4025,21 @@ paperwork. Those are ordinary hazards with a "bbox".
 A source plainly AT REST AND DE-ENERGISED has no line of fire — a load sitting
 on the ground, an empty hook, a belt you can see is stopped and isolated —
 EXCEPT stored energy, which can release with nobody touching it.
+
+★ BE STRICT — REPORT ONLY AN ACTUAL LINE OF FIRE. The app prints nothing
+  about line of fire unless you find one, so "NONE" costs nothing and a weak
+  path misleads. The energy must be LIVE NOW or able to release BY ITSELF:
+  • GRAVITY only when the load is OFF THE GROUND — hanging from a hook, sling,
+    chain block or crane, or stored on a rack or platform above people. A
+    heavy object resting on the floor, a bench or a stand is NOT a suspended
+    load, however heavy it is, even while someone works on it by hand.
+  • MOTION only when the vehicle is moving, manned or about to move; ROTATING
+    only when the part is running; THERMAL only when metal or slag is molten
+    or glowing; PRESSURE only when the line is charged.
+  • "evidence" MUST name that sign (hanging on slings, reversing, belt
+    running, glowing metal, no chock under the coil). If you cannot name it,
+    the verdict is NONE.
+  • Heavy, large, steel, nearby, damaged — none of these is a line of fire.
 
 STEP 2 — PLACE THE DANGER ZONE, by mechanism, from what you see:
   GRAVITY    — the ground directly beneath the load or edge, widened by any
@@ -4039,7 +4059,8 @@ STEP 2 — PLACE THE DANGER ZONE, by mechanism, from what you see:
   CHEMICAL   — the line of discharge and the area it would wet.
 
 STEP 3 — IS A PERSON INSIDE IT? Only a person you can actually SEE counts.
-  • Count the people first ("people"). If it is 0, every path has
+  • Count the people first ("people"). Hands, arms, legs or boots of a worker
+    in the frame ARE a visible person. If the count is 0, every path has
     "personVisible": false.
   • BANNED in "exposure", because they describe a scenario, not a person:
     "potential worker", "anyone", "any person", "personnel could", "if a
@@ -4173,7 +4194,7 @@ wording, never findings.
        "personVisible": <true only for a person you can SEE at x2,y2>,
        "exposure": "<max 4 words: the person you see ('rigger below load') or,
                     when nobody is there, the zone ('drop zone below load')>",
-       "evidence": "<max 15 words: what shows the source is live or can release>"}
+       "evidence": "<max 15 words: the LIVE sign — hanging on slings, reversing, belt running, glowing, no chock>"}
     ]},
   "summary": "<Sentence 1: what is physically visible. Sentence 2: primary safety concern with evidence. Sentence 3: applicable regulation.>",
   "hazards": [

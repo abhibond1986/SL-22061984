@@ -691,21 +691,27 @@ class LineOfFireGeometry {
   /// EVERY drawable line of fire for one photograph, most important first,
   /// capped at [max]: the [pickOne] choice, then the other hazard rows that
   /// carry a path, then the standalone zones from [check] (index -1, -2, …).
+  ///
+  /// ★ Only LIVE paths ([hazardPathIsLive]) — the same gate the audit
+  /// applies, here as well so reports saved before it existed stop showing a
+  /// "drop zone" under a cylinder sitting on the floor.
   static List<({int index, LineOfFire lof})> collect(List hazards,
       {Object? check, int max = 3}) {
-    final pick = pickOne(hazards);
+    final live = [
+      for (final h in hazards) h is Map && hazardPathIsLive(h) ? h : const {},
+    ];
+    final pick = pickOne(live);
     final out = <({int index, LineOfFire lof})>[
       if (pick != null) (index: pick.index, lof: pick.lof),
     ];
-    for (var i = 0; i < hazards.length; i++) {
+    for (var i = 0; i < live.length; i++) {
       if (pick != null && i == pick.index) continue;
-      final h = hazards[i];
-      if (h is! Map) continue;
-      final lof = parse(h);
+      final lof = parse(live[i]);
       if (lof != null) out.add((index: i, lof: lof));
     }
     final zones = zonesFromCheck(check);
     for (var k = 0; k < zones.length; k++) {
+      if (!hazardPathIsLive(zones[k])) continue;
       final lof = parse(zones[k]);
       if (lof != null) out.add((index: -(k + 1), lof: lof));
     }
@@ -817,6 +823,97 @@ class LineOfFireGeometry {
         'tension', 'tensioned', 'counterweight', 'reel', 'spool', 'unstable']),
     ('GRAVITY', ['load', 'grab', 'magnet', 'bucket']),
   ];
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  IS THE ENERGY ACTUALLY LIVE?
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ★ 2026-11-06, user: "I don't want gyaan on line of fire for everything
+  // … give comments only when there is an actual line of fire, like a
+  // suspended load even though no person is seen." The report that forced
+  // this: a heavy steel cylinder RESTING ON THE SHOP FLOOR, worked on by hand,
+  // was filed as "Z1 Heavy steel cylindrical component — drop zone below
+  // heavy component — nobody in frame" under SUSPENDED / FALLING LOAD. It was
+  // not suspended, and the worker's hands and legs were in the frame.
+  //
+  // So a path survives only when the model's OWN words (source, evidence,
+  // exposure) carry a sign that the energy is live now or can release by
+  // itself. Heavy, large, steel, near — none of those is a sign. A path that
+  // fails is dropped silently: nothing is drawn and nothing is said.
+
+  static final Map<String, RegExp> _liveSigns = {
+    'GRAVITY': RegExp(
+        r'\b(suspend\w*|hang\w*|hung|hoist\w*|aloft|overhead|hook\w*|'
+        r'sling\w*|chain ?block|crane|tackle|wire rope|from height|'
+        r'above head|overhead rack|stacked above|on the platform above)\b'),
+    'STORED': RegExp(
+        r'\b(unchock\w*|no (?:wheel )?chocks?|without (?:a )?chocks?|'
+        r'not chocked|free to roll|could roll|roll[- ]?away|rolling|unstable|'
+        r'leaning|tilt\w*|toppl\w*|overhang\w*|bulg\w*|tension\w*|taut|'
+        r'snap[- ]?back|spring|counterweight|unsecured|unbanded|no scotch|'
+        r'bare rail|stacked high|high stack)\b'),
+    'MOTION': RegExp(
+        r'\b(moving|in motion|travel\w*|revers\w*|driving|driver|operat\w*|'
+        r'running|engine|approach\w*|manoeuvr\w*|maneuver\w*|shunt\w*|'
+        r'turning|in transit|on the move|headlights?|beacon)\b'),
+    'ROTATING': RegExp(
+        r'\b(running|rotat\w*|turning|moving|in motion|operat\w*|spinning|'
+        r'in operation|loaded belt|material on (?:the )?belt)\b'),
+    'PRESSURE': RegExp(
+        r'\b(pressuri[sz]\w*|under pressure|charged|in service|leak\w*|'
+        r'hiss\w*|jet|spray\w*|steam|whip\w*|unrestrained|gauge|bulg\w*|'
+        r'live line)\b'),
+    'THERMAL': RegExp(
+        r'\b(molten|hot metal|liquid (?:metal|slag|iron|steel)|glow\w*|'
+        r'red[- ]hot|incandescent|pour\w*|tapping|tap hole|flames?|burning|'
+        r'splash\w*|slag|steam)\b'),
+    // Arc flash is a line of fire only for someone AT an open, energised
+    // panel — a damaged cable on the floor is a shock hazard, not a path.
+    'ELECTRICAL': RegExp(
+        r'\b(open (?:panel|door|cubicle|switchgear)|panel (?:door )?open|'
+        r'racking|switching|working on|live work|arc\w*)\b'),
+    'CHEMICAL': RegExp(
+        r'\b(leak\w*|spray\w*|discharg\w*|drip\w*|splash\w*|venting|'
+        r'releas\w*)\b'),
+  };
+
+  /// Wording that puts a "load" on the ground. Vetoes GRAVITY unless a hook,
+  /// sling, hoist or crane is ALSO named (a load being landed is still live).
+  static final RegExp _grounded = RegExp(
+      r'\b(on the (?:floor|ground|shop floor|bench|table|stand)|resting|rests|'
+      r'placed on|sitting on|lying on|grounded|landed|on its base)\b');
+  static final RegExp _strongGravity =
+      RegExp(r'\b(suspend\w*|hang\w*|hung|hoist\w*|hook\w*|sling\w*|crane|'
+          r'chain ?block)\b');
+
+  /// Whether [text] (the path's source + evidence + exposure, lower-case)
+  /// shows the [energy] is live. Unknown energy is never live — "actual line
+  /// of fire only". ELECTRICAL additionally needs a person at the panel.
+  static bool isLiveSource(String energy, String text,
+      {required bool personVisible}) {
+    final t = text.toLowerCase();
+    final sign = _liveSigns[energy];
+    if (sign == null || !sign.hasMatch(t)) return false;
+    if (energy == 'ELECTRICAL' && !personVisible) return false;
+    if (energy == 'GRAVITY' && _grounded.hasMatch(t) &&
+        !_strongGravity.hasMatch(t)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// [isLiveSource] for a hazard-shaped map carrying a `lofZone`.
+  static bool hazardPathIsLive(Map hazard) {
+    final zone = hazard['lofZone'];
+    if (zone is! Map) return false;
+    final source = (zone['source'] ?? hazard['lofSource'] ?? '').toString();
+    final text = '$source ${zone['exposure'] ?? ''} ${zone['evidence'] ?? ''} '
+        '${hazard['name'] ?? ''} ${hazard['description'] ?? ''} '
+        '${hazard['visualEvidence'] ?? ''}';
+    final lof = parse(hazard);
+    return isLiveSource(energyOf(zone['energy'], source), text,
+        personVisible: lof?.personVisible ?? false);
+  }
 
   /// The energy type: the model's own answer when it is one of
   /// [energyTypes], otherwise inferred from the source's wording, else ''.
