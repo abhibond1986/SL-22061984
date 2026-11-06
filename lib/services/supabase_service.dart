@@ -1193,6 +1193,19 @@ class SupabaseService {
   /// Last KB-write error, for diagnostics. Empty after a clean write.
   static String knowledgeLastError = '';
 
+  /// Set once the server has rejected `upsert(onConflict: 'client_id')` with
+  /// 42P10 — client_id is unique only through a partial index, which an
+  /// ON CONFLICT target cannot use. See [addKnowledgeDoc].
+  static bool _kbUpsertUnsupported = false;
+
+  static bool _isNoConflictTarget(Object e) {
+    if (e is PostgrestException) {
+      if (e.code == '42P10') return true;
+      return e.message.toLowerCase().contains('on conflict specification');
+    }
+    return e.toString().toLowerCase().contains('on conflict specification');
+  }
+
   /// App-key → column mapping for the SOP scan metadata. Local docs use
   /// camelCase keys; Postgres columns are snake_case.
   ///
@@ -1309,20 +1322,48 @@ class SupabaseService {
     // No client_id (a doc from before ids were pushed, or an un-migrated
     // server where the column was dropped) → plain insert; there is nothing to
     // conflict on, so it behaves exactly like the old code did.
-    final maxAttempts = _kbAppToDb.length + 1;
+    final maxAttempts = _kbAppToDb.length + 2;
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
-      final hasKey = (row['client_id']?.toString() ?? '').isNotEmpty;
+      final key = row['client_id']?.toString() ?? '';
+      final hasKey = key.isNotEmpty;
       try {
-        if (hasKey) {
+        if (hasKey && !_kbUpsertUnsupported) {
           await _db
               .from('knowledge_docs')
               .upsert(row, onConflict: 'client_id');
+        } else if (hasKey) {
+          // Same effect as the upsert, in two plain statements that need no
+          // conflict target: update the row with this client_id, and insert
+          // only if there was none. A plain INSERT is still policed by the
+          // partial unique index, so this cannot create a duplicate.
+          final updated = await _db
+              .from('knowledge_docs')
+              .update(row)
+              .eq('client_id', key)
+              .select('client_id');
+          if ((updated as List).isEmpty) {
+            await _db.from('knowledge_docs').insert(row);
+          }
         } else {
           await _db.from('knowledge_docs').insert(row);
         }
         knowledgeLastError = '';
         return true;
       } catch (e) {
+        // ★ 2026-11-06: 42P10 = "no unique or exclusion constraint matching the
+        // ON CONFLICT specification". migration_sop_scan.sql made client_id
+        // unique through a PARTIAL index (`where client_id is not null`), and
+        // PostgreSQL only infers a partial index when the ON CONFLICT clause
+        // repeats its predicate — which PostgREST never sends. So EVERY KB
+        // push failed with HTTP 400, nothing was ever marked synced, and
+        // retryUnsyncedKbDocs re-sent the whole library on every launch (173
+        // red console lines on one page load). Switch to update-then-insert
+        // for the rest of this session; migration_kb_client_id_unique.sql
+        // fixes the server so the one-trip upsert works again.
+        if (hasKey && !_kbUpsertUnsupported && _isNoConflictTarget(e)) {
+          _kbUpsertUnsupported = true;
+          continue;
+        }
         final missing = _missingColumnFrom(e);
         if (missing == null || !row.containsKey(missing)) {
           knowledgeLastError = _describeError(e);

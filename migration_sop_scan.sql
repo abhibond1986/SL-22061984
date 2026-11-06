@@ -24,12 +24,19 @@
 alter table public.knowledge_docs
   add column if not exists client_id text;
 
--- Partial unique index, not a plain unique constraint: rows written before this
--- migration have client_id = null, and several nulls would violate a NOT NULL
--- unique constraint while a partial index simply ignores them.
-create unique index if not exists knowledge_docs_client_id_uidx
-  on public.knowledge_docs (client_id)
-  where client_id is not null;
+-- ★ 2026-11-06: a plain UNIQUE constraint, NOT a partial index. The app
+-- upserts with ON CONFLICT (client_id), and a partial index (`where client_id
+-- is not null`) cannot be that conflict target — every write failed with
+-- 42P10 / HTTP 400. NULLs are distinct under UNIQUE, so old null rows are
+-- fine. See migration_kb_client_id_unique.sql.
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                  where conname = 'knowledge_docs_client_id_key') then
+    alter table public.knowledge_docs
+      add constraint knowledge_docs_client_id_key unique (client_id);
+  end if;
+end $$;
 
 -- ── 2. Scan metadata ──────────────────────────────────────────────────────
 alter table public.knowledge_docs add column if not exists doc_group  text;

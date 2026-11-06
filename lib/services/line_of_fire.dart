@@ -37,7 +37,13 @@ class LineOfFire {
     this.exposure = '',
     this.source = '',
     this.personVisible = true,
+    this.energy = '',
   });
+
+  /// GRAVITY | MOTION | ROTATING | PRESSURE | THERMAL | STORED | ELECTRICAL |
+  /// CHEMICAL, or '' when neither the model nor the source wording says.
+  /// Drives the ready-reference card ([LineOfFireGeometry.reference]).
+  final String energy;
 
   /// Centre of the energy source — the crane load, the nip point, the ladle.
   final double sourceX;
@@ -520,6 +526,7 @@ class LineOfFireGeometry {
             .trim(),
         source: describeSource(hazard),
         personVisible: personIsVisible(hazard),
+        energy: energyOf(zone['energy'], describeSource(hazard)),
       );
     } catch (_) {
       // A drawing overlay is never worth a crash.
@@ -731,6 +738,135 @@ class LineOfFireGeometry {
             ? 'Not assessed by the AI for this photo - check line of fire on site'
             : null;
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  READY REFERENCE — source, zone, control
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ★ 2026-11-06, user request: the strip under the photo ("1 damaged
+  // electrical cable → danger zone (nobody in frame)") should be a ready
+  // reference for the LINE OF FIRE only — what the energy is, where its
+  // danger zone is, and the one control that keeps people out of it. Same
+  // text on screen and in the PDF, so it lives here. ASCII only (PDF font).
+
+  static const List<String> energyTypes = [
+    'GRAVITY', 'MOTION', 'ROTATING', 'PRESSURE', 'THERMAL', 'STORED',
+    'ELECTRICAL', 'CHEMICAL',
+  ];
+
+  static const Map<String, String> energyLabel = {
+    'GRAVITY': 'Suspended / falling load',
+    'MOTION': 'Vehicle / mobile equipment',
+    'ROTATING': 'Moving machinery',
+    'PRESSURE': 'Pressure release',
+    'THERMAL': 'Hot metal / thermal',
+    'STORED': 'Stored energy',
+    'ELECTRICAL': 'Electrical',
+    'CHEMICAL': 'Chemical',
+  };
+
+  static const Map<String, String> _zoneByEnergy = {
+    'GRAVITY': 'drop and swing zone below the load',
+    'MOTION': 'vehicle path, blind side and crush gap',
+    'ROTATING': 'in-running nip and throw-out line',
+    'PRESSURE': 'discharge line and hose-whip radius',
+    'THERMAL': 'splash zone round the hot metal',
+    'STORED': 'roll-away, collapse or snap-back path',
+    'ELECTRICAL': 'contact and arc-flash zone round the live part',
+    'CHEMICAL': 'discharge line and wetted area',
+  };
+
+  static const Map<String, String> _controlByEnergy = {
+    'GRAVITY': 'never stand or pass under the load; barricade the zone, '
+        'use tag lines',
+    'MOTION': 'keep pedestrians out of the path; banksman for every movement',
+    'ROTATING': 'stop, isolate and lock out before approach; keep guards fitted',
+    'PRESSURE': 'depressurise and isolate before work; restrain hoses with '
+        'whip checks',
+    'THERMAL': 'barricade the splash zone; entry only in aluminised PPE under '
+        'permit',
+    'STORED': 'chock, band or restrain the load before approach',
+    'ELECTRICAL': 'isolate, lock out and prove dead before anyone approaches',
+    'CHEMICAL': 'isolate and drain before work; chemical PPE under permit',
+  };
+
+  // Inference order matters: "ladle on the crane hook" is a suspended load
+  // first, "cable" is electrical before anything else, a bare "coil" is
+  // stored (roll-away) energy, and "load" alone is gravity last.
+  static const List<(String, List<String>)> _energyWords = [
+    ('GRAVITY', ['suspended', 'hoist', 'hoisted', 'crane', 'hook', 'sling',
+        'falling', 'overhead', 'lifted', 'lifting']),
+    ('ELECTRICAL', ['cable', 'conductor', 'panel', 'switchgear', 'busbar',
+        'bus bar', 'live', 'energised', 'energized', 'transformer', 'breaker',
+        'terminal', 'electrical', 'wire', 'wiring', 'arc']),
+    ('THERMAL', ['molten', 'hot metal', 'slag', 'ladle', 'tundish', 'tapping',
+        'tap hole', 'runner', 'furnace', 'converter', 'steam', 'flame', 'torch',
+        'burner', 'tuyere', 'hot']),
+    ('MOTION', ['vehicle', 'truck', 'tipper', 'dumper', 'trailer', 'forklift',
+        'loader', 'excavator', 'dozer', 'locomotive', 'loco', 'wagon',
+        'trolley', 'transfer car', 'car', 'reversing']),
+    ('ROTATING', ['conveyor', 'belt', 'pulley', 'roll', 'roller', 'gear',
+        'shaft', 'coupling', 'drum', 'fan', 'shear', 'saw', 'grinder',
+        'grinding', 'mill', 'rotating', 'nip', 'impeller', 'blade']),
+    ('PRESSURE', ['hose', 'pipe', 'pipeline', 'flange', 'valve', 'hydraulic',
+        'pneumatic', 'compressed', 'cylinder', 'pressure', 'pressurised',
+        'pressurized', 'relief', 'nozzle', 'jet']),
+    ('CHEMICAL', ['acid', 'caustic', 'chemical', 'alkali']),
+    ('STORED', ['coil', 'stack', 'stacked', 'pile', 'bundle', 'spring',
+        'tension', 'tensioned', 'counterweight', 'reel', 'spool', 'unstable']),
+    ('GRAVITY', ['load', 'grab', 'magnet', 'bucket']),
+  ];
+
+  /// The energy type: the model's own answer when it is one of
+  /// [energyTypes], otherwise inferred from the source's wording, else ''.
+  static String energyOf(Object? declared, String source) {
+    final d = (declared ?? '').toString().trim().toUpperCase();
+    if (energyTypes.contains(d)) return d;
+    final s = _lower(source);
+    if (s.isEmpty) return '';
+    for (final (type, words) in _energyWords) {
+      if (_containsWord(s, words)) return type;
+    }
+    return '';
+  }
+
+  /// The three-line ready reference for one path:
+  ///   head    'LINE OF FIRE · ELECTRICAL'
+  ///   title   '1  Damaged electrical cable'
+  ///   zone    'Zone: contact and arc-flash zone round the live part - nobody in frame'
+  ///   control 'Control: isolate, lock out and prove dead before anyone approaches'
+  static ({String head, String title, String zone, String control}) reference(
+      int index, LineOfFire lof) {
+    final label = energyLabel[lof.energy] ?? '';
+    final num = index < 0 ? 'Z${-index}' : '${index + 1}';
+    var src = lof.source.trim();
+    if (src.isEmpty) src = 'Energy source';
+    src = '${src[0].toUpperCase()}${src.substring(1)}';
+
+    final who = lof.exposure.trim();
+    final modelZone = !lof.personVisible &&
+            who.isNotEmpty &&
+            who.toLowerCase() != 'danger zone'
+        ? who
+        : '';
+    final zoneText = modelZone.isNotEmpty
+        ? modelZone
+        : _zoneByEnergy[lof.energy] ?? 'path of the released energy';
+    final occupancy = lof.personVisible
+        ? (who.isEmpty ? 'a person is inside it' : '$who is inside it')
+        : 'nobody in frame';
+    final control = _controlByEnergy[lof.energy] ??
+        'keep everyone out of the path until the energy is isolated or secured';
+
+    return (
+      head: label.isEmpty
+          ? 'LINE OF FIRE'
+          : 'LINE OF FIRE · ${label.toUpperCase()}',
+      title: '$num  $src',
+      zone: 'Zone: $zoneText - $occupancy',
+      control: 'Control: $control',
+    );
   }
 
   /// Whether this hazard SHOULD have had a path. Used to flag a hazard that

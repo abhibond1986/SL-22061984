@@ -121,12 +121,19 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
                 notReported: widget.lofCheck != null);
         final checkedNone = widget.lofCheck is Map &&
             (widget.lofCheck as Map)['verdict'] == LineOfFireGeometry.vNone;
-        final legend = pick != null
-            ? LineOfFireGeometry.caption(pick.index, pick.lof)
-            : status == null
-                ? ''
-                : 'Line of fire: $status';
-        final legendH = legend.isEmpty ? 0.0 : _legendHeight;
+        // A located path gets the line-of-fire READY REFERENCE (source, zone,
+        // control — user request 2026-11-06); no path gets the one-line status.
+        final ref = pick == null
+            ? null
+            : LineOfFireGeometry.reference(pick.index, pick.lof);
+        final legend = ref != null || status == null
+            ? ''
+            : 'Line of fire: $status';
+        final legendH = ref != null
+            ? _cardHeight(ref, containerW, MediaQuery.textScalerOf(context))
+            : legend.isEmpty
+                ? 0.0
+                : _legendHeight;
 
         // Respect a bounded height from the caller. Width-driven sizing alone
         // makes a portrait photo taller than its slot — the widget used to
@@ -175,6 +182,13 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
           ),
         );
 
+        if (ref != null) {
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [photo, _referenceCard(ref, legendH)],
+          );
+        }
         if (legend.isEmpty) return photo;
         return Column(
           mainAxisSize: MainAxisSize.min,
@@ -192,6 +206,84 @@ class _HazardAnnotatedImageState extends State<HazardAnnotatedImage> {
       },
     );
   }
+
+  // ── Line-of-fire ready reference ─────────────────────────────────────
+  // Fixed pairs on an opaque pale-red card in BOTH themes (see _legendBar):
+  // #B3261E on #FDECEA is 5.7:1, #5F1410 on #FDECEA is 12:1.
+  static const _refPad = EdgeInsets.fromLTRB(10, 6, 10, 7);
+  static const _refBarW = 18.0; // 3px bar + gap
+  static const _refHead = TextStyle(color: Color(0xFFB3261E), fontSize: 9.5,
+      fontWeight: FontWeight.w800, letterSpacing: 0.8, height: 1.25);
+  static const _refTitle = TextStyle(color: Color(0xFFB3261E), fontSize: 11.5,
+      fontWeight: FontWeight.w800, height: 1.3);
+  static const _refBody = TextStyle(color: Color(0xFF5F1410), fontSize: 10.5,
+      fontWeight: FontWeight.w600, height: 1.3);
+
+  static List<(String, TextStyle, int)> _refLines(
+          ({String head, String title, String zone, String control}) r) =>
+      [
+        (r.head, _refHead, 1),
+        (r.title, _refTitle, 1),
+        (r.zone, _refBody, 2),
+        (r.control, _refBody, 2),
+      ];
+
+  /// Measured, not fixed: the zone and control lines wrap on a phone, and
+  /// the photo above has to be sized before the card is laid out.
+  static double _cardHeight(
+      ({String head, String title, String zone, String control}) r,
+      double width, TextScaler scaler) {
+    final textW = math.max(40.0, width - _refPad.horizontal - _refBarW);
+    var h = _refPad.vertical;
+    for (final (text, style, lines) in _refLines(r)) {
+      final tp = TextPainter(
+        text: TextSpan(text: text, style: style),
+        maxLines: lines,
+        ellipsis: '…',
+        textDirection: TextDirection.ltr,
+        // The SAME scaler the Text widgets below use, or a large system
+        // font overflows the card.
+        textScaler: scaler,
+      )..layout(maxWidth: textW);
+      h += tp.height;
+    }
+    return h.ceilToDouble() + 1;
+  }
+
+  Widget _referenceCard(
+          ({String head, String title, String zone, String control}) r,
+          double height) =>
+      Container(
+        height: height,
+        padding: _refPad,
+        color: _LegendTone.path.fill,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              width: 3,
+              decoration: BoxDecoration(
+                color: _LegendTone.path.bar,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: _refBarW - 3),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final (text, style, lines) in _refLines(r))
+                    Text(text,
+                        style: style,
+                        maxLines: lines,
+                        overflow: TextOverflow.ellipsis),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
 
   /// Reserved height for the legend strip. Fixed rather than measured: the
   /// caption is one short line by construction (see LineOfFireGeometry.caption)

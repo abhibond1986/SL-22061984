@@ -320,12 +320,37 @@ class DocQaService {
 
     int? documentId;
     try {
-      final inserted = await _db
-          .from('doc_library')
-          .upsert(row, onConflict: 'client_id')
-          .select('id')
-          .timeout(const Duration(seconds: 30));
-      final list = inserted as List;
+      List list;
+      try {
+        list = await _db
+            .from('doc_library')
+            .upsert(row, onConflict: 'client_id')
+            .select('id')
+            .timeout(const Duration(seconds: 30)) as List;
+      } on PostgrestException catch (e) {
+        // ★ 2026-11-06: 42P10. client_id is unique only through a PARTIAL
+        // index (migration_doc_qa.sql), which an ON CONFLICT target cannot
+        // use, so the upsert is rejected with HTTP 400 — the same defect
+        // that broke every knowledge_docs push. Update-then-insert needs no
+        // conflict target. migration_kb_client_id_unique.sql fixes the
+        // server.
+        final noTarget = e.code == '42P10' ||
+            e.message.toLowerCase().contains('on conflict specification');
+        if (!noTarget) rethrow;
+        list = await _db
+            .from('doc_library')
+            .update(row)
+            .eq('client_id', clientId)
+            .select('id')
+            .timeout(const Duration(seconds: 30)) as List;
+        if (list.isEmpty) {
+          list = await _db
+              .from('doc_library')
+              .insert(row)
+              .select('id')
+              .timeout(const Duration(seconds: 30)) as List;
+        }
+      }
       if (list.isNotEmpty) {
         documentId = ((list.first as Map)['id'] as num?)?.toInt();
       }

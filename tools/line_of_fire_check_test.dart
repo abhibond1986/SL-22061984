@@ -268,6 +268,64 @@ void main() {
   HazardQuality.apply(r15);
   ok((checkOf(r15)['zones'] as List).length == 2, 'at most two paths kept');
 
+  // ── 16. Energy type: the model's answer wins, else inferred from wording
+  ok(LineOfFireGeometry.energyOf('electrical', 'whatever') == 'ELECTRICAL',
+      'declared energy is used (case-insensitive)');
+  ok(LineOfFireGeometry.energyOf(null, 'damaged electrical cable') ==
+      'ELECTRICAL', 'cable -> ELECTRICAL');
+  ok(LineOfFireGeometry.energyOf(null, 'ladle on crane hook') == 'GRAVITY',
+      'ladle on a hook is a suspended load first');
+  ok(LineOfFireGeometry.energyOf(null, 'open ladle of hot metal') == 'THERMAL',
+      'open ladle -> THERMAL');
+  ok(LineOfFireGeometry.energyOf(null, 'unchocked steel coil') == 'STORED',
+      'bare coil -> STORED (roll-away)');
+  ok(LineOfFireGeometry.energyOf(null, 'reversing dumper') == 'MOTION',
+      'dumper -> MOTION');
+  ok(LineOfFireGeometry.energyOf('BOGUS', 'mystery thing') == '',
+      'unknown stays blank, never guessed');
+
+  // ── 17. Ready reference — the user's own case: damaged cable, nobody there
+  final cable = LineOfFireGeometry.parse({
+    'name': 'Exposed electrical conductors',
+    'description': 'Visible: damaged electrical cable with exposed conductors.',
+    'lofZone': {
+      'x1': 0.5, 'y1': 0.8, 'x2': 0.55, 'y2': 0.9,
+      'source': 'damaged electrical cable', 'exposure': 'danger zone',
+      'personVisible': false,
+    },
+    '_peopleVisible': 0,
+  });
+  ok(cable != null && cable.energy == 'ELECTRICAL',
+      'cable path parses as ELECTRICAL with no declared energy');
+  final ref = cable == null ? null : LineOfFireGeometry.reference(0, cable);
+  ok(ref?.head == 'LINE OF FIRE · ELECTRICAL', 'head names the energy (${ref?.head})');
+  ok(ref?.title == '1  Damaged electrical cable', 'title = number + source');
+  ok((ref?.zone ?? '').contains('arc-flash') &&
+          (ref?.zone ?? '').endsWith('nobody in frame'),
+      'zone describes the electrical zone and says nobody is there');
+  ok((ref?.control ?? '').startsWith('Control: isolate, lock out'),
+      'control is the electrical isolation rule');
+  final all = [ref?.head, ref?.title, ref?.zone, ref?.control].join(' ');
+  ok(!all.runes.any((c) => c > 0xFF), 'reference is Latin-1 for the PDF font');
+
+  // A visible person: the zone line names them; a model-named zone is kept.
+  final rig = LineOfFireGeometry.parse({
+    'name': 'Rigger under coil',
+    'description': 'Visible: rigger below a suspended coil.',
+    'lofZone': {'x1': 0.5, 'y1': 0.2, 'x2': 0.5, 'y2': 0.7,
+        'source': 'suspended steel coil', 'exposure': 'rigger below load',
+        'personVisible': true, 'energy': 'GRAVITY'},
+  });
+  final rr = rig == null ? null : LineOfFireGeometry.reference(1, rig);
+  ok((rr?.zone ?? '').endsWith('rigger below load is inside it'),
+      'person in zone is named (${rr?.zone})');
+  final z = LineOfFireGeometry.reference(-1, LineOfFire(
+      sourceX: 0.1, sourceY: 0.1, personX: 0.3, personY: 0.3, width: 0.1,
+      degenerate: false, source: 'unchocked coil', exposure: 'coil roll-away path',
+      personVisible: false, energy: 'STORED'));
+  ok(z.title.startsWith('Z1') && z.zone.startsWith('Zone: coil roll-away path'),
+      'standalone zone: Z1 and the model\'s own zone wording');
+
   print('');
   print('$_pass passed, $_fail failed');
   if (_fail > 0) throw StateError('$_fail assertion(s) failed');

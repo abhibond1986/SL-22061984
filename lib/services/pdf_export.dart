@@ -1525,32 +1525,30 @@ class PdfExport {
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-                  pw.Text('LINE OF FIRE  (red arrow / dashed zone on photo)',
-                    style: pw.TextStyle(fontSize: 6.2,
-                      fontWeight: pw.FontWeight.bold,
-                      color: PdfColor.fromHex('#B3261E'),
-                      letterSpacing: 0.4)),
-                  for (final line in lofLines)
+                  // ★ 2026-11-06: a READY REFERENCE per path — source, danger
+                  // zone, control (LineOfFireGeometry.reference, the same
+                  // words the screen shows), instead of one arrow caption.
+                  for (var k = 0; k < lofs.length; k++) ...[
+                    if (k > 0) pw.SizedBox(height: 3),
+                    _lofReferenceBlock(LineOfFireGeometry.reference(
+                        lofs[k].index, lofs[k].lof)),
+                  ],
+                  if (lofs.isEmpty)
+                    pw.Text('LINE OF FIRE',
+                      style: pw.TextStyle(fontSize: 6.2,
+                        fontWeight: pw.FontWeight.bold,
+                        color: PdfColor.fromHex('#B3261E'),
+                        letterSpacing: 0.4)),
+                  // Rows that CLAIM a line of fire with no locatable path.
+                  for (final line in lofLines.skip(lofs.length))
                     pw.Padding(
-                      padding: const pw.EdgeInsets.only(top: 1.5),
-                      child: pw.Row(
-                        crossAxisAlignment: pw.CrossAxisAlignment.start,
-                        children: [
-                          // Short bar in the shaft's red ties each line to
-                          // the mark above it.
-                          pw.Padding(
-                            padding: const pw.EdgeInsets.only(top: 3),
-                            child: pw.Container(
-                              width: 9, height: 2.4, color: _lofHot)),
-                          pw.SizedBox(width: 4),
-                          pw.Expanded(
-                            child: pw.Text(line,
-                              maxLines: 2,
-                              style: pw.TextStyle(
-                                fontSize: 6.8,
-                                fontWeight: pw.FontWeight.bold,
-                                color: PdfColor.fromHex('#B3261E')))),
-                        ])),
+                      padding: const pw.EdgeInsets.only(top: 2),
+                      child: pw.Text(line,
+                        maxLines: 2,
+                        style: pw.TextStyle(
+                          fontSize: 6.8,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColor.fromHex('#B3261E')))),
                 ])),
       pw.Container(
         width: double.infinity,
@@ -1732,6 +1730,37 @@ class PdfExport {
         ],
       ),
     );
+  }
+
+  /// One line-of-fire ready reference: a red bar, then
+  /// "LINE OF FIRE · ELECTRICAL" / "1  Damaged electrical cable" /
+  /// "Zone: …" / "Control: …". #B3261E and #5F1410 on #FDECEA (5.7:1, 12:1).
+  static pw.Widget _lofReferenceBlock(
+      ({String head, String title, String zone, String control}) r) {
+    final red = PdfColor.fromHex('#B3261E');
+    final ink = PdfColor.fromHex('#5F1410');
+    return pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Container(width: 2.4, height: 30, color: _lofHot),
+        pw.SizedBox(width: 5),
+        pw.Expanded(
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(_safe(r.head), style: pw.TextStyle(fontSize: 6.0,
+                fontWeight: pw.FontWeight.bold, color: red,
+                letterSpacing: 0.5)),
+              pw.SizedBox(height: 1),
+              pw.Text(_safe(r.title), maxLines: 1, style: pw.TextStyle(
+                fontSize: 7.4, fontWeight: pw.FontWeight.bold, color: red)),
+              pw.SizedBox(height: 0.8),
+              pw.Text(_safe(r.zone), maxLines: 2, style: pw.TextStyle(
+                fontSize: 6.6, color: ink, lineSpacing: 0.6)),
+              pw.Text(_safe(r.control), maxLines: 2, style: pw.TextStyle(
+                fontSize: 6.6, color: ink, lineSpacing: 0.6)),
+            ])),
+      ]);
   }
 
   static const double _tagSize = 14;
