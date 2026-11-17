@@ -2253,9 +2253,16 @@ class PdfExport {
         ]),
         ...List.generate(hazards.length, (i) {
           final h   = hazards[i];
-          final sev = h['severity']?.toString().toUpperCase() ?? 'MEDIUM';
-          final sc  = _getSevCol(sev);
-          final sb  = _getSevBg(sev);
+          // A row nobody rated (a hazard the reviewer added without choosing a
+          // severity) prints NOT RATED in grey. It used to fall back to
+          // MEDIUM, i.e. a rating no one made, on the one document that gets
+          // filed.
+          final rawSev = h['severity']?.toString().trim().toUpperCase() ?? '';
+          final unrated = rawSev.isEmpty;
+          final sev = unrated ? 'NOT RATED' : rawSev;
+          final sc  = unrated ? _textMed : _getSevCol(sev);
+          final sb  = unrated ? _panel : _getSevBg(sev);
+          final userAdded = h['userAdded'] == true;
           final bg  = i % 2 == 0 ? _rowNorm : _rowAlt;
 
           return pw.TableRow(
@@ -2280,6 +2287,13 @@ class PdfExport {
                     style: pw.TextStyle(fontSize: 7.8,
                       fontWeight: pw.FontWeight.bold, color: _ink,
                       lineSpacing: 1.3)),
+                  if (userAdded)
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.only(top: 2),
+                      child: pw.Text('added by reviewer',
+                        style: pw.TextStyle(fontSize: 6,
+                          fontWeight: pw.FontWeight.bold,
+                          color: _textMed))),
                   // Line-of-fire tag, so the table says which rows the arrow
                   // on the photo belongs to.
                   if (LineOfFireGeometry.parse(h) != null ||
@@ -2659,15 +2673,28 @@ class PdfExport {
       reporterPno: reporterPno, imageBytes: imageBytes);
     final fn = 'SafetyLens_${incident['type'] ?? 'Report'}'
         '_${incident['id'] ?? DateTime.now().millisecondsSinceEpoch}.pdf';
+    await downloadPdfBytes(bytes, fileName: fn);
+  }
+
+  /// Hand an ALREADY-BUILT PDF to the user: a browser download on web; on a
+  /// phone it is written to app documents and the system sheet opens (where
+  /// "Save to Files" / Drive / WhatsApp are offered — Android and iOS give an
+  /// app no silent "Downloads" write).
+  ///
+  /// Used by the post-save dialog, which builds the report once at save time
+  /// so the Download tap is instant instead of re-rendering the whole PDF.
+  static Future<void> downloadPdfBytes(Uint8List bytes,
+      {required String fileName}) async {
     if (kIsWeb) {
-      _downloadWeb(bytes, fn);
-    } else {
-      final dir  = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/$fn');
-      await file.writeAsBytes(bytes);
-      await Share.shareXFiles([XFile(file.path)],
-          text: '${Branding.appTitle} Report', subject: 'Incident Report');
+      _downloadWeb(bytes, fileName);
+      return;
     }
+    final dir  = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$fileName');
+    await file.writeAsBytes(bytes, flush: true);
+    await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/pdf', name: fileName)],
+        text: '${Branding.appTitle} Report', subject: 'Incident Report');
   }
 
   /// Share an incident AS A PDF FILE — the one entry point every WhatsApp /

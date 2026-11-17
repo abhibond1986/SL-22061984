@@ -1110,6 +1110,13 @@ class _AIScanTabState extends State<AIScanTab> {
 
     final Map<int, Map<String, TextEditingController>> editControllers = {};
     final Map<int, bool> editingIndex = {};
+    // Per-row message for a reviewer-added hazard that has nothing in it yet.
+    final Map<int, String> rowError = {};
+    // Nothing reaches `_result` until one of the two Save buttons is pressed,
+    // so the close button really does discard. Delete used to write straight
+    // into `_result` and a later add would then have leaked through the same
+    // list object even when the sheet was closed.
+    bool deletedAny = false;
 
     final summaryCtrl = TextEditingController(
         text: _result!['summary']?.toString() ?? '');
@@ -1145,6 +1152,92 @@ class _AIScanTabState extends State<AIScanTab> {
             editableHazards[i]['wsaCause']         = ctrls['wsaCause']!.text.trim();
             editableHazards[i]['type']             = ctrls['type']!.text.trim();
           }
+
+          // ── Reviewer-added hazards ("the AI missed one") ──────────────
+          //
+          // Only ONE thing is required: say what the hazard is, in the name OR
+          // the description. Every other column — severity, regulation, action,
+          // WSA cause, type — may be left blank. A blank severity stays blank
+          // (shown as NOT RATED) rather than being defaulted, because a
+          // defaulted MEDIUM would be a rating nobody made, and it would feed
+          // the headline band and the L×S matrix.
+          bool isUserRow(int i) => editableHazards[i]['userAdded'] == true;
+
+          bool rowIsEmpty(int i) =>
+              _str(editableHazards[i]['name']).isEmpty &&
+              _str(editableHazards[i]['description']).isEmpty;
+
+          // The AI-correction log and the PDF title both key on `name`, so a
+          // row described only in the description gets a short name from it.
+          void fillNameFromDescription(int i) {
+            if (_str(editableHazards[i]['name']).isNotEmpty) return;
+            final d = _str(editableHazards[i]['description']);
+            if (d.isEmpty) return;
+            final firstSentence = d.split(RegExp(r'[.\n]')).first.trim();
+            final base = firstSentence.isEmpty ? d : firstSentence;
+            editableHazards[i]['name'] =
+                base.length > 60 ? '${base.substring(0, 57).trim()}…' : base;
+          }
+
+          void addMissingHazard() {
+            editableHazards.add(<String, dynamic>{
+              'name': '',
+              'description': '',
+              'severity': '',
+              'regulation': '',
+              'correctiveAction': '',
+              'wsaCause': '',
+              'type': '',
+              'userAdded': true,
+              'source': 'REVIEWER',
+              // No box on the photo for it; the PDF says "not marked on photo".
+              'locationUnpinned': true,
+            });
+            final i = editableHazards.length - 1;
+            ctrlsFor(i);
+            editingIndex[i] = true;
+          }
+
+          /// Closes the editor on row [i]. Returns false (and keeps it open) only
+          /// for a reviewer-added row that is still completely empty.
+          bool finishRow(int i) {
+            applyEdits(i);
+            if (isUserRow(i) && rowIsEmpty(i)) {
+              rowError[i] = 'Enter a hazard name or a description — '
+                  'everything else is optional.';
+              return false;
+            }
+            rowError.remove(i);
+            if (isUserRow(i)) fillNameFromDescription(i);
+            editingIndex[i] = false;
+            return true;
+          }
+
+          void deleteRow(int i) {
+            editableHazards.removeAt(i);
+            deletedAny = true;
+            // Re-key everything after i. The maps are keyed by list position,
+            // so without this the rows below a deleted one picked up its
+            // neighbour's open editor and typed-in text.
+            Map<int, V> shift<V>(Map<int, V> m) => {
+                  for (final e in m.entries)
+                    if (e.key < i) e.key: e.value
+                    else if (e.key > i) e.key - 1: e.value,
+                };
+            editControllers[i]?.values.forEach((c) => c.dispose());
+            final c2 = shift(editControllers);
+            final e2 = shift(editingIndex);
+            final r2 = shift(rowError);
+            editControllers..clear()..addAll(c2);
+            editingIndex..clear()..addAll(e2);
+            rowError..clear()..addAll(r2);
+          }
+
+          // "Save as-is" means "the AI's list, untouched". Once the reviewer has
+          // added a hazard that is no longer true, so only "Save with edits" is
+          // offered — otherwise a tap on the wrong button silently drops it.
+          final hasUserRows =
+              editableHazards.any((h) => h['userAdded'] == true);
 
           final fieldBg = sl.isDark
               ? const Color(0xFF1C1F2E)
@@ -1182,7 +1275,8 @@ class _AIScanTabState extends State<AIScanTab> {
                   Text(
                       'Tap ✏️ Edit on any hazard to modify name, '
                       'severity, description, regulation, or '
-                      'corrective action. Then tap Save with edits.',
+                      'corrective action. Missed something? Use '
+                      '"Add a missing hazard" below. Then tap Save with edits.',
                       style: TextStyle(color: sl.text3, fontSize: 10,
                           height: 1.35)),
                 ])),
@@ -1405,8 +1499,12 @@ class _AIScanTabState extends State<AIScanTab> {
                     ...editableHazards.asMap().entries.map((e) {
                       final i  = e.key;
                       final h  = e.value;
-                      final sc = _sevColor(
-                          h['severity']?.toString() ?? 'MEDIUM');
+                      final sevLabel = _str(h['severity']);
+                      final userRow = isUserRow(i);
+                      // An unrated row is grey, never a severity colour.
+                      final sc = sevLabel.isEmpty
+                          ? sl.text3
+                          : _sevColor(sevLabel);
                       final isEditing = editingIndex[i] ?? false;
                       final ctrls = isEditing ? ctrlsFor(i) : null;
 
@@ -1439,18 +1537,26 @@ class _AIScanTabState extends State<AIScanTab> {
                               const SizedBox(width: 8),
                               Expanded(child: isEditing
                                 ? editField(ctrls!['name']!,
-                                    hint: 'Hazard name')
-                                : Text(h['name']?.toString() ?? '—',
+                                    hint: userRow
+                                        ? 'Hazard name (or fill Description)'
+                                        : 'Hazard name')
+                                : Text(_str(h['name']).isEmpty
+                                        ? '—' : _str(h['name']),
                                     style: TextStyle(
                                         color: sl.text1, fontSize: 13,
                                         fontWeight: FontWeight.w700))),
                               const SizedBox(width: 8),
                               isEditing
                                 ? _severityDropdown(
-                                    h['severity']?.toString() ?? 'MEDIUM',
+                                    // An AI row keeps its old fallback; a
+                                    // reviewer row may stay "Not set".
+                                    userRow
+                                        ? sevLabel
+                                        : (sevLabel.isEmpty ? 'MEDIUM' : sevLabel),
                                     sl,
                                     (val) => setLocal(() =>
-                                        editableHazards[i]['severity'] = val))
+                                        editableHazards[i]['severity'] = val),
+                                    allowUnset: userRow)
                                 : Container(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 6, vertical: 2),
@@ -1459,7 +1565,7 @@ class _AIScanTabState extends State<AIScanTab> {
                                       borderRadius: BorderRadius.circular(6),
                                       border: Border.all(color: sc)),
                                     child: Text(
-                                      h['severity']?.toString() ?? '—',
+                                      sevLabel.isEmpty ? 'NOT RATED' : sevLabel,
                                       style: TextStyle(
                                           color: sc, fontSize: 10,           // Improved: was 8px
                                           fontWeight: FontWeight.w900,        // Extra bold compensates for small size
@@ -1468,8 +1574,7 @@ class _AIScanTabState extends State<AIScanTab> {
                               GestureDetector(
                                 onTap: () => setLocal(() {
                                   if (isEditing) {
-                                    applyEdits(i);
-                                    editingIndex[i] = false;
+                                    finishRow(i);
                                   } else {
                                     ctrlsFor(i);
                                     editingIndex[i] = true;
@@ -1494,12 +1599,7 @@ class _AIScanTabState extends State<AIScanTab> {
                                       fontWeight: FontWeight.w700)))),
                               const SizedBox(width: 6),
                               GestureDetector(
-                                onTap: () => setLocal(() {
-                                  editableHazards.removeAt(i);
-                                  editControllers.remove(i);
-                                  editingIndex.remove(i);
-                                  _result!['hazards'] = editableHazards;
-                                }),
+                                onTap: () => setLocal(() => deleteRow(i)),
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 8, vertical: 4),
@@ -1516,6 +1616,23 @@ class _AIScanTabState extends State<AIScanTab> {
                             ]),
                             const SizedBox(height: 8),
 
+                            if (userRow)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: Row(children: [
+                                  Icon(Icons.person_outline_rounded,
+                                      size: 13, color: sl.text3),
+                                  const SizedBox(width: 4),
+                                  Expanded(child: Text(
+                                    isEditing
+                                        ? 'Added by you · only a name or a '
+                                          'description is required'
+                                        : 'Added by you (not detected by AI)',
+                                    style: TextStyle(color: sl.text3,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600))),
+                                ])),
+
                             if (!isEditing) ...[
                               Text(
                                 h['description']?.toString() ?? '',
@@ -1523,10 +1640,15 @@ class _AIScanTabState extends State<AIScanTab> {
                                     color: sl.text2,
                                     fontSize: 11, height: 1.4)),
                               const SizedBox(height: 5),
-                              _reviewRow('⚖️ Regulation',
-                                  h['regulation']?.toString() ?? '', sl),
-                              _reviewRow('🔧 Action',
-                                  h['correctiveAction']?.toString() ?? '', sl),
+                              // Blank optional fields on a reviewer row are
+                              // simply not shown, rather than as empty labels.
+                              if (!userRow || _str(h['regulation']).isNotEmpty)
+                                _reviewRow('⚖️ Regulation',
+                                    h['regulation']?.toString() ?? '', sl),
+                              if (!userRow ||
+                                  _str(h['correctiveAction']).isNotEmpty)
+                                _reviewRow('🔧 Action',
+                                    h['correctiveAction']?.toString() ?? '', sl),
                               if ((h['wsaCause']?.toString() ?? '').isNotEmpty)
                                 _reviewRow('📋 WSA Cause',
                                     h['wsaCause']?.toString() ?? '', sl),
@@ -1543,10 +1665,26 @@ class _AIScanTabState extends State<AIScanTab> {
                               editableRow('📋 WSA Cause',
                                   ctrls['wsaCause']!),
                               editableRow('🔍 Type', ctrls['type']!),
+                              if (rowError[i] != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Text(rowError[i]!,
+                                    style: TextStyle(color: sl.redText,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600))),
                               const SizedBox(height: 4),
                               GestureDetector(
                                 onTap: () => setLocal(() {
+                                  // A new row that was never filled in is
+                                  // just removed; there is nothing to revert.
+                                  if (userRow && rowIsEmpty(i)) {
+                                    deleteRow(i);
+                                    return;
+                                  }
+                                  editControllers[i]?.values
+                                      .forEach((c) => c.dispose());
                                   editControllers.remove(i);
+                                  rowError.remove(i);
                                   editingIndex[i] = false;
                                 }),
                                 child: Row(children: [
@@ -1560,6 +1698,36 @@ class _AIScanTabState extends State<AIScanTab> {
                             ],
                           ])));
                     }).toList(),
+
+                    // ── Add a hazard the AI missed ────────────────
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () => setLocal(addMissingHazard),
+                        icon: const Icon(Icons.add_circle_outline_rounded,
+                            size: 18, color: AppColors.accent),
+                        label: const Text('Add a missing hazard',
+                          style: TextStyle(
+                              color: AppColors.accent,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700)),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize:
+                              const Size.fromHeight(SLSpace.tapTarget),
+                          side: BorderSide(
+                              color: AppColors.accent.withOpacity(0.6),
+                              width: 1.2),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10))),
+                      )),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        'Something in the photo the AI did not list? Add it '
+                        'here. Only a name or a description is needed.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: sl.text4, fontSize: 11,
+                            height: 1.35))),
                   ])),
 
                 Container(
@@ -1602,10 +1770,28 @@ class _AIScanTabState extends State<AIScanTab> {
                                 applyEdits(i);
                               }
                             }
+                            // Reviewer rows: an untouched blank card is
+                            // dropped (the user opened it and changed their
+                            // mind); anything with a name or a description
+                            // is kept, whatever else is blank.
+                            for (var i = editableHazards.length - 1; i >= 0; i--) {
+                              if (!isUserRow(i)) continue;
+                              if (rowIsEmpty(i)) {
+                                editableHazards.removeAt(i);
+                              } else {
+                                fillNameFromDescription(i);
+                              }
+                            }
                             if (editingSummary) {
                               _result!['summary'] = summaryCtrl.text.trim();
                             }
                             _result!['hazards'] = editableHazards;
+                            // Rows were added or removed: the per-row keys and
+                            // mitigation controllers are positional and must
+                            // match the new list, or Mitigate indexes past
+                            // the end. Nothing is mitigated before a save, so
+                            // a rebuild loses nothing.
+                            _buildHazardKeys(editableHazards.length);
                             for (final m in editControllers.values) {
                               for (final c in m.values) { c.dispose(); }
                             }
@@ -1628,10 +1814,18 @@ class _AIScanTabState extends State<AIScanTab> {
                             shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(10))),
                         )),
+                      if (!hasUserRows) ...[
                       const SizedBox(width: 8),
                       Expanded(
                         child: OutlinedButton.icon(
                           onPressed: () {
+                            // A deletion has always counted even under
+                            // "as-is" (it used to be written to `_result` the
+                            // moment it was tapped); keep that.
+                            if (deletedAny) {
+                              _result!['hazards'] = editableHazards;
+                              _buildHazardKeys(editableHazards.length);
+                            }
                             for (final m in editControllers.values) {
                               for (final c in m.values) { c.dispose(); }
                             }
@@ -1654,45 +1848,62 @@ class _AIScanTabState extends State<AIScanTab> {
                             shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(10))),
                         )),
+                      ],
                     ]),
                   ])),
               ])));
         }));
   }
 
+  /// [allowUnset] adds a "Not set" entry (stored as '') — used for hazards the
+  /// reviewer adds, where severity is optional and must not be defaulted.
   Widget _severityDropdown(
-      String current, SL sl, ValueChanged<String> onChanged) {
+      String current, SL sl, ValueChanged<String> onChanged,
+      {bool allowUnset = false}) {
     // Admin-configured severities (Admin ▸ Custom Lists). Was hardcoded, so
     // a severity added or renamed in the admin panel never appeared here.
     final sevs = _severities;
+    final unset = allowUnset && current.trim().isEmpty;
+    final col = unset ? sl.text3 : _sevColor(current);
     if (sevs.isEmpty) {
-      return Text(current,
+      return Text(unset ? 'Not set' : current,
           style: TextStyle(
-              color: _sevColor(current),
+              color: col,
               fontSize: 9,
               fontWeight: FontWeight.w800));
     }
+    final String value = unset
+        ? ''
+        : (sevs.contains(current) ? current : sevs.first);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6),
       decoration: BoxDecoration(
-        color: _sevColor(current).withOpacity(0.12),
+        color: col.withOpacity(0.12),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: _sevColor(current))),
+        border: Border.all(color: col)),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: sevs.contains(current) ? current : sevs.first,
+          value: value,
           isDense: true,
           dropdownColor: sl.isDark ? const Color(0xFF252840) : Colors.white,
           style: TextStyle(
-              color: _sevColor(current), fontSize: 9,
+              color: col, fontSize: 9,
               fontWeight: FontWeight.w800),
           icon: Icon(Icons.arrow_drop_down,
-              color: _sevColor(current), size: 14),
-          items: sevs.map((s) => DropdownMenuItem(
+              color: col, size: 14),
+          items: [
+            if (allowUnset)
+              DropdownMenuItem(
+                value: '',
+                child: Text('Not set', style: TextStyle(
+                    color: sl.text3, fontSize: 9,
+                    fontWeight: FontWeight.w800))),
+            ...sevs.map((s) => DropdownMenuItem(
               value: s,
               child: Text(s, style: TextStyle(
                   color: _sevColor(s), fontSize: 9,
-                  fontWeight: FontWeight.w800)))).toList(),
+                  fontWeight: FontWeight.w800)))),
+          ],
           onChanged: (v) { if (v != null) onChanged(v); })));
   }
 
@@ -2010,7 +2221,11 @@ class _AIScanTabState extends State<AIScanTab> {
       debugPrint('AiScanTab: push failed for ${dbInc['id']}: $e');
       return false;
     });
-    _uploadPdfBackground(dbInc, user);
+    // The downloadable PDF is built right away from the saved row (including
+    // every edit and every hazard the reviewer added), and the save dialog
+    // offers it as soon as it is ready.
+    final pdfBytes = _pdfBytesFor(dbInc, user);
+    _uploadPdfBackground(dbInc, user, prebuilt: pdfBytes);
 
     // ★ v35: Trigger background AI audit (silently cross-verifies with another model)
     if (_imageBytes != null && _result != null) {
@@ -2070,12 +2285,19 @@ class _AIScanTabState extends State<AIScanTab> {
     AssignmentNotifications.refresh().catchError((_) {});
 
     if (mounted) {
-      _showSaveSuccessDialog(dbInc, uploadResult);
+      _showSaveSuccessDialog(dbInc, uploadResult, pdfBytes);
     }
   }
 
   void _showSaveSuccessDialog(
-      Map<String, dynamic> incident, Future<bool> uploadResult) {
+      Map<String, dynamic> incident, Future<bool> uploadResult,
+      Future<Uint8List> pdfBytes) {
+    // Settled value of [pdfBytes], read by the Download button. Kept outside
+    // the builder so a tap never waits on a future it has already seen finish.
+    Uint8List? readyPdf;
+    // Swallow here too: the FutureBuilder shows the failure, and an error
+    // future must never surface as an unhandled exception.
+    pdfBytes.then((b) { if (b.isNotEmpty) readyPdf = b; }).catchError((_) {});
     final sl = SL.of(context);
     final id = incident['id']?.toString() ?? '';
     final shortId = id.length > 8 ? id.substring(id.length - 8) : id;
@@ -2145,10 +2367,85 @@ class _AIScanTabState extends State<AIScanTab> {
                   },
                 ),
                 const SizedBox(height: 8),
-                _saveRow(Icons.picture_as_pdf_outlined, 'PDF report',
-                    'Uploading in background', AppColors.amber, sl),
+                FutureBuilder<Uint8List>(
+                  future: pdfBytes,
+                  builder: (_, snap) {
+                    if (snap.connectionState != ConnectionState.done) {
+                      return _saveRow(Icons.picture_as_pdf_outlined,
+                          'Preparing PDF report', 'Please wait…',
+                          AppColors.amber, sl);
+                    }
+                    if (snap.hasError || (snap.data?.isEmpty ?? true)) {
+                      return _saveRow(Icons.picture_as_pdf_outlined,
+                          'PDF not ready', 'Tap Download PDF to try again',
+                          AppColors.red, sl);
+                    }
+                    return _saveRow(Icons.picture_as_pdf_rounded,
+                        'PDF report ready',
+                        'Includes your edits and added hazards',
+                        AppColors.green, sl);
+                  },
+                ),
               ])),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
+            // ★ The downloadable PDF is the primary action after a save — it
+            // is what the reporter files or forwards. It sits ABOVE the share
+            // row and is enabled the moment the PDF has been built.
+            FutureBuilder<Uint8List>(
+              future: pdfBytes,
+              builder: (_, snap) {
+                final busy = snap.connectionState != ConnectionState.done;
+                return SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            Navigator.pop(ctx);
+                            final b = readyPdf ??
+                                (snap.hasData && snap.data!.isNotEmpty
+                                    ? snap.data : null);
+                            if (b == null) {
+                              // Build failed the first time: rebuild on tap.
+                              await _downloadPdf(incident);
+                              return;
+                            }
+                            try {
+                              await PdfExport.downloadPdfBytes(b,
+                                  fileName: PdfExport.pdfFileName(incident));
+                              if (mounted && kIsWeb) {
+                                _snack('PDF downloaded', AppColors.green);
+                              }
+                            } catch (e) {
+                              if (mounted) {
+                                _snack('Could not save the PDF: $e',
+                                    AppColors.red);
+                              }
+                            }
+                          },
+                    icon: busy
+                        ? const SizedBox(
+                            width: 16, height: 16,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.download_rounded,
+                            size: 18, color: Colors.white),
+                    label: Text(
+                        busy ? 'Preparing PDF…' : 'Download PDF report',
+                        style: const TextStyle(color: Colors.white,
+                            fontSize: 13, fontWeight: FontWeight.w800)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.red,
+                      disabledBackgroundColor:
+                          AppColors.red.withOpacity(0.55),
+                      minimumSize: const Size.fromHeight(SLSpace.tapTarget),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10))),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 10),
             // Share buttons row
             Row(children: [
               Expanded(child: _shareBtn(
@@ -2172,23 +2469,6 @@ class _AIScanTabState extends State<AIScanTab> {
                 onTap: () { Navigator.pop(ctx); _shareGeneric(incident); },
               )),
             ]),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () { Navigator.pop(ctx); _downloadPdf(incident); },
-                icon: const Icon(Icons.picture_as_pdf_rounded, size: 16,
-                    color: AppColors.red),
-                label: Text('Download PDF report',
-                    style: TextStyle(color: sl.text1, fontSize: 12,
-                        fontWeight: FontWeight.w700)),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: AppColors.red.withOpacity(0.5)),
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10))),
-              ),
-            ),
             const SizedBox(height: 12),
             // The reporter can hand the job to someone other than the area's
             // responsible person (or to someone at all, if nobody is linked).
@@ -2957,17 +3237,27 @@ class _AIScanTabState extends State<AIScanTab> {
     }
   }
 
-  Future<void> _uploadPdfBackground(
+  /// Builds the report PDF for a just-saved [incident] ONCE. The same future
+  /// feeds the Drive upload and the "Download PDF" button in the save dialog,
+  /// so the file the user downloads is byte-for-byte the one on the server,
+  /// and the tap is instant.
+  Future<Uint8List> _pdfBytesFor(
       Map<String, dynamic> incident, Map<String, dynamic> user,
-      {Uint8List? image}) async {
-    try {
-      print('PDF Upload: generating PDF for incident ${incident['id']}...');
-      final pdfBytes = await PdfExport.generateIncidentReportBytes(
+      {Uint8List? image}) =>
+      PdfExport.generateIncidentReportBytes(
         incident:     incident,
         reporterName: user['name']?.toString() ?? Branding.defaultReporter,
         reporterPno:  user['pno']?.toString()  ?? '',
         imageBytes:   image ?? _imageFor(incident),
       );
+
+  Future<void> _uploadPdfBackground(
+      Map<String, dynamic> incident, Map<String, dynamic> user,
+      {Uint8List? image, Future<Uint8List>? prebuilt}) async {
+    try {
+      print('PDF Upload: generating PDF for incident ${incident['id']}...');
+      final pdfBytes = await (prebuilt ??
+          _pdfBytesFor(incident, user, image: image));
       if (pdfBytes.isEmpty) {
         print('PDF Upload: FAILED — empty PDF bytes');
         return;
@@ -3729,7 +4019,8 @@ class _AIScanTabState extends State<AIScanTab> {
         debugPrint('AiScanTab: manual push failed for $id: $e');
         return false;
       });
-      _uploadPdfBackground(inc, user, image: photo);
+      final pdfBytes = _pdfBytesFor(inc, user, image: photo);
+      _uploadPdfBackground(inc, user, image: photo, prebuilt: pdfBytes);
       AssignmentNotifications.refresh().catchError((_) {});
 
       if (!mounted) return;
@@ -3741,7 +4032,7 @@ class _AIScanTabState extends State<AIScanTab> {
         _manualSeverity = null;
         _manualPhoto = null;
       });
-      _showSaveSuccessDialog(inc, uploadResult);
+      _showSaveSuccessDialog(inc, uploadResult, pdfBytes);
     } catch (e) {
       if (mounted) {
         setState(() => _manualSaving = false);
@@ -4637,9 +4928,13 @@ class _AIScanTabState extends State<AIScanTab> {
           final i   = entry.key;
           final h   = entry.value;
           final hm  = Map<String, dynamic>.from(h as Map);
-          final sev = (hm['severity'] ?? 'MEDIUM').toString();
+          // A row nobody rated (e.g. one the reviewer added without a
+          // severity) reads NOT RATED in grey — never a defaulted MEDIUM.
+          final rawSev = _str(hm['severity']);
+          final sev = rawSev.isEmpty ? 'NOT RATED' : rawSev;
           final isH = _highlightedRow == i;
-          final color = _sevColor(sev);
+          final color = rawSev.isEmpty ? sl.text3 : _sevColor(sev);
+          final userAdded = hm['userAdded'] == true;
           final regText = hm['regulation']?.toString() ?? '';
           // Written by HazardValidator. Presence of the reasons list is what
           // distinguishes "scored" from "never checked" — a confidence number
@@ -4677,7 +4972,16 @@ class _AIScanTabState extends State<AIScanTab> {
                   const SizedBox(height: 4),
                   // Type badge + Severity pill in a row
                   Wrap(spacing: 5, runSpacing: 4, children: [
-                    if (hm['type'] != null)
+                    if (userAdded)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: sl.border),
+                          borderRadius: BorderRadius.circular(4)),
+                        child: Text('Added by you',
+                          style: TextStyle(color: sl.text2,
+                            fontSize: SLText.minBadge, fontWeight: FontWeight.w700))),
+                    if (_str(hm['type']).isNotEmpty)
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                         decoration: BoxDecoration(
